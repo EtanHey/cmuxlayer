@@ -259,9 +259,10 @@ describe("Quality Tracking (sweep)", () => {
   });
 
   it("depth>0 agent at 80% is killed but NOT respawned (kill-only, no auto-respawn)", async () => {
-    // This test documents the intentional kill-only behavior.
-    // The design says "depth 1+: kill and log." Respawn is a future enhancement.
-    // TODO: Add respawn capability when agent session resume is implemented.
+    // Kill-only is intentional. Auto-respawn is wrong because:
+    // 1. Respawn loses all work-in-progress context (new agent starts from scratch)
+    // 2. Parent orchestrator should decide retry strategy, not the sweep
+    // 3. Each respawn adds a dead child — repeated cycles hit MAX_CHILDREN with corpses
     stateMgr.writeState(
       makeRecord({
         agent_id: "child1",

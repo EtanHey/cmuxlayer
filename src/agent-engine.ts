@@ -176,7 +176,10 @@ export class AgentEngine {
               await this.client.send(surface_id, "/compact", {});
               await this.client.sendKey(surface_id, "return", {});
             } else {
-              // Non-root: kill and log
+              // Non-root: kill and log. No auto-respawn because:
+              // 1. Respawn loses all work-in-progress context (new agent starts from scratch)
+              // 2. The parent orchestrator should decide retry strategy, not the sweep
+              // 3. Each respawn adds a dead child — repeated cycles hit MAX_CHILDREN with corpses
               await this.stopAgent(agentId, false);
               await this.client.log(
                 `context-limit: killing depth ${agent.spawn_depth} agent ${repo}`,
