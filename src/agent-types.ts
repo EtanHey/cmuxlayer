@@ -14,6 +14,11 @@ export type AgentState =
 
 export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
+export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
+
+export const MAX_SPAWN_DEPTH = 2;
+export const MAX_CHILDREN = 10;
+
 export interface AgentRecord {
   agent_id: string;
   surface_id: string;
@@ -28,6 +33,13 @@ export interface AgentRecord {
   created_at: string;
   updated_at: string;
   error: string | null;
+  // Hierarchy fields (Task 18)
+  parent_agent_id: string | null;
+  spawn_depth: number;
+  deletion_intent: boolean;
+  // Quality fields (Task 19)
+  quality: AgentQuality;
+  max_cost_per_agent: number | null;
 }
 
 export interface StateTransition {
@@ -78,6 +90,19 @@ export function assertValidTransition(from: AgentState, to: AgentState): void {
       `Invalid state transition: ${from} → ${to}. Allowed from ${from}: [${VALID_TRANSITIONS[from].join(", ")}]`,
     );
   }
+}
+
+/**
+ * Parses context usage percentage from Claude Code status bar text.
+ * Matches patterns like "80% context", "context 80%", "80% context remaining"
+ */
+export function parseContextPercent(text: string): number | null {
+  const m =
+    text.match(/(\d{1,3})%\s*context/i) ??
+    text.match(/context[^%]*?(\d{1,3})%/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return isNaN(n) || n < 0 || n > 100 ? null : n;
 }
 
 /**

@@ -111,7 +111,8 @@ export class CmuxClient {
     const code = "code" in error ? error.code : undefined;
 
     if (stderr) details.push(stderr);
-    if (code !== undefined && code !== null) details.push(`exit ${String(code)}`);
+    if (code !== undefined && code !== null)
+      details.push(`exit ${String(code)}`);
 
     const suffix = details.length > 0 ? ` (${details.join(", ")})` : "";
     return new Error(`cmux ${args[0]} failed: ${error.message}${suffix}`);
@@ -123,17 +124,10 @@ export class CmuxClient {
   ): CmuxNewSplitResult {
     return {
       workspace:
-        (parsed.workspace_ref as string) ??
-        (parsed.workspace as string) ??
-        "",
+        (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
       surface:
-        (parsed.surface_ref as string) ??
-        (parsed.surface as string) ??
-        "",
-      pane:
-        (parsed.pane_ref as string) ??
-        (parsed.pane as string) ??
-        "",
+        (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
       title: (parsed.title as string) ?? "",
       type: (parsed.type as "terminal" | "browser") ?? fallbackType,
     };
@@ -165,9 +159,11 @@ export class CmuxClient {
     return this.parse(raw, "list-pane-surfaces");
   }
 
-  async listPanes(opts?: {
-    workspace?: string;
-  }): Promise<{ workspace_ref: string; window_ref: string; panes: CmuxPane[] }> {
+  async listPanes(opts?: { workspace?: string }): Promise<{
+    workspace_ref: string;
+    window_ref: string;
+    panes: CmuxPane[];
+  }> {
     const args = ["list-panes"];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
     const raw = await this.run(args);
@@ -324,6 +320,27 @@ export class CmuxClient {
   async clearProgress(opts?: { workspace?: string }): Promise<void> {
     const args = ["clear-progress"];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
+    await this.run(args);
+  }
+
+  async log(
+    message: string,
+    opts?: {
+      level?: "info" | "progress" | "success" | "warning" | "error";
+      source?: string;
+      workspace?: string;
+      surface?: string;
+    },
+  ): Promise<void> {
+    const args = ["log", message];
+    if (opts?.level) args.push("--level", opts.level);
+    if (opts?.source) args.push("--source", opts.source);
+    const workspace =
+      opts?.workspace ??
+      (opts?.surface
+        ? await this.resolveWorkspaceFromSurface(opts.surface)
+        : undefined);
+    if (workspace) args.push("--workspace", workspace);
     await this.run(args);
   }
 

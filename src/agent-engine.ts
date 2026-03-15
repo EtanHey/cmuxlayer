@@ -8,6 +8,9 @@ import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import type { CmuxClient } from "./cmux-client.js";
 import {
   generateAgentId,
+  parseContextPercent,
+  MAX_SPAWN_DEPTH,
+  MAX_CHILDREN,
   type AgentRecord,
   type AgentState,
   type CliType,
@@ -20,6 +23,8 @@ export interface SpawnAgentParams {
   cli: CliType;
   prompt: string;
   workspace?: string;
+  parent_agent_id?: string;
+  max_cost_per_agent?: number;
 }
 
 export interface SpawnAgentResult {
@@ -31,6 +36,17 @@ export interface SpawnAgentResult {
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
+
+/** State → sidebar icon/color mapping */
+const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> = {
+  creating: { icon: "gear", color: "#888888" },
+  booting: { icon: "arrow.clockwise", color: "#F59E0B" },
+  ready: { icon: "checkmark.circle", color: "#10B981" },
+  working: { icon: "bolt.fill", color: "#3B82F6" },
+  idle: { icon: "pause.circle", color: "#F97316" },
+  done: { icon: "checkmark.square.fill", color: "#6B7280" },
+  error: { icon: "xmark.circle.fill", color: "#EF4444" },
+};
 
 /**
  * Build the shell command that launches a CLI agent.
@@ -58,6 +74,10 @@ export class AgentEngine {
   private registry: AgentRegistry;
   private client: CmuxClient;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** agentId → last-pushed status string */
+  private sidebarSnapshot = new Map<string, string>();
+  /** e.g. "a1:spawned", "a1:done", "a1:error" */
+  private loggedEvents = new Set<string>();
 
   constructor(
     stateMgr: StateManager,
@@ -74,12 +94,118 @@ export class AgentEngine {
   }
 
   /**
+   * Sync sidebar: diff agents against snapshot, push only changes.
+   * Logs lifecycle events (spawned, done, error) once each.
+   */
+  private async syncSidebar(): Promise<void> {
+    const agents = this.registry.list();
+    const total = agents.length;
+    const done = agents.filter((a) => a.state === "done").length;
+
+    for (const agent of agents) {
+      const { agent_id: agentId, repo, state, surface_id } = agent;
+      const statusValue =
+        state === "error" ? `${repo}: error` : `${repo}: ${state}`;
+
+      // Lifecycle log: spawned (first encounter)
+      if (!this.sidebarSnapshot.has(agentId)) {
+        if (!this.loggedEvents.has(`${agentId}:spawned`)) {
+          await this.client.log(`spawned: ${repo}`, {
+            level: "info",
+            source: "cmux-mcp",
+          });
+          this.loggedEvents.add(`${agentId}:spawned`);
+        }
+      }
+
+      // Lifecycle log: done
+      if (state === "done" && !this.loggedEvents.has(`${agentId}:done`)) {
+        await this.client.log(`done: ${repo}`, {
+          level: "success",
+          source: "cmux-mcp",
+        });
+        this.loggedEvents.add(`${agentId}:done`);
+      }
+
+      // Lifecycle log: error
+      if (state === "error" && !this.loggedEvents.has(`${agentId}:error`)) {
+        await this.client.log(`errored: ${repo}`, {
+          level: "error",
+          source: "cmux-mcp",
+        });
+        this.loggedEvents.add(`${agentId}:error`);
+      }
+
+      // Status diff — only push if changed
+      const prev = this.sidebarSnapshot.get(agentId);
+      if (prev !== statusValue) {
+        const sidebar = STATE_SIDEBAR[state];
+        await this.client.setStatus(agentId, statusValue, {
+          icon: sidebar.icon,
+          color: sidebar.color,
+          surface: surface_id,
+        });
+        this.sidebarSnapshot.set(agentId, statusValue);
+      }
+
+      // Quality tracking: check context usage for non-terminal agents
+      if (!TERMINAL_STATES.has(state)) {
+        try {
+          const screen = await this.client.readScreen(surface_id, { lines: 5 });
+          const contextPct = parseContextPercent(screen.text);
+          if (
+            contextPct !== null &&
+            contextPct >= 80 &&
+            agent.quality !== "degraded"
+          ) {
+            // Mark degraded
+            const updated = this.stateMgr.updateRecord(agentId, {
+              quality: "degraded",
+            });
+            this.registry.set(agentId, updated);
+
+            if (agent.spawn_depth === 0) {
+              // Root agent: send /compact
+              await this.client.send(surface_id, "/compact", {});
+              await this.client.sendKey(surface_id, "return", {});
+            } else {
+              // Non-root: kill and log
+              await this.stopAgent(agentId, false);
+              await this.client.log(
+                `context-limit: killing depth ${agent.spawn_depth} agent ${repo}`,
+                { level: "warning", source: "cmux-mcp" },
+              );
+            }
+          }
+        } catch {
+          // readScreen failures are non-fatal — next sweep will retry
+        }
+      }
+    }
+
+    // Progress bar
+    if (total > 0) {
+      await this.client.setProgress(done / total, {
+        label: `agents ${done}/${total}`,
+      });
+    }
+  }
+
+  /**
+   * Public sweep: reconcile registry then sync sidebar.
+   */
+  async runSweep(): Promise<void> {
+    await this.registry.reconcile();
+    await this.syncSidebar();
+  }
+
+  /**
    * Start the reconciliation sweep on an interval.
    */
   startSweep(intervalMs: number = 5000): void {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
-      this.registry.reconcile().catch(() => {
+      this.runSweep().catch(() => {
         // Sweep errors are non-fatal — next sweep will retry
       });
     }, intervalMs);
@@ -101,6 +227,26 @@ export class AgentEngine {
    */
   async spawnAgent(params: SpawnAgentParams): Promise<SpawnAgentResult> {
     const agentId = generateAgentId(params.model, params.repo);
+
+    // Resolve parent hierarchy
+    let spawnDepth = 0;
+    let parentAgentId: string | null = null;
+
+    if (params.parent_agent_id) {
+      const parent = this.registry.get(params.parent_agent_id);
+      if (!parent) {
+        throw new Error(`Parent agent not found: ${params.parent_agent_id}`);
+      }
+      if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
+        throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);
+      }
+      const children = this.registry.getChildren(params.parent_agent_id);
+      if (children.length >= MAX_CHILDREN) {
+        throw new Error(`Max children exceeded: ${MAX_CHILDREN}`);
+      }
+      spawnDepth = parent.spawn_depth + 1;
+      parentAgentId = params.parent_agent_id;
+    }
 
     // 1. Create cmux surface
     const surface = await this.client.newSplit("right", {
@@ -124,6 +270,11 @@ export class AgentEngine {
       created_at: now,
       updated_at: now,
       error: null,
+      parent_agent_id: parentAgentId,
+      spawn_depth: spawnDepth,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: params.max_cost_per_agent ?? null,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
@@ -142,6 +293,21 @@ export class AgentEngine {
       surface_id: surface.surface,
       state: "booting",
     };
+  }
+
+  /**
+   * Cascade-kill all agents in the subtree rooted at rootId.
+   * Uses DFS post-order (children before root). Continues on failures (best-effort).
+   */
+  async cascadeKill(rootId: string, force?: boolean): Promise<void> {
+    const subtree = this.registry.getSubtree(rootId);
+    for (const agent of subtree) {
+      try {
+        await this.stopAgent(agent.agent_id, force);
+      } catch {
+        // Best-effort — continue to next agent
+      }
+    }
   }
 
   /**

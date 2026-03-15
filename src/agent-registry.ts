@@ -68,6 +68,10 @@ export class AgentRegistry {
       if (TERMINAL_STATES.has(agent.state)) continue;
 
       if (!liveSurfaceRefs.has(agent.surface_id)) {
+        // Orphan-on-crash: when a parent surface disappears, only THAT agent
+        // transitions to error. Children are not affected because each child
+        // has its own separate surface. This is intentional — children continue
+        // running independently after a parent crash.
         const updated = this.stateMgr.transition(id, "error", {
           error: `Surface ${agent.surface_id} disappeared`,
         });
@@ -104,5 +108,32 @@ export class AgentRegistry {
 
   remove(agentId: string): void {
     this.agents.delete(agentId);
+  }
+
+  /**
+   * Get direct children of parentId.
+   */
+  getChildren(parentId: string): AgentRecord[] {
+    return [...this.agents.values()].filter(
+      (a) => a.parent_agent_id === parentId,
+    );
+  }
+
+  /**
+   * Get all agents in the subtree rooted at rootId (including root).
+   * DFS post-order: children before root.
+   */
+  getSubtree(rootId: string): AgentRecord[] {
+    const result: AgentRecord[] = [];
+    const collect = (id: string) => {
+      const children = this.getChildren(id);
+      for (const child of children) {
+        collect(child.agent_id);
+      }
+      const agent = this.agents.get(id);
+      if (agent) result.push(agent);
+    };
+    collect(rootId);
+    return result;
   }
 }
