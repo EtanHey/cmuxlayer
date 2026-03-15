@@ -1,0 +1,1073 @@
+/**
+ * cmux MCP server — registers 10 low-level tools + 7 agent lifecycle tools.
+ */
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import { parseReservedModeKey } from "./mode-policy.js";
+import { replaceTaskSuffix } from "./naming.js";
+import { StateManager } from "./state-manager.js";
+import { AgentRegistry } from "./agent-registry.js";
+import { AgentEngine } from "./agent-engine.js";
+
+type TextContent = { type: "text"; text: string };
+type ToolReturn = {
+  content: TextContent[];
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+};
+
+function ok(data: Record<string, unknown>): ToolReturn {
+  const payload = { ok: true, ...data };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload,
+  };
+}
+
+function err(error: unknown): ToolReturn {
+  const message = error instanceof Error ? error.message : String(error);
+  const payload = { ok: false, error: message };
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload,
+    isError: true,
+  };
+}
+
+function requireValue(
+  value: string | number | undefined,
+  message: string,
+): asserts value is string | number {
+  if (value === undefined || value === "") {
+    throw new Error(message);
+  }
+}
+
+export interface CreateServerOptions {
+  exec?: ExecFn;
+  bin?: string;
+  /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
+  stateDir?: string;
+  /** Skip agent lifecycle initialization (for testing low-level tools only) */
+  skipAgentLifecycle?: boolean;
+}
+
+export function createServer(opts?: CreateServerOptions): McpServer {
+  const client = new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+
+  const server = new McpServer({
+    name: "@golems/cmux-mcp",
+    version: "0.1.0",
+  });
+
+  // 1. list_surfaces
+  server.tool(
+    "list_surfaces",
+    "List all surfaces (terminal/browser panes) across workspaces",
+    {
+      workspace: z.string().optional().describe("Filter by workspace ref"),
+      include_screen_preview: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include screen content preview"),
+      preview_lines: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .default(8)
+        .describe("Number of preview lines"),
+    },
+    async (args) => {
+      try {
+        const workspaces = await client.listWorkspaces();
+        const targetWorkspaceRefs = args.workspace
+          ? [args.workspace]
+          : workspaces.workspaces.map((workspace) => workspace.ref);
+        const panesByWorkspace = await Promise.all(
+          targetWorkspaceRefs.map(async (workspaceRef) => ({
+            workspaceRef,
+            panes: await client.listPanes({ workspace: workspaceRef }),
+          })),
+        );
+        const surfaceGroups = await Promise.all(
+          panesByWorkspace.flatMap(({ workspaceRef, panes }) =>
+            panes.panes.map((pane) =>
+              client.listPaneSurfaces({
+                workspace: workspaceRef,
+                pane: pane.ref,
+              }),
+            ),
+          ),
+        );
+        const surfaces = await Promise.all(
+          surfaceGroups.flatMap((group) =>
+            group.surfaces.map(async (surface) => {
+              const enrichedSurface: Record<string, unknown> = {
+                ...surface,
+                workspace_ref: group.workspace_ref,
+                window_ref: group.window_ref,
+                pane_ref: group.pane_ref,
+              };
+
+              if (args.include_screen_preview && surface.type === "terminal") {
+                try {
+                  const preview = await client.readScreen(surface.ref, {
+                    workspace: group.workspace_ref,
+                    lines: args.preview_lines,
+                  });
+                  enrichedSurface.screen_preview = preview.text;
+                } catch (error) {
+                  enrichedSurface.screen_preview_error =
+                    error instanceof Error ? error.message : String(error);
+                }
+              }
+
+              return enrichedSurface;
+            }),
+          ),
+        );
+        return ok({
+          workspaces: workspaces.workspaces,
+          surfaces,
+          workspace_ref: args.workspace,
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 2. new_split
+  server.tool(
+    "new_split",
+    "Create a new split pane (terminal or browser)",
+    {
+      direction: z
+        .enum(["left", "right", "up", "down"])
+        .describe("Split direction"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+      pane: z.string().optional().describe("Target pane ref"),
+      type: z
+        .enum(["terminal", "browser"])
+        .optional()
+        .default("terminal")
+        .describe("Surface type"),
+      url: z.string().optional().describe("URL for browser surfaces"),
+      title: z.string().optional().describe("Tab title"),
+      focus: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe("Focus the new pane"),
+    },
+    async (args) => {
+      try {
+        const result = await client.newSplit(args.direction, {
+          workspace: args.workspace,
+          surface: args.surface,
+          pane: args.pane,
+          type: args.type,
+          url: args.url,
+          title: args.title,
+          focus: args.focus,
+        });
+        if (args.title) {
+          await client.renameTab(result.surface, args.title, {
+            workspace: result.workspace || args.workspace,
+          });
+          result.title = args.title;
+        }
+        return ok({ ...result });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 3. send_input
+  server.tool(
+    "send_input",
+    "Send text input to a terminal surface",
+    {
+      surface: z.string().describe("Target surface ref"),
+      text: z.string().describe("Text to send"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      press_enter: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Press enter after sending text"),
+      rename_to_task: z
+        .string()
+        .optional()
+        .describe("Rename tab suffix to this task name"),
+    },
+    async (args) => {
+      try {
+        await client.send(args.surface, args.text, {
+          workspace: args.workspace,
+        });
+        if (args.press_enter) {
+          await client.sendKey(args.surface, "return", {
+            workspace: args.workspace,
+          });
+        }
+        if (args.rename_to_task) {
+          const surfaces = await client.listPaneSurfaces({
+            workspace: args.workspace,
+          });
+          const surface = surfaces.surfaces.find((s) => s.ref === args.surface);
+          const currentTitle = surface?.title ?? "";
+          const newTitle = replaceTaskSuffix(currentTitle, args.rename_to_task);
+          await client.renameTab(args.surface, newTitle, {
+            workspace: args.workspace,
+          });
+        }
+        return ok({ surface: args.surface, applied: "send_input" });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 4. send_key
+  server.tool(
+    "send_key",
+    "Send a key press to a terminal surface",
+    {
+      surface: z.string().describe("Target surface ref"),
+      key: z.string().describe("Key name (e.g. 'return', 'escape', 'tab')"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+    },
+    async (args) => {
+      try {
+        await client.sendKey(args.surface, args.key, {
+          workspace: args.workspace,
+        });
+        return ok({ surface: args.surface, applied: "send_key" });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 5. read_screen
+  server.tool(
+    "read_screen",
+    "Read the current screen content of a terminal surface",
+    {
+      surface: z.string().describe("Target surface ref"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      lines: z
+        .number()
+        .int()
+        .min(1)
+        .max(500)
+        .optional()
+        .default(20)
+        .describe("Number of lines to read"),
+      scrollback: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include scrollback buffer"),
+    },
+    async (args) => {
+      try {
+        const result = await client.readScreen(args.surface, {
+          workspace: args.workspace,
+          lines: args.lines,
+          scrollback: args.scrollback,
+        });
+        return ok({
+          surface: result.surface,
+          lines: result.lines,
+          content: result.text,
+          scrollback_used: result.scrollback_used,
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 6. rename_tab
+  server.tool(
+    "rename_tab",
+    "Rename a surface tab",
+    {
+      surface: z.string().describe("Target surface ref"),
+      title: z.string().describe("New tab title"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      preserve_prefix: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Only replace the task suffix, keeping launcher prefix"),
+    },
+    async (args) => {
+      try {
+        let finalTitle = args.title;
+        if (args.preserve_prefix) {
+          const surfaces = await client.listPaneSurfaces({
+            workspace: args.workspace,
+          });
+          const surface = surfaces.surfaces.find((s) => s.ref === args.surface);
+          const currentTitle = surface?.title ?? "";
+          finalTitle = replaceTaskSuffix(currentTitle, args.title);
+        }
+        await client.renameTab(args.surface, finalTitle, {
+          workspace: args.workspace,
+        });
+        return ok({
+          surface: args.surface,
+          title: finalTitle,
+          applied: "rename_tab",
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 7. set_status
+  server.tool(
+    "set_status",
+    "Set a sidebar status key-value pair",
+    {
+      key: z.string().describe("Status key"),
+      value: z.string().describe("Status value"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+      icon: z.string().max(8).optional().describe("Icon name"),
+      color: z
+        .string()
+        .regex(/^#[0-9a-fA-F]{6}$/)
+        .optional()
+        .describe("Hex color"),
+    },
+    async (args) => {
+      try {
+        parseReservedModeKey(args.key, args.value);
+        await client.setStatus(args.key, args.value, {
+          icon: args.icon,
+          color: args.color,
+          workspace: args.workspace,
+          surface: args.surface,
+        });
+        return ok({
+          key: args.key,
+          value: args.value,
+          applied: "set_status",
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 8. set_progress
+  server.tool(
+    "set_progress",
+    "Set sidebar progress indicator (0.0 to 1.0)",
+    {
+      value: z
+        .number()
+        .min(0)
+        .max(1)
+        .describe("Progress value between 0 and 1"),
+      label: z.string().optional().describe("Progress label text"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+    },
+    async (args) => {
+      try {
+        await client.setProgress(args.value, {
+          label: args.label,
+          workspace: args.workspace,
+          surface: args.surface,
+        });
+        return ok({
+          value: args.value,
+          label: args.label,
+          applied: "set_progress",
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 9. close_surface
+  server.tool(
+    "close_surface",
+    "Close a surface (terminal or browser pane)",
+    {
+      surface: z.string().describe("Target surface ref"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+    },
+    async (args) => {
+      try {
+        await client.closeSurface(args.surface, {
+          workspace: args.workspace,
+        });
+        return ok({ surface: args.surface, applied: "close_surface" });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 10. browser_surface
+  server.tool(
+    "browser_surface",
+    "Interact with a browser surface (open, navigate, snapshot, click, type, eval, wait)",
+    {
+      action: z
+        .enum([
+          "open",
+          "goto",
+          "snapshot",
+          "click",
+          "type",
+          "eval",
+          "wait",
+          "url",
+        ])
+        .describe("Browser action to perform"),
+      surface: z.string().optional().describe("Target surface ref"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      url: z.string().optional().describe("URL for open/goto actions"),
+      selector: z
+        .string()
+        .optional()
+        .describe("CSS selector for click/type/wait actions"),
+      text: z.string().optional().describe("Text for type action"),
+      script: z.string().optional().describe("JavaScript for eval action"),
+      timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Timeout for wait action"),
+    },
+    async (args) => {
+      try {
+        const browserArgs: string[] = [];
+        if (args.surface) {
+          browserArgs.push("--surface", args.surface);
+        }
+
+        switch (args.action) {
+          case "open":
+            browserArgs.push("open");
+            if (args.url) {
+              browserArgs.push(args.url);
+            }
+            break;
+          case "goto":
+            requireValue(args.surface, "surface is required for goto");
+            requireValue(args.url, "url is required for goto");
+            browserArgs.push("goto", args.url);
+            break;
+          case "snapshot":
+            requireValue(args.surface, "surface is required for snapshot");
+            browserArgs.push("snapshot");
+            break;
+          case "click":
+            requireValue(args.surface, "surface is required for click");
+            requireValue(args.selector, "selector is required for click");
+            browserArgs.push("click", args.selector);
+            break;
+          case "type":
+            requireValue(args.surface, "surface is required for type");
+            requireValue(args.selector, "selector is required for type");
+            requireValue(args.text, "text is required for type");
+            browserArgs.push("type", args.selector, args.text);
+            break;
+          case "eval":
+            requireValue(args.surface, "surface is required for eval");
+            requireValue(args.script, "script is required for eval");
+            browserArgs.push("eval", args.script);
+            break;
+          case "wait":
+            requireValue(args.surface, "surface is required for wait");
+            if (!args.selector && !args.text && !args.timeout_ms) {
+              throw new Error(
+                "wait requires at least one of selector, text, or timeout_ms",
+              );
+            }
+            browserArgs.push("wait");
+            if (args.selector) {
+              browserArgs.push("--selector", args.selector);
+            }
+            if (args.text) {
+              browserArgs.push("--text", args.text);
+            }
+            if (args.timeout_ms) {
+              browserArgs.push("--timeout-ms", String(args.timeout_ms));
+            }
+            break;
+          case "url":
+            requireValue(args.surface, "surface is required for url");
+            browserArgs.push("url");
+            break;
+        }
+
+        const result = await client.browser(browserArgs);
+        // browser_surface actions map to cmux browser-surface subcommands
+        return ok({
+          action: args.action,
+          surface: args.surface,
+          result,
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // --- Agent Lifecycle Tools (Phase 5) ---
+
+  if (!opts?.skipAgentLifecycle) {
+    const stateDir =
+      opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+    const stateMgr = new StateManager(stateDir);
+    const surfaceProvider = async () => {
+      try {
+        const workspaces = await client.listWorkspaces();
+        const panesByWorkspace = await Promise.all(
+          workspaces.workspaces.map(async (ws) => ({
+            ref: ws.ref,
+            panes: await client.listPanes({ workspace: ws.ref }),
+          })),
+        );
+        const surfaceGroups = await Promise.all(
+          panesByWorkspace.flatMap(({ ref, panes }) =>
+            panes.panes.map((p) =>
+              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
+            ),
+          ),
+        );
+        return surfaceGroups.flatMap((g) => g.surfaces);
+      } catch {
+        return [];
+      }
+    };
+    const registry = new AgentRegistry(stateMgr, surfaceProvider);
+    const engine = new AgentEngine(stateMgr, registry, client);
+
+    // Reconstitute registry from disk on startup (async, best-effort)
+    registry.reconstitute().catch(() => {});
+    engine.startSweep(5000);
+
+    // 11. spawn_agent
+    server.tool(
+      "spawn_agent",
+      "Spawn an AI agent in a new terminal surface. Returns immediately — use wait_for to block until ready.",
+      {
+        repo: z
+          .string()
+          .describe("Repository name (e.g. 'brainlayer', 'golems')"),
+        model: z
+          .string()
+          .describe("Model name (e.g. 'sonnet', 'codex', 'opus')"),
+        cli: z
+          .enum(["claude", "codex", "gemini", "kiro", "cursor"])
+          .describe("CLI tool to launch"),
+        prompt: z.string().describe("Task prompt to send after agent is ready"),
+        workspace: z.string().optional().describe("Target workspace ref"),
+      },
+      async (args) => {
+        try {
+          const result = await engine.spawnAgent({
+            repo: args.repo,
+            model: args.model,
+            cli: args.cli,
+            prompt: args.prompt,
+            workspace: args.workspace,
+          });
+          return ok({ ...result });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 12. wait_for
+    server.tool(
+      "wait_for",
+      "Block until an agent reaches a target state (ready, done, error). Checks retroactively first.",
+      {
+        agent_id: z.string().describe("Agent ID from spawn_agent"),
+        target_state: z
+          .enum(["ready", "working", "idle", "done", "error"])
+          .describe("State to wait for"),
+        timeout_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .default(300000)
+          .describe("Timeout in milliseconds (default: 5 minutes)"),
+      },
+      async (args) => {
+        try {
+          const result = await engine.waitFor(
+            args.agent_id,
+            args.target_state,
+            args.timeout_ms,
+          );
+          return ok({ ...result });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 13. wait_for_all
+    server.tool(
+      "wait_for_all",
+      "Block until ALL agents reach target state OR any agent errors (fail-fast with partial results).",
+      {
+        agent_ids: z.array(z.string()).describe("Array of agent IDs"),
+        target_state: z
+          .enum(["ready", "working", "idle", "done", "error"])
+          .describe("State to wait for"),
+        timeout_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .default(300000)
+          .describe("Timeout in milliseconds (default: 5 minutes)"),
+      },
+      async (args) => {
+        try {
+          const results = await engine.waitForAll(
+            args.agent_ids,
+            args.target_state,
+            args.timeout_ms,
+          );
+          return ok({ results });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 14. get_agent_state
+    server.tool(
+      "get_agent_state",
+      "Get the full state of an agent including cli_session_id for resume.",
+      {
+        agent_id: z.string().describe("Agent ID"),
+      },
+      async (args) => {
+        try {
+          const state = engine.getAgentState(args.agent_id);
+          if (!state)
+            return err(new Error(`Agent not found: ${args.agent_id}`));
+          return ok(state as unknown as Record<string, unknown>);
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 15. list_agents
+    server.tool(
+      "list_agents",
+      "List all agents with optional filters by state, repo, or model.",
+      {
+        state: z
+          .enum([
+            "creating",
+            "booting",
+            "ready",
+            "working",
+            "idle",
+            "done",
+            "error",
+          ])
+          .optional()
+          .describe("Filter by state"),
+        repo: z.string().optional().describe("Filter by repository"),
+        model: z.string().optional().describe("Filter by model"),
+      },
+      async (args) => {
+        try {
+          const agents = engine.listAgents({
+            state: args.state,
+            repo: args.repo,
+            model: args.model,
+          });
+          return ok({
+            agents: agents as unknown as Record<string, unknown>[],
+            count: agents.length,
+          });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 16. stop_agent
+    server.tool(
+      "stop_agent",
+      "Stop an agent gracefully (Ctrl+C) or forcefully (kill process).",
+      {
+        agent_id: z.string().describe("Agent ID to stop"),
+        force: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Force kill instead of graceful Ctrl+C"),
+      },
+      async (args) => {
+        try {
+          await engine.stopAgent(args.agent_id, args.force);
+          const state = engine.getAgentState(args.agent_id);
+          return ok({
+            agent_id: args.agent_id,
+            state: state?.state ?? "done",
+            applied: "stop_agent",
+          });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 17. send_to_agent
+    server.tool(
+      "send_to_agent",
+      "Send text input to an agent. Agent must be in ready or idle state.",
+      {
+        agent_id: z.string().describe("Agent ID"),
+        text: z.string().describe("Text to send"),
+        press_enter: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Press enter after sending text"),
+      },
+      async (args) => {
+        try {
+          await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
+          return ok({
+            agent_id: args.agent_id,
+            applied: "send_to_agent",
+          });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+    // 18. read_agent_output
+    server.tool(
+      "read_agent_output",
+      "Extract structured output from an agent's terminal between delimiter markers (e.g., REVIEW_OUTPUT_START / REVIEW_OUTPUT_END). Returns the content between the markers, or null if not found.",
+      {
+        surface: z.string().describe("Target surface ref (e.g., 'surface:78')"),
+        tag: z
+          .string()
+          .optional()
+          .default("OUTPUT")
+          .describe(
+            "Delimiter tag name. Looks for {TAG}_START and {TAG}_END markers. Default: OUTPUT (matches OUTPUT_START/OUTPUT_END). Examples: REVIEW_OUTPUT, SYNTHESIS_OUTPUT, PUSHBACK_OUTPUT",
+          ),
+        lines: z
+          .number()
+          .optional()
+          .default(200)
+          .describe("Number of screen lines to scan (default: 200)"),
+        workspace: z.string().optional().describe("Target workspace ref"),
+      },
+      async (args) => {
+        try {
+          const opts: Record<string, unknown> = {
+            lines: args.lines,
+            scrollback: true,
+          };
+          if (args.workspace) opts.workspace = args.workspace;
+
+          const raw = await client.readScreen(args.surface, opts);
+          const text =
+            typeof raw === "string"
+              ? raw
+              : ((raw as { content?: string }).content ?? "");
+
+          const startMarker = `${args.tag}_START`;
+          const endMarker = `${args.tag}_END`;
+
+          const startIdx = text.indexOf(startMarker);
+          const endIdx = text.indexOf(endMarker);
+
+          if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+            return ok({
+              found: false,
+              tag: args.tag,
+              surface: args.surface,
+              content: null,
+            });
+          }
+
+          const content = text
+            .slice(startIdx + startMarker.length, endIdx)
+            .trim();
+
+          return ok({
+            found: true,
+            tag: args.tag,
+            surface: args.surface,
+            content,
+          });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+    // --- V2 Public API: interact + kill ---
+
+    // 19. interact
+    server.tool(
+      "interact",
+      "Send a message to an agent, or perform an agent action (interrupt, model switch, resume, skill, usage). If the agent is alive, sends directly. If not found, returns an error — use spawn_agent first.",
+      {
+        agent: z
+          .string()
+          .describe("Agent ID (from spawn_agent or list_agents)"),
+        action: z
+          .enum([
+            "send",
+            "interrupt",
+            "model",
+            "resume",
+            "skill",
+            "usage",
+            "mcp",
+          ])
+          .describe("Action to perform"),
+        text: z
+          .string()
+          .optional()
+          .describe("Text to send (required for action=send)"),
+        model: z
+          .string()
+          .optional()
+          .describe("Model to switch to (required for action=model)"),
+        session_id: z
+          .string()
+          .optional()
+          .describe("Session ID to resume (optional for action=resume)"),
+        command: z
+          .string()
+          .optional()
+          .describe("Slash command to run (required for action=skill)"),
+      },
+      async (args) => {
+        try {
+          // Runtime validation per action (Decision 2)
+          switch (args.action) {
+            case "send":
+              if (!args.text) {
+                return err(
+                  new Error(
+                    "text is required for action=send. Provide the message to send to the agent.",
+                  ),
+                );
+              }
+              break;
+            case "model":
+              if (!args.model) {
+                return err(
+                  new Error(
+                    "model is required for action=model. Provide the model name to switch to (e.g. 'sonnet', 'opus').",
+                  ),
+                );
+              }
+              break;
+            case "skill":
+              if (!args.command) {
+                return err(
+                  new Error(
+                    "command is required for action=skill. Provide the slash command (e.g. '/commit', '/review').",
+                  ),
+                );
+              }
+              break;
+            // interrupt, resume, usage, mcp — no extra fields required
+          }
+
+          // Resolve agent
+          const agent = engine.getAgentState(args.agent);
+          if (!agent) {
+            return err(
+              new Error(
+                `Agent not found: "${args.agent}". Use list_agents to see available agents, or spawn_agent to create one.`,
+              ),
+            );
+          }
+
+          // Dispatch action
+          switch (args.action) {
+            case "send": {
+              await engine.sendToAgent(args.agent, args.text!, true);
+              return ok({
+                agent_id: args.agent,
+                action: "send",
+                applied: true,
+              });
+            }
+            case "interrupt": {
+              await client.sendKey(agent.surface_id, "c-c", {});
+              return ok({
+                agent_id: args.agent,
+                action: "interrupt",
+                applied: true,
+              });
+            }
+            case "model": {
+              const modelCmd = `/model ${args.model}`;
+              await engine.sendToAgent(args.agent, modelCmd, true);
+              return ok({
+                agent_id: args.agent,
+                action: "model",
+                model: args.model,
+                applied: true,
+              });
+            }
+            case "resume": {
+              const resumeCmd = args.session_id
+                ? `/resume ${args.session_id}`
+                : "/resume";
+              await engine.sendToAgent(args.agent, resumeCmd, true);
+              return ok({
+                agent_id: args.agent,
+                action: "resume",
+                session_id: args.session_id,
+                applied: true,
+              });
+            }
+            case "skill": {
+              await engine.sendToAgent(args.agent, args.command!, true);
+              return ok({
+                agent_id: args.agent,
+                action: "skill",
+                command: args.command,
+                applied: true,
+              });
+            }
+            case "usage": {
+              // Read screen to extract usage info
+              const screen = await client.readScreen(agent.surface_id, {
+                lines: 5,
+              });
+              return ok({
+                agent_id: args.agent,
+                action: "usage",
+                surface_id: agent.surface_id,
+                screen_tail: screen.text,
+              });
+            }
+            case "mcp": {
+              // Read screen for MCP server status
+              const mcpScreen = await client.readScreen(agent.surface_id, {
+                lines: 10,
+              });
+              return ok({
+                agent_id: args.agent,
+                action: "mcp",
+                surface_id: agent.surface_id,
+                screen_tail: mcpScreen.text,
+              });
+            }
+          }
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // Expose engine on the tool for test access
+    (server as any)._registeredTools["interact"]._engine = engine;
+
+    // 20. kill
+    server.tool(
+      "kill",
+      "Stop one or more agents. Target can be a single agent ID, an array of IDs, or 'all'.",
+      {
+        target: z
+          .union([z.string(), z.array(z.string())])
+          .describe(
+            "Agent ID, array of agent IDs, or 'all' to stop all agents",
+          ),
+        force: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Force kill (SIGKILL) instead of graceful (Ctrl+C)"),
+      },
+      async (args) => {
+        try {
+          const killed: string[] = [];
+          const errors: string[] = [];
+
+          // Resolve target list
+          let targetIds: string[];
+          if (args.target === "all") {
+            const agents = engine.listAgents();
+            targetIds = agents
+              .filter((a) => a.state !== "done" && a.state !== "error")
+              .map((a) => a.agent_id);
+          } else if (Array.isArray(args.target)) {
+            targetIds = args.target;
+          } else {
+            targetIds = [args.target];
+          }
+
+          if (targetIds.length === 0) {
+            return ok({ killed: [], message: "No agents to kill" });
+          }
+
+          // Kill each agent, collecting results
+          for (const agentId of targetIds) {
+            try {
+              await engine.stopAgent(agentId, args.force);
+              killed.push(agentId);
+            } catch (e) {
+              errors.push(
+                `${agentId}: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+
+          if (killed.length === 0 && errors.length > 0) {
+            return err(
+              new Error(`Failed to kill any agents: ${errors.join("; ")}`),
+            );
+          }
+
+          return ok({
+            killed,
+            errors: errors.length > 0 ? errors : undefined,
+            force: args.force,
+          });
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+  } // end skipAgentLifecycle guard
+
+  return server;
+}
