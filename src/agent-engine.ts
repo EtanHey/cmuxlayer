@@ -50,9 +50,16 @@ const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> = {
 
 /**
  * Build the shell command that launches a CLI agent.
+ * Repo name is sanitized to prevent command injection.
  */
 function buildLaunchCommand(cli: CliType, repo: string): string {
-  const cdCmd = `cd ~/Gits/${repo}`;
+  const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!safeRepo || safeRepo !== repo) {
+    throw new Error(
+      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed.`,
+    );
+  }
+  const cdCmd = `cd ~/Gits/${safeRepo}`;
   switch (cli) {
     case "claude":
       return `${cdCmd} && claude --dangerously-skip-permissions`;

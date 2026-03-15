@@ -110,6 +110,7 @@ export function parseContextPercent(text: string): number | null {
  */
 export function generateAgentId(model: string, repo: string): string {
   const ts = Math.floor(Date.now() / 1000);
+  const rand = Math.random().toString(36).slice(2, 6);
   const slug = repo.replace(/[^a-zA-Z0-9-]/g, "-");
-  return `${model}-${slug}-${ts}`;
+  return `${model}-${slug}-${ts}-${rand}`;
 }
