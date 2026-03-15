@@ -64,18 +64,31 @@ export class AgentRegistry {
     const surfaces = await this.surfaceProvider();
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
 
+    // Phase 1: Mark agents with disappeared surfaces as error
+    const crashedIds = new Set<string>();
     for (const [id, agent] of this.agents) {
       if (TERMINAL_STATES.has(agent.state)) continue;
 
       if (!liveSurfaceRefs.has(agent.surface_id)) {
-        // Orphan-on-crash: when a parent surface disappears, only THAT agent
-        // transitions to error. Children are not affected because each child
-        // has its own separate surface. This is intentional — children continue
-        // running independently after a parent crash.
         const updated = this.stateMgr.transition(id, "error", {
           error: `Surface ${agent.surface_id} disappeared`,
         });
         this.agents.set(id, updated);
+        crashedIds.add(id);
+      }
+    }
+
+    // Phase 2: Reparent orphans — children of crashed agents get parent_agent_id=null.
+    // Children keep running independently (orphan survival), but are detached from
+    // the dead parent so getSubtree on the dead parent no longer includes them.
+    if (crashedIds.size > 0) {
+      for (const [id, agent] of this.agents) {
+        if (agent.parent_agent_id && crashedIds.has(agent.parent_agent_id)) {
+          const reparented = this.stateMgr.updateRecord(id, {
+            parent_agent_id: null,
+          });
+          this.agents.set(id, reparented);
+        }
       }
     }
   }

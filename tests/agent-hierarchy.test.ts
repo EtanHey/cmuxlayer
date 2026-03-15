@@ -393,8 +393,52 @@ describe("Agent Hierarchy", () => {
       // Child should still be working — orphan survival, NOT cascade kill
       const child = engine.getAgentState("child");
       expect(child!.state).toBe("working");
-      // Child retains its parent reference (no reparenting)
-      expect(child!.parent_agent_id).toBe("parent");
+      // Child is reparented to root (parent_agent_id set to null)
+      expect(child!.parent_agent_id).toBeNull();
+    });
+
+    it("reparents grandchildren when parent crashes", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "root",
+          surface_id: "s:1",
+          state: "working",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "mid",
+          surface_id: "s:2",
+          parent_agent_id: "root",
+          spawn_depth: 1,
+          state: "working",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "leaf",
+          surface_id: "s:3",
+          parent_agent_id: "mid",
+          spawn_depth: 2,
+          state: "working",
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("s:1"),
+        makeSurface("s:2"),
+        makeSurface("s:3"),
+      ];
+      await engine.getRegistry().reconstitute();
+
+      // Mid-level surface disappears
+      liveSurfaces = [makeSurface("s:1"), makeSurface("s:3")];
+      await engine.getRegistry().reconcile();
+
+      expect(engine.getAgentState("mid")!.state).toBe("error");
+      // Leaf reparented to null (orphaned to root level)
+      const leaf = engine.getAgentState("leaf");
+      expect(leaf!.state).toBe("working");
+      expect(leaf!.parent_agent_id).toBeNull();
     });
   });
 });

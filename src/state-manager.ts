@@ -120,7 +120,10 @@ export class StateManager {
   updateRecord(
     agentId: string,
     fields: Partial<
-      Pick<AgentRecord, "deletion_intent" | "quality" | "max_cost_per_agent">
+      Pick<
+        AgentRecord,
+        "deletion_intent" | "quality" | "max_cost_per_agent" | "parent_agent_id"
+      >
     >,
   ): AgentRecord {
     const current = this.readState(agentId);
