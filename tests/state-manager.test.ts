@@ -22,6 +22,11 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     created_at: "2026-03-14T03:40:00Z",
     updated_at: "2026-03-14T03:40:00Z",
     error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
     ...overrides,
   };
 }

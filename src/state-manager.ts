@@ -113,6 +113,51 @@ export class StateManager {
     return updated;
   }
 
+  /**
+   * Update arbitrary fields on an agent record without state-transition validation.
+   * Used for quality and deletion_intent updates.
+   */
+  updateRecord(
+    agentId: string,
+    fields: Partial<
+      Pick<
+        AgentRecord,
+        "deletion_intent" | "quality" | "max_cost_per_agent" | "parent_agent_id"
+      >
+    >,
+  ): AgentRecord {
+    const current = this.readState(agentId);
+    if (!current) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    const updated: AgentRecord = {
+      ...current,
+      ...fields,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+
+    const agentDir = join(this.baseDir, agentId);
+    const stateFile = join(agentDir, "state.json");
+    const tmpFile = join(agentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, stateFile);
+
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: agentId,
+      event: "transition",
+      from_state: current.state,
+      to_state: current.state,
+      surface_id: current.surface_id,
+      source: "updateRecord",
+      error: null,
+    });
+
+    return updated;
+  }
+
   listStates(): AgentRecord[] {
     if (!existsSync(this.baseDir)) return [];
     const entries = readdirSync(this.baseDir, { withFileTypes: true });

@@ -64,6 +64,8 @@ export class AgentRegistry {
     const surfaces = await this.surfaceProvider();
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
 
+    // Phase 1: Mark agents with disappeared surfaces as error
+    const crashedIds = new Set<string>();
     for (const [id, agent] of this.agents) {
       if (TERMINAL_STATES.has(agent.state)) continue;
 
@@ -72,6 +74,21 @@ export class AgentRegistry {
           error: `Surface ${agent.surface_id} disappeared`,
         });
         this.agents.set(id, updated);
+        crashedIds.add(id);
+      }
+    }
+
+    // Phase 2: Reparent orphans — children of crashed agents get parent_agent_id=null.
+    // Children keep running independently (orphan survival), but are detached from
+    // the dead parent so getSubtree on the dead parent no longer includes them.
+    if (crashedIds.size > 0) {
+      for (const [id, agent] of this.agents) {
+        if (agent.parent_agent_id && crashedIds.has(agent.parent_agent_id)) {
+          const reparented = this.stateMgr.updateRecord(id, {
+            parent_agent_id: null,
+          });
+          this.agents.set(id, reparented);
+        }
       }
     }
   }
@@ -104,5 +121,35 @@ export class AgentRegistry {
 
   remove(agentId: string): void {
     this.agents.delete(agentId);
+  }
+
+  /**
+   * Get direct children of parentId.
+   */
+  getChildren(parentId: string): AgentRecord[] {
+    return [...this.agents.values()].filter(
+      (a) => a.parent_agent_id === parentId,
+    );
+  }
+
+  /**
+   * Get all agents in the subtree rooted at rootId (including root).
+   * DFS post-order: children before root.
+   */
+  getSubtree(rootId: string): AgentRecord[] {
+    const result: AgentRecord[] = [];
+    const visited = new Set<string>();
+    const collect = (id: string) => {
+      if (visited.has(id)) return; // Prevent cycles from corrupted state
+      visited.add(id);
+      const children = this.getChildren(id);
+      for (const child of children) {
+        collect(child.agent_id);
+      }
+      const agent = this.agents.get(id);
+      if (agent) result.push(agent);
+    };
+    collect(rootId);
+    return result;
   }
 }

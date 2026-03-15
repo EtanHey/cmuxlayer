@@ -39,6 +39,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     clearProgress: vi.fn().mockResolvedValue(undefined),
     identify: vi.fn().mockResolvedValue({}),
     browser: vi.fn().mockResolvedValue({}),
+    log: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as CmuxClient;
 }
@@ -62,6 +63,11 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     created_at: "2026-03-14T03:40:00Z",
     updated_at: "2026-03-14T03:40:00Z",
     error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
     ...overrides,
   };
 }
@@ -97,7 +103,7 @@ describe("AgentEngine", () => {
         prompt: "Fix gap F",
       });
 
-      expect(result.agent_id).toMatch(/^sonnet-brainlayer-\d+$/);
+      expect(result.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
       expect(result.surface_id).toBe("surface:new");
       expect(result.state).toBe("booting");
     });

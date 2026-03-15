@@ -111,7 +111,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+$/);
+    expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("booting");
   });
