@@ -141,6 +141,17 @@ export class StateManager {
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
 
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: agentId,
+      event: "transition",
+      from_state: current.state,
+      to_state: current.state,
+      surface_id: current.surface_id,
+      source: "updateRecord",
+      error: null,
+    });
+
     return updated;
   }
 

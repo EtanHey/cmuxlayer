@@ -258,6 +258,40 @@ describe("Quality Tracking (sweep)", () => {
     );
   });
 
+  it("depth>0 agent at 80% is killed but NOT respawned (kill-only, no auto-respawn)", async () => {
+    // This test documents the intentional kill-only behavior.
+    // The design says "depth 1+: kill and log." Respawn is a future enhancement.
+    // TODO: Add respawn capability when agent session resume is implemented.
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "child1",
+        state: "working",
+        surface_id: "s:2",
+        spawn_depth: 1,
+        parent_agent_id: "some-parent",
+      }),
+    );
+    liveSurfaces = [makeSurface("s:2")];
+    await engine.getRegistry().reconstitute();
+
+    vi.mocked(mockClient.readScreen).mockResolvedValue({
+      surface: "s:2",
+      text: "Claude Code  ● 90% context  Model: haiku",
+      lines: 5,
+      scrollback_used: false,
+    });
+
+    await engine.runSweep();
+
+    // Agent should be in terminal state (killed)
+    const agent = engine.getAgentState("child1");
+    expect(agent!.state).toBe("done");
+
+    // No new agent should have been spawned (newSplit not called for respawn)
+    // newSplit is only called during spawnAgent — 0 calls means no respawn
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+  });
+
   it("maxCostPerAgent is stored in AgentRecord at spawn time", async () => {
     const result = await engine.spawnAgent({
       repo: "brainlayer",

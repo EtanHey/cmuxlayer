@@ -358,4 +358,43 @@ describe("Agent Hierarchy", () => {
       stopAgent.mockRestore();
     });
   });
+
+  describe("orphan survival", () => {
+    it("children continue running when parent surface disappears", async () => {
+      // Parent on surface s:1, child on surface s:2
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "parent",
+          surface_id: "s:1",
+          state: "working",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "child",
+          surface_id: "s:2",
+          parent_agent_id: "parent",
+          spawn_depth: 1,
+          state: "working",
+        }),
+      );
+      liveSurfaces = [makeSurface("s:1"), makeSurface("s:2")];
+      await engine.getRegistry().reconstitute();
+
+      // Parent surface disappears, child surface remains
+      liveSurfaces = [makeSurface("s:2")];
+      await engine.getRegistry().reconcile();
+
+      // Parent should be in error state
+      const parent = engine.getAgentState("parent");
+      expect(parent!.state).toBe("error");
+      expect(parent!.error).toContain("disappeared");
+
+      // Child should still be working — orphan survival, NOT cascade kill
+      const child = engine.getAgentState("child");
+      expect(child!.state).toBe("working");
+      // Child retains its parent reference (no reparenting)
+      expect(child!.parent_agent_id).toBe("parent");
+    });
+  });
 });

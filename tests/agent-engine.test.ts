@@ -103,7 +103,7 @@ describe("AgentEngine", () => {
         prompt: "Fix gap F",
       });
 
-      expect(result.agent_id).toMatch(/^sonnet-brainlayer-\d+$/);
+      expect(result.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
       expect(result.surface_id).toBe("surface:new");
       expect(result.state).toBe("booting");
     });

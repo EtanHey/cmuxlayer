@@ -125,7 +125,10 @@ export class AgentRegistry {
    */
   getSubtree(rootId: string): AgentRecord[] {
     const result: AgentRecord[] = [];
+    const visited = new Set<string>();
     const collect = (id: string) => {
+      if (visited.has(id)) return; // Prevent cycles from corrupted state
+      visited.add(id);
       const children = this.getChildren(id);
       for (const child of children) {
         collect(child.agent_id);

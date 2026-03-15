@@ -95,19 +95,22 @@ describe("assertValidTransition", () => {
 });
 
 describe("generateAgentId", () => {
-  it("produces a model-repo-timestamp pattern", () => {
+  it("produces a model-repo-timestamp-rand pattern", () => {
     const id = generateAgentId("codex", "brainlayer");
-    expect(id).toMatch(/^codex-brainlayer-\d+$/);
+    expect(id).toMatch(/^codex-brainlayer-\d+-[a-z0-9]+$/);
   });
 
   it("sanitizes repo names with special characters", () => {
     const id = generateAgentId("claude", "my/weird repo");
-    expect(id).toMatch(/^claude-my-weird-repo-\d+$/);
+    expect(id).toMatch(/^claude-my-weird-repo-\d+-[a-z0-9]+$/);
   });
 
-  it("generates unique IDs for sequential calls", () => {
+  it("generates unique IDs for sequential calls within the same second", () => {
     const id1 = generateAgentId("sonnet", "test");
-    // Ensure different even at same second by checking format
-    expect(id1).toMatch(/^sonnet-test-\d+$/);
+    const id2 = generateAgentId("sonnet", "test");
+    expect(id1).toMatch(/^sonnet-test-\d+-[a-z0-9]+$/);
+    expect(id2).toMatch(/^sonnet-test-\d+-[a-z0-9]+$/);
+    // Random suffix should make them different even in the same second
+    expect(id1).not.toBe(id2);
   });
 });

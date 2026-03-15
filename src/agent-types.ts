@@ -98,8 +98,8 @@ export function assertValidTransition(from: AgentState, to: AgentState): void {
  */
 export function parseContextPercent(text: string): number | null {
   const m =
-    text.match(/(\d{1,3})%\s*context/i) ??
-    text.match(/context[^%]*?(\d{1,3})%/i);
+    text.match(/\b(\d{1,3})%\s*context/i) ??
+    text.match(/context[^%]*?\b(\d{1,3})%/i);
   if (!m) return null;
   const n = parseInt(m[1], 10);
   return isNaN(n) || n < 0 || n > 100 ? null : n;
