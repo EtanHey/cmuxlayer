@@ -347,11 +347,12 @@ export class CmuxSocketClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
+    const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
       surface_id: surface,
       text,
+      workspace_id: workspace,
     };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
     await this.call("surface.send_text", params);
   }
 
@@ -360,11 +361,12 @@ export class CmuxSocketClient {
     key: string,
     opts?: { workspace?: string },
   ): Promise<void> {
+    const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
       surface_id: surface,
       key,
+      workspace_id: workspace,
     };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
     await this.call("surface.send_key", params);
   }
 
@@ -376,8 +378,11 @@ export class CmuxSocketClient {
       scrollback?: boolean;
     },
   ): Promise<CmuxReadScreenResult> {
-    const params: Record<string, unknown> = { surface_id: surface };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
+    const workspace = await this.resolveWorkspace(surface, opts?.workspace);
+    const params: Record<string, unknown> = {
+      surface_id: surface,
+      workspace_id: workspace,
+    };
     if (opts?.lines) params.lines = opts.lines;
     if (opts?.scrollback) params.scrollback = true;
 
@@ -483,8 +488,11 @@ export class CmuxSocketClient {
     surface: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const params: Record<string, unknown> = { surface_id: surface };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
+    const workspace = await this.resolveWorkspace(surface, opts?.workspace);
+    const params: Record<string, unknown> = {
+      surface_id: surface,
+      workspace_id: workspace,
+    };
     await this.call("surface.close", params);
   }
 
@@ -549,6 +557,30 @@ export class CmuxSocketClient {
       }
     }
     return this.call(method, params);
+  }
+
+  /**
+   * Resolve workspace for a surface ref when workspace is not provided.
+   * V2 protocol requires workspace_id for surface operations — unlike
+   * the CLI which resolves internally.
+   */
+  private async resolveWorkspace(
+    surface: string,
+    workspace?: string,
+  ): Promise<string> {
+    if (workspace) return workspace;
+
+    const { workspaces } = await this.listWorkspaces();
+    for (const ws of workspaces) {
+      const surfaces = await this.listPaneSurfaces({ workspace: ws.ref });
+      if (surfaces.surfaces.some((s) => s.ref === surface)) {
+        return ws.ref;
+      }
+    }
+    throw new CmuxSocketError(
+      `Unable to resolve workspace for surface ${surface}`,
+      "not_found",
+    );
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
