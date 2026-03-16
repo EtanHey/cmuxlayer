@@ -7,6 +7,7 @@ import { z } from "zod";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { parseReservedModeKey } from "./mode-policy.js";
 import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
@@ -50,6 +51,8 @@ function requireValue(
 export interface CreateServerOptions {
   exec?: ExecFn;
   bin?: string;
+  /** Pre-built client (socket or CLI). If omitted, creates a CLI client. */
+  client?: CmuxClient | CmuxSocketClient;
   /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
@@ -57,7 +60,8 @@ export interface CreateServerOptions {
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
-  const client = new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const client =
+    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
 
   const server = new McpServer({
     name: "@golems/cmux-mcp",

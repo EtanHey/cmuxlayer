@@ -10,9 +10,11 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
+import { createCmuxClient } from "./cmux-client-factory.js";
 
 async function main() {
-  const server = createServer();
+  const client = await createCmuxClient();
+  const server = createServer({ client });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
