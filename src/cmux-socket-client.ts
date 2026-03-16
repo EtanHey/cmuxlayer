@@ -22,7 +22,6 @@ import type {
 // ── Configuration ──────────────────────────────────────────────────────
 
 const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
-const DEBUG_SOCKET_PATH = "/tmp/cmux-debug.sock";
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface CmuxSocketClientOptions {
@@ -164,7 +163,71 @@ export class CmuxSocketClient {
 
       socket.on("close", () => {
         clearTimeout(timeout);
-        // If we haven't resolved yet, we got disconnected
+        // Reject immediately if we haven't received a response
+        reject(
+          new CmuxSocketError(
+            "Socket closed before receiving response",
+            "connection_closed",
+          ),
+        );
+      });
+    });
+  }
+
+  /**
+   * Send a V1 plain-text command. Some cmux operations (set_status,
+   * set_progress, log, rename_tab) only exist as V1 commands.
+   */
+  private sendV1(command: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const payload = command + "\n";
+
+      const socket = net.createConnection({ path: this.socketPath }, () => {
+        socket.write(payload);
+      });
+
+      let buffer = "";
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        reject(
+          new CmuxSocketError(
+            `Timeout after ${this.timeoutMs}ms waiting for V1: ${command.split(" ")[0]}`,
+            "timeout",
+          ),
+        );
+      }, this.timeoutMs);
+
+      socket.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString("utf-8");
+        if (buffer.includes("\n")) {
+          clearTimeout(timeout);
+          socket.destroy();
+          resolve(buffer.trim());
+        }
+      });
+
+      socket.on("error", (err: Error) => {
+        clearTimeout(timeout);
+        reject(
+          new CmuxSocketError(
+            `Socket error: ${err.message}`,
+            "connection_error",
+          ),
+        );
+      });
+
+      socket.on("close", () => {
+        clearTimeout(timeout);
+        if (buffer.trim()) {
+          resolve(buffer.trim());
+        } else {
+          reject(
+            new CmuxSocketError(
+              "Socket closed before receiving response",
+              "connection_closed",
+            ),
+          );
+        }
       });
     });
   }
@@ -330,12 +393,10 @@ export class CmuxSocketClient {
     title: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const params: Record<string, unknown> = {
-      surface_id: surface,
-      title,
-    };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
-    await this.call("surface.rename", params);
+    const args = ["rename_tab", "--surface", surface];
+    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    args.push(title);
+    await this.sendV1(args.join(" "));
   }
 
   async setStatus(
@@ -348,22 +409,22 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const params: Record<string, unknown> = { key, value };
-    if (opts?.icon) params.icon = opts.icon;
-    if (opts?.color) params.color = opts.color;
+    const args = ["set_status", key, value];
+    if (opts?.icon) args.push("--icon", opts.icon);
+    if (opts?.color) args.push("--color", opts.color);
     const workspace =
       opts?.workspace ??
       (opts?.surface
         ? (await this.identify(opts.surface)).caller?.workspace_ref
         : undefined);
-    if (workspace) params.workspace_id = workspace;
-    await this.call("status.set", params);
+    if (workspace) args.push("--workspace", workspace);
+    await this.sendV1(args.join(" "));
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {
-    const params: Record<string, unknown> = { key };
-    if (opts?.workspace) params.workspace_id = opts.workspace;
-    await this.call("status.clear", params);
+    const args = ["clear_status", key];
+    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    await this.sendV1(args.join(" "));
   }
 
   async setProgress(
@@ -374,21 +435,21 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const params: Record<string, unknown> = { value };
-    if (opts?.label) params.label = opts.label;
+    const args = ["set_progress", String(value)];
+    if (opts?.label) args.push("--label", opts.label);
     const workspace =
       opts?.workspace ??
       (opts?.surface
         ? (await this.identify(opts.surface)).caller?.workspace_ref
         : undefined);
-    if (workspace) params.workspace_id = workspace;
-    await this.call("progress.set", params);
+    if (workspace) args.push("--workspace", workspace);
+    await this.sendV1(args.join(" "));
   }
 
   async clearProgress(opts?: { workspace?: string }): Promise<void> {
-    const params: Record<string, unknown> = {};
-    if (opts?.workspace) params.workspace_id = opts.workspace;
-    await this.call("progress.clear", params);
+    const args = ["clear_progress"];
+    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    await this.sendV1(args.join(" "));
   }
 
   async log(
@@ -400,16 +461,16 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const params: Record<string, unknown> = { message };
-    if (opts?.level) params.level = opts.level;
-    if (opts?.source) params.source = opts.source;
+    const args = ["log", JSON.stringify(message)];
+    if (opts?.level) args.push("--level", opts.level);
+    if (opts?.source) args.push("--source", opts.source);
     const workspace =
       opts?.workspace ??
       (opts?.surface
         ? (await this.identify(opts.surface)).caller?.workspace_ref
         : undefined);
-    if (workspace) params.workspace_id = workspace;
-    await this.call("notification.create", params);
+    if (workspace) args.push("--workspace", workspace);
+    await this.sendV1(args.join(" "));
   }
 
   async closeSurface(
@@ -422,13 +483,31 @@ export class CmuxSocketClient {
   }
 
   async listStatus(opts?: { workspace?: string }): Promise<CmuxStatusEntry[]> {
-    const params: Record<string, unknown> = {};
-    if (opts?.workspace) params.workspace_id = opts.workspace;
-    const result = await this.call<{ entries: CmuxStatusEntry[] }>(
-      "status.list",
-      params,
-    );
-    return result.entries ?? [];
+    const args = ["list_status"];
+    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    const raw = await this.sendV1(args.join(" "));
+    if (!raw || raw === "OK") return [];
+    try {
+      return JSON.parse(raw) as CmuxStatusEntry[];
+    } catch {
+      // Parse key=value format
+      return raw
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => {
+          const match = line.match(
+            /^([^=]+)=(.*?)(?:\s+icon=([^\s]+))?(?:\s+color=(#[0-9a-fA-F]{6}))?$/,
+          );
+          if (!match) return { key: line, value: "" };
+          const [, key, value, icon, color] = match;
+          return {
+            key: key ?? "",
+            value: value?.trim() ?? "",
+            ...(icon ? { icon } : {}),
+            ...(color ? { color } : {}),
+          };
+        });
+    }
   }
 
   async identify(surface: string): Promise<{
@@ -447,15 +526,21 @@ export class CmuxSocketClient {
   }
 
   async browser(args: string[]): Promise<unknown> {
-    // Browser commands map to browser.* methods
-    // First arg is the browser subcommand
     const [subcommand, ...rest] = args;
     const method = `browser.${subcommand ?? "status"}`;
-    // Parse remaining args as key-value pairs
     const params: Record<string, unknown> = {};
-    for (let i = 0; i < rest.length; i += 2) {
-      const key = rest[i]?.replace(/^--/, "") ?? "";
-      params[key] = rest[i + 1] ?? true;
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg?.startsWith("--")) {
+        const key = arg.replace(/^--/, "");
+        const next = rest[i + 1];
+        if (next && !next.startsWith("--")) {
+          params[key] = next;
+          i++; // skip consumed value
+        } else {
+          params[key] = true;
+        }
+      }
     }
     return this.call(method, params);
   }
@@ -475,157 +560,5 @@ export class CmuxSocketClient {
       title: (parsed.title as string) ?? "",
       type: (parsed.type as "terminal" | "browser") ?? fallbackType,
     };
-  }
-}
-
-// ── Persistent connection pool (optional optimization) ──────────────
-
-/**
- * A persistent socket connection that stays open across multiple requests.
- * Useful for high-frequency operations like sidebar sweeps.
- *
- * Unlike CmuxSocketClient (which opens/closes a connection per request),
- * this keeps a single socket open and multiplexes requests over it.
- */
-export class CmuxPersistentSocket {
-  private socket: net.Socket | null = null;
-  private socketPath: string;
-  private buffer = "";
-  private pending = new Map<
-    string,
-    {
-      resolve: (v: V2Response) => void;
-      reject: (e: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-  private connected = false;
-  private timeoutMs: number;
-
-  constructor(opts?: CmuxSocketClientOptions) {
-    this.socketPath =
-      opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
-    this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
-  }
-
-  async connect(): Promise<void> {
-    if (this.connected) return;
-
-    return new Promise((resolve, reject) => {
-      this.socket = net.createConnection({ path: this.socketPath }, () => {
-        this.connected = true;
-        resolve();
-      });
-
-      this.socket.on("data", (chunk: Buffer) => {
-        this.buffer += chunk.toString("utf-8");
-        this.processBuffer();
-      });
-
-      this.socket.on("error", (err: Error) => {
-        this.connected = false;
-        // Reject all pending requests
-        for (const [, entry] of this.pending) {
-          clearTimeout(entry.timer);
-          entry.reject(
-            new CmuxSocketError(
-              `Socket error: ${err.message}`,
-              "connection_error",
-            ),
-          );
-        }
-        this.pending.clear();
-        reject(
-          new CmuxSocketError(
-            `Socket error: ${err.message}`,
-            "connection_error",
-          ),
-        );
-      });
-
-      this.socket.on("close", () => {
-        this.connected = false;
-        this.socket = null;
-      });
-    });
-  }
-
-  private processBuffer(): void {
-    let newlineIdx: number;
-    while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, newlineIdx);
-      this.buffer = this.buffer.slice(newlineIdx + 1);
-
-      if (!line.trim()) continue;
-
-      try {
-        const parsed = JSON.parse(line) as V2Response;
-        const entry = this.pending.get(parsed.id);
-        if (entry) {
-          clearTimeout(entry.timer);
-          this.pending.delete(parsed.id);
-          entry.resolve(parsed);
-        }
-      } catch {
-        // Skip non-JSON lines
-      }
-    }
-  }
-
-  async call<T = Record<string, unknown>>(
-    method: string,
-    params: Record<string, unknown> = {},
-  ): Promise<T> {
-    if (!this.connected || !this.socket) {
-      await this.connect();
-    }
-
-    const id = crypto.randomUUID();
-    const request: V2Request = { id, method, params };
-    const payload = JSON.stringify(request) + "\n";
-
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(
-          new CmuxSocketError(
-            `Timeout after ${this.timeoutMs}ms waiting for ${method}`,
-            "timeout",
-          ),
-        );
-      }, this.timeoutMs);
-
-      this.pending.set(id, {
-        resolve: (response: V2Response) => {
-          if (!response.ok) {
-            const errCode = response.error?.code ?? "unknown";
-            const errMsg = response.error?.message ?? "Unknown error";
-            reject(new CmuxSocketError(`${errCode}: ${errMsg}`, errCode));
-          } else {
-            resolve((response.result ?? {}) as T);
-          }
-        },
-        reject,
-        timer,
-      });
-
-      this.socket!.write(payload);
-    });
-  }
-
-  disconnect(): void {
-    if (this.socket) {
-      this.socket.destroy();
-      this.socket = null;
-      this.connected = false;
-    }
-    for (const [, entry] of this.pending) {
-      clearTimeout(entry.timer);
-    }
-    this.pending.clear();
-  }
-
-  isConnected(): boolean {
-    return this.connected;
   }
 }

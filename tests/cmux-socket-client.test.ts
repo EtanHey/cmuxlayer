@@ -131,7 +131,28 @@ function startMockServer(): Promise<void> {
               conn.write(resp);
             }
           } catch {
-            // ignore parse errors
+            // Not JSON — handle as V1 plain-text command
+            const cmd = line.split(" ")[0];
+            if (
+              cmd &&
+              [
+                "set_status",
+                "clear_status",
+                "set_progress",
+                "clear_progress",
+                "log",
+                "list_status",
+                "rename_tab",
+              ].includes(cmd)
+            ) {
+              if (cmd === "list_status") {
+                conn.write("agent=active icon=bolt\n");
+              } else {
+                conn.write("OK\n");
+              }
+            } else {
+              conn.write("ERROR: unknown command\n");
+            }
           }
         }
       });

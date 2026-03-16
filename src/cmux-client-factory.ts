@@ -32,15 +32,15 @@ function probeSocket(path: string, timeoutMs = 1000): Promise<boolean> {
       sock.destroy();
       resolve(true);
     });
-    sock.on("error", () => {
-      resolve(false);
-    });
     const timer = setTimeout(() => {
       sock.destroy();
       resolve(false);
     }, timeoutMs);
+    sock.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
     sock.on("connect", () => clearTimeout(timer));
-    sock.on("error", () => clearTimeout(timer));
   });
 }
 
@@ -54,7 +54,7 @@ export async function createCmuxClient(
   const socketPath =
     opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
 
-  const socketAvailable = await probeSocket(socketPath);
+  const socketAvailable = await probeSocket(socketPath, opts?.timeoutMs);
 
   if (socketAvailable) {
     return new CmuxSocketClient({
