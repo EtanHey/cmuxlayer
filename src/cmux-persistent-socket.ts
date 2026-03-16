@@ -43,6 +43,8 @@ export class CmuxPersistentSocket {
   >();
   private connected = false;
   private timeoutMs: number;
+  /** Guards against concurrent connect() calls */
+  private connectPromise: Promise<void> | null = null;
 
   constructor(opts?: CmuxSocketClientOptions) {
     this.socketPath =
@@ -52,13 +54,16 @@ export class CmuxPersistentSocket {
 
   async connect(): Promise<void> {
     if (this.connected) return;
+    // Deduplicate concurrent connect() calls
+    if (this.connectPromise) return this.connectPromise;
 
-    return new Promise((resolve, reject) => {
+    this.connectPromise = new Promise<void>((resolve, reject) => {
       let settled = false;
 
       this.socket = net.createConnection({ path: this.socketPath }, () => {
         this.connected = true;
         settled = true;
+        this.connectPromise = null;
         resolve();
       });
 
@@ -69,18 +74,15 @@ export class CmuxPersistentSocket {
 
       this.socket.on("error", (err: Error) => {
         this.connected = false;
-        for (const [, entry] of this.pending) {
-          clearTimeout(entry.timer);
-          entry.reject(
-            new CmuxSocketError(
-              `Socket error: ${err.message}`,
-              "connection_error",
-            ),
-          );
-        }
-        this.pending.clear();
+        this.rejectAllPending(
+          new CmuxSocketError(
+            `Socket error: ${err.message}`,
+            "connection_error",
+          ),
+        );
         if (!settled) {
           settled = true;
+          this.connectPromise = null;
           reject(
             new CmuxSocketError(
               `Socket error: ${err.message}`,
@@ -93,8 +95,25 @@ export class CmuxPersistentSocket {
       this.socket.on("close", () => {
         this.connected = false;
         this.socket = null;
+        // Reject all inflight requests — transport is gone
+        this.rejectAllPending(
+          new CmuxSocketError(
+            "Socket closed unexpectedly",
+            "connection_closed",
+          ),
+        );
       });
     });
+
+    return this.connectPromise;
+  }
+
+  private rejectAllPending(error: CmuxSocketError): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pending.clear();
   }
 
   private processBuffer(): void {
@@ -166,11 +185,10 @@ export class CmuxPersistentSocket {
       this.socket = null;
       this.connected = false;
     }
-    for (const [, entry] of this.pending) {
-      clearTimeout(entry.timer);
-      entry.reject(new CmuxSocketError("Socket disconnected", "disconnected"));
-    }
-    this.pending.clear();
+    this.connectPromise = null;
+    this.rejectAllPending(
+      new CmuxSocketError("Socket disconnected", "connection_closed"),
+    );
   }
 
   isConnected(): boolean {

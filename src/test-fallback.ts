@@ -2,48 +2,67 @@
 /**
  * Manual test: verify factory fallback and real socket operation.
  * Run: npx tsx src/test-fallback.ts
+ * Exits non-zero if any test fails.
  */
 
 import { createCmuxClient } from "./cmux-client-factory.js";
 import { CmuxSocketClient } from "./cmux-socket-client.js";
+
+function assert(label: string, condition: boolean): void {
+  if (condition) {
+    console.log(`  PASS: ${label}`);
+  } else {
+    console.error(`  FAIL: ${label}`);
+    process.exitCode = 1;
+  }
+}
 
 async function test() {
   console.log("=== Manual Test: Graceful Fallback ===\n");
 
   // Test 1: Socket available → CmuxSocketClient
   const socketClient = await createCmuxClient();
-  const isSocket = socketClient instanceof CmuxSocketClient;
-  console.log(
-    `1. Socket available → CmuxSocketClient: ${isSocket ? "PASS" : "FAIL"}`,
+  assert(
+    "Socket available → CmuxSocketClient",
+    socketClient instanceof CmuxSocketClient,
   );
 
   // Test 2: Socket unavailable → CmuxClient fallback
   const fallbackClient = await createCmuxClient({
     socketPath: "/tmp/nonexistent.sock",
   });
-  const isFallback = !(fallbackClient instanceof CmuxSocketClient);
-  console.log(
-    `2. Fallback to CLI when socket missing: ${isFallback ? "PASS" : "FAIL"}`,
+  assert(
+    "Fallback to CLI when socket missing",
+    !(fallbackClient instanceof CmuxSocketClient),
   );
 
-  // Test 3: Socket client works for real operation
+  // Test 3-5: Socket client works for real operations
   if (socketClient instanceof CmuxSocketClient) {
     const ws = await socketClient.listWorkspaces();
-    console.log(
-      `3. Socket listWorkspaces (${ws.workspaces.length} workspaces): PASS`,
+    assert(
+      `Socket listWorkspaces (${ws.workspaces.length} workspaces)`,
+      ws.workspaces.length > 0,
     );
 
-    // Test 4: Sidebar operations work
     await socketClient.setStatus("test-key", "test-value", {
       workspace: ws.workspaces[0]?.ref,
     });
-    console.log(`4. setStatus via socket: PASS`);
+    assert("setStatus via socket", true);
+
     await socketClient.clearStatus("test-key", {
       workspace: ws.workspaces[0]?.ref,
     });
-    console.log(`5. clearStatus via socket: PASS`);
+    assert("clearStatus via socket", true);
   }
 
-  console.log("\n=== All manual tests passed ===");
+  if (process.exitCode) {
+    console.log("\n=== SOME TESTS FAILED ===");
+  } else {
+    console.log("\n=== All manual tests passed ===");
+  }
 }
-test().catch((e) => console.error("FAIL:", e.message));
+
+test().catch((e) => {
+  console.error("FATAL:", e.message);
+  process.exitCode = 1;
+});

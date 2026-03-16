@@ -83,22 +83,25 @@ export class CmuxSocketClient {
       const request: V2Request = { id, method, params };
       const payload = JSON.stringify(request) + "\n";
 
+      let authId: string | null = null;
+
       const socket = net.createConnection({ path: this.socketPath }, () => {
-        // If password auth is needed, send it first
         if (this.password) {
+          // Send auth first — payload is deferred until auth succeeds
+          authId = crypto.randomUUID();
           const authReq: V2Request = {
-            id: crypto.randomUUID(),
+            id: authId,
             method: "auth.login",
             params: { password: this.password },
           };
           socket.write(JSON.stringify(authReq) + "\n");
+        } else {
+          socket.write(payload);
         }
-
-        socket.write(payload);
       });
 
       let buffer = "";
-      let authDone = !this.password; // skip auth parsing if no password
+      let authDone = !this.password;
       const timeout = setTimeout(() => {
         socket.destroy();
         reject(
@@ -124,7 +127,7 @@ export class CmuxSocketClient {
             const parsed = JSON.parse(line) as V2Response;
 
             // If we sent an auth request, consume its response first
-            if (!authDone) {
+            if (!authDone && authId && parsed.id === authId) {
               authDone = true;
               if (!parsed.ok) {
                 clearTimeout(timeout);
@@ -135,7 +138,10 @@ export class CmuxSocketClient {
                     "auth_failed",
                   ),
                 );
+                return;
               }
+              // Auth succeeded — now send the actual request
+              socket.write(payload);
               continue;
             }
 

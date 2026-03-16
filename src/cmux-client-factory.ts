@@ -20,6 +20,8 @@ export interface CreateCmuxClientOptions {
   bin?: string;
   /** Socket timeout in ms */
   timeoutMs?: number;
+  /** Password for socket access mode "password" */
+  password?: string;
 }
 
 /**
@@ -57,10 +59,19 @@ export async function createCmuxClient(
   const socketAvailable = await probeSocket(socketPath, opts?.timeoutMs);
 
   if (socketAvailable) {
-    return new CmuxSocketClient({
+    const client = new CmuxSocketClient({
       socketPath,
       timeoutMs: opts?.timeoutMs,
+      password: opts?.password,
     });
+    // Verify socket actually works (catches auth failures)
+    try {
+      await client.ping();
+      return client;
+    } catch {
+      // Socket reachable but not usable (auth required, protocol mismatch, etc.)
+      // Fall through to CLI
+    }
   }
 
   return new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
