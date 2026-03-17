@@ -199,7 +199,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 3. send_input
   server.tool(
     "send_input",
-    "Send text input to a terminal surface",
+    "Send text input to a terminal surface. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
@@ -208,7 +208,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .boolean()
         .optional()
         .default(false)
-        .describe("Press enter after sending text"),
+        .describe(
+          "Press enter after sending text. For reliability with interactive programs, send text first, then use a separate send_key 'return' call.",
+        ),
       rename_to_task: z
         .string()
         .optional()
@@ -220,6 +222,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: args.workspace,
         });
         if (args.press_enter) {
+          // Small delay to let the terminal process the text input before
+          // sending the return key. Without this, the enter keypress can
+          // arrive before the text is fully inserted into the terminal's
+          // input buffer, causing the enter to be swallowed.
+          await new Promise((resolve) => setTimeout(resolve, 50));
           await client.sendKey(args.surface, "return", {
             workspace: args.workspace,
           });
@@ -245,7 +252,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 4. send_key
   server.tool(
     "send_key",
-    "Send a key press to a terminal surface",
+    "Send a key press to a terminal surface. Use this after send_input to reliably submit commands — especially when targeting interactive programs like Claude sessions.",
     {
       surface: z.string().describe("Target surface ref"),
       key: z.string().describe("Key name (e.g. 'return', 'escape', 'tab')"),
