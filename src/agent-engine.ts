@@ -5,7 +5,7 @@
 
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
-import type { CmuxClient } from "./cmux-client.js";
+import type { CmuxNewSplitResult, CmuxReadScreenResult } from "./types.js";
 import {
   generateAgentId,
   parseContextPercent,
@@ -36,6 +36,58 @@ export interface SpawnAgentResult {
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
+
+interface AgentEngineClient {
+  log(
+    message: string,
+    opts?: {
+      level?: "info" | "progress" | "success" | "warning" | "error";
+      source?: string;
+      workspace?: string;
+      surface?: string;
+    },
+  ): Promise<void>;
+  setStatus(
+    key: string,
+    value: string,
+    opts?: {
+      icon?: string;
+      color?: string;
+      workspace?: string;
+      surface?: string;
+    },
+  ): Promise<void>;
+  readScreen(
+    surface: string,
+    opts?: { workspace?: string; lines?: number; scrollback?: boolean },
+  ): Promise<CmuxReadScreenResult>;
+  send(
+    surface: string,
+    text: string,
+    opts?: { workspace?: string },
+  ): Promise<void>;
+  sendKey(
+    surface: string,
+    key: string,
+    opts?: { workspace?: string },
+  ): Promise<void>;
+  setProgress(
+    value: number,
+    opts?: { label?: string; workspace?: string; surface?: string },
+  ): Promise<void>;
+  newSplit(
+    direction: string,
+    opts?: {
+      workspace?: string;
+      surface?: string;
+      pane?: string;
+      type?: string;
+      url?: string;
+      title?: string;
+      focus?: boolean;
+    },
+  ): Promise<CmuxNewSplitResult>;
+}
 
 /** State → sidebar icon/color mapping */
 const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> = {
@@ -79,7 +131,7 @@ function buildLaunchCommand(cli: CliType, repo: string): string {
 export class AgentEngine {
   private stateMgr: StateManager;
   private registry: AgentRegistry;
-  private client: CmuxClient;
+  private client: AgentEngineClient;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** agentId → last-pushed status string */
   private sidebarSnapshot = new Map<string, string>();
@@ -89,7 +141,7 @@ export class AgentEngine {
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
-    client: CmuxClient,
+    client: AgentEngineClient,
   ) {
     this.stateMgr = stateMgr;
     this.registry = registry;
