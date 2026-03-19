@@ -55,6 +55,22 @@ export interface CmuxReadScreenResult {
   scrollback_used: boolean;
 }
 
+export type ParsedScreenAgentType = "claude" | "codex" | "gemini" | "unknown";
+export type ParsedScreenStatus = "frozen" | "working" | "idle" | "done";
+
+export interface ParsedScreenResult {
+  agent_type: ParsedScreenAgentType;
+  status: ParsedScreenStatus;
+  token_count: number | null;
+  done_signal: string | null;
+  response: string | null;
+  errors: string[];
+  model: string | null;
+  cost: number | null;
+  context_pct?: number | null;
+  actions?: string[];
+}
+
 export interface CmuxStatusEntry {
   key: string;
   value: string;

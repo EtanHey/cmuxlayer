@@ -13,6 +13,7 @@ import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { AgentEngine } from "./agent-engine.js";
+import { parseScreen } from "./screen-parser.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -303,6 +304,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           lines: result.lines,
           content: result.text,
           scrollback_used: result.scrollback_used,
+          parsed: parseScreen(result.text),
         });
       } catch (e) {
         return err(e);

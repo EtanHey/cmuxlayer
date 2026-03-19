@@ -2,16 +2,22 @@
 
 > Terminal multiplexer MCP — multi-agent workspace orchestration for [cmux](https://github.com/manaflow-ai/cmux).
 
+<p align="center">
+  <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxlayer Split Pane Grid logo" width="96" height="96" />
+</p>
+
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-221%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-228%20passing-brightgreen.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**221 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
+**230 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
+
+`read_screen` returns raw terminal text alongside structured parsed agent metadata for common CLI agents including Claude, Codex, and Gemini. That makes status checks, done-signal detection, token counting, and model extraction available directly through MCP without forcing each client to re-parse terminal output.
 
 ## Quick Start
 
@@ -44,7 +50,7 @@ Requires [cmux](https://github.com/manaflow-ai/cmux) to be installed and running
 | `new_split` | Create a new split pane (terminal or browser) |
 | `send_input` | Send text to a terminal surface (with optional enter/rename) |
 | `send_key` | Send a key press to a surface |
-| `read_screen` | Read screen content from a surface |
+| `read_screen` | Read raw screen text plus parsed agent state from a surface |
 | `rename_tab` | Rename a surface tab (with optional prefix preservation) |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set sidebar progress indicator (0.0-1.0) |
@@ -109,7 +115,7 @@ cmuxlayer development has contributed back to cmux:
 ## Testing
 
 ```bash
-bun test            # 221 tests via vitest
+bun run test        # 230 tests via vitest
 bun run typecheck   # Type checking
 ```
 

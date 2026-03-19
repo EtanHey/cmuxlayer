@@ -274,7 +274,14 @@ describe("tool handler integration", () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         surface_ref: "surface:1",
-        text: "hello",
+        text: [
+          "---RESPONSE_START---",
+          "hello",
+          "---RESPONSE_END---",
+          "ENRICHMENT_PROMPT_DONE",
+          "Token usage: total=2,345",
+          "🤖 Sonnet 4.6 | 💰 $1.25",
+        ].join("\n"),
         lines: 20,
       }),
       stderr: "",
@@ -291,7 +298,16 @@ describe("tool handler integration", () => {
       expect.arrayContaining(["read-screen"]),
     );
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.content).toBe("hello");
+    expect(parsed.content).toContain("hello");
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "claude",
+      status: "done",
+      token_count: 2345,
+      done_signal: "ENRICHMENT_PROMPT_DONE",
+      response: "hello",
+      model: "Sonnet 4.6",
+      cost: 1.25,
+    });
   });
 
   it("send_input handler calls cmux send", async () => {
