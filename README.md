@@ -13,7 +13,7 @@
 
 ---
 
-**228 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
+**230 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 
@@ -115,7 +115,7 @@ cmuxlayer development has contributed back to cmux:
 ## Testing
 
 ```bash
-bun test            # 221 tests via vitest
+bun run test        # 230 tests via vitest
 bun run typecheck   # Type checking
 ```
 

@@ -19,6 +19,10 @@ const CODEX_ACTION_RE =
   /^\s*[•·]\s+(.+)$/gm;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
+const CLAUDE_DONE_LINE_RE =
+  /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
+const CLAUDE_WORKING_LINE_RE =
+  /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
@@ -38,7 +42,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   if (claudeMarkers.some((marker) => text.includes(marker))) {
     return "claude";
   }
-  if (HEADER_MODEL_RE.test(text)) {
+  if (HEADER_MODEL_RE.test(text) || MODEL_COST_RE.test(text) || CLAUDE_DONE_LINE_RE.test(text) || CLAUDE_WORKING_LINE_RE.test(text)) {
     return "claude";
   }
 
@@ -181,16 +185,19 @@ function inferStatus(
     return "done";
   }
 
+  if (agentType === "claude" && CLAUDE_DONE_LINE_RE.test(text)) {
+    return "done";
+  }
+
+  if (agentType === "claude" && CLAUDE_WORKING_LINE_RE.test(text)) {
+    return "working";
+  }
+
   const workingMarkers = [
-    "✻",
-    "⏺",
     "thinking",
-    "working",
-    "receiving ",
     " /loop",
     "bypass permissions on",
     "esc to interrupt",
-    "running",
   ];
   if (workingMarkers.some((marker) => joined.toLowerCase().includes(marker.toLowerCase()))) {
     return "working";

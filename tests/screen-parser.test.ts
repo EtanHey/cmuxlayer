@@ -23,6 +23,30 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.cost).toBe(7.73);
   });
 
+  it("treats completed Claude banners as done instead of working", () => {
+    const parsed = parseScreen(`
+\u001b[32m⏺ Completed successfully\u001b[0m
+  Added parser integration to read_screen
+🤖 Sonnet 4.6 | 💰 $1.25 | ⏱️  2m 11s
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("done");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.response).toBeNull();
+  });
+
+  it("treats active Claude status banners as working", () => {
+    const parsed = parseScreen(`
+✻ Working…
+  Reading src/server.ts
+🤖 Sonnet 4.6 | 💰 $0.50 | ⏱️  41s
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+  });
+
   it("parses Codex-style output with model, context left, and actions", () => {
     const parsed = parseScreen(`
 gpt-5.4 high · 87% left · ~/Gits/orchestrator
