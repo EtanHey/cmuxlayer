@@ -7,13 +7,13 @@
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-228%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-233%20passing-brightgreen.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**230 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
+**233 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 
@@ -41,6 +41,12 @@ Add to your editor's MCP config:
 ```
 
 Requires [cmux](https://github.com/manaflow-ai/cmux) to be installed and running.
+
+## Claude Channels Preview
+
+Set `CMUXLAYER_ENABLE_CLAUDE_CHANNELS=1` in the server environment and launch Claude Code with `--channels <server-name>` plus `--dangerously-load-development-channels <server-name>` during preview. With that enabled, cmuxlayer advertises `experimental["claude/channel"]` and emits one-way `notifications/claude/channel` updates when tracked agents are spawned, finish, or error.
+
+See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the notification format, OpenClaw pairing patterns worth stealing, and the remaining gaps for a real cmux mobile client.
 
 ## MCP Tools (10)
 

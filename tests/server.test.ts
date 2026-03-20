@@ -1,6 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { StateManager } from "../src/state-manager.js";
 
 // The 10 tools from the design doc
 const EXPECTED_TOOLS = [
@@ -16,11 +21,34 @@ const EXPECTED_TOOLS = [
   "browser_surface",
 ] as const;
 
+const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
+
 describe("createServer", () => {
   it("returns an McpServer with a connect method", async () => {
     const server = createServer({ skipAgentLifecycle: true });
     expect(server).toBeDefined();
     expect(typeof server.connect).toBe("function");
+  });
+
+  it("registers Claude channel capability when enabled", () => {
+    const server = createServer({
+      skipAgentLifecycle: true,
+      enableClaudeChannels: true,
+    });
+    const rawServer = (server as any).server;
+
+    expect(rawServer._capabilities.experimental).toEqual({
+      "claude/channel": {},
+    });
+    expect(rawServer._instructions).toContain("notifications/claude/channel");
+  });
+
+  it("does not register Claude channel capability by default", () => {
+    const server = createServer({ skipAgentLifecycle: true });
+    const rawServer = (server as any).server;
+
+    expect(rawServer._capabilities.experimental).toBeUndefined();
+    expect(rawServer._instructions).toBeUndefined();
   });
 });
 
@@ -36,6 +64,126 @@ describe("tool registration", () => {
       expect(toolNames).toContain(expected);
     }
     expect(toolNames).toHaveLength(EXPECTED_TOOLS.length);
+  });
+});
+
+describe("Claude channels", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllTimers();
+    rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("emits lifecycle notifications over the MCP transport when enabled", async () => {
+    vi.useFakeTimers();
+    rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+
+    const stateMgr = new StateManager(CHANNEL_TEST_DIR);
+    stateMgr.writeState({
+      agent_id: "a1",
+      surface_id: "surface:42",
+      state: "done",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "Ship channel prototype",
+      pid: null,
+      version: 1,
+      created_at: "2026-03-21T00:00:00Z",
+      updated_at: "2026-03-21T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:42",
+            title: "agent",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+      log: vi.fn().mockResolvedValue(undefined),
+      setStatus: vi.fn().mockResolvedValue(undefined),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:42",
+        text: "$ ",
+        lines: 5,
+        scrollback_used: false,
+      }),
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      setProgress: vi.fn().mockResolvedValue(undefined),
+      newSplit: vi.fn(),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir: CHANNEL_TEST_DIR,
+      enableClaudeChannels: true,
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const messages: any[] = [];
+    clientTransport.onmessage = (message) => {
+      messages.push(message);
+    };
+
+    await server.connect(serverTransport);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const notifications = messages.filter(
+      (message) =>
+        "method" in message &&
+        message.method === "notifications/claude/channel",
+    );
+    expect(notifications).toHaveLength(2);
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          params: expect.objectContaining({
+            meta: expect.objectContaining({
+              event: "spawned",
+              agent_id: "a1",
+              repo: "brainlayer",
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          params: expect.objectContaining({
+            meta: expect.objectContaining({
+              event: "done",
+              agent_id: "a1",
+              repo: "brainlayer",
+            }),
+          }),
+        }),
+      ]),
+    );
+
+    await server.close();
+    await clientTransport.close();
   });
 });
 

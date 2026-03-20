@@ -44,6 +44,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     identify: vi.fn().mockResolvedValue({}),
     browser: vi.fn().mockResolvedValue({}),
     log: vi.fn().mockResolvedValue(undefined),
+    notifyLifecycleEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as CmuxClient;
 }
@@ -205,6 +206,14 @@ describe("Sidebar Sync", () => {
       "spawned: brainlayer",
       expect.objectContaining({ level: "info", source: "cmux-mcp" }),
     );
+    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
+      "spawned",
+      expect.objectContaining({
+        agent_id: "a1",
+        repo: "brainlayer",
+        state: "working",
+      }),
+    );
   });
 
   it("logs done event when agent reaches done state", async () => {
@@ -231,6 +240,14 @@ describe("Sidebar Sync", () => {
       "done: brainlayer",
       expect.objectContaining({ level: "success", source: "cmux-mcp" }),
     );
+    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
+      "done",
+      expect.objectContaining({
+        agent_id: "a1",
+        repo: "brainlayer",
+        state: "done",
+      }),
+    );
   });
 
   it("logs error event when agent enters error state", async () => {
@@ -250,6 +267,14 @@ describe("Sidebar Sync", () => {
     expect(mockClient.log).toHaveBeenCalledWith(
       "errored: brainlayer",
       expect.objectContaining({ level: "error", source: "cmux-mcp" }),
+    );
+    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
+      "errored",
+      expect.objectContaining({
+        agent_id: "a1",
+        repo: "brainlayer",
+        state: "error",
+      }),
     );
   });
 
@@ -275,5 +300,13 @@ describe("Sidebar Sync", () => {
       (c) => typeof c[0] === "string" && c[0].startsWith("done:"),
     );
     expect(doneCalls).toHaveLength(1);
+
+    const channelCalls = (
+      (mockClient as any).notifyLifecycleEvent as ReturnType<typeof vi.fn>
+    ).mock.calls;
+    const spawnedChannelCalls = channelCalls.filter((c) => c[0] === "spawned");
+    expect(spawnedChannelCalls).toHaveLength(1);
+    const doneChannelCalls = channelCalls.filter((c) => c[0] === "done");
+    expect(doneChannelCalls).toHaveLength(1);
   });
 });
