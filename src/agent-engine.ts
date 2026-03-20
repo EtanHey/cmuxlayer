@@ -33,6 +33,8 @@ export interface SpawnAgentResult {
   state: AgentState;
 }
 
+export type AgentLifecycleEvent = "spawned" | "done" | "errored";
+
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
@@ -87,6 +89,10 @@ interface AgentEngineClient {
       focus?: boolean;
     },
   ): Promise<CmuxNewSplitResult>;
+  notifyLifecycleEvent(
+    event: AgentLifecycleEvent,
+    agent: AgentRecord,
+  ): Promise<void>;
 }
 
 /** State → sidebar icon/color mapping */
@@ -99,6 +105,12 @@ const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> = {
   done: { icon: "checkmark.square.fill", color: "#6B7280" },
   error: { icon: "xmark.circle.fill", color: "#EF4444" },
 };
+
+const LIFECYCLE_LOGS = {
+  spawned: { message: "spawned", level: "info" },
+  done: { message: "done", level: "success" },
+  errored: { message: "errored", level: "error" },
+} as const;
 
 /**
  * Build the shell command that launches a CLI agent.
@@ -152,6 +164,31 @@ export class AgentEngine {
     return this.registry;
   }
 
+  private async emitLifecycleEvent(
+    agent: AgentRecord,
+    event: AgentLifecycleEvent,
+  ): Promise<void> {
+    const eventKey = `${agent.agent_id}:${event}`;
+    if (this.loggedEvents.has(eventKey)) {
+      return;
+    }
+
+    const spec = LIFECYCLE_LOGS[event];
+    await this.client.log(`${spec.message}: ${agent.repo}`, {
+      level: spec.level,
+      source: "cmux-mcp",
+    });
+
+    try {
+      // Channel delivery is best-effort and must not break the sweep loop.
+      await this.client.notifyLifecycleEvent(event, agent);
+    } catch {
+      // Ignore Claude channel push failures; logs and sidebar state remain canonical.
+    }
+
+    this.loggedEvents.add(eventKey);
+  }
+
   /**
    * Sync sidebar: diff agents against snapshot, push only changes.
    * Logs lifecycle events (spawned, done, error) once each.
@@ -168,31 +205,17 @@ export class AgentEngine {
 
       // Lifecycle log: spawned (first encounter)
       if (!this.sidebarSnapshot.has(agentId)) {
-        if (!this.loggedEvents.has(`${agentId}:spawned`)) {
-          await this.client.log(`spawned: ${repo}`, {
-            level: "info",
-            source: "cmux-mcp",
-          });
-          this.loggedEvents.add(`${agentId}:spawned`);
-        }
+        await this.emitLifecycleEvent(agent, "spawned");
       }
 
       // Lifecycle log: done
-      if (state === "done" && !this.loggedEvents.has(`${agentId}:done`)) {
-        await this.client.log(`done: ${repo}`, {
-          level: "success",
-          source: "cmux-mcp",
-        });
-        this.loggedEvents.add(`${agentId}:done`);
+      if (state === "done") {
+        await this.emitLifecycleEvent(agent, "done");
       }
 
       // Lifecycle log: error
-      if (state === "error" && !this.loggedEvents.has(`${agentId}:error`)) {
-        await this.client.log(`errored: ${repo}`, {
-          level: "error",
-          source: "cmux-mcp",
-        });
-        this.loggedEvents.add(`${agentId}:error`);
+      if (state === "error") {
+        await this.emitLifecycleEvent(agent, "errored");
       }
 
       // Status diff — only push if changed

@@ -12,7 +12,11 @@ import { parseReservedModeKey } from "./mode-policy.js";
 import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
-import { AgentEngine } from "./agent-engine.js";
+import {
+  AgentEngine,
+  type AgentLifecycleEvent,
+} from "./agent-engine.js";
+import type { AgentRecord } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
 
 type TextContent = { type: "text"; text: string };
@@ -21,6 +25,11 @@ type ToolReturn = {
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
+
+const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
+const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
+const CLAUDE_CHANNEL_INSTRUCTIONS =
+  "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmux agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 
 function ok(data: Record<string, unknown>): ToolReturn {
   const payload = { ok: true, ...data };
@@ -58,16 +67,76 @@ export interface CreateServerOptions {
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
+  /** Opt into Claude Code channel notifications for lifecycle events */
+  enableClaudeChannels?: boolean;
+}
+
+function formatLifecycleChannelContent(
+  event: AgentLifecycleEvent,
+  agent: AgentRecord,
+): string {
+  switch (event) {
+    case "spawned":
+      return `cmux agent spawned: ${agent.repo} (${agent.agent_id}) is ${agent.state}`;
+    case "done":
+      return `cmux agent done: ${agent.repo} (${agent.agent_id}) finished`;
+    case "errored":
+      return agent.error
+        ? `cmux agent errored: ${agent.repo} (${agent.agent_id}) - ${agent.error}`
+        : `cmux agent errored: ${agent.repo} (${agent.agent_id})`;
+  }
+}
+
+function buildLifecycleChannelMeta(
+  event: AgentLifecycleEvent,
+  agent: AgentRecord,
+): Record<string, string> {
+  const meta: Record<string, string> = {
+    source: "cmux-agent-status",
+    event,
+    agent_id: agent.agent_id,
+    repo: agent.repo,
+    state: agent.state,
+    surface_id: agent.surface_id,
+    model: agent.model,
+    cli: agent.cli,
+    spawn_depth: String(agent.spawn_depth),
+  };
+
+  if (agent.parent_agent_id) {
+    meta.parent_agent_id = agent.parent_agent_id;
+  }
+  if (agent.cli_session_id) {
+    meta.cli_session_id = agent.cli_session_id;
+  }
+
+  return meta;
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
   const client =
     opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const enableClaudeChannels =
+    opts?.enableClaudeChannels ??
+    process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1";
 
-  const server = new McpServer({
-    name: "@golems/cmux-mcp",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    {
+      name: "@golems/cmux-mcp",
+      version: "0.1.0",
+    },
+    enableClaudeChannels
+      ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
+      : undefined,
+  );
+
+  if (enableClaudeChannels) {
+    server.server.registerCapabilities({
+      experimental: {
+        [CLAUDE_CHANNEL_CAPABILITY]: {},
+      },
+    });
+  }
 
   // 1. list_surfaces
   server.tool(
@@ -576,7 +645,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     };
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
-    const engine = new AgentEngine(stateMgr, registry, client);
+    const notifyLifecycleEvent = async (
+      event: AgentLifecycleEvent,
+      agent: AgentRecord,
+    ): Promise<void> => {
+      if (!enableClaudeChannels || !server.server.transport) {
+        return;
+      }
+
+      // Claude turns meta keys into <channel ...> attributes, so keep keys simple.
+      await server.server.notification({
+        method: CLAUDE_CHANNEL_NOTIFICATION,
+        params: {
+          content: formatLifecycleChannelContent(event, agent),
+          meta: buildLifecycleChannelMeta(event, agent),
+        },
+      });
+    };
+    const engine = new AgentEngine(stateMgr, registry, {
+      log: (message, eventOpts) => client.log(message, eventOpts),
+      setStatus: (key, value, statusOpts) =>
+        client.setStatus(key, value, statusOpts),
+      readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
+      send: (surface, text, sendOpts) => client.send(surface, text, sendOpts),
+      sendKey: (surface, key, keyOpts) =>
+        client.sendKey(surface, key, keyOpts),
+      setProgress: (value, progressOpts) =>
+        client.setProgress(value, progressOpts),
+      newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),
+      notifyLifecycleEvent,
+    });
 
     // Reconstitute registry from disk on startup (async, best-effort)
     registry.reconstitute().catch(() => {});
