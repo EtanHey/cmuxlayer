@@ -16,12 +16,14 @@ import { createCmuxClient } from "../src/cmux-client-factory.js";
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
 
 const MOCK_SOCKET_PATH = "/tmp/cmux-test-mock.sock";
+const MOCK_WORKSPACE_ID = "8481D6A0-CE17-4B7C-8695-7A722D30FEE2";
 
 const MOCK_RESPONSES: Record<string, unknown> = {
   "system.ping": { pong: true },
   "workspace.list": {
     workspaces: [
       {
+        id: MOCK_WORKSPACE_ID,
         ref: "workspace:1",
         title: "Test WS",
         index: 0,
@@ -290,7 +292,7 @@ describe("CmuxSocketClient", () => {
     });
 
     expect(lastV1Command).toBe(
-      'set_status agent "brainlayerCodex: building" --workspace workspace:1',
+      `set_status agent "brainlayerCodex: building" --tab=${MOCK_WORKSPACE_ID}`,
     );
   });
 
@@ -303,7 +305,7 @@ describe("CmuxSocketClient", () => {
     });
 
     expect(lastV1Command).toBe(
-      'set_progress 0.95 --label "enrichment 95%" --workspace workspace:1',
+      `set_progress 0.95 --label "enrichment 95%" --tab=${MOCK_WORKSPACE_ID}`,
     );
   });
 
@@ -315,7 +317,31 @@ describe("CmuxSocketClient", () => {
     });
 
     expect(lastV1Command).toBe(
-      'log "agent finished cleanly" --workspace workspace:1',
+      `log --tab=${MOCK_WORKSPACE_ID} -- "agent finished cleanly"`,
+    );
+  });
+
+  it("preserves flag-shaped log messages as message payloads", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.log("--workspace", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `log --tab=${MOCK_WORKSPACE_ID} -- --workspace`,
+    );
+  });
+
+  it("resolves surface-derived workspaces to tab ids for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "active", {
+      surface: "surface:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_status agent active --tab=${MOCK_WORKSPACE_ID}`,
     );
   });
 });

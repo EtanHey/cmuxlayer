@@ -9,6 +9,7 @@ export interface SurfaceMode {
 }
 
 export interface CmuxWorkspace {
+  id?: string;
   ref: string;
   title: string;
   index: number;

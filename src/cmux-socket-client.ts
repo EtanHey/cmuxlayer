@@ -437,18 +437,16 @@ export class CmuxSocketClient {
     const args = ["set_status", key, value];
     if (opts?.icon) args.push("--icon", opts.icon);
     if (opts?.color) args.push("--color", opts.color);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(`--tab=${tabId}`);
     await this.sendV1Args(args);
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {
     const args = ["clear_status", key];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.workspace) {
+      args.push(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`);
+    }
     await this.sendV1Args(args);
   }
 
@@ -462,18 +460,16 @@ export class CmuxSocketClient {
   ): Promise<void> {
     const args = ["set_progress", String(value)];
     if (opts?.label) args.push("--label", opts.label);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(`--tab=${tabId}`);
     await this.sendV1Args(args);
   }
 
   async clearProgress(opts?: { workspace?: string }): Promise<void> {
     const args = ["clear_progress"];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.workspace) {
+      args.push(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`);
+    }
     await this.sendV1Args(args);
   }
 
@@ -486,15 +482,12 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const args = ["log", message];
+    const args = ["log"];
     if (opts?.level) args.push("--level", opts.level);
     if (opts?.source) args.push("--source", opts.source);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(`--tab=${tabId}`);
+    args.push("--", message);
     await this.sendV1Args(args);
   }
 
@@ -512,7 +505,9 @@ export class CmuxSocketClient {
 
   async listStatus(opts?: { workspace?: string }): Promise<CmuxStatusEntry[]> {
     const args = ["list_status"];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.workspace) {
+      args.push(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`);
+    }
     const raw = await this.sendV1Args(args);
     if (!raw || raw === "OK") return [];
     try {
@@ -594,6 +589,40 @@ export class CmuxSocketClient {
     throw new CmuxSocketError(
       `Unable to resolve workspace for surface ${surface}`,
       "not_found",
+    );
+  }
+
+  private async resolveSidebarTabId(opts?: {
+    workspace?: string;
+    surface?: string;
+  }): Promise<string | undefined> {
+    const workspace =
+      opts?.workspace ??
+      (opts?.surface
+        ? (await this.identify(opts.surface)).caller?.workspace_ref
+        : undefined);
+    if (!workspace) return undefined;
+    return this.resolveWorkspaceTabId(workspace);
+  }
+
+  private async resolveWorkspaceTabId(workspace: string): Promise<string> {
+    const { workspaces } = await this.listWorkspaces();
+    const match = workspaces.find(
+      (candidate) => candidate.ref === workspace || candidate.id === workspace,
+    );
+
+    if (match?.id) return match.id;
+    if (this.looksLikeUuid(workspace)) return workspace;
+
+    throw new CmuxSocketError(
+      `Unable to resolve tab id for workspace ${workspace}`,
+      "not_found",
+    );
+  }
+
+  private looksLikeUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
     );
   }
 
