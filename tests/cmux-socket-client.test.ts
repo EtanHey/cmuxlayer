@@ -16,12 +16,14 @@ import { createCmuxClient } from "../src/cmux-client-factory.js";
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
 
 const MOCK_SOCKET_PATH = "/tmp/cmux-test-mock.sock";
+const MOCK_WORKSPACE_ID = "8481D6A0-CE17-4B7C-8695-7A722D30FEE2";
 
 const MOCK_RESPONSES: Record<string, unknown> = {
   "system.ping": { pong: true },
   "workspace.list": {
     workspaces: [
       {
+        id: MOCK_WORKSPACE_ID,
         ref: "workspace:1",
         title: "Test WS",
         index: 0,
@@ -89,6 +91,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
 };
 
 let mockServer: net.Server;
+let lastV1Command = "";
 
 function startMockServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -132,6 +135,7 @@ function startMockServer(): Promise<void> {
             }
           } catch {
             // Not JSON — handle as V1 plain-text command
+            lastV1Command = line;
             const cmd = line.split(" ")[0];
             if (
               cmd &&
@@ -183,6 +187,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await stopMockServer();
+});
+
+beforeEach(() => {
+  lastV1Command = "";
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -274,6 +282,79 @@ describe("CmuxSocketClient", () => {
     const result = await client.listStatus({ workspace: "workspace:1" });
     expect(result).toBeInstanceOf(Array);
     expect(result[0].key).toBe("agent");
+  });
+
+  it("quotes status values with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "brainlayerCodex: building", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_status agent "brainlayerCodex: building" --tab=${MOCK_WORKSPACE_ID}`,
+    );
+  });
+
+  it("quotes progress labels with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setProgress(0.95, {
+      label: "enrichment 95%",
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_progress 0.95 --label "enrichment 95%" --tab=${MOCK_WORKSPACE_ID}`,
+    );
+  });
+
+  it("quotes log values with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.log("agent finished cleanly", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `log --tab=${MOCK_WORKSPACE_ID} -- "agent finished cleanly"`,
+    );
+  });
+
+  it("preserves flag-shaped log messages as message payloads", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.log("--workspace", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `log --tab=${MOCK_WORKSPACE_ID} -- "--workspace"`,
+    );
+  });
+
+  it("quotes flag-shaped status values in the outgoing V1 command", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "--workspace", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_status agent "--workspace" --tab=${MOCK_WORKSPACE_ID}`,
+    );
+  });
+
+  it("resolves surface-derived workspaces to tab ids for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "active", {
+      surface: "surface:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_status agent active --tab=${MOCK_WORKSPACE_ID}`,
+    );
   });
 });
 

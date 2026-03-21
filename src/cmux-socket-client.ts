@@ -23,6 +23,13 @@ import type {
 
 const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
 const REQUEST_TIMEOUT_MS = 10_000;
+const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
+
+interface V1RawArg {
+  raw: string;
+}
+
+type V1Arg = string | V1RawArg;
 
 export interface CmuxSocketClientOptions {
   socketPath?: string;
@@ -238,6 +245,27 @@ export class CmuxSocketClient {
     });
   }
 
+  private quoteV1Arg(arg: string): string {
+    if (!arg) return '""';
+    if (V1_SAFE_VALUE_RE.test(arg)) return arg;
+    return JSON.stringify(arg);
+  }
+
+  private rawV1Arg(arg: string): V1RawArg {
+    return { raw: arg };
+  }
+
+  private sendV1Args(command: string, args: V1Arg[] = []): Promise<string> {
+    return this.sendV1(
+      [
+        command,
+        ...args.map((arg) =>
+          typeof arg === "string" ? this.quoteV1Arg(arg) : arg.raw,
+        ),
+      ].join(" "),
+    );
+  }
+
   /**
    * Execute a V2 method and return the result. Throws on error.
    */
@@ -404,10 +432,12 @@ export class CmuxSocketClient {
     title: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const args = ["rename_tab", "--surface", surface];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    const args: V1Arg[] = [this.rawV1Arg("--surface"), surface];
+    if (opts?.workspace) {
+      args.push(this.rawV1Arg("--workspace"), opts.workspace);
+    }
     args.push(title);
-    await this.sendV1(args.join(" "));
+    await this.sendV1Args("rename_tab", args);
   }
 
   async setStatus(
@@ -420,22 +450,22 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const args = ["set_status", key, value];
-    if (opts?.icon) args.push("--icon", opts.icon);
-    if (opts?.color) args.push("--color", opts.color);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
-    await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [key, value];
+    if (opts?.icon) args.push(this.rawV1Arg("--icon"), opts.icon);
+    if (opts?.color) args.push(this.rawV1Arg("--color"), opts.color);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
+    await this.sendV1Args("set_status", args);
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {
-    const args = ["clear_status", key];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
-    await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [key];
+    if (opts?.workspace) {
+      args.push(
+        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+      );
+    }
+    await this.sendV1Args("clear_status", args);
   }
 
   async setProgress(
@@ -446,21 +476,21 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const args = ["set_progress", String(value)];
-    if (opts?.label) args.push("--label", opts.label);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
-    await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [String(value)];
+    if (opts?.label) args.push(this.rawV1Arg("--label"), opts.label);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
+    await this.sendV1Args("set_progress", args);
   }
 
   async clearProgress(opts?: { workspace?: string }): Promise<void> {
-    const args = ["clear_progress"];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
-    await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [];
+    if (opts?.workspace) {
+      args.push(
+        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+      );
+    }
+    await this.sendV1Args("clear_progress", args);
   }
 
   async log(
@@ -472,16 +502,13 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const args = ["log", JSON.stringify(message)];
-    if (opts?.level) args.push("--level", opts.level);
-    if (opts?.source) args.push("--source", opts.source);
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
-    if (workspace) args.push("--workspace", workspace);
-    await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [];
+    if (opts?.level) args.push(this.rawV1Arg("--level"), opts.level);
+    if (opts?.source) args.push(this.rawV1Arg("--source"), opts.source);
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
+    args.push(this.rawV1Arg("--"), message);
+    await this.sendV1Args("log", args);
   }
 
   async closeSurface(
@@ -497,9 +524,13 @@ export class CmuxSocketClient {
   }
 
   async listStatus(opts?: { workspace?: string }): Promise<CmuxStatusEntry[]> {
-    const args = ["list_status"];
-    if (opts?.workspace) args.push("--workspace", opts.workspace);
-    const raw = await this.sendV1(args.join(" "));
+    const args: V1Arg[] = [];
+    if (opts?.workspace) {
+      args.push(
+        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+      );
+    }
+    const raw = await this.sendV1Args("list_status", args);
     if (!raw || raw === "OK") return [];
     try {
       return JSON.parse(raw) as CmuxStatusEntry[];
@@ -580,6 +611,40 @@ export class CmuxSocketClient {
     throw new CmuxSocketError(
       `Unable to resolve workspace for surface ${surface}`,
       "not_found",
+    );
+  }
+
+  private async resolveSidebarTabId(opts?: {
+    workspace?: string;
+    surface?: string;
+  }): Promise<string | undefined> {
+    const workspace =
+      opts?.workspace ??
+      (opts?.surface
+        ? (await this.identify(opts.surface)).caller?.workspace_ref
+        : undefined);
+    if (!workspace) return undefined;
+    return this.resolveWorkspaceTabId(workspace);
+  }
+
+  private async resolveWorkspaceTabId(workspace: string): Promise<string> {
+    const { workspaces } = await this.listWorkspaces();
+    const match = workspaces.find(
+      (candidate) => candidate.ref === workspace || candidate.id === workspace,
+    );
+
+    if (match?.id) return match.id;
+    if (this.looksLikeUuid(workspace)) return workspace;
+
+    throw new CmuxSocketError(
+      `Unable to resolve tab id for workspace ${workspace}`,
+      "not_found",
+    );
+  }
+
+  private looksLikeUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
     );
   }
 
