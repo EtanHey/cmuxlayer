@@ -329,7 +329,19 @@ describe("CmuxSocketClient", () => {
     });
 
     expect(lastV1Command).toBe(
-      `log --tab=${MOCK_WORKSPACE_ID} -- --workspace`,
+      `log --tab=${MOCK_WORKSPACE_ID} -- "--workspace"`,
+    );
+  });
+
+  it("quotes flag-shaped status values in the outgoing V1 command", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "--workspace", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      `set_status agent "--workspace" --tab=${MOCK_WORKSPACE_ID}`,
     );
   });
 
