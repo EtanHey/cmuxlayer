@@ -6,6 +6,8 @@
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxlayer Split Pane Grid logo" width="96" height="96" />
 </p>
 
+[![cmuxlayer MCP server](https://glama.ai/mcp/servers/EtanHey/cmuxlayer/badges/card.svg)](https://glama.ai/mcp/servers/EtanHey/cmuxlayer)
+
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-233%20passing-brightgreen.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
