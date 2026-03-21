@@ -129,11 +129,7 @@ function buildLaunchCommand(cli: CliType, repo: string): string {
       return [
         "source ~/.zshrc >/dev/null 2>&1 || true",
         "unset ANTHROPIC_API_KEY",
-        `if command -v ${safeRepo}Claude >/dev/null 2>&1; then`,
-        `${safeRepo}Claude -s`,
-        "else",
-        `${cdCmd} && claude --dangerously-skip-permissions`,
-        "fi",
+        `if command -v ${safeRepo}Claude >/dev/null 2>&1; then ${safeRepo}Claude -s; else ${cdCmd} && claude --dangerously-skip-permissions; fi`,
       ].join("; ");
     case "codex":
       return `${cdCmd} && codex`;

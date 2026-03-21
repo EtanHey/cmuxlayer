@@ -134,7 +134,9 @@ describe("AgentEngine", () => {
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
       expect(launchCmd).toContain("unset ANTHROPIC_API_KEY");
-      expect(launchCmd).toContain("brainlayerClaude -s");
+      expect(launchCmd).toContain(
+        "if command -v brainlayerClaude >/dev/null 2>&1; then brainlayerClaude -s; else cd ~/Gits/brainlayer && claude --dangerously-skip-permissions; fi",
+      );
       expect(launchCmd).toContain("claude --dangerously-skip-permissions");
     });
 

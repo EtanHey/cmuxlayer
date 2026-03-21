@@ -306,6 +306,18 @@ describe("CmuxSocketClient", () => {
       'set_progress 0.95 --label "enrichment 95%" --workspace workspace:1',
     );
   });
+
+  it("quotes log values with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.log("agent finished cleanly", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      'log "agent finished cleanly" --workspace workspace:1',
+    );
+  });
 });
 
 describe("createCmuxClient factory", () => {

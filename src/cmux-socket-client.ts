@@ -486,7 +486,7 @@ export class CmuxSocketClient {
       surface?: string;
     },
   ): Promise<void> {
-    const args = ["log", JSON.stringify(message)];
+    const args = ["log", message];
     if (opts?.level) args.push("--level", opts.level);
     if (opts?.source) args.push("--source", opts.source);
     const workspace =
