@@ -89,6 +89,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
 };
 
 let mockServer: net.Server;
+let lastV1Command = "";
 
 function startMockServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -132,6 +133,7 @@ function startMockServer(): Promise<void> {
             }
           } catch {
             // Not JSON — handle as V1 plain-text command
+            lastV1Command = line;
             const cmd = line.split(" ")[0];
             if (
               cmd &&
@@ -183,6 +185,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await stopMockServer();
+});
+
+beforeEach(() => {
+  lastV1Command = "";
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -274,6 +280,31 @@ describe("CmuxSocketClient", () => {
     const result = await client.listStatus({ workspace: "workspace:1" });
     expect(result).toBeInstanceOf(Array);
     expect(result[0].key).toBe("agent");
+  });
+
+  it("quotes status values with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatus("agent", "brainlayerCodex: building", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      'set_status agent "brainlayerCodex: building" --workspace workspace:1',
+    );
+  });
+
+  it("quotes progress labels with spaces for V1 sidebar commands", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setProgress(0.95, {
+      label: "enrichment 95%",
+      workspace: "workspace:1",
+    });
+
+    expect(lastV1Command).toBe(
+      'set_progress 0.95 --label "enrichment 95%" --workspace workspace:1',
+    );
   });
 });
 
