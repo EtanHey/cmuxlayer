@@ -177,6 +177,32 @@ etanheyman ~ [master] $
       expect(parsed).toHaveProperty("context_pct");
       expect(parsed).toHaveProperty("context_window");
     });
+
+    it("clamps context_pct to 100 when token_count exceeds context_window", () => {
+      const parsed = parseScreen(`
+⏺ Completed successfully
+Token usage: total=300,000 input=250,000 output=50,000
+🤖 Sonnet 4.6 | 💰 $8.00
+`);
+
+      expect(parsed.token_count).toBe(300000);
+      expect(parsed.context_window).toBe(200_000);
+      expect(parsed.context_pct).toBe(100); // clamped, not 150
+    });
+
+    it("computes context_pct for Gemini from token_count", () => {
+      const parsed = parseScreen(`
+Gemini CLI
+Model: gemini-2.5-pro
+100,000 tokens
+`);
+
+      expect(parsed.agent_type).toBe("gemini");
+      expect(parsed.model).toBe("gemini-2.5-pro");
+      expect(parsed.token_count).toBe(100000);
+      expect(parsed.context_window).toBe(1_000_000);
+      expect(parsed.context_pct).toBe(10); // 100K/1M = 10%
+    });
   });
 
   describe("resolveModelMax", () => {
@@ -201,12 +227,18 @@ etanheyman ~ [master] $
       expect(resolveModelMax("gemini-2.5-pro")).toBe(1_000_000);
     });
 
-    it("resolves GPT/Codex models to 1M (hyphenated and space-separated)", () => {
+    it("resolves GPT-5/Codex models to 1M (hyphenated and space-separated)", () => {
       expect(resolveModelMax("gpt-5.4 high")).toBe(1_000_000);
       expect(resolveModelMax("gpt-5.4")).toBe(1_000_000);
       // Space-separated format from Claude's HEADER_MODEL_RE
       expect(resolveModelMax("GPT 5")).toBe(1_000_000);
+    });
+
+    it("resolves GPT-4 variants to 128K", () => {
       expect(resolveModelMax("GPT 4")).toBe(128_000);
+      expect(resolveModelMax("gpt-4-turbo")).toBe(128_000);
+      expect(resolveModelMax("gpt-4o")).toBe(128_000);
+      expect(resolveModelMax("gpt-4o-mini")).toBe(128_000);
     });
 
     it("returns null for unknown models", () => {

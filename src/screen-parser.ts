@@ -27,13 +27,18 @@ export const MODEL_MAX_TOKENS: Record<string, number> = {
  * Matches by prefix/keyword — e.g. "Sonnet 4.6" matches "sonnet", "gpt-5.4 high" matches "gpt-5".
  * Returns null if model is unknown.
  */
+// Pre-sorted by key length descending so longer (more specific) keys match first.
+// This makes matching deterministic regardless of Object.entries() iteration order.
+const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
+  ([a], [b]) => b.length - a.length,
+);
+
 export function resolveModelMax(model: string | null): number | null {
   if (!model) return null;
   const lower = model.toLowerCase().trim();
 
-  // Try each key as a prefix/substring match
-  // Also match space-separated variants (e.g., "gpt 4" matches "gpt-4")
-  for (const [key, max] of Object.entries(MODEL_MAX_TOKENS)) {
+  // Match by substring — also try space-separated variants (e.g., "gpt 4" matches "gpt-4")
+  for (const [key, max] of SORTED_MODEL_ENTRIES) {
     if (lower.includes(key) || lower.includes(key.replace("-", " ")))
       return max;
   }
@@ -283,14 +288,16 @@ export function parseScreen(text: string): ParsedScreenResult {
   const contextWindow = resolveModelMax(model);
 
   // Compute context_pct: percentage of context window USED (0=fresh, 100=full)
-  // For Codex: invert the "% left" value (87% left → 13% used)
-  // For others: compute from token_count / context_window
+  // Clamped to [0, 100] — token_count can exceed context_window in practice
+  // but >100% is noise for monitoring. For Codex: invert "% left" → "% used".
+  // AIDEV-NOTE: For Codex, token_count may be null while context_pct is populated
+  // (Codex surfaces show "% left" directly rather than raw token counts).
   let contextPct: number | null = null;
   if (agentType === "codex") {
     const codexLeft = parseCodexContextPct(normalized);
     contextPct = codexLeft !== null ? 100 - codexLeft : null;
   } else if (tokenCount !== null && contextWindow !== null) {
-    contextPct = Math.round((tokenCount / contextWindow) * 100);
+    contextPct = Math.min(100, Math.round((tokenCount / contextWindow) * 100));
   }
 
   const result: ParsedScreenResult = {
