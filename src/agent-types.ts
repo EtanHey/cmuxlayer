@@ -93,6 +93,8 @@ export function assertValidTransition(from: AgentState, to: AgentState): void {
 }
 
 /**
+ * @deprecated Use parseScreen().context_pct instead — it computes context usage from
+ * token_count/model_max and works for all agent types, not just Claude text patterns.
  * Parses context usage percentage from Claude Code status bar text.
  * Matches patterns like "80% context", "context 80%", "80% context remaining"
  */
