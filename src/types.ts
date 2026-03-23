@@ -56,7 +56,12 @@ export interface CmuxReadScreenResult {
   scrollback_used: boolean;
 }
 
-export type ParsedScreenAgentType = "claude" | "codex" | "gemini" | "unknown";
+export type ParsedScreenAgentType =
+  | "claude"
+  | "codex"
+  | "gemini"
+  | "cursor"
+  | "unknown";
 export type ParsedScreenStatus = "frozen" | "working" | "idle" | "done";
 
 export interface ParsedScreenResult {

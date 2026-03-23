@@ -100,12 +100,47 @@ const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
 
+/** Cursor Agent CLI — mode bar, hex status, context strip, follow-up prompt */
+const CURSOR_MODE_BAR_RE =
+  /\/ commands · @ files · ! shell · ctrl\+r to review edits/i;
+const CURSOR_HEX_RUNNING_RE = /⬡\s+Running\.\.\./i;
+const CURSOR_HEX_IDLE_RE = /⬡\s+Idle\b/i;
+const CURSOR_TOKEN_LINE_RE =
+  /⬡\s+(?:Running\.\.\.|Idle)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*([km])?\s*tokens\b/i;
+const CURSOR_STATUS_PCT_RE =
+  /(?:^|\n)\s*(?:Auto|Agent)\s*·\s*(\d+(?:\.\d+)?)\s*%\s*·/i;
+const CURSOR_FOLLOWUP_RE = /→\s*Add a follow-up/i;
+const CURSOR_STOP_RE = /ctrl\+c to stop/i;
+const CURSOR_SESSION_COMPLETE_RE =
+  /\b(?:Task completed|Generation complete|All edits applied|Session complete)\b/i;
+const CURSOR_CHECKMARK_DONE_RE =
+  /(?:^|\n)\s*[✓✔]\s*(?:Done|Complete|Completed)\b/i;
+const CURSOR_MODEL_LINE_RE = /^\s*Model:\s*(.+)$/im;
+const CURSOR_USING_LINE_RE = /^\s*Using\s*:?\s*(.+)$/im;
+const CURSOR_MODEL_INLINE_RE =
+  /\b(claude-[0-9][0-9a-z.-]*|gpt-[0-9][0-9a-z.-]*(?:\s+(?:high|low|mini))?|gemini-[0-9][0-9a-z.-]*)\b/i;
+
 function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
 }
 
 function normalizeText(text: string): string {
   return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function isCursorAgentScreen(text: string): boolean {
+  if (CURSOR_MODE_BAR_RE.test(text)) return true;
+  if (CURSOR_FOLLOWUP_RE.test(text) && CURSOR_STOP_RE.test(text)) return true;
+  if (CURSOR_STATUS_PCT_RE.test(text) && /files edited/i.test(text)) {
+    return true;
+  }
+  if (
+    (CURSOR_HEX_RUNNING_RE.test(text) || CURSOR_HEX_IDLE_RE.test(text)) &&
+    CURSOR_TOKEN_LINE_RE.test(text)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function detectAgentType(text: string): ParsedScreenAgentType {
@@ -140,6 +175,10 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   }
   if (GEMINI_MODEL_RE.test(text) && !CODEX_MODEL_RE.test(text)) {
     return "gemini";
+  }
+
+  if (isCursorAgentScreen(text)) {
+    return "cursor";
   }
 
   return "unknown";
@@ -269,6 +308,13 @@ function parseModelAndCost(
     };
   }
 
+  if (agentType === "cursor") {
+    return {
+      model: parseCursorModel(text),
+      cost: null,
+    };
+  }
+
   if (agentType === "gemini") {
     return {
       model: text.match(GEMINI_MODEL_RE)?.[1] ?? null,
@@ -307,6 +353,46 @@ function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
 }
 
+function parseCursorScaledTokenCount(raw: string, suffix?: string): number {
+  const n = Number.parseFloat(raw.replaceAll(",", ""));
+  if (!Number.isFinite(n)) return NaN;
+  const s = (suffix ?? "").toLowerCase();
+  if (s === "k") return Math.round(n * 1000);
+  if (s === "m") return Math.round(n * 1_000_000);
+  return Math.round(n);
+}
+
+function parseCursorTokenCount(text: string): number | null {
+  const m = text.match(CURSOR_TOKEN_LINE_RE);
+  if (!m) return null;
+  const value = parseCursorScaledTokenCount(m[1], m[2]);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Context % used from the "Auto · 22.5% · …" status strip */
+function parseCursorStatusContextPct(text: string): number | null {
+  const m = text.match(CURSOR_STATUS_PCT_RE);
+  if (!m) return null;
+  const pct = Number.parseFloat(m[1]);
+  if (!Number.isFinite(pct)) return null;
+  return Math.min(100, Math.round(pct));
+}
+
+function parseCursorModel(text: string): string | null {
+  const labeled =
+    text.match(CURSOR_MODEL_LINE_RE)?.[1]?.trim() ??
+    text.match(CURSOR_USING_LINE_RE)?.[1]?.trim();
+  if (labeled) return labeled;
+  const inline = text.match(CURSOR_MODEL_INLINE_RE)?.[0]?.trim();
+  return inline ?? null;
+}
+
+function parseCursorDoneSignal(text: string): string | null {
+  if (CURSOR_SESSION_COMPLETE_RE.test(text)) return "CURSOR_SESSION_COMPLETE";
+  if (CURSOR_CHECKMARK_DONE_RE.test(text)) return "CURSOR_SESSION_COMPLETE";
+  return null;
+}
+
 function inferStatus(
   text: string,
   doneSignal: string | null,
@@ -336,6 +422,16 @@ function inferStatus(
 
   if (agentType === "codex" && CODEX_RESUME_RE.test(text)) {
     return "done";
+  }
+
+  if (agentType === "cursor") {
+    if (CURSOR_HEX_RUNNING_RE.test(text)) {
+      return "working";
+    }
+    if (CURSOR_FOLLOWUP_RE.test(text) || CURSOR_HEX_IDLE_RE.test(text)) {
+      return "idle";
+    }
+    return "idle";
   }
 
   if (agentType === "claude" && CLAUDE_DONE_LINE_RE.test(text)) {
@@ -382,10 +478,19 @@ function inferStatus(
 export function parseScreen(text: string): ParsedScreenResult {
   const normalized = normalizeText(text);
   const agentType = detectAgentType(normalized);
-  const doneSignal = parseDoneSignal(normalized);
+  let doneSignal = parseDoneSignal(normalized);
+  if (agentType === "cursor" && doneSignal === null) {
+    doneSignal = parseCursorDoneSignal(normalized);
+  }
   const errors = parseErrors(normalized);
   const { model, cost } = parseModelAndCost(normalized, agentType);
-  const tokenCount = parseTokenCount(normalized);
+  let tokenCount = parseTokenCount(normalized);
+  if (agentType === "cursor") {
+    const cursorTokens = parseCursorTokenCount(normalized);
+    if (cursorTokens !== null) {
+      tokenCount = cursorTokens;
+    }
+  }
   const contextWindow = inferContextWindow(model, tokenCount, normalized);
 
   // Compute context_pct: percentage of context window USED (0=fresh, 100=full)
@@ -393,10 +498,19 @@ export function parseScreen(text: string): ParsedScreenResult {
   // but >100% is noise for monitoring. For Codex: invert "% left" → "% used".
   // AIDEV-NOTE: For Codex, token_count may be null while context_pct is populated
   // (Codex surfaces show "% left" directly rather than raw token counts).
+  // Cursor: prefer the status strip "Auto · 22.5% · …" when present.
   let contextPct: number | null = null;
   if (agentType === "codex") {
     const codexLeft = parseCodexContextPct(normalized);
     contextPct = codexLeft !== null ? 100 - codexLeft : null;
+  } else if (agentType === "cursor") {
+    contextPct = parseCursorStatusContextPct(normalized);
+    if (contextPct === null && tokenCount !== null && contextWindow !== null) {
+      contextPct = Math.min(
+        100,
+        Math.round((tokenCount / contextWindow) * 100),
+      );
+    }
   } else if (tokenCount !== null && contextWindow !== null) {
     contextPct = Math.min(100, Math.round((tokenCount / contextWindow) * 100));
   }
