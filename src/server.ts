@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 10 low-level tools + 7 agent lifecycle tools.
+ * cmux MCP server — registers 11 low-level tools + 7 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -525,7 +525,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 7. set_status
+  // 7. notify
+  server.tool(
+    "notify",
+    "Show a cmux notification banner for a workspace or specific surface.",
+    {
+      title: z
+        .string()
+        .optional()
+        .default("Notification")
+        .describe("Notification title"),
+      subtitle: z.string().optional().describe("Notification subtitle"),
+      body: z.string().optional().describe("Notification body"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+    },
+    async (args) => {
+      try {
+        const title = args.title ?? "Notification";
+        await client.notify({
+          title,
+          subtitle: args.subtitle,
+          body: args.body,
+          workspace: args.workspace,
+          surface: args.surface,
+        });
+        return ok({
+          title,
+          subtitle: args.subtitle,
+          body: args.body,
+          workspace: args.workspace,
+          surface: args.surface,
+          applied: "notify",
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 8. set_status
   server.tool(
     "set_status",
     "Set a sidebar status key-value pair",
@@ -561,7 +600,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 8. set_progress
+  // 9. set_progress
   server.tool(
     "set_progress",
     "Set sidebar progress indicator (0.0 to 1.0)",
@@ -593,7 +632,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 9. close_surface
+  // 10. close_surface
   server.tool(
     "close_surface",
     "Close a surface (terminal or browser pane)",
@@ -613,7 +652,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 10. browser_surface
+  // 11. browser_surface
   server.tool(
     "browser_surface",
     "Interact with a browser surface (open, navigate, snapshot, click, type, eval, wait)",

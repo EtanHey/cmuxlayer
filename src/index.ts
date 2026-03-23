@@ -3,9 +3,10 @@
 /**
  * @golems/cmux-mcp — MCP server for programmatic cmux terminal control.
  *
- * Exposes 10 tools:
+ * Exposes 11 tools:
  *   list_surfaces, new_split, send_input, send_key, read_screen,
- *   rename_tab, set_status, set_progress, close_surface, browser_surface
+ *   rename_tab, notify, set_status, set_progress, close_surface,
+ *   browser_surface
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

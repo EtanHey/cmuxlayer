@@ -440,6 +440,28 @@ export class CmuxSocketClient {
     await this.sendV1Args("rename_tab", args);
   }
 
+  async notify(opts?: {
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    workspace?: string;
+    surface?: string;
+  }): Promise<void> {
+    const args: V1Arg[] = [
+      this.rawV1Arg("--title"),
+      opts?.title ?? "Notification",
+    ];
+    if (opts?.subtitle) args.push(this.rawV1Arg("--subtitle"), opts.subtitle);
+    if (opts?.body) args.push(this.rawV1Arg("--body"), opts.body);
+    if (opts?.workspace) {
+      args.push(this.rawV1Arg("--workspace"), opts.workspace);
+    }
+    if (opts?.surface) {
+      args.push(this.rawV1Arg("--surface"), opts.surface);
+    }
+    await this.sendV1Args("notify", args);
+  }
+
   async setStatus(
     key: string,
     value: string,
