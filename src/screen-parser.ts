@@ -6,6 +6,8 @@ import type {
 
 // AIDEV-NOTE: Model context window sizes in tokens. Used to compute context_pct from raw token_count.
 // Keep this table updated as new models launch.
+// ORDER MATTERS: resolveModelMax uses substring matching, so more-specific keys (e.g. "gpt-5")
+// must come before less-specific ones (e.g. "gpt-4") if they share a common prefix.
 export const MODEL_MAX_TOKENS: Record<string, number> = {
   // Claude models
   opus: 1_000_000,
