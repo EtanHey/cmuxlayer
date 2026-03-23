@@ -166,6 +166,80 @@ Thinking...
     expect(parsed.model).toBe("gemini-3.1-pro");
   });
 
+  it("parses Cursor Agent working state with status strip, k tokens, and mode bar", () => {
+    const parsed = parseScreen(`
+Auto · 22.5% · 4 files edited
+
+⬡ Running...  3.3k tokens
+
+→ Add a follow-up
+ctrl+c to stop
+
+/ commands · @ files · ! shell · ctrl+r to review edits
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("working");
+    expect(parsed.token_count).toBe(3300);
+    expect(parsed.context_pct).toBe(23);
+  });
+
+  it("parses Cursor Agent idle with Idle line, comma tokens, and Model line", () => {
+    const parsed = parseScreen(`
+Auto · 10% · 1 file edited
+Model: gpt-5.2 high
+
+⬡ Idle  12,450 tokens
+
+→ Add a follow-up
+
+/ commands · @ files · ! shell · ctrl+r to review edits
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.token_count).toBe(12450);
+    expect(parsed.context_pct).toBe(10);
+    expect(parsed.model).toBe("gpt-5.2 high");
+  });
+
+  it("detects Cursor session completion as done_signal and status done", () => {
+    const parsed = parseScreen(`
+Auto · 90% · 2 files edited
+Task completed
+
+⬡ Idle  1.2k tokens
+/ commands · @ files · ! shell · ctrl+r to review edits
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.done_signal).toBe("CURSOR_SESSION_COMPLETE");
+    expect(parsed.status).toBe("done");
+  });
+
+  it("detects Cursor via follow-up prompt and ctrl+c without mode bar", () => {
+    const parsed = parseScreen(`
+→ Add a follow-up
+ctrl+c to stop
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("idle");
+  });
+
+  it("detects Cursor via inline claude model id", () => {
+    const parsed = parseScreen(`
+Auto · 5% · 0 files edited
+Using claude-sonnet-4-20250514
+
+⬡ Idle  800 tokens
+4 files edited
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.model).toBe("claude-sonnet-4-20250514");
+  });
+
   it("detects idle shell output and strips ANSI sequences", () => {
     const parsed = parseScreen(`
 \u001b[36mLast login:\u001b[0m Fri Mar 13 18:10:54 on ttys016
