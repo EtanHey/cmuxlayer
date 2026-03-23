@@ -54,6 +54,14 @@ const TOKENS_RE = /\b([0-9][0-9,]*)\s+tokens\b/i;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
   /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*)/m;
+// AIDEV-NOTE: Fallback for 🤖 lines without cost — e.g. "🤖 Opus 4.6 (1M context)"
+// or "🤖 Sonnet 4.6 | ⏱️ 2m". Captures model name up to first paren, pipe, or newline.
+const MODEL_EMOJI_RE =
+  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*)/i;
+// AIDEV-NOTE: Last-resort fallback for narrow panes where model string is cut off.
+// If we see 🤖 followed by a known model family name, extract just the family name.
+// e.g. "🤖 Opus …" → "Opus", "🤖 Sonnet" → "Sonnet"
+const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CODEX_MODEL_RE =
   /^(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\s*[·•]\s*(\d+)%\s+left/m;
@@ -191,7 +199,12 @@ function parseModelAndCost(
     };
   }
 
-  const model = text.match(HEADER_MODEL_RE)?.[1]?.trim() ?? null;
+  // Fallback chain: full header → 🤖+version → 🤖+keyword (narrow panes)
+  const model =
+    text.match(HEADER_MODEL_RE)?.[1]?.trim() ??
+    text.match(MODEL_EMOJI_RE)?.[1]?.trim() ??
+    text.match(MODEL_KEYWORD_RE)?.[1]?.trim() ??
+    null;
   const costMatch = text.match(/💰\s*\$([0-9]+(?:\.[0-9]+)?)/);
 
   return {

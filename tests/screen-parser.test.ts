@@ -51,6 +51,60 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.status).toBe("working");
   });
 
+  it("extracts model from 🤖 line without cost (production format)", () => {
+    const parsed = parseScreen(`
+✻ Working…
+  Reading files
+Token usage: total=356,835
+🤖 Opus 4.6 (1M context)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Opus 4.6");
+    expect(parsed.token_count).toBe(356835);
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36); // 356835/1000000 ≈ 35.7 → rounds to 36
+  });
+
+  it("extracts model from narrow pane where version is cut off", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=356,835
+🤖 Opus …
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Opus");
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36); // 356835/1000000
+  });
+
+  it("extracts Sonnet from narrow pane without version number", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=160,000
+🤖 Sonnet
+`);
+
+    expect(parsed.model).toBe("Sonnet");
+    expect(parsed.context_window).toBe(200_000);
+    expect(parsed.context_pct).toBe(80); // 160000/200000
+  });
+
+  it("extracts model from 🤖 line with only timer (no cost)", () => {
+    const parsed = parseScreen(`
+⏺ Completed successfully
+Token usage: total=50,000
+🤖 Sonnet 4.6 | ⏱️  2m 11s
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Sonnet 4.6");
+    expect(parsed.cost).toBeNull();
+    expect(parsed.context_window).toBe(200_000);
+    expect(parsed.context_pct).toBe(25); // 50000/200000
+  });
+
   it("parses Codex-style output with model, context left, and actions", () => {
     const parsed = parseScreen(`
 gpt-5.4 high · 87% left · ~/Gits/orchestrator
