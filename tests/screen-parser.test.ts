@@ -82,6 +82,19 @@ Token usage: total=356,835
     expect(parsed.context_pct).toBe(36);
   });
 
+  it("infers context from truncated Claude model family with ellipsis", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=356,835
+🤖 Opus…
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Opus");
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36);
+  });
+
   it("treats CLAUDE_COUNTER as an idle done signal and extracts fallback response text", () => {
     const parsed = parseScreen(`
 ✻ Working…
@@ -162,6 +175,29 @@ etanheyman ~ [master] $
     expect(parsed.agent_type).toBe("unknown");
     expect(parsed.status).toBe("idle");
     expect(parsed.errors).toEqual([]);
+  });
+
+  it("infers Claude context window from token count when the model footer is fully truncated", () => {
+    const parsed = parseScreen(`
+  Say "go" when you're ready and I'll start your timer.
+
+  CLAUDE_COUNTER: 186
+
+──────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens
+  🤖 …                                                        current: 2.1.81 · latest…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.token_count).toBe(418310);
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(42);
+    expect(parsed.done_signal).toBe("CLAUDE_COUNTER:186");
+    expect(parsed.model).toBeNull();
   });
 
   // --- context_pct and context_window tests ---

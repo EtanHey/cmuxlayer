@@ -548,6 +548,141 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("read_screen title is additive and preserves existing Claude parsed fields", async () => {
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: [
+          "---RESPONSE_START---",
+          "hello",
+          "---RESPONSE_END---",
+          "ENRICHMENT_PROMPT_DONE",
+          "Token usage: total=2,345",
+          "🤖 Sonnet 4.6 | 💰 $1.25",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:1" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:1",
+            title: "orchestratorClaude",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["read_screen"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.title).toBe("orchestratorClaude");
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "claude",
+      status: "done",
+      token_count: 2345,
+      context_pct: 1,
+      context_window: 200000,
+      done_signal: "ENRICHMENT_PROMPT_DONE",
+      response: "hello",
+      model: "Sonnet 4.6",
+      cost: 1.25,
+    });
+  });
+
+  it("read_screen infers context fields for live Claude panes with fully truncated model footers", async () => {
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: [
+          '  Say "go" when you\'re ready and I\'ll start your timer.',
+          "",
+          "  CLAUDE_COUNTER: 186",
+          "",
+          "──────────────────────────────────────────────────────────────────────────────────────────",
+          "❯",
+          "──────────────────────────────────────────────────────────────────────────────────────────",
+          "  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens",
+          "  🤖 …                                                        current: 2.1.81 · latest…",
+          "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ].join("\n"),
+        lines: 40,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:1" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:1",
+            title: "qwanClaude (main)",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["read_screen"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", parsed_only: true, lines: 40 },
+      {} as any,
+    );
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.title).toBe("qwanClaude (main)");
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "claude",
+      status: "idle",
+      token_count: 418310,
+      context_window: 1_000_000,
+      context_pct: 42,
+      done_signal: "CLAUDE_COUNTER:186",
+      model: null,
+      cost: null,
+    });
+  });
+
   it("send_input handler calls cmux send", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 

@@ -55,7 +55,14 @@ export function inferContextWindow(
   rawText: string,
 ): number | null {
   const defaultMax = resolveModelMax(model);
-  if (defaultMax === null) return null;
+  const looksLikeClaudePane =
+    /CLAUDE_COUNTER|bypass permissions on|Claude Code|🤖/i.test(rawText);
+  if (defaultMax === null) {
+    if (looksLikeClaudePane && tokenCount !== null) {
+      return tokenCount > 200_000 ? 1_000_000 : 200_000;
+    }
+    return null;
+  }
 
   // Signal 1: explicit "(1M" in the status line
   if (/\(1M\b/i.test(rawText)) return 1_000_000;
