@@ -68,6 +68,7 @@ export function inferContextWindow(
 
 const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
 const DONE_SIGNAL_RE = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)\b/;
+const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
 const RESPONSE_BLOCK_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/s;
 const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
 const TOKENS_RE = /\b([0-9][0-9,]*)\s+tokens\b/i;
@@ -152,12 +153,72 @@ function parseTokenCount(text: string): number | null {
 }
 
 function parseDoneSignal(text: string): string | null {
-  return text.match(DONE_SIGNAL_RE)?.[1] ?? null;
+  const explicitDoneSignal = text.match(DONE_SIGNAL_RE)?.[1];
+  if (explicitDoneSignal) {
+    return explicitDoneSignal;
+  }
+
+  const claudeCounter = text.match(CLAUDE_COUNTER_RE)?.[1];
+  return claudeCounter ? `CLAUDE_COUNTER:${claudeCounter}` : null;
+}
+
+function trimBlankEdges(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+
+  while (start < end && lines[start].trim() === "") start++;
+  while (end > start && lines[end - 1].trim() === "") end--;
+
+  return lines.slice(start, end);
+}
+
+function extractClaudeResponseTail(text: string): string | null {
+  if (!CLAUDE_COUNTER_RE.test(text)) {
+    return null;
+  }
+
+  const lines = text.split("\n");
+  const counterIndex = lines.findIndex((line) => CLAUDE_COUNTER_RE.test(line));
+  if (counterIndex === -1) {
+    return null;
+  }
+
+  let startIndex = 0;
+  for (let i = counterIndex - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (CLAUDE_WORKING_LINE_RE.test(line) || CLAUDE_DONE_LINE_RE.test(line)) {
+      startIndex = i + 1;
+      break;
+    }
+  }
+
+  const candidateLines = trimBlankEdges(
+    lines
+      .slice(startIndex, counterIndex)
+      .filter(
+        (line) =>
+          !/^\s*(?:Token usage:|🤖\s|CLAUDE_COUNTER:)/.test(line) &&
+          !/^\s*(?:[⏺●✻✢✳✶]\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing))\b/.test(
+            line,
+          ) &&
+          !/^\s{2,}(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/.test(
+            line,
+          ) &&
+          !/^\s*(?:Bash|Read|Edit|Write|Glob|Grep|LS)\(/.test(line) &&
+          !/^\s*\/Users\//.test(line),
+      ),
+  );
+
+  if (candidateLines.length === 0) {
+    return null;
+  }
+
+  return candidateLines.join("\n");
 }
 
 function parseResponse(text: string): string | null {
   const response = text.match(RESPONSE_BLOCK_RE)?.[1]?.trim();
-  return response || null;
+  return response || extractClaudeResponseTail(text);
 }
 
 function parseErrors(text: string): string[] {
@@ -252,6 +313,9 @@ function inferStatus(
   const joined = lines.join("\n");
 
   if (doneSignal) {
+    if (doneSignal.startsWith("CLAUDE_COUNTER:")) {
+      return "idle";
+    }
     return "done";
   }
 

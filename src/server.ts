@@ -14,7 +14,8 @@ import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
 import type { AgentRecord } from "./agent-types.js";
-import { parseScreen } from "./screen-parser.js";
+import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -53,6 +54,58 @@ function requireValue(
   if (value === undefined || value === "") {
     throw new Error(message);
   }
+}
+
+function pickLatestSurfaceModel(
+  stateMgr: StateManager,
+  surfaceRef: string,
+): string | null {
+  const matches = stateMgr
+    .listStates()
+    .filter((record) => record.surface_id === surfaceRef && record.model);
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  matches.sort((a, b) => {
+    if (b.version !== a.version) return b.version - a.version;
+    return (
+      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    );
+  });
+
+  return matches[0]?.model ?? null;
+}
+
+function enrichParsedScreen(
+  parsed: ParsedScreenResult,
+  rawText: string,
+  fallbackModel: string | null,
+): ParsedScreenResult {
+  const model = parsed.model ?? fallbackModel;
+  const contextWindow =
+    parsed.context_window ?? inferContextWindow(model, parsed.token_count, rawText);
+
+  let contextPct = parsed.context_pct;
+  if (
+    contextPct === null &&
+    parsed.agent_type !== "codex" &&
+    parsed.token_count !== null &&
+    contextWindow !== null
+  ) {
+    contextPct = Math.min(
+      100,
+      Math.round((parsed.token_count / contextWindow) * 100),
+    );
+  }
+
+  return {
+    ...parsed,
+    model,
+    context_window: contextWindow,
+    context_pct: contextPct,
+  };
 }
 
 export interface CreateServerOptions {
@@ -113,6 +166,9 @@ function buildLifecycleChannelMeta(
 export function createServer(opts?: CreateServerOptions): McpServer {
   const client =
     opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const stateDir =
+    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+  const stateMgr = new StateManager(stateDir);
   const enableClaudeChannels =
     opts?.enableClaudeChannels ??
     process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1";
@@ -134,6 +190,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     });
   }
+
+  const findSurfaceByRef = async (
+    surfaceRef: string,
+    workspace?: string,
+  ): Promise<CmuxSurface | null> => {
+    try {
+      const workspaceRefs = workspace
+        ? [workspace]
+        : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+
+      for (const workspaceRef of workspaceRefs) {
+        const panes = await client.listPanes({ workspace: workspaceRef });
+        for (const pane of panes.panes) {
+          const group = await client.listPaneSurfaces({
+            workspace: workspaceRef,
+            pane: pane.ref,
+          });
+          const surface = group.surfaces.find((entry) => entry.ref === surfaceRef);
+          if (surface) {
+            return surface;
+          }
+        }
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  };
 
   // 1. list_surfaces
   server.tool(
@@ -372,17 +457,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           lines: args.lines,
           scrollback: args.scrollback,
         });
-        const parsed = parseScreen(result.text);
+        const surface = await findSurfaceByRef(result.surface, args.workspace);
+        const parsed = enrichParsedScreen(
+          parseScreen(result.text),
+          result.text,
+          pickLatestSurfaceModel(stateMgr, result.surface),
+        );
 
         if (args.parsed_only) {
           return ok({
             surface: result.surface,
+            title: surface?.title ?? null,
             parsed,
           });
         }
 
         return ok({
           surface: result.surface,
+          title: surface?.title ?? null,
           lines: result.lines,
           content: result.text,
           scrollback_used: result.scrollback_used,
@@ -633,9 +725,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // --- Agent Lifecycle Tools (Phase 5) ---
 
   if (!opts?.skipAgentLifecycle) {
-    const stateDir =
-      opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
-    const stateMgr = new StateManager(stateDir);
     const surfaceProvider = async () => {
       try {
         const workspaces = await client.listWorkspaces();

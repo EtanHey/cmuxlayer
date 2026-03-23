@@ -458,6 +458,96 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("read_screen parsed_only includes the tab title and recovers model context from agent state", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-read-screen-parser-fallback");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "sonnet-orchestrator-123",
+      surface_id: "surface:1",
+      state: "idle",
+      repo: "orchestrator",
+      model: "Sonnet 4.6",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "Monitor parser output",
+      pid: null,
+      version: 1,
+      created_at: "2026-03-23T00:00:00Z",
+      updated_at: "2026-03-23T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: [
+          "Parser fallback is running in the narrow pane.",
+          "Token usage: total=40,000",
+          "CLAUDE_COUNTER: 7",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:1" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:1",
+            title: "orchestratorClaude",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["read_screen"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.title).toBe("orchestratorClaude");
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "claude",
+      status: "idle",
+      model: "Sonnet 4.6",
+      context_window: 200000,
+      context_pct: 20,
+      done_signal: "CLAUDE_COUNTER:7",
+      response: "Parser fallback is running in the narrow pane.",
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("send_input handler calls cmux send", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
