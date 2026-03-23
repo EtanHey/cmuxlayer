@@ -82,6 +82,34 @@ Token usage: total=356,835
     expect(parsed.context_pct).toBe(36);
   });
 
+  it("treats CLAUDE_COUNTER as an idle done signal and extracts fallback response text", () => {
+    const parsed = parseScreen(`
+✻ Working…
+  Reading src/server.ts
+
+Codex is working well — searching through real session files for patterns to parse, writing tests first (TDD). 90% context left.
+
+No idle agents to reassign right now. Everything is either done or Codex is handling the last task.
+
+Token usage: total=356,835
+🤖 Opus
+CLAUDE_COUNTER: 92
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.done_signal).toBe("CLAUDE_COUNTER:92");
+    expect(parsed.response).toBe(
+      [
+        "Codex is working well — searching through real session files for patterns to parse, writing tests first (TDD). 90% context left.",
+        "",
+        "No idle agents to reassign right now. Everything is either done or Codex is handling the last task.",
+      ].join("\n"),
+    );
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36);
+  });
+
   it("extracts model from timer-only status line (no cost)", () => {
     const parsed = parseScreen(`
 ⏺ Completed successfully
