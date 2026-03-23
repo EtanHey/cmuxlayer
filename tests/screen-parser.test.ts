@@ -201,9 +201,12 @@ etanheyman ~ [master] $
       expect(resolveModelMax("gemini-2.5-pro")).toBe(1_000_000);
     });
 
-    it("resolves GPT/Codex models to 1M", () => {
+    it("resolves GPT/Codex models to 1M (hyphenated and space-separated)", () => {
       expect(resolveModelMax("gpt-5.4 high")).toBe(1_000_000);
       expect(resolveModelMax("gpt-5.4")).toBe(1_000_000);
+      // Space-separated format from Claude's HEADER_MODEL_RE
+      expect(resolveModelMax("GPT 5")).toBe(1_000_000);
+      expect(resolveModelMax("GPT 4")).toBe(128_000);
     });
 
     it("returns null for unknown models", () => {

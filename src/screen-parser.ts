@@ -30,8 +30,10 @@ export function resolveModelMax(model: string | null): number | null {
   const lower = model.toLowerCase().trim();
 
   // Try each key as a prefix/substring match
+  // Also match space-separated variants (e.g., "gpt 4" matches "gpt-4")
   for (const [key, max] of Object.entries(MODEL_MAX_TOKENS)) {
-    if (lower.includes(key)) return max;
+    if (lower.includes(key) || lower.includes(key.replace("-", " ")))
+      return max;
   }
 
   return null;
