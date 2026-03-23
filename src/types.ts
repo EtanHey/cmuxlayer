@@ -63,12 +63,13 @@ export interface ParsedScreenResult {
   agent_type: ParsedScreenAgentType;
   status: ParsedScreenStatus;
   token_count: number | null;
+  context_pct: number | null;
+  context_window: number | null;
   done_signal: string | null;
   response: string | null;
   errors: string[];
   model: string | null;
   cost: number | null;
-  context_pct?: number | null;
   actions?: string[];
 }
 

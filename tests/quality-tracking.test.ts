@@ -153,10 +153,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
-    // Mock readScreen to return 80% context
+    // Mock readScreen: 160K tokens on Sonnet (200K window) = 80% used
     vi.mocked(mockClient.readScreen).mockResolvedValue({
       surface: "s:1",
-      text: "Claude Code  ● 80% context  Model: sonnet",
+      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.6 | 💰 $3.50",
       lines: 5,
       scrollback_used: false,
     });
@@ -181,10 +181,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:2")];
     await engine.getRegistry().reconstitute();
 
-    // Mock readScreen to return 85% context
+    // Mock readScreen: 170K tokens on Haiku (200K window) = 85% used
     vi.mocked(mockClient.readScreen).mockResolvedValue({
       surface: "s:2",
-      text: "Claude Code  ● 85% context  Model: haiku",
+      text: "✻ Working…\nToken usage: total=170,000\n🤖 Haiku 3.5 | 💰 $0.10",
       lines: 5,
       scrollback_used: false,
     });
@@ -213,9 +213,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
+    // 160K tokens on Sonnet (200K window) = 80% used
     vi.mocked(mockClient.readScreen).mockResolvedValue({
       surface: "s:1",
-      text: "80% context remaining",
+      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.6 | 💰 $2.00",
       lines: 5,
       scrollback_used: false,
     });
@@ -239,9 +240,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
+    // 100K tokens on Sonnet (200K window) = 50% used — below threshold
     vi.mocked(mockClient.readScreen).mockResolvedValue({
       surface: "s:1",
-      text: "Claude Code  ● 50% context  Model: sonnet",
+      text: "✻ Working…\nToken usage: total=100,000\n🤖 Sonnet 4.6 | 💰 $1.00",
       lines: 5,
       scrollback_used: false,
     });
@@ -275,9 +277,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:2")];
     await engine.getRegistry().reconstitute();
 
+    // 180K tokens on Haiku (200K window) = 90% used — above threshold
     vi.mocked(mockClient.readScreen).mockResolvedValue({
       surface: "s:2",
-      text: "Claude Code  ● 90% context  Model: haiku",
+      text: "✻ Working…\nToken usage: total=180,000\n🤖 Haiku 3.5 | 💰 $0.15",
       lines: 5,
       scrollback_used: false,
     });

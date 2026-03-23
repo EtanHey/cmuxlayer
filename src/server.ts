@@ -12,10 +12,7 @@ import { parseReservedModeKey } from "./mode-policy.js";
 import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
-import {
-  AgentEngine,
-  type AgentLifecycleEvent,
-} from "./agent-engine.js";
+import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
 import type { AgentRecord } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
 
@@ -343,7 +340,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 5. read_screen
   server.tool(
     "read_screen",
-    "Read the current screen content of a terminal surface",
+    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors. Use parsed_only=true for monitoring (omits raw terminal content).",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -360,6 +357,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe("Include scrollback buffer"),
+      parsed_only: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "If true, return only parsed fields (omit raw content). Best for agent monitoring.",
+        ),
     },
     async (args) => {
       try {
@@ -368,12 +372,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           lines: args.lines,
           scrollback: args.scrollback,
         });
+        const parsed = parseScreen(result.text);
+
+        if (args.parsed_only) {
+          return ok({
+            surface: result.surface,
+            parsed,
+          });
+        }
+
         return ok({
           surface: result.surface,
           lines: result.lines,
           content: result.text,
           scrollback_used: result.scrollback_used,
-          parsed: parseScreen(result.text),
+          parsed,
         });
       } catch (e) {
         return err(e);
@@ -668,8 +681,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         client.setStatus(key, value, statusOpts),
       readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
       send: (surface, text, sendOpts) => client.send(surface, text, sendOpts),
-      sendKey: (surface, key, keyOpts) =>
-        client.sendKey(surface, key, keyOpts),
+      sendKey: (surface, key, keyOpts) => client.sendKey(surface, key, keyOpts),
       setProgress: (value, progressOpts) =>
         client.setProgress(value, progressOpts),
       newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),

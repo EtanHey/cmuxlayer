@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseScreen } from "../src/screen-parser.js";
+import {
+  parseScreen,
+  MODEL_MAX_TOKENS,
+  resolveModelMax,
+} from "../src/screen-parser.js";
 
 describe("parseScreen", () => {
   it("parses Claude-style output with response block and done signal", () => {
@@ -59,7 +63,7 @@ Working (2m 06s • esc to interrupt)
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("working");
     expect(parsed.model).toBe("gpt-5.4 high");
-    expect(parsed.context_pct).toBe(87);
+    expect(parsed.context_pct).toBe(13); // 100 - 87% left = 13% used
     expect(parsed.actions).toContain('Ran rg -n "read_screen" src tests');
   });
 
@@ -85,5 +89,126 @@ etanheyman ~ [master] $
     expect(parsed.agent_type).toBe("unknown");
     expect(parsed.status).toBe("idle");
     expect(parsed.errors).toEqual([]);
+  });
+
+  // --- context_pct and context_window tests ---
+
+  describe("context_pct computation", () => {
+    it("computes context_pct for Claude Sonnet from token_count (200K window)", () => {
+      const parsed = parseScreen(`
+✻ Working…
+  Reading src/server.ts
+Token usage: total=40,000 input=35,000 output=5,000
+🤖 Sonnet 4.6 | 💰 $0.50 | ⏱️  41s
+`);
+
+      expect(parsed.agent_type).toBe("claude");
+      expect(parsed.token_count).toBe(40000);
+      expect(parsed.model).toBe("Sonnet 4.6");
+      expect(parsed.context_window).toBe(200_000);
+      expect(parsed.context_pct).toBe(20); // 40000/200000 = 20%
+    });
+
+    it("computes context_pct for Claude Opus from token_count (1M window)", () => {
+      const parsed = parseScreen(`
+⏺ Completed successfully
+Token usage: total=250,000 input=200,000 output=50,000
+🤖 Opus 4.6 | 💰 $12.50 | ⏱️  15m
+`);
+
+      expect(parsed.agent_type).toBe("claude");
+      expect(parsed.token_count).toBe(250000);
+      expect(parsed.model).toBe("Opus 4.6");
+      expect(parsed.context_window).toBe(1_000_000);
+      expect(parsed.context_pct).toBe(25); // 250000/1000000 = 25%
+    });
+
+    it("computes context_pct for Claude Haiku from token_count (200K window)", () => {
+      const parsed = parseScreen(`
+✻ Working…
+  Running tests
+Token usage: total=10,000
+🤖 Haiku 3.5 | 💰 $0.05
+`);
+
+      expect(parsed.agent_type).toBe("claude");
+      expect(parsed.token_count).toBe(10000);
+      expect(parsed.context_window).toBe(200_000);
+      expect(parsed.context_pct).toBe(5); // 10000/200000 = 5%
+    });
+
+    it("inverts Codex '% left' to '% used' for context_pct", () => {
+      const parsed = parseScreen(`
+gpt-5.4 high · 87% left · ~/Gits/orchestrator
+Working (2m 06s • esc to interrupt)
+• Ran rg -n "read_screen" src tests
+`);
+
+      expect(parsed.agent_type).toBe("codex");
+      expect(parsed.context_pct).toBe(13); // 100 - 87 = 13% used
+      expect(parsed.context_window).toBe(1_000_000); // gpt-5.4 resolves to 1M
+    });
+
+    it("returns null context_pct when model is unknown", () => {
+      const parsed = parseScreen(`
+etanheyman ~ [master] $
+`);
+
+      expect(parsed.agent_type).toBe("unknown");
+      expect(parsed.context_pct).toBeNull();
+      expect(parsed.context_window).toBeNull();
+    });
+
+    it("returns null context_pct when token_count unavailable for Claude", () => {
+      const parsed = parseScreen(`
+✻ Working…
+  Analyzing code
+🤖 Sonnet 4.6 | 💰 $0.10
+`);
+
+      expect(parsed.agent_type).toBe("claude");
+      expect(parsed.token_count).toBeNull();
+      expect(parsed.context_pct).toBeNull();
+      expect(parsed.context_window).toBe(200_000); // window known even without tokens
+    });
+
+    it("always includes context_pct and context_window fields (never undefined)", () => {
+      const parsed = parseScreen("etanheyman ~ $");
+      expect(parsed).toHaveProperty("context_pct");
+      expect(parsed).toHaveProperty("context_window");
+    });
+  });
+
+  describe("resolveModelMax", () => {
+    it("resolves Sonnet variants to 200K", () => {
+      expect(resolveModelMax("Sonnet 4.6")).toBe(200_000);
+      expect(resolveModelMax("Sonnet 4")).toBe(200_000);
+      expect(resolveModelMax("sonnet")).toBe(200_000);
+    });
+
+    it("resolves Opus variants to 1M", () => {
+      expect(resolveModelMax("Opus 4.6")).toBe(1_000_000);
+      expect(resolveModelMax("opus")).toBe(1_000_000);
+    });
+
+    it("resolves Haiku variants to 200K", () => {
+      expect(resolveModelMax("Haiku 3.5")).toBe(200_000);
+      expect(resolveModelMax("haiku")).toBe(200_000);
+    });
+
+    it("resolves Gemini models to 1M", () => {
+      expect(resolveModelMax("gemini-3.1-pro")).toBe(1_000_000);
+      expect(resolveModelMax("gemini-2.5-pro")).toBe(1_000_000);
+    });
+
+    it("resolves GPT/Codex models to 1M", () => {
+      expect(resolveModelMax("gpt-5.4 high")).toBe(1_000_000);
+      expect(resolveModelMax("gpt-5.4")).toBe(1_000_000);
+    });
+
+    it("returns null for unknown models", () => {
+      expect(resolveModelMax(null)).toBeNull();
+      expect(resolveModelMax("mystery-model")).toBeNull();
+    });
   });
 });
