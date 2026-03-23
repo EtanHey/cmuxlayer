@@ -54,6 +54,9 @@ export function inferContextWindow(
   tokenCount: number | null,
   rawText: string,
 ): number | null {
+  // Signal 1: explicit "(1M" in the status line should win even if model parsing fails.
+  if (/\(1M\b/i.test(rawText)) return 1_000_000;
+
   const defaultMax = resolveModelMax(model);
   const looksLikeClaudePane =
     /CLAUDE_COUNTER|bypass permissions on|Claude Code|🤖/i.test(rawText);
@@ -63,9 +66,6 @@ export function inferContextWindow(
     }
     return null;
   }
-
-  // Signal 1: explicit "(1M" in the status line
-  if (/\(1M\b/i.test(rawText)) return 1_000_000;
 
   // Signal 2: token count exceeds default → must be a larger tier
   if (tokenCount !== null && tokenCount > defaultMax) return 1_000_000;

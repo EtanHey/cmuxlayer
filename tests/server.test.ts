@@ -678,6 +678,7 @@ describe("tool handler integration", () => {
       context_window: 1_000_000,
       context_pct: 42,
       done_signal: "CLAUDE_COUNTER:186",
+      response: `  Say "go" when you're ready and I'll start your timer.`,
       model: null,
       cost: null,
     });
