@@ -4,13 +4,12 @@ import type {
   ParsedScreenStatus,
 } from "./types.js";
 
-// AIDEV-NOTE: Model context window sizes in tokens. Used to compute context_pct from raw token_count.
-// Keep this table updated as new models launch.
-// ORDER MATTERS: resolveModelMax uses substring matching, so more-specific keys (e.g. "gpt-5")
-// must come before less-specific ones (e.g. "gpt-4") if they share a common prefix.
+// AIDEV-NOTE: DEFAULT context window sizes per model family. All Claude models default to 200K.
+// The 1M tier is detected via "(1M" suffix in the status line or inferred from token_count > 200K.
+// ORDER MATTERS: resolveModelMax uses substring matching — longer keys must come first.
 export const MODEL_MAX_TOKENS: Record<string, number> = {
-  // Claude models
-  opus: 1_000_000,
+  // Claude models — ALL default to 200K (1M is the Max-plan tier, detected separately)
+  opus: 200_000,
   sonnet: 200_000,
   haiku: 200_000,
   // GPT / Codex models
@@ -22,28 +21,49 @@ export const MODEL_MAX_TOKENS: Record<string, number> = {
   "gemini-1": 1_000_000,
 };
 
-/**
- * Resolve the max context window size for a model string.
- * Matches by prefix/keyword — e.g. "Sonnet 4.6" matches "sonnet", "gpt-5.4 high" matches "gpt-5".
- * Returns null if model is unknown.
- */
-// Pre-sorted by key length descending so longer (more specific) keys match first.
-// This makes matching deterministic regardless of Object.entries() iteration order.
+// Pre-sorted by key length descending for deterministic longest-match-first.
 const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
   ([a], [b]) => b.length - a.length,
 );
 
+/**
+ * Resolve the DEFAULT context window for a model string.
+ * Returns the base tier (e.g. 200K for Claude). Use inferContextWindow() for
+ * smart inference that detects the 1M tier from "(1M" suffix or token count.
+ */
 export function resolveModelMax(model: string | null): number | null {
   if (!model) return null;
   const lower = model.toLowerCase().trim();
 
-  // Match by substring — also try space-separated variants (e.g., "gpt 4" matches "gpt-4")
   for (const [key, max] of SORTED_MODEL_ENTRIES) {
     if (lower.includes(key) || lower.includes(key.replace("-", " ")))
       return max;
   }
 
   return null;
+}
+
+/**
+ * Smart context window inference. Uses three signals:
+ * 1. Explicit "(1M" in screen text → 1M (Max plan confirmed)
+ * 2. token_count > default window → must be 1M (can't exceed 200K on 200K tier)
+ * 3. Fall back to resolveModelMax() default
+ */
+export function inferContextWindow(
+  model: string | null,
+  tokenCount: number | null,
+  rawText: string,
+): number | null {
+  const defaultMax = resolveModelMax(model);
+  if (defaultMax === null) return null;
+
+  // Signal 1: explicit "(1M" in the status line
+  if (/\(1M\b/i.test(rawText)) return 1_000_000;
+
+  // Signal 2: token count exceeds default → must be a larger tier
+  if (tokenCount !== null && tokenCount > defaultMax) return 1_000_000;
+
+  return defaultMax;
 }
 
 const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -54,6 +74,11 @@ const TOKENS_RE = /\b([0-9][0-9,]*)\s+tokens\b/i;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
   /^\s*[▝▜▛▘▐].*?\b((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][^(\n·|]*)/m;
+// Fallback: 🤖 + model name + version, without requiring cost or pipe
+const MODEL_EMOJI_RE =
+  /🤖\s*((?:Opus|Sonnet|Haiku|GPT|Claude)\s+[0-9][0-9.]*)/i;
+// Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
+const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CODEX_MODEL_RE =
   /^(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\s*[·•]\s*(\d+)%\s+left/m;
@@ -191,7 +216,12 @@ function parseModelAndCost(
     };
   }
 
-  const model = text.match(HEADER_MODEL_RE)?.[1]?.trim() ?? null;
+  // Fallback chain: header spinner → 🤖+version → 🤖+keyword (narrow panes)
+  const model =
+    text.match(HEADER_MODEL_RE)?.[1]?.trim() ??
+    text.match(MODEL_EMOJI_RE)?.[1]?.trim() ??
+    text.match(MODEL_KEYWORD_RE)?.[1]?.trim() ??
+    null;
   const costMatch = text.match(/💰\s*\$([0-9]+(?:\.[0-9]+)?)/);
 
   return {
@@ -285,7 +315,7 @@ export function parseScreen(text: string): ParsedScreenResult {
   const errors = parseErrors(normalized);
   const { model, cost } = parseModelAndCost(normalized, agentType);
   const tokenCount = parseTokenCount(normalized);
-  const contextWindow = resolveModelMax(model);
+  const contextWindow = inferContextWindow(model, tokenCount, normalized);
 
   // Compute context_pct: percentage of context window USED (0=fresh, 100=full)
   // Clamped to [0, 100] — token_count can exceed context_window in practice

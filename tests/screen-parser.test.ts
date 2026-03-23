@@ -3,6 +3,7 @@ import {
   parseScreen,
   MODEL_MAX_TOKENS,
   resolveModelMax,
+  inferContextWindow,
 } from "../src/screen-parser.js";
 
 describe("parseScreen", () => {
@@ -49,6 +50,50 @@ Token usage: total=12,345 input=10,000 output=2,345
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("working");
+  });
+
+  it("extracts model from no-cost status line (production format)", () => {
+    const parsed = parseScreen(`
+✻ Working…
+  Reading files
+Token usage: total=356,835
+🤖 Opus 4.6 (1M context)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Opus 4.6");
+    expect(parsed.token_count).toBe(356835);
+    // "(1M" detected in text → 1M window
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36); // 356835/1000000
+  });
+
+  it("extracts model from narrow pane (keyword only)", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=356,835
+🤖 Opus
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Opus");
+    // token_count > 200K default → must be 1M tier
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(36);
+  });
+
+  it("extracts model from timer-only status line (no cost)", () => {
+    const parsed = parseScreen(`
+⏺ Completed successfully
+Token usage: total=50,000
+🤖 Sonnet 4.6 | ⏱️  2m 11s
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.model).toBe("Sonnet 4.6");
+    expect(parsed.cost).toBeNull();
+    expect(parsed.context_window).toBe(200_000);
+    expect(parsed.context_pct).toBe(25); // 50000/200000
   });
 
   it("parses Codex-style output with model, context left, and actions", () => {
@@ -109,7 +154,8 @@ Token usage: total=40,000 input=35,000 output=5,000
       expect(parsed.context_pct).toBe(20); // 40000/200000 = 20%
     });
 
-    it("computes context_pct for Claude Opus from token_count (1M window)", () => {
+    it("infers 1M window for Opus when token_count > 200K", () => {
+      // No "(1M" marker, but 250K tokens can't fit in 200K → must be 1M tier
       const parsed = parseScreen(`
 ⏺ Completed successfully
 Token usage: total=250,000 input=200,000 output=50,000
@@ -119,8 +165,31 @@ Token usage: total=250,000 input=200,000 output=50,000
       expect(parsed.agent_type).toBe("claude");
       expect(parsed.token_count).toBe(250000);
       expect(parsed.model).toBe("Opus 4.6");
-      expect(parsed.context_window).toBe(1_000_000);
+      expect(parsed.context_window).toBe(1_000_000); // inferred from token_count > 200K
       expect(parsed.context_pct).toBe(25); // 250000/1000000 = 25%
+    });
+
+    it("defaults Opus to 200K when token_count is low and no 1M signal", () => {
+      const parsed = parseScreen(`
+✻ Working…
+Token usage: total=50,000
+🤖 Opus 4.6 | 💰 $2.00
+`);
+
+      expect(parsed.model).toBe("Opus 4.6");
+      expect(parsed.context_window).toBe(200_000); // default tier
+      expect(parsed.context_pct).toBe(25); // 50000/200000
+    });
+
+    it("detects 1M tier from explicit (1M marker in status line", () => {
+      const parsed = parseScreen(`
+✻ Working…
+Token usage: total=50,000
+🤖 Opus 4.6 (1M context)
+`);
+
+      expect(parsed.context_window).toBe(1_000_000); // "(1M" detected
+      expect(parsed.context_pct).toBe(5); // 50000/1000000
     });
 
     it("computes context_pct for Claude Haiku from token_count (200K window)", () => {
@@ -178,7 +247,21 @@ etanheyman ~ [master] $
       expect(parsed).toHaveProperty("context_window");
     });
 
-    it("clamps context_pct to 100 when token_count exceeds context_window", () => {
+    it("clamps context_pct to 100 when near context limit", () => {
+      // Sonnet 200K tier with exactly 200K tokens
+      const parsed = parseScreen(`
+⏺ Completed successfully
+Token usage: total=200,000
+🤖 Sonnet 4.6 | 💰 $8.00
+`);
+
+      expect(parsed.token_count).toBe(200000);
+      expect(parsed.context_window).toBe(200_000);
+      expect(parsed.context_pct).toBe(100);
+    });
+
+    it("infers 1M when Sonnet token_count exceeds 200K default", () => {
+      // 300K tokens can't fit in 200K → must be Max plan (1M)
       const parsed = parseScreen(`
 ⏺ Completed successfully
 Token usage: total=300,000 input=250,000 output=50,000
@@ -186,8 +269,8 @@ Token usage: total=300,000 input=250,000 output=50,000
 `);
 
       expect(parsed.token_count).toBe(300000);
-      expect(parsed.context_window).toBe(200_000);
-      expect(parsed.context_pct).toBe(100); // clamped, not 150
+      expect(parsed.context_window).toBe(1_000_000); // inferred upgrade
+      expect(parsed.context_pct).toBe(30); // 300000/1000000
     });
 
     it("computes context_pct for Gemini from token_count", () => {
@@ -205,20 +288,13 @@ Model: gemini-2.5-pro
     });
   });
 
-  describe("resolveModelMax", () => {
-    it("resolves Sonnet variants to 200K", () => {
+  describe("resolveModelMax (default tiers)", () => {
+    it("resolves ALL Claude models to 200K default", () => {
       expect(resolveModelMax("Sonnet 4.6")).toBe(200_000);
-      expect(resolveModelMax("Sonnet 4")).toBe(200_000);
-      expect(resolveModelMax("sonnet")).toBe(200_000);
-    });
-
-    it("resolves Opus variants to 1M", () => {
-      expect(resolveModelMax("Opus 4.6")).toBe(1_000_000);
-      expect(resolveModelMax("opus")).toBe(1_000_000);
-    });
-
-    it("resolves Haiku variants to 200K", () => {
+      expect(resolveModelMax("Opus 4.6")).toBe(200_000);
       expect(resolveModelMax("Haiku 3.5")).toBe(200_000);
+      expect(resolveModelMax("sonnet")).toBe(200_000);
+      expect(resolveModelMax("opus")).toBe(200_000);
       expect(resolveModelMax("haiku")).toBe(200_000);
     });
 
@@ -230,7 +306,6 @@ Model: gemini-2.5-pro
     it("resolves GPT-5/Codex models to 1M (hyphenated and space-separated)", () => {
       expect(resolveModelMax("gpt-5.4 high")).toBe(1_000_000);
       expect(resolveModelMax("gpt-5.4")).toBe(1_000_000);
-      // Space-separated format from Claude's HEADER_MODEL_RE
       expect(resolveModelMax("GPT 5")).toBe(1_000_000);
     });
 
@@ -244,6 +319,43 @@ Model: gemini-2.5-pro
     it("returns null for unknown models", () => {
       expect(resolveModelMax(null)).toBeNull();
       expect(resolveModelMax("mystery-model")).toBeNull();
+    });
+  });
+
+  describe("inferContextWindow (smart tier detection)", () => {
+    it("returns default 200K for Opus with low token count", () => {
+      expect(inferContextWindow("Opus 4.6", 50_000, "🤖 Opus 4.6")).toBe(
+        200_000,
+      );
+    });
+
+    it("upgrades to 1M when (1M marker present", () => {
+      expect(
+        inferContextWindow("Opus 4.6", 50_000, "🤖 Opus 4.6 (1M context)"),
+      ).toBe(1_000_000);
+    });
+
+    it("upgrades to 1M when token_count exceeds default", () => {
+      expect(inferContextWindow("Opus 4.6", 250_000, "🤖 Opus 4.6")).toBe(
+        1_000_000,
+      );
+      expect(inferContextWindow("Sonnet 4.6", 300_000, "🤖 Sonnet 4.6")).toBe(
+        1_000_000,
+      );
+    });
+
+    it("keeps 1M for models that default to 1M (GPT, Gemini)", () => {
+      expect(inferContextWindow("gpt-5.4 high", 50_000, "gpt-5.4")).toBe(
+        1_000_000,
+      );
+      expect(
+        inferContextWindow("gemini-2.5-pro", 50_000, "gemini-2.5-pro"),
+      ).toBe(1_000_000);
+    });
+
+    it("returns null for unknown models", () => {
+      expect(inferContextWindow(null, 50_000, "")).toBeNull();
+      expect(inferContextWindow("mystery", 50_000, "")).toBeNull();
     });
   });
 });
