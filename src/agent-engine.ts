@@ -8,7 +8,6 @@ import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import type { CmuxNewSplitResult, CmuxReadScreenResult } from "./types.js";
 import {
   generateAgentId,
-  parseContextPercent,
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   type AgentRecord,
@@ -16,6 +15,7 @@ import {
   type CliType,
   type WaitResult,
 } from "./agent-types.js";
+import { parseScreen } from "./screen-parser.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -235,10 +235,13 @@ export class AgentEngine {
       }
 
       // Quality tracking: check context usage for non-terminal agents
+      // AIDEV-NOTE: Uses parseScreen for model-aware context_pct (handles Claude, Codex, Gemini).
+      // Replaces legacy parseContextPercent which only matched "X% context" text patterns.
       if (!TERMINAL_STATES.has(state)) {
         try {
           const screen = await this.client.readScreen(surface_id, { lines: 5 });
-          const contextPct = parseContextPercent(screen.text);
+          const parsed = parseScreen(screen.text);
+          const contextPct = parsed.context_pct;
           if (
             contextPct !== null &&
             contextPct >= 80 &&
