@@ -620,7 +620,7 @@ describe("tool handler integration", () => {
       readScreen: vi.fn().mockResolvedValue({
         surface: "surface:1",
         text: [
-          '  Say "go" when you\'re ready and I\'ll start your timer.',
+          "  Say \"go\" when you're ready and I'll start your timer.",
           "",
           "  CLAUDE_COUNTER: 186",
           "",
@@ -902,7 +902,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("notify handler calls cmux notify with defaults and optional args", async () => {
+  it("notify handler calls cmux notify without --title when title omitted", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
@@ -922,8 +922,6 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenCalledWith("cmux", [
       "--json",
       "notify",
-      "--title",
-      "Notification",
       "--subtitle",
       "Build",
       "--body",
@@ -938,12 +936,29 @@ describe("tool handler integration", () => {
     expect(parsed).toMatchObject({
       ok: true,
       applied: "notify",
-      title: "Notification",
+      title: null,
       subtitle: "Build",
       body: "Finished successfully",
       workspace: "workspace:1",
       surface: "surface:1",
     });
+  });
+
+  it("notify handler passes --title when title is provided", async () => {
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["notify"];
+
+    await tool.handler({ title: "Done" }, {} as any);
+
+    expect(mockExec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "notify",
+      "--title",
+      "Done",
+    ]);
   });
 
   it("set_progress handler calls cmux set-progress", async () => {

@@ -277,7 +277,8 @@ export class CmuxClient {
     workspace?: string;
     surface?: string;
   }): Promise<void> {
-    const args = ["notify", "--title", opts?.title ?? "Notification"];
+    const args = ["notify"];
+    if (opts?.title) args.push("--title", opts.title);
     if (opts?.subtitle) args.push("--subtitle", opts.subtitle);
     if (opts?.body) args.push("--body", opts.body);
     if (opts?.workspace) args.push("--workspace", opts.workspace);

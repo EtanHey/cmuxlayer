@@ -70,9 +70,7 @@ function pickLatestSurfaceModel(
 
   matches.sort((a, b) => {
     if (b.version !== a.version) return b.version - a.version;
-    return (
-      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   });
 
   return matches[0]?.model ?? null;
@@ -85,7 +83,8 @@ function enrichParsedScreen(
 ): ParsedScreenResult {
   const model = parsed.model ?? fallbackModel;
   const contextWindow =
-    parsed.context_window ?? inferContextWindow(model, parsed.token_count, rawText);
+    parsed.context_window ??
+    inferContextWindow(model, parsed.token_count, rawText);
 
   let contextPct = parsed.context_pct;
   if (
@@ -207,7 +206,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: workspaceRef,
             pane: pane.ref,
           });
-          const surface = group.surfaces.find((entry) => entry.ref === surfaceRef);
+          const surface = group.surfaces.find(
+            (entry) => entry.ref === surfaceRef,
+          );
           if (surface) {
             return surface;
           }
@@ -533,8 +534,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       title: z
         .string()
         .optional()
-        .default("Notification")
-        .describe("Notification title"),
+        .describe(
+          'Notification title; omit to use cmux CLI default ("Notification")',
+        ),
       subtitle: z.string().optional().describe("Notification subtitle"),
       body: z.string().optional().describe("Notification body"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -542,20 +544,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
     async (args) => {
       try {
-        const title = args.title ?? "Notification";
         await client.notify({
-          title,
+          title: args.title,
           subtitle: args.subtitle,
           body: args.body,
           workspace: args.workspace,
           surface: args.surface,
         });
         return ok({
-          title,
-          subtitle: args.subtitle,
-          body: args.body,
-          workspace: args.workspace,
-          surface: args.surface,
+          title: args.title ?? null,
+          subtitle: args.subtitle ?? null,
+          body: args.body ?? null,
+          workspace: args.workspace ?? null,
+          surface: args.surface ?? null,
           applied: "notify",
         });
       } catch (e) {
