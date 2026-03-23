@@ -440,6 +440,28 @@ export class CmuxSocketClient {
     await this.sendV1Args("rename_tab", args);
   }
 
+  async notify(opts?: {
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    workspace?: string;
+    surface?: string;
+  }): Promise<void> {
+    const args: V1Arg[] = [];
+    if (opts?.title) {
+      args.push(this.rawV1Arg("--title"), opts.title);
+    }
+    if (opts?.subtitle) args.push(this.rawV1Arg("--subtitle"), opts.subtitle);
+    if (opts?.body) args.push(this.rawV1Arg("--body"), opts.body);
+    if (opts?.workspace) {
+      args.push(this.rawV1Arg("--workspace"), opts.workspace);
+    }
+    if (opts?.surface) {
+      args.push(this.rawV1Arg("--surface"), opts.surface);
+    }
+    await this.sendV1Args("notify", args);
+  }
+
   async setStatus(
     key: string,
     value: string,
@@ -462,7 +484,9 @@ export class CmuxSocketClient {
     const args: V1Arg[] = [key];
     if (opts?.workspace) {
       args.push(
-        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+        this.rawV1Arg(
+          `--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`,
+        ),
       );
     }
     await this.sendV1Args("clear_status", args);
@@ -487,7 +511,9 @@ export class CmuxSocketClient {
     const args: V1Arg[] = [];
     if (opts?.workspace) {
       args.push(
-        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+        this.rawV1Arg(
+          `--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`,
+        ),
       );
     }
     await this.sendV1Args("clear_progress", args);
@@ -527,7 +553,9 @@ export class CmuxSocketClient {
     const args: V1Arg[] = [];
     if (opts?.workspace) {
       args.push(
-        this.rawV1Arg(`--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`),
+        this.rawV1Arg(
+          `--tab=${await this.resolveWorkspaceTabId(opts.workspace)}`,
+        ),
       );
     }
     const raw = await this.sendV1Args("list_status", args);

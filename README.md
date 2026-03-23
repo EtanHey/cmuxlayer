@@ -7,13 +7,13 @@
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-233%20passing-brightgreen.svg)](#testing)
-[![MCP](https://img.shields.io/badge/MCP-10%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-272%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-11%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**233 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **10 MCP tools** · **Agent lifecycle engine**
+**272 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **11 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 
@@ -48,7 +48,7 @@ Set `CMUXLAYER_ENABLE_CLAUDE_CHANNELS=1` in the server environment and launch Cl
 
 See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the notification format, OpenClaw pairing patterns worth stealing, and the remaining gaps for a real cmux mobile client.
 
-## MCP Tools (10)
+## MCP Tools (11)
 
 | Tool | Description |
 |------|-------------|
@@ -58,6 +58,7 @@ See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the not
 | `send_key` | Send a key press to a surface |
 | `read_screen` | Read raw screen text plus parsed agent state from a surface |
 | `rename_tab` | Rename a surface tab (with optional prefix preservation) |
+| `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set sidebar progress indicator (0.0-1.0) |
 | `close_surface` | Close a surface |

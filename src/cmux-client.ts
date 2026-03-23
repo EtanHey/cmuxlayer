@@ -270,6 +270,22 @@ export class CmuxClient {
     await this.run(args);
   }
 
+  async notify(opts?: {
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    workspace?: string;
+    surface?: string;
+  }): Promise<void> {
+    const args = ["notify"];
+    if (opts?.title) args.push("--title", opts.title);
+    if (opts?.subtitle) args.push("--subtitle", opts.subtitle);
+    if (opts?.body) args.push("--body", opts.body);
+    if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.surface) args.push("--surface", opts.surface);
+    await this.run(args);
+  }
+
   async setStatus(
     key: string,
     value: string,

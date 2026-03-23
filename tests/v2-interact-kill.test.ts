@@ -40,14 +40,14 @@ describe("V2 tool registration", () => {
     expect(tools).toContain("kill");
   });
 
-  it("total tool count is 20 (10 low-level + 8 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 21 (11 low-level + 8 agent lifecycle + 2 v2)", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
     });
     const server = createServer({ exec: mockExec, stateDir: TEST_DIR });
     const count = Object.keys((server as any)._registeredTools).length;
-    expect(count).toBe(20);
+    expect(count).toBe(21);
   });
 });
 

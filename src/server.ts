@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 10 low-level tools + 7 agent lifecycle tools.
+ * cmux MCP server — registers 11 low-level tools + 7 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -70,9 +70,7 @@ function pickLatestSurfaceModel(
 
   matches.sort((a, b) => {
     if (b.version !== a.version) return b.version - a.version;
-    return (
-      new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   });
 
   return matches[0]?.model ?? null;
@@ -85,7 +83,8 @@ function enrichParsedScreen(
 ): ParsedScreenResult {
   const model = parsed.model ?? fallbackModel;
   const contextWindow =
-    parsed.context_window ?? inferContextWindow(model, parsed.token_count, rawText);
+    parsed.context_window ??
+    inferContextWindow(model, parsed.token_count, rawText);
 
   let contextPct = parsed.context_pct;
   if (
@@ -207,7 +206,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: workspaceRef,
             pane: pane.ref,
           });
-          const surface = group.surfaces.find((entry) => entry.ref === surfaceRef);
+          const surface = group.surfaces.find(
+            (entry) => entry.ref === surfaceRef,
+          );
           if (surface) {
             return surface;
           }
@@ -525,7 +526,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 7. set_status
+  // 7. notify
+  server.tool(
+    "notify",
+    "Show a cmux notification banner for a workspace or specific surface.",
+    {
+      title: z
+        .string()
+        .optional()
+        .describe(
+          'Notification title; omit to use cmux CLI default ("Notification")',
+        ),
+      subtitle: z.string().optional().describe("Notification subtitle"),
+      body: z.string().optional().describe("Notification body"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      surface: z.string().optional().describe("Target surface ref"),
+    },
+    async (args) => {
+      try {
+        await client.notify({
+          title: args.title,
+          subtitle: args.subtitle,
+          body: args.body,
+          workspace: args.workspace,
+          surface: args.surface,
+        });
+        return ok({
+          title: args.title ?? null,
+          subtitle: args.subtitle ?? null,
+          body: args.body ?? null,
+          workspace: args.workspace ?? null,
+          surface: args.surface ?? null,
+          applied: "notify",
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 8. set_status
   server.tool(
     "set_status",
     "Set a sidebar status key-value pair",
@@ -561,7 +601,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 8. set_progress
+  // 9. set_progress
   server.tool(
     "set_progress",
     "Set sidebar progress indicator (0.0 to 1.0)",
@@ -593,7 +633,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 9. close_surface
+  // 10. close_surface
   server.tool(
     "close_surface",
     "Close a surface (terminal or browser pane)",
@@ -613,7 +653,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 10. browser_surface
+  // 11. browser_surface
   server.tool(
     "browser_surface",
     "Interact with a browser surface (open, navigate, snapshot, click, type, eval, wait)",
