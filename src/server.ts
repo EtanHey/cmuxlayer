@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 11 low-level tools + 7 agent lifecycle tools.
+ * cmux MCP server — registers 11 core tools + 10 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
