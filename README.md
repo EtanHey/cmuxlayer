@@ -7,13 +7,13 @@
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-272%20passing-brightgreen.svg)](#testing)
-[![MCP](https://img.shields.io/badge/MCP-11%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-278%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-21%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**272 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **11 MCP tools** · **Agent lifecycle engine**
+**278 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **21 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 
@@ -48,7 +48,9 @@ Set `CMUXLAYER_ENABLE_CLAUDE_CHANNELS=1` in the server environment and launch Cl
 
 See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the notification format, OpenClaw pairing patterns worth stealing, and the remaining gaps for a real cmux mobile client.
 
-## MCP Tools (11)
+## MCP Tools (21)
+
+### Core (11)
 
 | Tool | Description |
 |------|-------------|
@@ -63,6 +65,21 @@ See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the not
 | `set_progress` | Set sidebar progress indicator (0.0-1.0) |
 | `close_surface` | Close a surface |
 | `browser_surface` | Interact with browser surfaces |
+
+### Agent Lifecycle (10)
+
+| Tool | Description |
+|------|-------------|
+| `spawn_agent` | Spawn a CLI agent in a new or existing surface |
+| `send_to_agent` | Send a prompt or message to a running agent |
+| `read_agent_output` | Read recent output from an agent's surface |
+| `get_agent_state` | Get current state of a tracked agent |
+| `list_agents` | List all tracked agents and their states |
+| `wait_for` | Wait for an agent to reach a target state (with timeout) |
+| `wait_for_all` | Wait for multiple agents to reach target states |
+| `stop_agent` | Gracefully stop a running agent |
+| `kill` | Force-kill an agent process |
+| `interact` | Send interactive input (confirm, cancel, etc.) to an agent |
 
 ## Architecture
 
@@ -87,6 +104,7 @@ AI Agent  ─── MCP ───>  cmuxlayer
 | `naming.ts` | Surface naming rules (launcher prefix preservation) |
 | `mode-policy.ts` | Mode enforcement (autonomous = full access, manual = read-only) |
 | `state-manager.ts` | Sidebar state synchronization |
+| `screen-parser.ts` | Parse terminal output to extract agent type, model, token count, context % |
 | `event-log.ts` | Audit trail for all agent actions |
 | `pattern-registry.ts` | Reusable patterns for common workflows |
 
@@ -122,7 +140,7 @@ cmuxlayer development has contributed back to cmux:
 ## Testing
 
 ```bash
-bun run test        # 230 tests via vitest
+bun run test        # 278 tests via vitest
 bun run typecheck   # Type checking
 ```
 
