@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
+import { AgentRegistry } from "../src/agent-registry.js";
 
 // The 11 low-level tools from the design doc
 const EXPECTED_TOOLS = [
@@ -1076,5 +1077,37 @@ describe("tool handler integration", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/selector.*required/i);
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+describe("registry reconstitution error logging", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("logs errors instead of silently swallowing them", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(AgentRegistry.prototype, "reconstitute").mockRejectedValueOnce(
+      new Error("disk corrupted"),
+    );
+
+    const mockExec: ExecFn = vi
+      .fn()
+      .mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    createServer({ exec: mockExec });
+
+    // Allow the async .catch() handler to run
+    await vi.waitFor(() => {
+      expect(console.error).toHaveBeenCalledWith(
+        "[cmux-mcp] registry reconstitution failed:",
+        expect.any(Error),
+      );
+    });
   });
 });
