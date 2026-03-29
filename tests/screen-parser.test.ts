@@ -263,6 +263,18 @@ I mentioned 42 tokens in this note, but this is just prose and not a status line
     expect(parsed.context_pct).toBeNull();
   });
 
+  it("does not treat prose ending with token count as a status line", () => {
+    const parsed = parseScreen(`
+⏺ Completed successfully
+I only have 42 tokens
+🤖 Sonnet 4.6 | 💰 $0.10
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.token_count).toBeNull();
+    expect(parsed.context_pct).toBeNull();
+  });
+
   it("infers Claude context window from token count when the model footer is fully truncated", () => {
     const parsed = parseScreen(`
   Say "go" when you're ready and I'll start your timer.
