@@ -190,7 +190,12 @@ function parseTokenCount(text: string): number | null {
     return Number.parseInt(usageMatch[1].replaceAll(",", ""), 10);
   }
 
-  const tokensMatch = text.match(TOKENS_RE);
+  // AIDEV-NOTE: TOKENS_RE is a loose fallback ("N tokens") that can false-positive on prose.
+  // Restrict it to the last 5 non-empty lines of the screen buffer where footer/status lines live.
+  const lines = text.split("\n");
+  const nonEmpty = lines.filter((l) => l.trim() !== "");
+  const tail = nonEmpty.slice(-5).join("\n");
+  const tokensMatch = tail.match(TOKENS_RE);
   if (tokensMatch) {
     return Number.parseInt(tokensMatch[1].replaceAll(",", ""), 10);
   }
