@@ -14,6 +14,13 @@ import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
 import type { AgentRecord } from "./agent-types.js";
+import {
+  formatListSurfaces,
+  formatReadScreen,
+  formatListAgents,
+  formatAgentState,
+  formatOk,
+} from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
@@ -33,6 +40,18 @@ function ok(data: Record<string, unknown>): ToolReturn {
   const payload = { ok: true, ...data };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
+    structuredContent: payload,
+  };
+}
+
+/** ok() variant with formatted human-readable text content */
+function okFormatted(
+  formattedText: string,
+  data: Record<string, unknown>,
+): ToolReturn {
+  const payload = { ok: true, ...data };
+  return {
+    content: [{ type: "text", text: formattedText }],
     structuredContent: payload,
   };
 }
@@ -290,11 +309,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }),
           ),
         );
-        return ok({
+        const data = {
           workspaces: workspaces.workspaces,
           surfaces,
           workspace_ref: args.workspace,
-        });
+        };
+        const formatted = formatListSurfaces(
+          surfaces as Array<{
+            ref?: string;
+            title?: string;
+            type?: string;
+            workspace_ref?: string;
+            pane_ref?: string;
+            screen_preview?: string;
+          }>,
+          workspaces.workspaces as Array<{ ref: string; title?: string }>,
+        );
+        return okFormatted(formatted, data);
       } catch (e) {
         return err(e);
       }
@@ -342,7 +373,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           result.title = args.title;
         }
-        return ok({ ...result });
+        const data = { ...result };
+        return okFormatted(
+          formatOk("new_split", {
+            surface: result.surface,
+            direction: args.direction,
+            type: args.type,
+            title: result.title,
+          }),
+          data,
+        );
       } catch (e) {
         return err(e);
       }
@@ -395,7 +435,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: args.workspace,
           });
         }
-        return ok({ surface: args.surface, applied: "send_input" });
+        const data = { surface: args.surface };
+        return okFormatted(formatOk("send_input", data), data);
       } catch (e) {
         return err(e);
       }
@@ -416,7 +457,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await client.sendKey(args.surface, args.key, {
           workspace: args.workspace,
         });
-        return ok({ surface: args.surface, applied: "send_key" });
+        const data = { surface: args.surface, key: args.key };
+        return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
       }
@@ -466,21 +508,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         if (args.parsed_only) {
-          return ok({
+          const data = {
             surface: result.surface,
             title: surface?.title ?? null,
             parsed,
-          });
+          };
+          const formatted = formatReadScreen(
+            result.surface,
+            surface?.title ?? null,
+            null,
+            parsed,
+            false,
+            0,
+          );
+          return okFormatted(formatted, data);
         }
 
-        return ok({
+        const data = {
           surface: result.surface,
           title: surface?.title ?? null,
           lines: result.lines,
           content: result.text,
           scrollback_used: result.scrollback_used,
           parsed,
-        });
+        };
+        const formatted = formatReadScreen(
+          result.surface,
+          surface?.title ?? null,
+          result.text,
+          parsed,
+          result.scrollback_used,
+          result.lines,
+        );
+        return okFormatted(formatted, data);
       } catch (e) {
         return err(e);
       }
@@ -515,11 +575,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await client.renameTab(args.surface, finalTitle, {
           workspace: args.workspace,
         });
-        return ok({
-          surface: args.surface,
-          title: finalTitle,
-          applied: "rename_tab",
-        });
+        const data = { surface: args.surface, title: finalTitle };
+        return okFormatted(formatOk("rename_tab", data), data);
       } catch (e) {
         return err(e);
       }
@@ -551,14 +608,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: args.workspace,
           surface: args.surface,
         });
-        return ok({
+        const data = {
           title: args.title ?? null,
           subtitle: args.subtitle ?? null,
           body: args.body ?? null,
           workspace: args.workspace ?? null,
           surface: args.surface ?? null,
-          applied: "notify",
-        });
+        };
+        return okFormatted(formatOk("notify", data), data);
       } catch (e) {
         return err(e);
       }
@@ -590,11 +647,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: args.workspace,
           surface: args.surface,
         });
-        return ok({
-          key: args.key,
-          value: args.value,
-          applied: "set_status",
-        });
+        const data = { key: args.key, value: args.value };
+        return okFormatted(formatOk("set_status", data), data);
       } catch (e) {
         return err(e);
       }
@@ -622,11 +676,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: args.workspace,
           surface: args.surface,
         });
-        return ok({
-          value: args.value,
-          label: args.label,
-          applied: "set_progress",
-        });
+        const data = { value: args.value, label: args.label };
+        return okFormatted(formatOk("set_progress", data), data);
       } catch (e) {
         return err(e);
       }
@@ -646,7 +697,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
         });
-        return ok({ surface: args.surface, applied: "close_surface" });
+        const data = { surface: args.surface };
+        return okFormatted(formatOk("close_surface", data), data);
       } catch (e) {
         return err(e);
       }
@@ -751,11 +803,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         const result = await client.browser(browserArgs);
         // browser_surface actions map to cmux browser-surface subcommands
-        return ok({
-          action: args.action,
-          surface: args.surface,
-          result,
-        });
+        const data = { action: args.action, surface: args.surface, result };
+        return okFormatted(formatOk("browser_surface", data), data);
       } catch (e) {
         return err(e);
       }
@@ -859,7 +908,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             parent_agent_id: args.parent_agent_id,
             max_cost_per_agent: args.max_cost_per_agent,
           });
-          return ok({ ...result });
+          return okFormatted(
+            formatOk("spawn_agent", {
+              agent_id: result.agent_id,
+              repo: args.repo,
+              model: args.model,
+              surface: result.surface_id,
+            }),
+            { ...result },
+          );
         } catch (e) {
           return err(e);
         }
@@ -890,7 +947,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.target_state,
             args.timeout_ms,
           );
-          return ok({ ...result });
+          return okFormatted(
+            formatOk("wait_for", {
+              agent_id: args.agent_id,
+              state: result.state,
+            }),
+            { ...result },
+          );
         } catch (e) {
           return err(e);
         }
@@ -921,7 +984,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.target_state,
             args.timeout_ms,
           );
-          return ok({ results });
+          return okFormatted(
+            formatOk("wait_for_all", {
+              count: results.length,
+              target: args.target_state,
+            }),
+            { results },
+          );
         } catch (e) {
           return err(e);
         }
@@ -940,7 +1009,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const state = engine.getAgentState(args.agent_id);
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
-          return ok(state as unknown as Record<string, unknown>);
+          const formatted = formatAgentState(state);
+          return okFormatted(
+            formatted,
+            state as unknown as Record<string, unknown>,
+          );
         } catch (e) {
           return err(e);
         }
@@ -974,10 +1047,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             repo: args.repo,
             model: args.model,
           });
-          return ok({
+          const data = {
             agents: agents as unknown as Record<string, unknown>[],
             count: agents.length,
-          });
+          };
+          const formatted = formatListAgents(agents, agents.length);
+          return okFormatted(formatted, data);
         } catch (e) {
           return err(e);
         }
@@ -1000,11 +1075,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           await engine.stopAgent(args.agent_id, args.force);
           const state = engine.getAgentState(args.agent_id);
-          return ok({
+          const data = {
             agent_id: args.agent_id,
             state: state?.state ?? "done",
-            applied: "stop_agent",
-          });
+          };
+          return okFormatted(formatOk("stop_agent", data), data);
         } catch (e) {
           return err(e);
         }
@@ -1027,10 +1102,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
-          return ok({
-            agent_id: args.agent_id,
-            applied: "send_to_agent",
-          });
+          const data = { agent_id: args.agent_id };
+          return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
           return err(e);
         }
@@ -1183,50 +1256,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           switch (args.action) {
             case "send": {
               await engine.sendToAgent(args.agent, args.text!, true);
-              return ok({
-                agent_id: args.agent,
-                action: "send",
-                applied: true,
-              });
+              const d = { agent_id: args.agent, action: "send" };
+              return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
               await client.sendKey(agent.surface_id, "c-c", {});
-              return ok({
-                agent_id: args.agent,
-                action: "interrupt",
-                applied: true,
-              });
+              const d = { agent_id: args.agent, action: "interrupt" };
+              return okFormatted(formatOk("interact:interrupt", d), d);
             }
             case "model": {
               const modelCmd = `/model ${args.model}`;
               await engine.sendToAgent(args.agent, modelCmd, true);
-              return ok({
+              const d = {
                 agent_id: args.agent,
                 action: "model",
                 model: args.model,
-                applied: true,
-              });
+              };
+              return okFormatted(formatOk("interact:model", d), d);
             }
             case "resume": {
               const resumeCmd = args.session_id
                 ? `/resume ${args.session_id}`
                 : "/resume";
               await engine.sendToAgent(args.agent, resumeCmd, true);
-              return ok({
+              const d = {
                 agent_id: args.agent,
                 action: "resume",
                 session_id: args.session_id,
-                applied: true,
-              });
+              };
+              return okFormatted(formatOk("interact:resume", d), d);
             }
             case "skill": {
               await engine.sendToAgent(args.agent, args.command!, true);
-              return ok({
+              const d = {
                 agent_id: args.agent,
                 action: "skill",
                 command: args.command,
-                applied: true,
-              });
+              };
+              return okFormatted(formatOk("interact:skill", d), d);
             }
             case "usage": {
               // Read screen to extract usage info
@@ -1297,7 +1364,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           if (targetIds.length === 0) {
-            return ok({ killed: [], message: "No agents to kill" });
+            return okFormatted(
+              formatOk("kill", { message: "No agents to kill" }),
+              { killed: [] },
+            );
           }
 
           // Kill each agent, collecting results
@@ -1318,11 +1388,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
 
-          return ok({
+          const data = {
             killed,
             errors: errors.length > 0 ? errors : undefined,
             force: args.force,
-          });
+          };
+          return okFormatted(formatOk("kill", { count: killed.length }), data);
         } catch (e) {
           return err(e);
         }

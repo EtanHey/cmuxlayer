@@ -330,7 +330,8 @@ describe("tool handler integration", () => {
       ]),
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.surfaces).toHaveLength(2);
     expect(parsed.surfaces[0]).toMatchObject({
       ref: "surface:1",
@@ -413,7 +414,8 @@ describe("tool handler integration", () => {
     );
 
     expect(result.isError).toBeUndefined();
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.surfaces[0].screen_preview_error).toMatch(
       /surface unavailable/,
     );
@@ -446,7 +448,8 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["read-screen"]),
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.content).toContain("hello");
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
@@ -534,7 +537,8 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.title).toBe("orchestratorClaude");
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
@@ -600,7 +604,8 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.title).toBe("orchestratorClaude");
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
@@ -670,7 +675,8 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.title).toBe("qwanClaude (main)");
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
@@ -701,7 +707,8 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["send"]),
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
   });
 
@@ -753,7 +760,8 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["new-split", "right"]),
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.surface).toBe("surface:2");
   });
 
@@ -806,7 +814,8 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["set-status", "task", "building"]),
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
   });
 
@@ -932,10 +941,10 @@ describe("tool handler integration", () => {
       "surface:1",
     ]);
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed).toMatchObject({
       ok: true,
-      applied: "notify",
       title: null,
       subtitle: "Build",
       body: "Finished successfully",
@@ -1058,7 +1067,8 @@ describe("tool handler integration", () => {
       "surface:9",
       "url",
     ]);
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.result).toEqual({ url: "https://example.com" });
   });
