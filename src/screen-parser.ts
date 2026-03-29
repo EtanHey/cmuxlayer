@@ -78,6 +78,9 @@ const DONE_SIGNAL_RE = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)\b/;
 const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
 const RESPONSE_BLOCK_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/s;
 const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
+// Match token counts only at end of status lines to avoid false positives from prose.
+// Example valid: "418310 tokens" or "  100,000 tokens"
+// Example invalid: "I mentioned 42 tokens in this note"
 const TOKENS_RE = /(?:^|\n).*?\b([0-9][0-9,]*)\s+tokens\s*$/im;
 const MODEL_COST_RE = /🤖\s*([^|\n]+?)\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)/i;
 const HEADER_MODEL_RE =
