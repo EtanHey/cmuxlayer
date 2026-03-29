@@ -837,6 +837,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("CLI tool to launch"),
         prompt: z.string().describe("Task prompt to send after agent is ready"),
         workspace: z.string().optional().describe("Target workspace ref"),
+        parent_agent_id: z
+          .string()
+          .optional()
+          .describe(
+            "ID of the parent agent for hierarchical spawning. Parent must exist.",
+          ),
+        max_cost_per_agent: z
+          .number()
+          .optional()
+          .describe("Maximum cost cap in USD for this agent"),
       },
       async (args) => {
         try {
@@ -846,6 +856,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: args.cli,
             prompt: args.prompt,
             workspace: args.workspace,
+            parent_agent_id: args.parent_agent_id,
+            max_cost_per_agent: args.max_cost_per_agent,
           });
           return ok({ ...result });
         } catch (e) {
@@ -1053,10 +1065,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.workspace) opts.workspace = args.workspace;
 
           const raw = await client.readScreen(args.surface, opts);
-          const text =
-            typeof raw === "string"
-              ? raw
-              : ((raw as { content?: string }).content ?? "");
+          const text = typeof raw === "string" ? raw : (raw.text ?? "");
 
           const startMarker = `${args.tag}_START`;
           const endMarker = `${args.tag}_END`;
