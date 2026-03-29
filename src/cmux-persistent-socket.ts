@@ -16,6 +16,19 @@ import {
 const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
 const REQUEST_TIMEOUT_MS = 10_000;
 
+export interface BackoffOptions {
+  /** Base delay in milliseconds (default: 100) */
+  baseMs?: number;
+  /** Maximum delay in milliseconds (default: 10_000) */
+  maxMs?: number;
+  /** Apply random jitter to prevent thundering herd (default: true) */
+  jitter?: boolean;
+}
+
+export interface CmuxPersistentSocketOptions extends CmuxSocketClientOptions {
+  backoff?: BackoffOptions;
+}
+
 interface V2Request {
   id: string;
   method: string;
@@ -46,10 +59,43 @@ export class CmuxPersistentSocket {
   /** Guards against concurrent connect() calls */
   private connectPromise: Promise<void> | null = null;
 
-  constructor(opts?: CmuxSocketClientOptions) {
+  // Backoff state
+  private backoffBaseMs: number;
+  private backoffMaxMs: number;
+  private backoffJitter: boolean;
+  private backoffAttempt = 0;
+  private _currentBackoffMs = 0;
+
+  constructor(opts?: CmuxPersistentSocketOptions) {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.backoffBaseMs = opts?.backoff?.baseMs ?? 100;
+    this.backoffMaxMs = opts?.backoff?.maxMs ?? 10_000;
+    this.backoffJitter = opts?.backoff?.jitter ?? true;
+  }
+
+  /** Current backoff delay in ms (0 when connected or no failures). */
+  currentBackoffMs(): number {
+    return this._currentBackoffMs;
+  }
+
+  /** Advance backoff to the next exponential step. */
+  incrementBackoff(): void {
+    this.backoffAttempt++;
+    const exponential = Math.min(
+      this.backoffBaseMs * Math.pow(2, this.backoffAttempt - 1),
+      this.backoffMaxMs,
+    );
+    this._currentBackoffMs = this.backoffJitter
+      ? Math.round(exponential * (0.5 + Math.random() * 0.5))
+      : exponential;
+  }
+
+  /** Reset backoff after a successful connection. */
+  resetBackoff(): void {
+    this.backoffAttempt = 0;
+    this._currentBackoffMs = 0;
   }
 
   async connect(): Promise<void> {
@@ -64,6 +110,7 @@ export class CmuxPersistentSocket {
         this.connected = true;
         settled = true;
         this.connectPromise = null;
+        this.resetBackoff();
         resolve();
       });
 
@@ -143,6 +190,10 @@ export class CmuxPersistentSocket {
     params: Record<string, unknown> = {},
   ): Promise<T> {
     if (!this.connected || !this.socket) {
+      if (this._currentBackoffMs > 0) {
+        await new Promise((r) => setTimeout(r, this._currentBackoffMs));
+      }
+      this.incrementBackoff();
       await this.connect();
     }
 
