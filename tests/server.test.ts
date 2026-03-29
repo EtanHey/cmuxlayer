@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
@@ -65,6 +66,11 @@ describe("tool registration", () => {
       expect(toolNames).toContain(expected);
     }
     expect(toolNames).toHaveLength(EXPECTED_TOOLS.length);
+  });
+
+  it("keeps the index header tool count aligned with the registered total", () => {
+    const header = readFileSync(join(process.cwd(), "src/index.ts"), "utf8");
+    expect(header).toContain("Exposes 21 tools");
   });
 });
 
