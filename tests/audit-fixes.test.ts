@@ -66,7 +66,8 @@ describe("read_agent_output uses CmuxReadScreenResult.text", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.found).toBe(true);
     expect(parsed.content).toBe("hello world");
@@ -106,7 +107,8 @@ describe("read_agent_output uses CmuxReadScreenResult.text", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.found).toBe(false);
   });
@@ -299,7 +301,9 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
       { repo: "test", model: "sonnet", cli: "claude", prompt: "parent task" },
       {} as any,
     );
-    const parentId = JSON.parse(parentResult.content[0].text).agent_id;
+    const parentId = (
+      parentResult.structuredContent ?? JSON.parse(parentResult.content[0].text)
+    ).agent_id;
 
     // Spawn child with parent_agent_id
     const childResult = await spawn.handler(
@@ -312,7 +316,8 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
       },
       {} as any,
     );
-    const childParsed = JSON.parse(childResult.content[0].text);
+    const childParsed =
+      childResult.structuredContent ?? JSON.parse(childResult.content[0].text);
     expect(childParsed.ok).toBe(true);
     expect(childParsed.agent_id).toBeDefined();
   });
@@ -334,7 +339,8 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
       },
       {} as any,
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
   });
 
@@ -355,7 +361,8 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
       },
       {} as any,
     );
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toMatch(/not found/i);
   });

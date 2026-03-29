@@ -109,7 +109,8 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
@@ -135,7 +136,8 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     const result = await list.handler({}, {} as any);
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0].repo).toBe("brainlayer");
@@ -158,10 +160,13 @@ describe("agent lifecycle tool handlers", () => {
       },
       {} as any,
     );
-    const agentId = JSON.parse(spawnResult.content[0].text).agent_id;
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
 
     const result = await getState.handler({ agent_id: agentId }, {} as any);
-    const parsed = JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.cli).toBe("codex");
@@ -198,7 +203,9 @@ describe("agent lifecycle tool handlers", () => {
       },
       {} as any,
     );
-    const agentId = JSON.parse(spawnResult.content[0].text).agent_id;
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
 
     // Agent is in "booting" state — not interactive
     const result = await sendTo.handler(

@@ -25,7 +25,7 @@ function callTool(server: any, name: string, args: Record<string, unknown>) {
 }
 
 function parseResult(result: any): any {
-  return JSON.parse(result.content[0].text);
+  return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
 describe("V2 tool registration", () => {
