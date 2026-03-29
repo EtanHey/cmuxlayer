@@ -21,7 +21,7 @@ function pad(text: string, width: number): string {
   return s.padEnd(width);
 }
 
-function padRight(text: string, width: number): string {
+function alignRight(text: string, width: number): string {
   const s = String(text ?? "");
   if (s.length >= width) return s.slice(0, width - 1) + "\u2026";
   return s.padStart(width);
@@ -30,7 +30,7 @@ function padRight(text: string, width: number): string {
 // Context bar: visual fill indicator
 function contextBar(pct: number | null): string {
   if (pct === null) return "   \u2500";
-  const filled = Math.round(pct / 10);
+  const filled = Math.max(0, Math.min(10, Math.round(pct / 10)));
   const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
   return `${bar} ${pct}%`;
 }
