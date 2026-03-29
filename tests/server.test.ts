@@ -70,7 +70,17 @@ describe("tool registration", () => {
 
   it("keeps the index header tool count aligned with the registered total", () => {
     const header = readFileSync(join(process.cwd(), "src/index.ts"), "utf8");
-    expect(header).toContain("Exposes 21 tools");
+    const headerCountMatch = header.match(/Exposes\s+(\d+)\s+tools/);
+    expect(headerCountMatch).not.toBeNull();
+
+    const serverSource = readFileSync(
+      join(process.cwd(), "src/server.ts"),
+      "utf8",
+    );
+    const registeredTotal = (serverSource.match(/\bserver\.tool\(/g) ?? [])
+      .length;
+
+    expect(Number(headerCountMatch![1])).toBe(registeredTotal);
   });
 });
 
