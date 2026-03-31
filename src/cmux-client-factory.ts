@@ -58,11 +58,14 @@ export async function createCmuxClient(
 
   const socketAvailable = await probeSocket(socketPath, opts?.timeoutMs);
 
+  const cliFallback = new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+
   if (socketAvailable) {
     const client = new CmuxSocketClient({
       socketPath,
       timeoutMs: opts?.timeoutMs,
       password: opts?.password,
+      cliFallback,
     });
     // Verify socket actually works (catches auth failures)
     try {
@@ -74,5 +77,5 @@ export async function createCmuxClient(
     }
   }
 
-  return new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  return cliFallback;
 }

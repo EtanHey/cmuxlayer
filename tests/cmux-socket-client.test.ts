@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
+import { CmuxClient } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
@@ -355,6 +356,118 @@ describe("CmuxSocketClient", () => {
     expect(lastV1Command).toBe(
       `set_status agent active --tab=${MOCK_WORKSPACE_ID}`,
     );
+  });
+});
+
+describe("CmuxSocketClient V2→CLI fallback", () => {
+  let cliCalls: { method: string; args: unknown[] }[];
+
+  function createMockCli(): CmuxClient {
+    cliCalls = [];
+    return {
+      newSplit: async (direction: string, opts?: unknown) => {
+        cliCalls.push({ method: "newSplit", args: [direction, opts] });
+        return {
+          workspace: "workspace:1",
+          surface: "surface:cli",
+          pane: "pane:cli",
+          title: "",
+          type: "terminal" as const,
+        };
+      },
+      closeSurface: async (surface: string, opts?: unknown) => {
+        cliCalls.push({ method: "closeSurface", args: [surface, opts] });
+      },
+    } as unknown as CmuxClient;
+  }
+
+  it("newSplit falls back to CLI when pane.split returns method_not_found", async () => {
+    const saved = MOCK_RESPONSES["pane.split"];
+    delete MOCK_RESPONSES["pane.split"];
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: createMockCli(),
+      });
+      const result = await client.newSplit("right", {
+        workspace: "workspace:1",
+      });
+      expect(cliCalls).toHaveLength(1);
+      expect(cliCalls[0].method).toBe("newSplit");
+      expect(result.surface).toBe("surface:cli");
+    } finally {
+      MOCK_RESPONSES["pane.split"] = saved;
+    }
+  });
+
+  it("newSplit browser falls back to CLI when pane.create returns method_not_found", async () => {
+    // pane.create is already NOT in MOCK_RESPONSES
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+    const result = await client.newSplit("right", {
+      workspace: "workspace:1",
+      type: "browser",
+      url: "https://example.com",
+    });
+    expect(cliCalls).toHaveLength(1);
+    expect(cliCalls[0].method).toBe("newSplit");
+    expect(cliCalls[0].args[1]).toMatchObject({ type: "browser" });
+  });
+
+  it("closeSurface falls back to CLI when surface.close returns method_not_found", async () => {
+    const saved = MOCK_RESPONSES["surface.close"];
+    delete MOCK_RESPONSES["surface.close"];
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: createMockCli(),
+      });
+      await client.closeSurface("surface:1", { workspace: "workspace:1" });
+      expect(cliCalls).toHaveLength(1);
+      expect(cliCalls[0].method).toBe("closeSurface");
+      expect(cliCalls[0].args[0]).toBe("surface:1");
+    } finally {
+      MOCK_RESPONSES["surface.close"] = saved;
+    }
+  });
+
+  it("newSplit throws when no CLI fallback and method_not_found", async () => {
+    const saved = MOCK_RESPONSES["pane.split"];
+    delete MOCK_RESPONSES["pane.split"];
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+      await expect(
+        client.newSplit("right", { workspace: "workspace:1" }),
+      ).rejects.toThrow("method_not_found");
+    } finally {
+      MOCK_RESPONSES["pane.split"] = saved;
+    }
+  });
+
+  it("closeSurface throws when no CLI fallback and method_not_found", async () => {
+    const saved = MOCK_RESPONSES["surface.close"];
+    delete MOCK_RESPONSES["surface.close"];
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+      await expect(
+        client.closeSurface("surface:1", { workspace: "workspace:1" }),
+      ).rejects.toThrow("method_not_found");
+    } finally {
+      MOCK_RESPONSES["surface.close"] = saved;
+    }
+  });
+
+  it("uses V2 when method is available (no fallback triggered)", async () => {
+    // pane.split IS in MOCK_RESPONSES — V2 should work directly
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+    const result = await client.newSplit("right", { workspace: "workspace:1" });
+    expect(cliCalls).toHaveLength(0);
+    expect(result.surface).toBe("surface:2"); // from MOCK_RESPONSES
   });
 });
 

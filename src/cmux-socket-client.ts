@@ -18,6 +18,7 @@ import type {
   CmuxReadScreenResult,
   CmuxStatusEntry,
 } from "./types.js";
+import type { CmuxClient } from "./cmux-client.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ export interface CmuxSocketClientOptions {
   timeoutMs?: number;
   /** Password for socket access mode "password" */
   password?: string;
+  /** CLI client fallback for V2 methods not supported by the daemon */
+  cliFallback?: CmuxClient;
 }
 
 // ── Socket-level errors ────────────────────────────────────────────────
@@ -71,12 +74,14 @@ export class CmuxSocketClient {
   private socketPath: string;
   private timeoutMs: number;
   private password?: string;
+  private cliFallback?: CmuxClient;
 
   constructor(opts?: CmuxSocketClientOptions) {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.password = opts?.password;
+    this.cliFallback = opts?.cliFallback;
   }
 
   // ── Low-level: send a V2 request, get a V2 response ────────────────
@@ -347,11 +352,18 @@ export class CmuxSocketClient {
       if (opts.workspace) params.workspace_id = opts.workspace;
       if (opts.url) params.url = opts.url;
 
-      const result = await this.call<Record<string, unknown>>(
-        "pane.create",
-        params,
-      );
-      return this.mapSplitResult(result, "browser");
+      try {
+        const result = await this.call<Record<string, unknown>>(
+          "pane.create",
+          params,
+        );
+        return this.mapSplitResult(result, "browser");
+      } catch (e) {
+        if (this.isMethodNotFound(e) && this.cliFallback) {
+          return this.cliFallback.newSplit(direction, opts);
+        }
+        throw e;
+      }
     }
 
     if (opts?.url) {
@@ -363,11 +375,18 @@ export class CmuxSocketClient {
     if (opts?.surface) params.surface_id = opts.surface;
     if (opts?.pane) params.pane_id = opts.pane;
 
-    const result = await this.call<Record<string, unknown>>(
-      "pane.split",
-      params,
-    );
-    return this.mapSplitResult(result, "terminal");
+    try {
+      const result = await this.call<Record<string, unknown>>(
+        "pane.split",
+        params,
+      );
+      return this.mapSplitResult(result, "terminal");
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallback.newSplit(direction, opts);
+      }
+      throw e;
+    }
   }
 
   async send(
@@ -546,7 +565,14 @@ export class CmuxSocketClient {
       surface_id: surface,
       workspace_id: workspace,
     };
-    await this.call("surface.close", params);
+    try {
+      await this.call("surface.close", params);
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallback.closeSurface(surface, opts);
+      }
+      throw e;
+    }
   }
 
   async listStatus(opts?: { workspace?: string }): Promise<CmuxStatusEntry[]> {
@@ -677,6 +703,10 @@ export class CmuxSocketClient {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
+
+  private isMethodNotFound(e: unknown): boolean {
+    return e instanceof CmuxSocketError && e.code === "method_not_found";
+  }
 
   private mapSplitResult(
     parsed: Record<string, unknown>,
