@@ -7,27 +7,46 @@
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-310%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen.svg)](#testing)
 [![MCP](https://img.shields.io/badge/MCP-22%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**310 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **22 MCP tools** · **Agent lifecycle engine**
+**326 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **22 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 
 `read_screen` returns raw terminal text alongside structured parsed agent metadata for common CLI agents including Claude, Codex, and Gemini. That makes status checks, done-signal detection, token counting, and model extraction available directly through MCP without forcing each client to re-parse terminal output.
 
-## Quick Start
+## Install
+
+```bash
+npm install -g cmuxlayer
+```
+
+Or from source:
 
 ```bash
 git clone https://github.com/EtanHey/cmuxlayer.git && cd cmuxlayer
-bun install
-bun run build
+npm install && npm run build
 ```
 
-Add to your editor's MCP config:
+## Quick Start
+
+Add to your editor's MCP config (Claude Code `settings.json`, VS Code, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "cmux": {
+      "command": "cmuxlayer"
+    }
+  }
+}
+```
+
+Or with a local build:
 
 ```json
 {
@@ -48,38 +67,41 @@ Set `CMUXLAYER_ENABLE_CLAUDE_CHANNELS=1` in the server environment and launch Cl
 
 See [docs/claude-channels-mobile.md](docs/claude-channels-mobile.md) for the notification format, OpenClaw pairing patterns worth stealing, and the remaining gaps for a real cmux mobile client.
 
-## MCP Tools (21)
+## MCP Tools (22)
+
+All 22 tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so MCP clients can enforce safety policies automatically.
 
 ### Core (11)
 
-| Tool | Description |
-|------|-------------|
-| `list_surfaces` | List all surfaces across workspaces |
-| `new_split` | Create a new split pane (terminal or browser) |
-| `send_input` | Send text to a terminal surface (with optional enter/rename) |
-| `send_key` | Send a key press to a surface |
-| `read_screen` | Read raw screen text plus parsed agent state from a surface |
-| `rename_tab` | Rename a surface tab (with optional prefix preservation) |
-| `notify` | Show a cmux notification banner |
-| `set_status` | Set sidebar status key-value pair |
-| `set_progress` | Set sidebar progress indicator (0.0-1.0) |
-| `close_surface` | Close a surface |
-| `browser_surface` | Interact with browser surfaces |
+| Tool | Annotation | Description |
+|------|------------|-------------|
+| `list_surfaces` | readOnly | List all surfaces across workspaces |
+| `new_split` | mutating | Create a new split pane (terminal or browser) |
+| `send_input` | mutating | Send text to a terminal surface (with optional enter/rename) |
+| `send_key` | mutating | Send a key press to a surface |
+| `read_screen` | readOnly | Read raw screen text plus parsed agent state from a surface |
+| `rename_tab` | mutating | Rename a surface tab (with optional prefix preservation) |
+| `notify` | mutating | Show a cmux notification banner |
+| `set_status` | mutating | Set sidebar status key-value pair |
+| `set_progress` | mutating | Set sidebar progress indicator (0.0-1.0) |
+| `close_surface` | destructive | Close a surface |
+| `browser_surface` | mutating | Interact with browser surfaces |
 
-### Agent Lifecycle (10)
+### Agent Lifecycle (11)
 
-| Tool | Description |
-|------|-------------|
-| `spawn_agent` | Spawn a CLI agent in a new or existing surface |
-| `send_to_agent` | Send a prompt or message to a running agent |
-| `read_agent_output` | Read recent output from an agent's surface |
-| `get_agent_state` | Get current state of a tracked agent |
-| `list_agents` | List all tracked agents and their states |
-| `wait_for` | Wait for an agent to reach a target state (with timeout) |
-| `wait_for_all` | Wait for multiple agents to reach target states |
-| `stop_agent` | Gracefully stop a running agent |
-| `kill` | Force-kill an agent process |
-| `interact` | Send interactive input (confirm, cancel, etc.) to an agent |
+| Tool | Annotation | Description |
+|------|------------|-------------|
+| `spawn_agent` | mutating | Spawn a CLI agent in a new or existing surface |
+| `send_to_agent` | mutating | Send a prompt or message to a running agent |
+| `read_agent_output` | readOnly | Read recent output from an agent's surface |
+| `get_agent_state` | readOnly | Get current state of a tracked agent |
+| `list_agents` | readOnly | List all tracked agents and their states |
+| `my_agents` | readOnly | Get all children of a parent agent with live screen status |
+| `wait_for` | mutating | Wait for an agent to reach a target state (with timeout) |
+| `wait_for_all` | mutating | Wait for multiple agents to reach target states |
+| `stop_agent` | destructive | Gracefully stop a running agent |
+| `kill` | destructive | Force-kill one or more agent processes |
+| `interact` | mutating | Send interactive input (confirm, cancel, etc.) to an agent |
 
 ## Architecture
 
@@ -140,7 +162,7 @@ cmuxlayer development has contributed back to cmux:
 ## Testing
 
 ```bash
-bun run test        # 278 tests via vitest
+bun run test        # 326 tests via vitest
 bun run typecheck   # Type checking
 ```
 
