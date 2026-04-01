@@ -589,43 +589,54 @@
       text-align: center;
     }
 
-    .compat-grid {
+    .logo-row {
       display: flex;
       justify-content: center;
-      gap: 12px;
+      gap: 40px;
       flex-wrap: wrap;
       margin-bottom: 64px;
-      max-width: 600px;
-      margin-left: auto;
-      margin-right: auto;
     }
 
-    .compat-item {
-      display: inline-flex;
+    .logo-item {
+      display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 8px;
-      padding: 10px 18px;
-      border-radius: 8px;
+      gap: 10px;
+      transition: transform 0.2s;
+    }
+
+    .logo-item:hover { transform: translateY(-3px); }
+
+    .logo-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
       background: var(--bg-card);
       border: 1px solid var(--border);
-      font-family: var(--mono);
-      font-size: 13px;
-      font-weight: 400;
-      color: var(--text-secondary);
-      transition: border-color 0.25s, color 0.2s;
-      cursor: default;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 11px;
+      transition: border-color 0.25s;
     }
 
-    .compat-icon {
-      font-size: 14px;
-      line-height: 1;
-      flex-shrink: 0;
+    .logo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
     }
 
-    .compat-item:hover {
+    .logo-item:hover .logo-box {
       border-color: var(--accent);
-      color: var(--text);
     }
+
+    .logo-name {
+      font-size: 12px;
+      color: var(--text-dim);
+      transition: color 0.2s;
+    }
+
+    .logo-item:hover .logo-name { color: var(--text-secondary); }
 
     /* ─── Setup ─── */
     .setup-grid {
@@ -884,7 +895,7 @@
       .pipe-arrow { display: none; }
       .pipe-step { flex: 0 0 40%; }
       .setup-grid { grid-template-columns: 1fr; }
-      .compat-grid { gap: 8px; }
+      .logo-row { gap: 24px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -1177,12 +1188,27 @@
       <div class="section-label">Compatible with</div>
       <h2 class="section-heading">Five CLI agents</h2>
 
-      <div class="compat-grid reveal">
-        <span class="compat-item"><span class="compat-icon" style="color:#d4956a;">&#x2726;</span> Claude Code</span>
-        <span class="compat-item"><span class="compat-icon" style="color:#a78bfa;">&#x25E8;</span> Cursor</span>
-        <span class="compat-item"><span class="compat-icon" style="color:#10b981;">&#x25C8;</span> Codex</span>
-        <span class="compat-item"><span class="compat-icon" style="color:#60a5fa;">&#x2735;</span> Gemini CLI</span>
-        <span class="compat-item"><span class="compat-icon" style="color:#f97316;">&#x25B2;</span> Kiro</span>
+      <div class="logo-row reveal">
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/claude.svg" alt="Claude Code"></div>
+          <span class="logo-name">Claude Code</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/cursor.svg" alt="Cursor"></div>
+          <span class="logo-name">Cursor</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/openai.svg" alt="Codex"></div>
+          <span class="logo-name">Codex</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/gemini.svg" alt="Gemini CLI"></div>
+          <span class="logo-name">Gemini CLI</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/kiro.svg" alt="Kiro"></div>
+          <span class="logo-name">Kiro</span>
+        </div>
       </div>
 
       <div class="section-label">Get started</div>
