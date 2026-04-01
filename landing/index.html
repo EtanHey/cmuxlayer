@@ -786,14 +786,20 @@
       color: var(--text-dim);
       border-bottom: 2px solid transparent;
       transition: all 0.2s;
+      cursor: pointer;
+      user-select: none;
     }
+    .demo-tab:hover { color: var(--text-secondary); background: rgba(255,255,255,0.02); }
     .demo-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(34,197,94,0.04); }
 
     /* Pane content */
     .demo-pane-body {
       flex: 1; padding: 10px 12px;
       font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
-      overflow: hidden; white-space: pre-wrap; color: var(--text-secondary);
+      overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; color: var(--text-secondary);
+      max-height: 340px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(34,197,94,0.2) transparent;
     }
 
     /* Status bar */
@@ -1362,7 +1368,7 @@
         const visibleTab = userTab || activeTab;
         // Render tabs
         tabsEl.innerHTML = tabList.map(t =>
-          `<div class="demo-tab${t === visibleTab ? ' active' : ''}" data-dtab="${esc(t)}">${esc(t)}</div>`
+          `<div class="demo-tab${t === visibleTab ? ' active' : ''}" data-dtab="${esc(t)}" title="Click to view">${esc(t)}</div>`
         ).join('');
         // Attach click handlers
         tabsEl.querySelectorAll('.demo-tab').forEach(tab => {
@@ -1470,9 +1476,9 @@
 
         // Phase 3.5 — Set up cron monitoring
         appendOrc('');
-        appendOrc(dim('\u250C\u2500') + ' ' + brg('CronCreate') + '(' + cyn('schedule') + '=' + amb('"*/3 * * * *"') + ', ' + cyn('cmd') + '=' + amb('"read_screen parsed_only"') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('CronCreate') + '(' + cyn('interval') + '=' + amb('"*/30s"') + ', ' + cyn('cmd') + '=' + amb('"read_screen parsed_only=true"') + ')');
         await sleep(400);
-        appendOrc(dim('\u2514\u2500') + ' ' + dim('cron:') + ' ' + amb('cron-1') + '  ' + grn('active') + '  ' + dim('every 3s'));
+        appendOrc(dim('\u2514\u2500') + ' ' + dim('cron:') + ' ' + amb('cron-1') + '  ' + grn('active') + '  ' + dim('polling every 30s'));
         startCron();
         await sleep(600);
 
