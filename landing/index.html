@@ -1045,7 +1045,7 @@
         const icon = el.querySelector('.copy-btn, .copy-icon');
         if (!icon) return;
         const original = icon.innerHTML || '';
-        const isSvg = icon.tagName === 'svg';
+        const isSvg = icon.tagName.toLowerCase() === 'svg';
 
         if (isSvg) {
           // For SVG elements in setup cards
