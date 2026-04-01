@@ -786,6 +786,9 @@
       scrollbar-width: thin;
       scrollbar-color: rgba(34,197,94,0.2) transparent;
     }
+    .demo-pane-body::-webkit-scrollbar { width: 6px; }
+    .demo-pane-body::-webkit-scrollbar-track { background: transparent; }
+    .demo-pane-body::-webkit-scrollbar-thumb { background: rgba(34,197,94,0.2); border-radius: 3px; }
 
     /* Status bar */
     .demo-statusbar {
@@ -1412,6 +1415,8 @@
         orc.innerHTML = '';
         Object.keys(agentState).forEach(k => delete agentState[k]);
         tabList = []; activeTab = null;
+        userTab = null;
+        if (userTabTimeout) { clearTimeout(userTabTimeout); userTabTimeout = null; }
         tabsEl.innerHTML = ''; agentEl.innerHTML = dim('no active agents');
         setStat(2, 0, 'ready');
         stopCron();
