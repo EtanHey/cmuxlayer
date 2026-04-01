@@ -24,6 +24,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("[cmux-mcp] fatal", error);
+  console.error("[cmuxlayer] fatal", error);
   process.exit(1);
 });

@@ -162,17 +162,17 @@ cmuxlayer development has contributed back to cmux:
 ## Testing
 
 ```bash
-bun run test        # 326 tests via vitest
-bun run typecheck   # Type checking
+npm test            # 326 tests via vitest
+npm run typecheck   # Type checking
 ```
 
 ## Development
 
 ```bash
-bun install
-bun run dev         # Run with tsx (hot reload)
-bun run build       # Compile TypeScript
-bun run start       # Run compiled output
+npm install
+npm run dev         # Run with tsx (hot reload)
+npm run build       # Compile TypeScript
+npm start           # Run compiled output
 ```
 
 ## Contributing
