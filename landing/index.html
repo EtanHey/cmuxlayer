@@ -1369,14 +1369,15 @@
       // ── The Movie Script ──
       async function runCycle() {
         // Reset
-        orc.innerHTML = ''; agent.innerHTML = ''; tabs.innerHTML = '';
+        orc.innerHTML = ''; tabs.innerHTML = '';
+        agent.innerHTML = dim('no active agents');
         setStat(2, 0, 'ready');
 
         // Phase 1 — Prompt
         appendOrc(grn('\u276F') + ' ' + wht('Deploy the voice fix and optimize brain search'));
         await sleep(800);
         appendOrc('');
-        await typeIn(orc, 'Spawning two agents in parallel.', 35);
+        await typeIn(orc, 'On it. Two parallel agents for this.', 35);
         await sleep(400);
 
         // Phase 2 — Spawn agent 1
@@ -1472,23 +1473,18 @@
         await sleep(1200);
 
         appendOrc('');
-        await typeIn(orc, 'Both done. Creating PRs.', 30);
+        await typeIn(orc, 'Both done. Pushing PRs now.', 30);
         await sleep(500);
         appendOrc('');
-        appendOrc(grn('\u2713') + ' ' + sec('PR #142: ') + amb('fix: edge-tts fallback to google-tts'));
+        appendOrc(grn('\u2713') + ' ' + sec('voicelayer#34: ') + amb('fix: edge-tts fallback to google-tts'));
         await sleep(400);
-        appendOrc(grn('\u2713') + ' ' + sec('PR #87: ') + amb('perf: optimize FTS5 hybrid search (4.3x)'));
+        appendOrc(grn('\u2713') + ' ' + sec('brainlayer#91: ') + amb('perf: optimize FTS5 hybrid search (4.3x)'));
         await sleep(600);
         appendOrc('');
         appendOrc(grn('\u2501\u2501\u2501 ') + wht('2 agents \u00B7 2 PRs \u00B7 298 tests passing') + grn(' \u2501\u2501\u2501'));
         setStat(4, 0, '\u2713 complete');
 
         await sleep(4000);
-
-        // Fade and restart
-        orc.style.opacity = '0'; agent.style.opacity = '0';
-        await sleep(600);
-        orc.style.opacity = '1'; agent.style.opacity = '1';
       }
 
       // Start on scroll
@@ -1496,9 +1492,15 @@
         entries.forEach(async e => {
           if (e.isIntersecting) {
             demoObs.disconnect();
-            orc.style.transition = 'opacity 0.5s';
-            agent.style.transition = 'opacity 0.5s';
-            while (true) { await runCycle(); }
+            const frame = document.getElementById('demo');
+            const layout = frame.querySelector('.demo-layout');
+            layout.style.transition = 'opacity 0.6s ease';
+            while (true) {
+              layout.style.opacity = '1';
+              await runCycle();
+              layout.style.opacity = '0.15';
+              await sleep(800);
+            }
           }
         });
       }, { threshold: 0.2 });
