@@ -58,6 +58,7 @@ export function AnimatedDemo() {
   const statusBarRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
+  const unmountedRef = useRef(false);
 
   // Centralized agent state
   const agentState = useRef<Record<string, string>>({});
@@ -655,10 +656,11 @@ export function AnimatedDemo() {
             await runCycle();
             return;
           }
-          while (true) {
+          while (!unmountedRef.current) {
             try {
               layout.style.opacity = "1";
               await runCycle();
+              if (unmountedRef.current) break;
               layout.style.opacity = "0.15";
               await sleep(800);
             } catch {
@@ -674,7 +676,9 @@ export function AnimatedDemo() {
     if (el) obs.observe(el);
 
     return () => {
+      unmountedRef.current = true;
       clearInterval(latencyId);
+      if (cronInterval.current) clearInterval(cronInterval.current);
       obs.disconnect();
     };
   }, []);
