@@ -1221,7 +1221,7 @@
       <div class="section-label reveal">See it work</div>
       <h2 class="section-heading reveal">Two agents. One orchestrator. Zero tab-switching.</h2>
 
-      <div class="demo-frame reveal" id="demo">
+      <div class="demo-frame reveal" id="demo" aria-hidden="true">
         <div class="demo-titlebar">
           <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
           <span class="demo-titlebar-text">cmux &mdash; workspace:1</span>
@@ -1330,9 +1330,7 @@
         return grn('\u2588'.repeat(f)) + dim('\u2588'.repeat(e)) + ' ' + tea(pct + '%');
       }
 
-      let typing = false;
       async function typeIn(el, text, speed) {
-        typing = true;
         const cursor = '<span class="demo-cursor"></span>';
         for (let i = 0; i <= text.length; i++) {
           const before = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
@@ -1342,7 +1340,6 @@
         // Remove cursor after a beat
         await sleep(300);
         el.innerHTML = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
-        typing = false;
       }
 
       function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -1495,11 +1492,18 @@
             const frame = document.getElementById('demo');
             const layout = frame.querySelector('.demo-layout');
             layout.style.transition = 'opacity 0.6s ease';
+            // Respect reduced motion preference
+            if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+              await runCycle(); // Run once, don't loop
+              return;
+            }
             while (true) {
-              layout.style.opacity = '1';
-              await runCycle();
-              layout.style.opacity = '0.15';
-              await sleep(800);
+              try {
+                layout.style.opacity = '1';
+                await runCycle();
+                layout.style.opacity = '0.15';
+                await sleep(800);
+              } catch(e) { await sleep(3000); }
             }
           }
         });
