@@ -1,5 +1,3 @@
-"use client";
-
 export function Cta() {
   return (
     <section className="py-[100px] pb-20 text-center">

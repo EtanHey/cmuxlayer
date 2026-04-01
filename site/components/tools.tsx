@@ -1,5 +1,3 @@
-"use client";
-
 interface Tool {
   name: string;
   desc: string;

@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Terminal } from "./shared/terminal";
 
 interface CmuxShellProps {
   children: ReactNode;

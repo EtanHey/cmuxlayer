@@ -1,5 +1,3 @@
-"use client";
-
 const stats = [
   { value: "0.2ms", label: "socket latency" },
   { value: "22", label: "MCP tools" },

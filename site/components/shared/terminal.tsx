@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type CSSProperties,
 } from "react";
+// useContext used internally by useTerminalContext hook
 
 /* ─── Context ─── */
 interface TerminalContextValue {
@@ -19,7 +20,7 @@ const TerminalContext = createContext<TerminalContextValue>({
 });
 
 export function useTerminalContext() {
-  return useContext(TerminalContext);
+  return useTerminalContext();
 }
 
 /* ─── Root ─── */
@@ -77,7 +78,7 @@ interface TabBarProps {
 }
 
 function TabBar({ tabs, activeTab, onTabClick }: TabBarProps) {
-  const { accentColor } = useContext(TerminalContext);
+  const { accentColor } = useTerminalContext();
 
   return (
     <div className="flex bg-white/[0.02] border-b border-white/[0.04] flex-wrap">
@@ -130,7 +131,7 @@ interface StatusBarProps {
 }
 
 function StatusBar({ children, className = "" }: StatusBarProps) {
-  const { accentColor } = useContext(TerminalContext);
+  const { accentColor } = useTerminalContext();
 
   return (
     <div
@@ -162,7 +163,7 @@ interface PaneBarProps {
 }
 
 function PaneBar({ title, meta }: PaneBarProps) {
-  const { accentColor } = useContext(TerminalContext);
+  const { accentColor } = useTerminalContext();
 
   return (
     <div className="flex items-center px-3 py-[5px] bg-white/[0.02] border-b border-white/[0.04] font-mono text-[10px]">

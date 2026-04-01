@@ -1,5 +1,3 @@
-"use client";
-
 import { Nav } from "@/components/shared/nav";
 import { Hero } from "@/components/hero";
 import { StatStrip } from "@/components/stat-strip";

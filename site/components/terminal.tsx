@@ -1,5 +1,3 @@
-"use client";
-
 export function Terminal() {
   return (
     <section className="py-12 pb-[100px]">

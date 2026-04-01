@@ -58,7 +58,7 @@ export function Nav({ product, links = [] }: NavProps) {
           <span style={{ color: current.accent }}>
             {product === "cmuxlayer" ? "cmux" : current.label.slice(0, -5)}
           </span>
-          {product === "cmuxlayer" ? "Layer" : "Layer"}
+          Layer
         </a>
 
         <div className="flex items-center gap-6">
