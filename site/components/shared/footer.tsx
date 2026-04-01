@@ -3,7 +3,7 @@ type Product = "brainlayer" | "voicelayer" | "cmuxlayer";
 const SIBLING_LINKS: Record<Product, { label: string; href: string }[]> = {
   cmuxlayer: [
     { label: "GitHub", href: "https://github.com/EtanHey/cmuxlayer" },
-    { label: "npm", href: "https://www.npmjs.com/package/cmuxlayer" },
+    { label: "npm", href: "https://github.com/EtanHey/cmuxlayer#install" },
     { label: "VoiceLayer", href: "https://voicelayer.etanheyman.com" },
     { label: "BrainLayer", href: "https://brainlayer.etanheyman.com" },
   ],
