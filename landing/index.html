@@ -589,57 +589,65 @@
       text-align: center;
     }
 
-    .compat-grid {
+    .logo-row {
       display: flex;
       justify-content: center;
-      gap: 12px;
+      gap: 40px;
       flex-wrap: wrap;
       margin-bottom: 64px;
-      max-width: 600px;
-      margin-left: auto;
-      margin-right: auto;
     }
 
-    .compat-item {
-      display: inline-flex;
+    .logo-item {
+      display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 8px;
-      padding: 10px 18px;
-      border-radius: 8px;
+      gap: 10px;
+      transition: transform 0.2s;
+    }
+
+    .logo-item:hover { transform: translateY(-3px); }
+
+    .logo-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
       background: var(--bg-card);
       border: 1px solid var(--border);
-      font-family: var(--mono);
-      font-size: 13px;
-      font-weight: 400;
-      color: var(--text-secondary);
-      transition: border-color 0.25s, color 0.2s;
-      cursor: default;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 11px;
+      transition: border-color 0.25s;
     }
 
-    .compat-item::before {
-      content: '\25CF';
-      color: var(--accent);
-      font-size: 8px;
+    .logo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
     }
 
-    .compat-item:hover {
+    .logo-item:hover .logo-box {
       border-color: var(--accent);
-      color: var(--text);
     }
+
+    .logo-name {
+      font-size: 12px;
+      color: var(--text-dim);
+      transition: color 0.2s;
+    }
+
+    .logo-item:hover .logo-name { color: var(--text-secondary); }
 
     /* ─── Setup ─── */
     .setup-grid {
-      display: flex;
-      align-items: stretch;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
       gap: 24px;
       max-width: 780px;
       margin: 0 auto;
     }
 
     .setup-card {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
       text-align: left;
     }
 
@@ -657,7 +665,6 @@
       line-height: 1.6;
       font-weight: 300;
       margin-bottom: 10px;
-      flex: 1;
     }
 
     .setup-code {
@@ -667,6 +674,8 @@
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 6px;
+      overflow: hidden;
+      white-space: nowrap;
       padding: 8px 12px;
       font-family: var(--mono);
       font-size: 12px;
@@ -885,8 +894,8 @@
       .pipeline { flex-wrap: wrap; gap: 16px; }
       .pipe-arrow { display: none; }
       .pipe-step { flex: 0 0 40%; }
-      .setup-grid { flex-direction: column; }
-      .compat-grid { gap: 8px; }
+      .setup-grid { grid-template-columns: 1fr; }
+      .logo-row { gap: 24px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -1179,12 +1188,27 @@
       <div class="section-label">Compatible with</div>
       <h2 class="section-heading">Five CLI agents</h2>
 
-      <div class="compat-grid reveal">
-        <span class="compat-item">Claude Code</span>
-        <span class="compat-item">Cursor</span>
-        <span class="compat-item">Codex</span>
-        <span class="compat-item">Gemini CLI</span>
-        <span class="compat-item">Kiro</span>
+      <div class="logo-row reveal">
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/claude.svg" alt="Claude Code"></div>
+          <span class="logo-name">Claude Code</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/cursor.svg" alt="Cursor"></div>
+          <span class="logo-name">Cursor</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/openai.svg" alt="Codex"></div>
+          <span class="logo-name">Codex</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/gemini.svg" alt="Gemini CLI"></div>
+          <span class="logo-name">Gemini CLI</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/kiro.svg" alt="Kiro"></div>
+          <span class="logo-name">Kiro</span>
+        </div>
       </div>
 
       <div class="section-label">Get started</div>
