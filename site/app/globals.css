@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-bg: #09090b;
+  --color-bg-elevated: #111114;
+  --color-bg-card: #151519;
+  --color-border: #222228;
+  --color-border-hover: #38383f;
+  --color-text: #fafaf9;
+  --color-text-secondary: #a8a29e;
+  --color-text-dim: #6b6660;
+  --color-accent: #22c55e;
+  --color-accent-bright: #4ade80;
+  --color-accent-subtle: rgba(34, 197, 94, 0.08);
+  --color-amber: #fbbf24;
+  --color-cyan: #67e8f9;
+  --color-teal: #5eead4;
+  --color-red: #cf6060;
+
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Grain overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Hero stagger */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.hero-fade { opacity: 0; animation: fadeUp 0.7s ease-out forwards; }
+.hero-fade-d1 { animation-delay: 0.1s; }
+.hero-fade-d2 { animation-delay: 0.2s; }
+.hero-fade-d3 { animation-delay: 0.3s; }
+
+/* Hero pane animation */
+@keyframes pane-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.01); }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* Terminal syntax colors */
+.t-prompt { color: var(--color-accent); }
+.t-tool { color: var(--color-accent-bright); font-weight: 500; }
+.t-arg { color: var(--color-cyan); }
+.t-str { color: var(--color-amber); }
+.t-num { color: var(--color-teal); }
+.t-ok { color: var(--color-accent); font-weight: 500; }
+.t-border { color: #333338; }
+.t-body { color: var(--color-text-secondary); }
+.t-dim { color: #4a4a52; }
+
+/* Demo animation colors */
+.c-g { color: var(--color-accent); }
+.c-gb { color: var(--color-accent-bright); }
+.c-a { color: var(--color-amber); }
+.c-c { color: var(--color-cyan); }
+.c-t { color: var(--color-teal); }
+.c-d { color: #3a3a40; }
+.c-w { color: var(--color-text); }
+.c-s { color: var(--color-text-secondary); }
+
+/* Demo cursor blink */
+.demo-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  background: var(--color-accent);
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+
+/* Cron pulse */
+@keyframes cronPulse {
+  0% { background: rgba(34,197,94,0.08); }
+  100% { background: transparent; }
+}
+.cron-flash { animation: cronPulse 0.6s ease-out; }

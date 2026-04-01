@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
-  "outputDirectory": "landing",
+  "framework": "nextjs",
+  "rootDirectory": "site",
   "headers": [
     {
       "source": "/logos/(.*)",
