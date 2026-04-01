@@ -115,28 +115,34 @@ const LIFECYCLE_LOGS = {
 /**
  * Build the shell command that launches a CLI agent.
  * Repo name is sanitized to prevent command injection.
+ *
+ * For claude: uses repoGolem launchers (e.g. `voicelayerClaude -s`)
+ * which handle cd, model, iTerm profile, MCP config, and contexts.
+ * No `cd` prefix needed — the launcher does it.
+ *
+ * For other CLIs: uses `cd ~/Gits/<repo> && <cli>` since they
+ * don't have launcher functions yet.
  */
-function buildLaunchCommand(cli: CliType, repo: string): string {
+export function buildLaunchCommand(cli: CliType, repo: string): string {
   const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
   if (!safeRepo || safeRepo !== repo) {
     throw new Error(
       `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed.`,
     );
   }
-  const cdCmd = `cd ~/Gits/${safeRepo}`;
   switch (cli) {
     case "claude":
-      return `${cdCmd} && ${safeRepo}Claude -s`;
+      return `${safeRepo}Claude -s`;
     case "codex":
-      return `${cdCmd} && codex`;
+      return `cd ~/Gits/${safeRepo} && codex`;
     case "gemini":
-      return `${cdCmd} && gemini`;
+      return `cd ~/Gits/${safeRepo} && gemini`;
     case "kiro":
-      return `${cdCmd} && kiro-cli`;
+      return `cd ~/Gits/${safeRepo} && kiro-cli`;
     case "cursor":
-      return `${cdCmd} && cursor agent`;
+      return `cd ~/Gits/${safeRepo} && cursor agent`;
     default:
-      return `${cdCmd} && ${cli}`;
+      return `cd ~/Gits/${safeRepo} && ${cli}`;
   }
 }
 
