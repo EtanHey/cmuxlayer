@@ -467,33 +467,54 @@
       text-align: center;
     }
 
-    .badge-row {
+    .logo-row {
       display: flex;
       justify-content: center;
-      gap: 12px;
+      gap: 40px;
       flex-wrap: wrap;
       margin-bottom: 64px;
     }
 
-    .integration-badge {
-      display: inline-flex;
+    .logo-item {
+      display: flex;
+      flex-direction: column;
       align-items: center;
-      padding: 8px 18px;
-      border-radius: 999px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      font-family: var(--sans);
-      font-size: 13px;
-      font-weight: 400;
-      color: var(--text-secondary);
-      transition: border-color 0.25s, color 0.2s;
-      cursor: default;
+      gap: 10px;
+      transition: transform 0.2s;
     }
 
-    .integration-badge:hover {
-      border-color: var(--border-hover);
-      color: var(--text);
+    .logo-item:hover { transform: translateY(-3px); }
+
+    .logo-box {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 11px;
+      transition: border-color 0.25s;
     }
+
+    .logo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .logo-item:hover .logo-box {
+      border-color: var(--border-hover);
+    }
+
+    .logo-name {
+      font-size: 12px;
+      color: var(--text-dim);
+      transition: color 0.2s;
+    }
+
+    .logo-item:hover .logo-name { color: var(--text-secondary); }
 
     /* ─── Setup ─── */
     .setup-grid {
@@ -670,7 +691,7 @@
       .ps-grid { grid-template-columns: 1fr; }
       .setup-grid { flex-direction: column; }
       .speed-grid { grid-template-columns: 1fr; }
-      .badge-row { gap: 8px; }
+      .logo-row { gap: 24px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -933,14 +954,35 @@
       <div class="section-label">Works with</div>
       <h2 class="section-heading">Any MCP client</h2>
 
-      <div class="badge-row reveal">
-        <span class="integration-badge">Claude Code</span>
-        <span class="integration-badge">Cursor</span>
-        <span class="integration-badge">VS Code</span>
-        <span class="integration-badge">Zed</span>
-        <span class="integration-badge">Codex</span>
-        <span class="integration-badge">Gemini CLI</span>
-        <span class="integration-badge">Kiro</span>
+      <div class="logo-row reveal">
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/claude.svg" alt="Claude Code"></div>
+          <span class="logo-name">Claude Code</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/cursor.svg" alt="Cursor"></div>
+          <span class="logo-name">Cursor</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/zed.svg" alt="Zed"></div>
+          <span class="logo-name">Zed</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/vscode.svg" alt="VS Code"></div>
+          <span class="logo-name">VS Code</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/openai.svg" alt="Codex"></div>
+          <span class="logo-name">Codex</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/kiro.svg" alt="Kiro"></div>
+          <span class="logo-name">Kiro</span>
+        </div>
+        <div class="logo-item">
+          <div class="logo-box"><img src="logos/gemini.svg" alt="Gemini CLI"></div>
+          <span class="logo-name">Gemini CLI</span>
+        </div>
       </div>
 
       <div class="section-label">Get started</div>
