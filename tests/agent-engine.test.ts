@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentEngine } from "../src/agent-engine.js";
+import { AgentEngine, buildLaunchCommand } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
@@ -133,7 +133,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("cd ~/Gits/brainlayer && brainlayerClaude -s");
+      expect(launchCmd).toBe("brainlayerClaude -s");
     });
 
     it("writes initial state file", async () => {
@@ -461,5 +461,73 @@ describe("AgentEngine", () => {
         /not in an interactive state/,
       );
     });
+  });
+});
+
+describe("buildLaunchCommand", () => {
+  it("uses repoGolem launcher for claude (no cd prefix)", () => {
+    expect(buildLaunchCommand("claude", "brainlayer")).toBe(
+      "brainlayerClaude -s",
+    );
+    expect(buildLaunchCommand("claude", "voicelayer")).toBe(
+      "voicelayerClaude -s",
+    );
+    expect(buildLaunchCommand("claude", "golems")).toBe("golemsClaude -s");
+  });
+
+  it("uses cd + raw command for codex", () => {
+    expect(buildLaunchCommand("codex", "brainlayer")).toBe(
+      "cd ~/Gits/brainlayer && codex",
+    );
+  });
+
+  it("uses cd + raw command for gemini", () => {
+    expect(buildLaunchCommand("gemini", "voicelayer")).toBe(
+      "cd ~/Gits/voicelayer && gemini",
+    );
+  });
+
+  it("uses cd + kiro-cli for kiro", () => {
+    expect(buildLaunchCommand("kiro", "golems")).toBe(
+      "cd ~/Gits/golems && kiro-cli",
+    );
+  });
+
+  it("uses cd + cursor agent for cursor", () => {
+    expect(buildLaunchCommand("cursor", "cmuxlayer")).toBe(
+      "cd ~/Gits/cmuxlayer && cursor agent",
+    );
+  });
+
+  it("rejects invalid repo names", () => {
+    expect(() => buildLaunchCommand("claude", "foo bar")).toThrow(
+      /Invalid repo name/,
+    );
+    expect(() => buildLaunchCommand("claude", "foo;rm -rf")).toThrow(
+      /Invalid repo name/,
+    );
+    expect(() => buildLaunchCommand("claude", "")).toThrow(/Invalid repo name/);
+  });
+
+  it("rejects path-traversal names . and ..", () => {
+    expect(() => buildLaunchCommand("codex", ".")).toThrow(/Invalid repo name/);
+    expect(() => buildLaunchCommand("codex", "..")).toThrow(
+      /Invalid repo name/,
+    );
+    expect(() => buildLaunchCommand("claude", ".")).toThrow(
+      /Invalid repo name/,
+    );
+  });
+
+  it("allows dots, hyphens, underscores in repo names", () => {
+    expect(buildLaunchCommand("claude", "my-project")).toBe(
+      "my-projectClaude -s",
+    );
+    expect(buildLaunchCommand("claude", "my_project")).toBe(
+      "my_projectClaude -s",
+    );
+    expect(buildLaunchCommand("claude", "my.project")).toBe(
+      "my.projectClaude -s",
+    );
   });
 });
