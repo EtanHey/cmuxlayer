@@ -867,7 +867,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
 
     // Reconstitute registry from disk on startup (async, best-effort)
-    registry.reconstitute().catch(() => {});
+    registry
+      .reconstitute()
+      .catch((e) =>
+        console.error("[cmux-mcp] registry reconstitution failed:", e),
+      );
     engine.startSweep(5000);
 
     // 11. spawn_agent
