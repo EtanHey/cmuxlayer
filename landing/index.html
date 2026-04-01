@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>cmuxLayer — Terminal MCP for AI Agents</title>
   <meta name="description" content="MCP server that gives AI agents programmatic control over terminal panes. 21 tools. Split, read, send, automate. One Unix socket.">
+  <meta property="og:title" content="cmuxLayer — Terminal MCP for AI Agents">
+  <meta property="og:description" content="21 MCP tools. 0.2ms socket latency. Spawn agents, split panes, read screens. One Unix socket.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://etanhey.github.io/cmuxlayer/">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2309090b'/%3E%3Crect x='3' y='3' width='12' height='26' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3Crect x='17' y='3' width='12' height='12' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3Crect x='17' y='17' width='12' height='12' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,700&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -23,7 +29,8 @@
       --accent: #22c55e;
       --accent-bright: #4ade80;
       --accent-subtle: rgba(34, 197, 94, 0.08);
-      --accent-glow: rgba(34, 197, 94, 0.12);
+      --amber: #fbbf24;
+      --cyan: #67e8f9;
       --teal: #5eead4;
       --red: #cf6060;
       --display: 'Newsreader', Georgia, serif;
@@ -102,7 +109,6 @@
     }
 
     .logo:hover { opacity: 1; }
-
     .logo .accent { color: var(--accent); }
 
     .nav-right {
@@ -136,8 +142,65 @@
 
     /* ─── Hero ─── */
     .hero {
-      padding: 180px 0 80px;
+      padding: 180px 0 48px;
       text-align: center;
+      position: relative;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -100px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 500px;
+      background: radial-gradient(ellipse, rgba(34, 197, 94, 0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    /* Animated pane grid behind hero */
+    .hero-panes {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -55%);
+      width: 380px;
+      height: 240px;
+      opacity: 0.06;
+      pointer-events: none;
+    }
+
+    .pane {
+      position: absolute;
+      border: 2px solid var(--accent);
+      border-radius: 4px;
+      animation: pane-pulse 3s ease-in-out infinite;
+    }
+
+    .pane-1 { top: 0; left: 0; width: 54%; height: 100%; }
+    .pane-2 { top: 0; right: 0; width: 44%; height: 47%; animation-delay: 0.6s; }
+    .pane-3 { bottom: 0; right: 0; width: 44%; height: 47%; animation-delay: 1.2s; }
+
+    .pane-cursor {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      width: 8px;
+      height: 15px;
+      background: var(--accent);
+      border-radius: 1px;
+      animation: blink 1s step-end infinite;
+    }
+
+    @keyframes pane-pulse {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.01); }
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
     }
 
     h1 {
@@ -150,6 +213,7 @@
       max-width: 700px;
       margin-left: auto;
       margin-right: auto;
+      position: relative;
     }
 
     h1 em {
@@ -164,6 +228,7 @@
       margin: 0 auto 40px;
       line-height: 1.65;
       font-weight: 300;
+      position: relative;
     }
 
     .hero-actions {
@@ -172,6 +237,7 @@
       justify-content: center;
       gap: 12px;
       margin-bottom: 48px;
+      position: relative;
     }
 
     .btn {
@@ -216,6 +282,7 @@
     .install-block {
       max-width: 420px;
       margin: 0 auto;
+      position: relative;
     }
 
     .install-cmd {
@@ -233,9 +300,7 @@
       position: relative;
     }
 
-    .install-cmd:hover {
-      border-color: var(--accent);
-    }
+    .install-cmd:hover { border-color: var(--accent); }
 
     .install-cmd code { color: var(--text); flex: 1; }
     .install-cmd .dim { color: var(--text-dim); }
@@ -245,20 +310,59 @@
       border: none;
       color: var(--text-dim);
       cursor: pointer;
-      padding: 4px;
+      padding: 0;
       transition: color 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      flex-shrink: 0;
     }
 
     .copy-btn:hover { color: var(--accent); }
 
+    /* ─── Stat Strip ─── */
+    .stat-strip {
+      display: flex;
+      justify-content: center;
+      gap: 48px;
+      padding: 48px 0 16px;
+      flex-wrap: wrap;
+      position: relative;
+    }
+
+    .stat-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .stat-value {
+      font-family: var(--mono);
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      font-weight: 300;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
     /* ─── Terminal ─── */
     .terminal-section {
-      padding: 0 0 100px;
+      padding: 48px 0 100px;
     }
 
     .terminal {
       background: #0c0c0e;
       border: 1px solid rgba(255,255,255,0.06);
+      border-top: 1px solid rgba(34, 197, 94, 0.15);
       border-radius: 16px;
       overflow: hidden;
       max-width: 820px;
@@ -313,9 +417,10 @@
     .t-dim { color: #4a4a52; }
     .t-sys { color: #78787f; font-style: italic; }
     .t-tool { color: var(--accent-bright); font-weight: 500; }
-    .t-arg { color: #67e8f9; }
-    .t-str { color: #fbbf24; }
+    .t-arg { color: var(--cyan); }
+    .t-str { color: var(--amber); }
     .t-num { color: var(--teal); }
+    .t-ok { color: var(--accent); font-weight: 500; }
     .t-border { color: #333338; }
     .t-body { color: var(--text-secondary); }
 
@@ -349,58 +454,77 @@
       background: linear-gradient(90deg, transparent, var(--border), transparent);
     }
 
-    /* ─── Problem / Solution ─── */
-    .ps-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
+    /* ─── Pipeline ─── */
+    .pipeline {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 0;
+      max-width: 860px;
+      margin: 0 auto;
     }
 
-    .ps-card {
-      padding: 32px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      background: var(--bg-card);
+    .pipe-step {
       display: flex;
       flex-direction: column;
-      transition: border-color 0.3s;
-    }
-
-    .ps-card:hover {
-      border-color: var(--border-hover);
-    }
-
-    .ps-card.problem { border-top: 2px solid var(--red); }
-    .ps-card.solution { border-top: 2px solid var(--teal); }
-
-    .ps-tag {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      margin-bottom: 14px;
-      font-weight: 500;
-    }
-
-    .problem .ps-tag { color: var(--red); }
-    .solution .ps-tag { color: var(--teal); }
-
-    .ps-title {
-      font-family: var(--sans);
-      font-size: 20px;
-      font-weight: 600;
-      letter-spacing: -0.02em;
-      margin-bottom: 14px;
-    }
-
-    .ps-body {
-      color: var(--text-secondary);
-      font-size: 15px;
-      line-height: 1.7;
-      font-weight: 300;
+      align-items: center;
+      text-align: center;
       flex: 1;
     }
 
-    .ps-body strong { color: var(--text); font-weight: 500; }
+    .pipe-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 16px;
+      background: var(--bg-card);
+      border: 1px solid rgba(34, 197, 94, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 14px;
+      font-family: var(--mono);
+      font-size: 18px;
+      color: var(--accent);
+      transition: border-color 0.25s, transform 0.2s;
+    }
+
+    .pipe-step:hover .pipe-icon {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+
+    .pipe-arrow {
+      flex-shrink: 0;
+      width: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--border-hover);
+      margin-top: 20px;
+    }
+
+    .pipe-label {
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .pipe-time {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .pipe-desc {
+      font-size: 12px;
+      color: var(--text-dim);
+      font-weight: 300;
+      max-width: 130px;
+      margin-top: 4px;
+    }
 
     /* ─── Tools ─── */
     .tools-section {
@@ -433,9 +557,7 @@
       transition: background 0.2s;
     }
 
-    .tool-item:hover {
-      background: var(--bg-elevated);
-    }
+    .tool-item:hover { background: var(--bg-elevated); }
 
     .tool-item .name {
       font-family: var(--mono);
@@ -473,7 +595,7 @@
       gap: 12px;
       flex-wrap: wrap;
       margin-bottom: 64px;
-      max-width: 640px;
+      max-width: 600px;
       margin-left: auto;
       margin-right: auto;
     }
@@ -561,56 +683,12 @@
       color: var(--text-dim);
       transition: color 0.2s;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .setup-code:hover .copy-icon { color: var(--accent); }
-
-    /* ─── Speed ─── */
-    .speed-section {
-      padding: 80px 0;
-    }
-
-    .speed-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 24px;
-      max-width: 640px;
-      margin: 0 auto;
-    }
-
-    .speed-card {
-      padding: 28px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      background: var(--bg-card);
-      text-align: center;
-      transition: border-color 0.3s;
-    }
-
-    .speed-card:hover { border-color: var(--border-hover); }
-
-    .speed-val {
-      font-family: var(--mono);
-      font-size: 36px;
-      font-weight: 500;
-      color: var(--accent);
-      letter-spacing: -0.03em;
-      margin-bottom: 4px;
-    }
-
-    .speed-label {
-      font-size: 13px;
-      color: var(--text-dim);
-      font-weight: 300;
-    }
-
-    .speed-note {
-      font-size: 13px;
-      color: var(--text-dim);
-      text-align: center;
-      margin-top: 16px;
-      font-weight: 300;
-    }
 
     /* ─── CTA ─── */
     .cta-section {
@@ -676,10 +754,14 @@
     /* ─── Responsive ─── */
     @media (max-width: 768px) {
       .nav-right a:not(.nav-gh) { display: none; }
-      .hero { padding: 140px 0 60px; }
-      .ps-grid { grid-template-columns: 1fr; }
+      .hero { padding: 140px 0 40px; }
+      .hero-panes { width: 280px; height: 180px; }
+      .stat-strip { gap: 24px; }
+      .terminal-body { font-size: 11px; padding: 16px 14px 40px; overflow-x: auto; }
+      .pipeline { flex-wrap: wrap; gap: 16px; }
+      .pipe-arrow { display: none; }
+      .pipe-step { flex: 0 0 40%; }
       .setup-grid { flex-direction: column; }
-      .speed-grid { grid-template-columns: 1fr; }
       .compat-grid { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
@@ -687,6 +769,9 @@
     @media (max-width: 480px) {
       .hero-actions { flex-direction: column; }
       .btn { width: 100%; justify-content: center; }
+      .stat-strip { gap: 20px; }
+      .stat-label { font-size: 11px; }
+      .pipe-step { flex: 0 0 100%; }
     }
 
     /* ─── Animations ─── */
@@ -723,8 +808,13 @@
 
   <!-- Hero -->
   <section class="hero">
+    <div class="hero-panes" aria-hidden="true">
+      <div class="pane pane-1"><div class="pane-cursor"></div></div>
+      <div class="pane pane-2"></div>
+      <div class="pane pane-3"></div>
+    </div>
     <div class="wrap">
-      <h1 class="reveal">Your agents can't touch the terminal. <em>Fix that.</em></h1>
+      <h1 class="reveal">Your agents can't touch<br>the terminal. <em>Fix that.</em></h1>
       <p class="hero-sub reveal reveal-d1">
         MCP server that gives AI agents programmatic control over terminal panes.
         Split, read, send, automate &mdash; through one Unix socket.
@@ -747,6 +837,30 @@
     </div>
   </section>
 
+  <!-- Stat Strip -->
+  <div class="wrap">
+    <div class="stat-strip reveal">
+      <div class="stat-item">
+        <span class="stat-value">0.2ms</span>
+        <span class="stat-label">socket latency</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">21</span>
+        <span class="stat-label">MCP tools</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">5</span>
+        <span class="stat-label">agent CLIs</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-value">298</span>
+        <span class="stat-label">tests passing</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap"><div class="divider"></div></div>
+
   <!-- Terminal -->
   <section class="terminal-section">
     <div class="wrap-wide">
@@ -758,21 +872,27 @@
           <span class="terminal-title">claude ~ my-project</span>
         </div>
         <div class="terminal-body">
-          <span class="t"><span class="t-prompt">&#10095;</span> <span class="t-user">Split a new pane and run tests there</span></span>
-          <span class="t t-gap"><span class="t-body">I'll create a split and start the test runner.</span></span>
-          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">new_split</span>(<span class="t-arg">direction</span>=<span class="t-str">"right"</span>)</span>
+          <span class="t"><span class="t-prompt">&#10095;</span> <span class="t-user">Spawn two agents &mdash; one for the API, one for the frontend</span></span>
+          <span class="t t-gap"><span class="t-body">Setting up both agents.</span></span>
+          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">spawn_agent</span>(<span class="t-arg">repo</span>=<span class="t-str">"api"</span>, <span class="t-arg">model</span>=<span class="t-str">"sonnet"</span>, <span class="t-arg">task</span>=<span class="t-str">"fix rate limiter"</span>)</span>
           <span class="t"><span class="t-border">&#9474;</span></span>
-          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">workspace:</span> <span class="t-str">"workspace:1"</span>  <span class="t-dim">surface:</span> <span class="t-str">"surface:2"</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">agent_id:</span>  <span class="t-str">sonnet-api-1743523200-f7a2</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">surface:</span>   <span class="t-str">surface:3</span>  <span class="t-dim">state:</span> <span class="t-ok">creating</span></span>
           <span class="t"><span class="t-border">&#9474;</span></span>
-          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">type: terminal</span></span>
-          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">send_input</span>(<span class="t-arg">surface</span>=<span class="t-str">"surface:2"</span>, <span class="t-arg">text</span>=<span class="t-str">"bun test\n"</span>)</span>
-          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">ok</span></span>
-          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">read_screen</span>(<span class="t-arg">surface</span>=<span class="t-str">"surface:2"</span>, <span class="t-arg">lines</span>=<span class="t-num">5</span>)</span>
+          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">cli: claude</span></span>
+          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">spawn_agent</span>(<span class="t-arg">repo</span>=<span class="t-str">"web"</span>, <span class="t-arg">model</span>=<span class="t-str">"opus"</span>, <span class="t-arg">task</span>=<span class="t-str">"add metrics page"</span>)</span>
           <span class="t"><span class="t-border">&#9474;</span></span>
-          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-num">290</span> <span class="t-dim">pass</span>  <span class="t-num">0</span> <span class="t-dim">fail</span>  <span class="t-dim">Ran</span> <span class="t-num">296</span> <span class="t-dim">tests</span> <span class="t-dim">[2.37s]</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">agent_id:</span>  <span class="t-str">opus-web-1743523200-b4c1</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">surface:</span>   <span class="t-str">surface:4</span>  <span class="t-dim">state:</span> <span class="t-ok">creating</span></span>
           <span class="t"><span class="t-border">&#9474;</span></span>
-          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">lines: 5 &middot; scrollback: false</span></span>
-          <span class="t t-gap"><span class="t-body">All 296 tests pass. The test runner is in the right split.</span></span>
+          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">cli: claude</span></span>
+          <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">read_screen</span>(<span class="t-arg">surface</span>=<span class="t-str">"surface:3"</span>, <span class="t-arg">parsed_only</span>=<span class="t-num">true</span>)</span>
+          <span class="t"><span class="t-border">&#9474;</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">agent:</span> <span class="t-str">claude</span>  <span class="t-dim">status:</span> <span class="t-ok">working</span>  <span class="t-dim">model:</span> <span class="t-str">claude-sonnet-4-6</span></span>
+          <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">ctx:</span> <span class="t-ok">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="t-dim">&#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617;</span> <span class="t-num">54%</span>  <span class="t-dim">cost:</span> <span class="t-num">$0.42</span></span>
+          <span class="t"><span class="t-border">&#9474;</span></span>
+          <span class="t"><span class="t-border">&#9492;&#9472;</span> <span class="t-dim">parsed_only: true</span></span>
+          <span class="t t-gap"><span class="t-body">Both agents are running. The API fix is 54% through context.</span></span>
         </div>
       </div>
     </div>
@@ -780,54 +900,46 @@
 
   <div class="wrap"><div class="divider"></div></div>
 
-  <!-- Problem / Solution -->
+  <!-- Pipeline -->
   <section class="section">
     <div class="wrap">
-      <div class="ps-grid">
-        <div class="ps-card problem reveal">
-          <div class="ps-tag">The problem</div>
-          <h2 class="ps-title">Agents are blind</h2>
-          <p class="ps-body">
-            AI agents can write code but can't see the terminal they run in.
-            They can't split panes, read output from other processes, or
-            orchestrate parallel work.<br><br>
-            You end up being the <strong>human clipboard</strong> &mdash;
-            copying test output, switching tabs, relaying errors.
-          </p>
+      <div class="section-label reveal">Workflow</div>
+      <h2 class="section-heading reveal">Spawn. Split. Monitor. Read.</h2>
+      <div class="pipeline reveal">
+        <div class="pipe-step">
+          <div class="pipe-icon">&gt;_</div>
+          <div class="pipe-label">Spawn</div>
+          <div class="pipe-time">0.2ms</div>
+          <div class="pipe-desc">Pick a CLI, a repo, and a task. cmuxLayer opens the pane.</div>
         </div>
-        <div class="ps-card solution reveal reveal-d1">
-          <div class="ps-tag">The fix</div>
-          <h2 class="ps-title">21 tools. One socket.</h2>
-          <p class="ps-body">
-            cmuxLayer connects to cmux via a <strong>persistent Unix socket</strong> and
-            exposes every terminal operation as an MCP tool. Split panes, read screens,
-            send keystrokes, open browsers, spawn agents.<br><br>
-            Socket-first architecture: <strong>0.2ms per operation</strong>.
-            CLI fallback when the socket isn't available.
-          </p>
+        <div class="pipe-arrow">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
         </div>
-      </div>
-    </div>
-  </section>
-
-  <div class="wrap"><div class="divider"></div></div>
-
-  <!-- Speed -->
-  <section class="speed-section">
-    <div class="wrap">
-      <div class="section-label reveal">Performance</div>
-      <h2 class="section-heading reveal">Socket, not subprocess</h2>
-      <div class="speed-grid">
-        <div class="speed-card reveal">
-          <div class="speed-val">0.2ms</div>
-          <div class="speed-label">Unix socket (default)</div>
+        <div class="pipe-step">
+          <div class="pipe-icon">&#9553;</div>
+          <div class="pipe-label">Split</div>
+          <div class="pipe-time">0.2ms</div>
+          <div class="pipe-desc">Terminal or browser, any direction. Surfaces stack or tile.</div>
         </div>
-        <div class="speed-card reveal reveal-d1">
-          <div class="speed-val">287ms</div>
-          <div class="speed-label">CLI subprocess (fallback)</div>
+        <div class="pipe-arrow">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
+        </div>
+        <div class="pipe-step">
+          <div class="pipe-icon">&#9679;</div>
+          <div class="pipe-label">Monitor</div>
+          <div class="pipe-time">live</div>
+          <div class="pipe-desc">Context %, cost, state, errors. Parsed from raw screen output.</div>
+        </div>
+        <div class="pipe-arrow">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
+        </div>
+        <div class="pipe-step">
+          <div class="pipe-icon">&#9618;</div>
+          <div class="pipe-label">Read</div>
+          <div class="pipe-time">0.2ms</div>
+          <div class="pipe-desc">Screen content, scrollback, or structured parsed data.</div>
         </div>
       </div>
-      <p class="speed-note reveal reveal-d2">1,423x faster. Auto-reconnects. Falls back gracefully.</p>
     </div>
   </section>
 
@@ -837,7 +949,7 @@
   <section class="tools-section" id="tools">
     <div class="wrap">
       <div class="section-label">MCP tools</div>
-      <h2 class="section-heading">21 tools. Two groups.</h2>
+      <h2 class="section-heading">Every operation is a tool call</h2>
 
       <div class="tools-group">
         <div class="tools-group-label">Core &mdash; terminal operations</div>
@@ -940,17 +1052,15 @@
   <!-- Integrations + Setup -->
   <section class="integrations-section" id="setup">
     <div class="wrap">
-      <div class="section-label">Works with</div>
-      <h2 class="section-heading">Any MCP client</h2>
+      <div class="section-label">Compatible with</div>
+      <h2 class="section-heading">Five CLI agents</h2>
 
       <div class="compat-grid reveal">
         <span class="compat-item">Claude Code</span>
         <span class="compat-item">Cursor</span>
-        <span class="compat-item">Zed</span>
-        <span class="compat-item">VS Code</span>
         <span class="compat-item">Codex</span>
-        <span class="compat-item">Kiro</span>
         <span class="compat-item">Gemini CLI</span>
+        <span class="compat-item">Kiro</span>
       </div>
 
       <div class="section-label">Get started</div>
@@ -959,7 +1069,7 @@
       <div class="setup-grid">
         <div class="setup-card reveal">
           <div class="setup-num">01</div>
-          <div class="setup-text">Install cmuxLayer from npm</div>
+          <div class="setup-text">Install from npm</div>
           <div class="setup-code" onclick="copyText(this, 'npm install -g cmuxlayer')">
             <span>npm install -g cmuxlayer</span>
             <svg class="copy-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-6A1.5 1.5 0 013.5 2h6A1.5 1.5 0 0111 3.5V5"/></svg>
@@ -990,7 +1100,7 @@
   <section class="cta-section">
     <div class="wrap">
       <h2 class="cta-heading reveal">Stop being the clipboard.</h2>
-      <p class="cta-sub reveal reveal-d1">Open source. TypeScript. One socket. Built for cmux.</p>
+      <p class="cta-sub reveal reveal-d1">npm install. Add to MCP config. Start orchestrating.</p>
       <div class="hero-actions reveal reveal-d2">
         <a href="#setup" class="btn btn-primary">Get started</a>
         <a href="https://github.com/EtanHey/cmuxlayer" class="btn btn-ghost">
@@ -1008,8 +1118,8 @@
       <div class="footer-right">
         <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
         <a href="https://www.npmjs.com/package/cmuxlayer">npm</a>
-        <a href="https://github.com/EtanHey/brainlayer">BrainLayer</a>
         <a href="https://github.com/EtanHey/voicelayer">VoiceLayer</a>
+        <a href="https://etanhey.github.io/brainlayer/">BrainLayer</a>
       </div>
     </div>
   </footer>
@@ -1033,22 +1143,20 @@
     // Copy to clipboard
     function copyText(el, text) {
       navigator.clipboard.writeText(text).then(() => {
-        const icon = el.querySelector('.copy-btn, .copy-icon');
-        if (!icon) return;
-        const original = icon.innerHTML || '';
-        const isSvg = icon.tagName.toLowerCase() === 'svg';
+        const btn = el.querySelector('.copy-btn');
+        const icon = el.querySelector('.copy-icon');
 
-        if (isSvg) {
-          // For SVG elements in setup cards
+        if (btn) {
+          const orig = btn.innerHTML;
+          btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
+          setTimeout(() => { btn.innerHTML = orig; }, 1500);
+        } else if (icon) {
           const parent = icon.parentElement;
           const check = document.createElement('span');
           check.textContent = 'copied';
-          check.style.cssText = 'font-size:11px;color:var(--accent);font-family:var(--mono);';
+          check.style.cssText = 'font-size:11px;color:var(--accent);font-family:var(--mono);display:flex;align-items:center;';
           parent.replaceChild(check, icon);
           setTimeout(() => parent.replaceChild(icon, check), 1500);
-        } else {
-          icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
-          setTimeout(() => { icon.innerHTML = original; }, 1500);
         }
       });
     }
