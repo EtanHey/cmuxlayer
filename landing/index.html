@@ -142,6 +142,18 @@
       position: relative;
     }
 
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -100px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 500px;
+      background: radial-gradient(ellipse, rgba(34, 197, 94, 0.04) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
     /* Animated pane grid behind hero */
     .hero-panes {
       position: absolute;
@@ -150,7 +162,7 @@
       transform: translate(-50%, -55%);
       width: 380px;
       height: 240px;
-      opacity: 0.04;
+      opacity: 0.06;
       pointer-events: none;
     }
 
@@ -345,6 +357,7 @@
     .terminal {
       background: #0c0c0e;
       border: 1px solid rgba(255,255,255,0.06);
+      border-top: 1px solid rgba(34, 197, 94, 0.15);
       border-radius: 16px;
       overflow: hidden;
       max-width: 820px;
@@ -459,7 +472,7 @@
       height: 64px;
       border-radius: 16px;
       background: var(--bg-card);
-      border: 1px solid var(--border);
+      border: 1px solid rgba(34, 197, 94, 0.12);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -739,10 +752,10 @@
       .hero { padding: 140px 0 40px; }
       .hero-panes { width: 280px; height: 180px; }
       .stat-strip { gap: 24px; }
+      .terminal-body { font-size: 11px; padding: 16px 14px 40px; overflow-x: auto; }
       .pipeline { flex-wrap: wrap; gap: 16px; }
       .pipe-arrow { display: none; }
       .pipe-step { flex: 0 0 40%; }
-      .ps-grid { grid-template-columns: 1fr; }
       .setup-grid { flex-direction: column; }
       .compat-grid { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
@@ -752,6 +765,7 @@
       .hero-actions { flex-direction: column; }
       .btn { width: 100%; justify-content: center; }
       .stat-strip { gap: 20px; }
+      .stat-label { font-size: 11px; }
       .pipe-step { flex: 0 0 100%; }
     }
 
@@ -851,7 +865,7 @@
           <span class="terminal-title">claude ~ my-project</span>
         </div>
         <div class="terminal-body">
-          <span class="t"><span class="t-prompt">&#10095;</span> <span class="t-user">Spawn two agents &mdash; one for the API fix, one for the dashboard</span></span>
+          <span class="t"><span class="t-prompt">&#10095;</span> <span class="t-user">Spawn two agents &mdash; one for the API, one for the frontend</span></span>
           <span class="t t-gap"><span class="t-body">I'll set up both agents in parallel.</span></span>
           <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">spawn_agent</span>(<span class="t-arg">repo</span>=<span class="t-str">"api"</span>, <span class="t-arg">model</span>=<span class="t-str">"sonnet"</span>, <span class="t-arg">task</span>=<span class="t-str">"fix rate limiter"</span>)</span>
           <span class="t"><span class="t-border">&#9474;</span></span>
