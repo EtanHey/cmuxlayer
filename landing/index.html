@@ -842,6 +842,7 @@
       .demo-left .demo-pane-body { max-height: 220px; }
       .demo-right .demo-pane-body { max-height: 220px; }
       .demo-pane-body { font-size: 10px; }
+      .demo-tabs { flex-wrap: wrap; }
     }
 
     /* ─── Footer ─── */
@@ -902,7 +903,7 @@
     @media (max-width: 480px) {
       .hero-actions { flex-direction: column; }
       .btn { width: 100%; justify-content: center; }
-      .stat-strip { gap: 20px; }
+      .stat-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
       .stat-label { font-size: 11px; }
       .pipe-step { flex: 0 0 100%; }
     }
@@ -1346,6 +1347,18 @@
         const f = Math.round(pct / 5.5), e = 18 - f;
         return grn('\u2588'.repeat(f)) + dim('\u2588'.repeat(e)) + ' ' + tea(pct + '%');
       }
+      // Claude Code-style formatting
+      const bullet = () => grn('\u23FA ');  // ⏺
+      const indent = () => dim('\u23BF ');  // ⎿
+      const prompt = () => grn('\u276F ');  // ❯
+      const think = () => amb('\u273B ') + dim('Thinking...');
+      function statusLine(branch, model, tokens, cost) {
+        return '\n' + dim('\u2500'.repeat(38)) + '\n' +
+          dim('\u2387 ') + sec(branch) + '  ' +
+          dim('\uD83E\uDD16 ') + sec(model) + '  ' +
+          tea(tokens) + dim(' tokens') + '  ' +
+          tea(cost);
+      }
       function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
       const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -1464,12 +1477,13 @@
         setStat(3, 1, 'spawning');
         setTabList(['voiceFix'], 'voiceFix');
         updateAgentState('voiceFix',
-          dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('cli: claude') + '\n' +
-          dim('model: ') + sec('claude-opus-4-6') + '  ' + dim('state: ') + grn('booting') + '\n\n' +
-          sec('> Claude Code v1.0.23\n') +
-          sec('> Model: claude-opus-4-6 (1M context)\n') +
-          sec('> Loading repo: voicelayer\n') +
-          dim('tokens: ') + tea('0') + '  ' + dim('cost: ') + tea('$0.00')
+          dim('╭─ Claude Code v1.0.23') + '\n' +
+          dim('│ ') + sec('Model: claude-opus-4-6 (1M context)') + '\n' +
+          dim('│ ') + sec('Repo: ~/Gits/voicelayer') + '\n' +
+          dim('│ ') + sec('Task: Fix edge-tts fallback') + '\n' +
+          dim('╰─') + '\n\n' +
+          think() +
+          statusLine('main', 'Opus 4.6', '0', '$0.00')
         );
         await sleep(1200);
 
@@ -1483,10 +1497,13 @@
         setStat(4, 2, 'spawning');
         setTabList(['voiceFix', 'brainOpt'], 'voiceFix');
         updateAgentState('brainOpt',
-          dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('cli: claude') + '\n' +
-          dim('model: ') + sec('claude-sonnet-4-6') + '  ' + dim('state: ') + grn('booting') + '\n\n' +
-          sec('> Claude Code v1.0.23\n') +
-          sec('> Loading repo: brainlayer')
+          dim('╭─ Claude Code v1.0.23') + '\n' +
+          dim('│ ') + sec('Model: claude-sonnet-4-6 (200K context)') + '\n' +
+          dim('│ ') + sec('Repo: ~/Gits/brainlayer') + '\n' +
+          dim('│ ') + sec('Task: Optimize FTS5 search') + '\n' +
+          dim('╰─') + '\n\n' +
+          think() +
+          statusLine('main', 'Sonnet 4.6', '0', '$0.00')
         );
         await sleep(800);
 
@@ -1501,14 +1518,31 @@
         // Phase 4 — Agents working (both update in background)
         setStat(4, 2, 'agents working');
         const voiceSteps = [
-          { tok: '42K', pct: 21, cost: '$0.23', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nFound fallback issue at line 147' },
-          { tok: '87K', pct: 43, cost: '$0.61', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nFound fallback issue at line 147\n\nEditing src/tts/edge-tts.ts\n  + if (!stream) return fallbackToGoogleTTS(text)' },
-          { tok: '134K', pct: 67, cost: '$1.12', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nEditing src/tts/edge-tts.ts\n  + if (!stream) return fallbackToGoogleTTS(text)\n\nRunning: bun test src/tts/\n  ' + grn('\u2713') + ' edge-tts falls back on timeout\n  ' + grn('\u2713') + ' google-tts returns audio buffer' },
+          { tok: '42K', cost: '$0.23',
+            out: bullet() + wht('Read') + sec(' src/tts/edge-tts.ts') + '\n' +
+                 indent() + sec('Found fallback issue at line 147') + '\n' +
+                 indent() + sec('Stream closes without retry on timeout') },
+          { tok: '87K', cost: '$0.61',
+            out: bullet() + wht('Edit') + sec(' src/tts/edge-tts.ts') + '\n' +
+                 indent() + grn('+ ') + sec('if (!stream) return fallbackToGoogleTTS(text);') + '\n' +
+                 indent() + grn('+ ') + sec('log.warn("edge-tts timeout, falling back");') },
+          { tok: '134K', cost: '$1.12',
+            out: bullet() + wht('Bash') + sec(' bun test src/tts/') + '\n' +
+                 indent() + grn('\u2713') + sec(' edge-tts falls back on timeout') + '\n' +
+                 indent() + grn('\u2713') + sec(' google-tts returns audio buffer') + '\n' +
+                 indent() + tea('2 pass') + dim(' 0 fail') },
         ];
         const brainSteps = [
-          { tok: '31K', pct: 15, cost: '$0.11', state: 'working', out: 'Reading src/search/hybrid.ts' },
-          { tok: '68K', pct: 34, cost: '$0.24', state: 'working', out: 'Rewrote hybrid_search() to use\npre-filtered candidate set before\nsemantic ranking.' },
-          { tok: '96K', pct: 48, cost: '$0.34', state: 'working', out: 'Rewrote hybrid_search() to use\npre-filtered candidate set.\n\nBenchmark: 48ms \u2192 11ms (4.3x faster)' },
+          { tok: '31K', cost: '$0.11',
+            out: think() },
+          { tok: '68K', cost: '$0.24',
+            out: bullet() + wht('Edit') + sec(' src/search/hybrid.ts') + '\n' +
+                 indent() + sec('Rewrite hybrid_search() to use pre-filtered') + '\n' +
+                 indent() + sec('candidate set before semantic ranking') },
+          { tok: '96K', cost: '$0.34',
+            out: bullet() + wht('Bash') + sec(' bun test src/search/') + '\n' +
+                 indent() + grn('\u2713') + sec(' hybrid search returns top-3 in <11ms') + '\n' +
+                 indent() + sec('Benchmark: 48ms \u2192 11ms (4.3x faster)') },
         ];
 
         setActiveTab('voiceFix');
@@ -1516,22 +1550,27 @@
           const vs = voiceSteps[i];
           const bs = brainSteps[i] || brainSteps[brainSteps.length - 1];
           updateAgentState('voiceFix',
-            dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('state: ') + grn(vs.state) + '\n' +
-            dim('model: ') + sec('claude-opus-4-6') + '  ' + dim('tokens: ') + tea(vs.tok) + '\n' +
-            dim('ctx: ') + ctxBar(vs.pct) + '  ' + dim('cost: ') + tea(vs.cost) + '\n\n' +
-            sec(vs.out)
+            vs.out +
+            statusLine('fix/edge-tts', 'Opus 4.6', vs.tok, vs.cost)
           );
           updateAgentState('brainOpt',
-            dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('state: ') + grn(bs.state) + '\n' +
-            dim('model: ') + sec('claude-sonnet-4-6') + '  ' + dim('tokens: ') + tea(bs.tok) + '\n' +
-            dim('ctx: ') + ctxBar(bs.pct) + '  ' + dim('cost: ') + tea(bs.cost) + '\n\n' +
-            sec(bs.out)
+            bs.out +
+            statusLine('fix/fts5-perf', 'Sonnet 4.6', bs.tok, bs.cost)
           );
           await sleep(2000);
         }
 
-        // Phase 5 — Auto-switch to brainOpt tab (user can override)
+        // Phase 5 — Auto-switch to brainOpt tab
         setActiveTab('brainOpt');
+        updateAgentState('brainOpt',
+          bullet() + wht('Edit') + sec(' src/search/hybrid.ts') + '\n' +
+          indent() + sec('Rewrite hybrid_search() with pre-filtered') + '\n' +
+          indent() + sec('candidate set before semantic ranking') + '\n\n' +
+          bullet() + wht('Bash') + sec(' bun test src/search/') + '\n' +
+          indent() + grn('\u2713') + sec(' hybrid search returns top-3 in <11ms') + '\n' +
+          indent() + sec('Benchmark: ') + amb('48ms \u2192 11ms') + sec(' (4.3x faster)') +
+          statusLine('fix/fts5-perf', 'Sonnet 4.6', '96K', '$0.34')
+        );
         await sleep(3000);
 
         // Phase 6 — Monitor from orchestrator
@@ -1558,20 +1597,22 @@
 
         // Phase 8 — Results (both agents show done)
         updateAgentState('voiceFix',
-          dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('state: ') + grn('\u2713 done') + '\n' +
-          dim('tokens: ') + tea('142K') + '  ' + dim('cost: ') + tea('$1.12') + '\n\n' +
-          dim('files:\n') +
-          sec('  src/tts/edge-tts.ts (+23 -4)\n') +
-          sec('  tests/tts.test.ts (+47)\n\n') +
-          grn('\u2713') + ' ' + sec('Committed: ') + amb('fix: edge-tts fallback to google-tts')
+          prompt() + wht('Done.') + '\n\n' +
+          bullet() + wht('Bash') + sec(' git add src/tts/ tests/tts.test.ts') + '\n' +
+          bullet() + wht('Bash') + sec(' git commit -m "fix: edge-tts fallback"') + '\n' +
+          indent() + grn('[fix/edge-tts a3f7c21]') + '\n' +
+          indent() + sec('2 files changed, +23 -4') + '\n\n' +
+          sec('CLAUDE_COUNTER: 7') +
+          statusLine('fix/edge-tts', 'Opus 4.6', '142K', '$1.12')
         );
         updateAgentState('brainOpt',
-          dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('state: ') + grn('\u2713 done') + '\n' +
-          dim('tokens: ') + tea('96K') + '  ' + dim('cost: ') + tea('$0.34') + '\n\n' +
-          dim('files:\n') +
-          sec('  src/search/hybrid.ts (+31 -8)\n') +
-          sec('  tests/search.test.ts (+22)\n\n') +
-          grn('\u2713') + ' ' + sec('Committed: ') + amb('perf: optimize FTS5 hybrid search')
+          prompt() + wht('Done.') + '\n\n' +
+          bullet() + wht('Bash') + sec(' git add src/search/ tests/') + '\n' +
+          bullet() + wht('Bash') + sec(' git commit -m "perf: optimize FTS5"') + '\n' +
+          indent() + grn('[fix/fts5-perf c1d4e89]') + '\n' +
+          indent() + sec('2 files changed, +31 -8') + '\n\n' +
+          sec('CLAUDE_COUNTER: 12') +
+          statusLine('fix/fts5-perf', 'Sonnet 4.6', '96K', '$0.34')
         );
         setActiveTab('voiceFix');
         await sleep(1200);
