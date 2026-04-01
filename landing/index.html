@@ -8,7 +8,7 @@
   <meta property="og:title" content="cmuxLayer — Terminal MCP for AI Agents">
   <meta property="og:description" content="21 MCP tools. 0.2ms socket latency. Spawn agents, split panes, read screens. One Unix socket.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://etanhey.github.io/cmuxlayer/">
+  <meta property="og:url" content="https://cmuxlayer.etanheyman.com">
   <meta name="twitter:card" content="summary">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2309090b'/%3E%3Crect x='3' y='3' width='12' height='26' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3Crect x='17' y='3' width='12' height='12' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3Crect x='17' y='17' width='12' height='12' rx='2' stroke='%2322c55e' stroke-width='2' fill='none'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -829,7 +829,9 @@
 
     @media (max-width: 768px) {
       .demo-layout { flex-direction: column; min-height: auto; }
-      .demo-left { flex: none; border-right: none; border-bottom: 2px solid rgba(34,197,94,0.12); min-height: 200px; }
+      .demo-left { flex: none; border-right: none; border-bottom: 2px solid rgba(34,197,94,0.12); }
+      .demo-left .demo-pane-body { max-height: 220px; }
+      .demo-right .demo-pane-body { max-height: 220px; }
       .demo-pane-body { font-size: 10px; }
     }
 
@@ -1562,7 +1564,7 @@
         appendOrc(grn('\u2501\u2501\u2501 ') + wht('2 agents \u00B7 2 PRs \u00B7 298 tests passing') + grn(' \u2501\u2501\u2501'));
         setStat(4, 0, '\u2713 complete');
 
-        await sleep(4000);
+        await sleep(3000);
       }
 
       // Start on scroll
