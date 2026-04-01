@@ -17,6 +17,10 @@ export default function Home() {
         links={[
           { label: "Tools", href: "#tools" },
           { label: "Setup", href: "#setup" },
+          {
+            label: "Docs",
+            href: "https://github.com/EtanHey/cmuxlayer#readme",
+          },
         ]}
       />
       <Hero />
