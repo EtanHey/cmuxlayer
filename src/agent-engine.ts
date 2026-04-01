@@ -297,8 +297,8 @@ export class AgentEngine {
   startSweep(intervalMs: number = 5000): void {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => {
-      this.runSweep().catch(() => {
-        // Sweep errors are non-fatal — next sweep will retry
+      this.runSweep().catch((e) => {
+        console.error("[cmux-mcp] sweep failed (will retry):", e);
       });
     }, intervalMs);
   }
