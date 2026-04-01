@@ -6,27 +6,27 @@
 - TypeScript + Zod, built with `tsc`, runs on Node 20+
 - MCP SDK (`@modelcontextprotocol/sdk`)
 - Persistent Unix socket connection to cmux (1,423x faster than CLI subprocess fallback)
-- Vitest for testing (278 tests across 17 test files)
+- Vitest for testing (310 tests across 17 test files)
 
 ## Development
 ```bash
 bun install
 bun run dev          # Run with tsx (hot reload)
 bun run build        # Compile TypeScript to dist/
-bun run test         # 278 tests via vitest
+bun run test         # 310 tests via vitest
 bun run typecheck    # Type checking only
 ```
 
 ## Architecture
 
-### MCP Tools (21 total)
+### MCP Tools (22 total)
 - **11 core tools**: list_surfaces, new_split, send_input, send_key, read_screen, rename_tab, notify, set_status, set_progress, close_surface, browser_surface
-- **10 agent lifecycle tools**: spawn_agent, send_to_agent, read_agent_output, get_agent_state, list_agents, wait_for, wait_for_all, stop_agent, kill, interact
+- **11 agent lifecycle tools**: spawn_agent, send_to_agent, read_agent_output, get_agent_state, list_agents, my_agents, wait_for, wait_for_all, stop_agent, kill, interact
 
 ### Key Source Files
 | File | Role |
 |------|------|
-| `server.ts` | MCP tool registration and handlers (all 21 tools) |
+| `server.ts` | MCP tool registration and handlers (all 22 tools) |
 | `cmux-socket-client.ts` | Persistent Unix socket to cmux |
 | `cmux-client.ts` | CLI wrapper fallback |
 | `agent-engine.ts` | Agent lifecycle — spawn, monitor, quality tracking |

@@ -7,13 +7,13 @@
 </p>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-278%20passing-brightgreen.svg)](#testing)
-[![MCP](https://img.shields.io/badge/MCP-21%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-310%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-22%20tools-green.svg)](https://modelcontextprotocol.io)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 
 ---
 
-**278 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **21 MCP tools** · **Agent lifecycle engine**
+**310 tests** · **1,423x socket speedup** · **Native MCP in cmux Swift fork** · **22 MCP tools** · **Agent lifecycle engine**
 
 cmuxlayer gives AI agents programmatic control over terminal workspaces via MCP. Spawn split panes, send commands, read screen output, manage agent lifecycles — all through typed MCP tools that any MCP-compatible AI client can use.
 

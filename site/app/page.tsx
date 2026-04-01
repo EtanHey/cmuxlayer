@@ -5,6 +5,7 @@ import { Terminal } from "@/components/terminal";
 import { Pipeline } from "@/components/pipeline";
 import { Tools } from "@/components/tools";
 import { Integrations } from "@/components/integrations";
+import { AnimatedDemo } from "@/components/animated-demo";
 import { Cta } from "@/components/cta";
 import { Footer } from "@/components/shared/footer";
 
@@ -28,6 +29,8 @@ export default function Home() {
       <Tools />
       <Divider />
       <Integrations />
+      <Divider />
+      <AnimatedDemo />
       <Divider />
       <Cta />
       <Footer product="cmuxlayer" />
