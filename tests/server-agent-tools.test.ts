@@ -289,7 +289,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(data.parent_agent_id).toBe(parentId);
   });
 
-  it("my_agents returns error for nonexistent parent", async () => {
+  it("my_agents returns empty array for nonexistent parent (orphan-safe)", async () => {
     const server = createServer({
       exec: mockExec,
       stateDir: TEST_DIR,
@@ -300,8 +300,9 @@ describe("agent lifecycle tool handlers", () => {
       { parent_agent_id: "nonexistent-id" },
       {} as any,
     );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/Parent agent not found/);
+    const data = result.structuredContent;
+    expect(data.count).toBe(0);
+    expect(data.agents).toHaveLength(0);
   });
 
   it("my_agents includes screen data fields (null when no real screen)", async () => {

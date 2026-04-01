@@ -1415,12 +1415,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           let agents: AgentRecord[];
           if (args.parent_agent_id) {
-            const parent = engine.getAgentState(args.parent_agent_id);
-            if (!parent) {
-              return err(
-                new Error(`Parent agent not found: ${args.parent_agent_id}`),
-              );
-            }
+            // Look up children directly — parent record may be gone
+            // but children still reference it via parent_agent_id
             agents = engine.getRegistry().getChildren(args.parent_agent_id);
           } else {
             agents = engine
@@ -1428,20 +1424,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               .filter((a) => a.parent_agent_id === null);
           }
 
+          const SCREEN_TIMEOUT = 3000;
           const enriched = await Promise.all(
             agents.map(async (agent) => {
               let screenData: ParsedScreenResult | null = null;
               try {
-                const screen = await client.readScreen(agent.surface_id, {
-                  lines: 20,
-                });
+                const screen = await Promise.race([
+                  client.readScreen(agent.surface_id, { lines: 20 }),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(
+                      () => reject(new Error("timeout")),
+                      SCREEN_TIMEOUT,
+                    ),
+                  ),
+                ]);
                 screenData = enrichParsedScreen(
                   parseScreen(screen.text),
                   screen.text,
                   pickLatestSurfaceModel(stateMgr, agent.surface_id),
                 );
               } catch {
-                // Surface may be closed or unavailable
+                // Surface may be closed, unavailable, or timed out
               }
 
               return {
