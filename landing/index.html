@@ -150,7 +150,7 @@
       transform: translateX(-50%);
       width: 800px;
       height: 500px;
-      background: radial-gradient(ellipse, rgba(34, 197, 94, 0.04) 0%, transparent 70%);
+      background: radial-gradient(ellipse, rgba(34, 197, 94, 0.06) 0%, transparent 70%);
       pointer-events: none;
     }
 
@@ -844,15 +844,17 @@
         <span class="stat-label">MCP tools</span>
       </div>
       <div class="stat-item">
-        <span class="stat-value">5 CLIs</span>
-        <span class="stat-label">Claude &middot; Codex &middot; Gemini &middot; Cursor &middot; Kiro</span>
+        <span class="stat-value">5</span>
+        <span class="stat-label">agent CLIs</span>
       </div>
       <div class="stat-item">
-        <span class="stat-value">296</span>
+        <span class="stat-value">298</span>
         <span class="stat-label">tests passing</span>
       </div>
     </div>
   </div>
+
+  <div class="wrap"><div class="divider"></div></div>
 
   <!-- Terminal -->
   <section class="terminal-section">
@@ -866,7 +868,7 @@
         </div>
         <div class="terminal-body">
           <span class="t"><span class="t-prompt">&#10095;</span> <span class="t-user">Spawn two agents &mdash; one for the API, one for the frontend</span></span>
-          <span class="t t-gap"><span class="t-body">I'll set up both agents in parallel.</span></span>
+          <span class="t t-gap"><span class="t-body">Setting up both agents.</span></span>
           <span class="t t-gap"><span class="t-border">&#9484;&#9472;</span> <span class="t-tool">spawn_agent</span>(<span class="t-arg">repo</span>=<span class="t-str">"api"</span>, <span class="t-arg">model</span>=<span class="t-str">"sonnet"</span>, <span class="t-arg">task</span>=<span class="t-str">"fix rate limiter"</span>)</span>
           <span class="t"><span class="t-border">&#9474;</span></span>
           <span class="t"><span class="t-border">&#9474;</span>  <span class="t-dim">agent_id:</span>  <span class="t-str">sonnet-api-1743523200-f7a2</span></span>
@@ -902,35 +904,35 @@
         <div class="pipe-step">
           <div class="pipe-icon">&gt;_</div>
           <div class="pipe-label">Spawn</div>
-          <div class="pipe-time">0ms</div>
-          <div class="pipe-desc">Launch Claude, Codex, Gemini, Cursor, or Kiro in a new pane</div>
+          <div class="pipe-time">0.2ms</div>
+          <div class="pipe-desc">Pick a CLI, a repo, and a task. cmuxLayer opens the pane.</div>
         </div>
         <div class="pipe-arrow">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
         </div>
         <div class="pipe-step">
-          <div class="pipe-icon">&#9475;&#9474;</div>
+          <div class="pipe-icon">&#9553;</div>
           <div class="pipe-label">Split</div>
           <div class="pipe-time">0.2ms</div>
-          <div class="pipe-desc">Create terminal or browser panes in any direction</div>
+          <div class="pipe-desc">Terminal or browser, any direction. Surfaces stack or tile.</div>
         </div>
         <div class="pipe-arrow">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
         </div>
         <div class="pipe-step">
-          <div class="pipe-icon">&#9673;</div>
+          <div class="pipe-icon">&#9679;</div>
           <div class="pipe-label">Monitor</div>
           <div class="pipe-time">live</div>
-          <div class="pipe-desc">Track agent state, context usage, cost, and errors</div>
+          <div class="pipe-desc">Context %, cost, state, errors. Parsed from raw screen output.</div>
         </div>
         <div class="pipe-arrow">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 12h14m-4-4 4 4-4 4"/></svg>
         </div>
         <div class="pipe-step">
-          <div class="pipe-icon">&#9610;</div>
+          <div class="pipe-icon">&#9618;</div>
           <div class="pipe-label">Read</div>
-          <div class="pipe-time">instant</div>
-          <div class="pipe-desc">Capture screen output, scrollback, and parsed agent data</div>
+          <div class="pipe-time">0.2ms</div>
+          <div class="pipe-desc">Screen content, scrollback, or structured parsed data.</div>
         </div>
       </div>
     </div>
@@ -942,7 +944,7 @@
   <section class="tools-section" id="tools">
     <div class="wrap">
       <div class="section-label">MCP tools</div>
-      <h2 class="section-heading">21 tools. Two groups.</h2>
+      <h2 class="section-heading">Every operation is a tool call</h2>
 
       <div class="tools-group">
         <div class="tools-group-label">Core &mdash; terminal operations</div>
