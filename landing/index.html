@@ -20,10 +20,10 @@
       --text: #fafaf9;
       --text-secondary: #a8a29e;
       --text-dim: #6b6660;
-      --accent: #d4956a;
-      --accent-bright: #e8b090;
-      --accent-subtle: rgba(212, 149, 106, 0.08);
-      --accent-glow: rgba(212, 149, 106, 0.12);
+      --accent: #22c55e;
+      --accent-bright: #4ade80;
+      --accent-subtle: rgba(34, 197, 94, 0.08);
+      --accent-glow: rgba(34, 197, 94, 0.12);
       --teal: #5eead4;
       --red: #cf6060;
       --display: 'Newsreader', Georgia, serif;
@@ -308,13 +308,13 @@
     .t { display: block; }
     .t-gap { margin-top: 12px; }
 
-    .t-prompt { color: #6ec1e4; }
+    .t-prompt { color: var(--accent); }
     .t-user { color: var(--text); }
     .t-dim { color: #4a4a52; }
     .t-sys { color: #78787f; font-style: italic; }
-    .t-tool { color: var(--accent); font-weight: 500; }
-    .t-arg { color: #a8d8a8; }
-    .t-str { color: #e8b090; }
+    .t-tool { color: var(--accent-bright); font-weight: 500; }
+    .t-arg { color: #67e8f9; }
+    .t-str { color: #fbbf24; }
     .t-num { color: var(--teal); }
     .t-border { color: #333338; }
     .t-body { color: var(--text-secondary); }
@@ -467,54 +467,43 @@
       text-align: center;
     }
 
-    .logo-row {
+    .compat-grid {
       display: flex;
       justify-content: center;
-      gap: 40px;
+      gap: 12px;
       flex-wrap: wrap;
       margin-bottom: 64px;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
     }
 
-    .logo-item {
-      display: flex;
-      flex-direction: column;
+    .compat-item {
+      display: inline-flex;
       align-items: center;
-      gap: 10px;
-      transition: transform 0.2s;
-    }
-
-    .logo-item:hover { transform: translateY(-3px); }
-
-    .logo-box {
-      width: 52px;
-      height: 52px;
-      border-radius: 12px;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 8px;
       background: var(--bg-card);
       border: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 11px;
-      transition: border-color 0.25s;
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-secondary);
+      transition: border-color 0.25s, color 0.2s;
+      cursor: default;
     }
 
-    .logo-box img {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
+    .compat-item::before {
+      content: '\25CF';
+      color: var(--accent);
+      font-size: 8px;
     }
 
-    .logo-item:hover .logo-box {
-      border-color: var(--border-hover);
+    .compat-item:hover {
+      border-color: var(--accent);
+      color: var(--text);
     }
-
-    .logo-name {
-      font-size: 12px;
-      color: var(--text-dim);
-      transition: color 0.2s;
-    }
-
-    .logo-item:hover .logo-name { color: var(--text-secondary); }
 
     /* ─── Setup ─── */
     .setup-grid {
@@ -691,7 +680,7 @@
       .ps-grid { grid-template-columns: 1fr; }
       .setup-grid { flex-direction: column; }
       .speed-grid { grid-template-columns: 1fr; }
-      .logo-row { gap: 24px; }
+      .compat-grid { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -954,35 +943,14 @@
       <div class="section-label">Works with</div>
       <h2 class="section-heading">Any MCP client</h2>
 
-      <div class="logo-row reveal">
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/claude.svg" alt="Claude Code"></div>
-          <span class="logo-name">Claude Code</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/cursor.svg" alt="Cursor"></div>
-          <span class="logo-name">Cursor</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/zed.svg" alt="Zed"></div>
-          <span class="logo-name">Zed</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/vscode.svg" alt="VS Code"></div>
-          <span class="logo-name">VS Code</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/openai.svg" alt="Codex"></div>
-          <span class="logo-name">Codex</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/kiro.svg" alt="Kiro"></div>
-          <span class="logo-name">Kiro</span>
-        </div>
-        <div class="logo-item">
-          <div class="logo-box"><img src="logos/gemini.svg" alt="Gemini CLI"></div>
-          <span class="logo-name">Gemini CLI</span>
-        </div>
+      <div class="compat-grid reveal">
+        <span class="compat-item">Claude Code</span>
+        <span class="compat-item">Cursor</span>
+        <span class="compat-item">Zed</span>
+        <span class="compat-item">VS Code</span>
+        <span class="compat-item">Codex</span>
+        <span class="compat-item">Kiro</span>
+        <span class="compat-item">Gemini CLI</span>
       </div>
 
       <div class="section-label">Get started</div>
