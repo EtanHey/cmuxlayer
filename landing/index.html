@@ -20,10 +20,10 @@
       --text: #fafaf9;
       --text-secondary: #a8a29e;
       --text-dim: #6b6660;
-      --accent: #d4956a;
-      --accent-bright: #e8b090;
-      --accent-subtle: rgba(212, 149, 106, 0.08);
-      --accent-glow: rgba(212, 149, 106, 0.12);
+      --accent: #22c55e;
+      --accent-bright: #4ade80;
+      --accent-subtle: rgba(34, 197, 94, 0.08);
+      --accent-glow: rgba(34, 197, 94, 0.12);
       --teal: #5eead4;
       --red: #cf6060;
       --display: 'Newsreader', Georgia, serif;
@@ -104,18 +104,6 @@
     .logo:hover { opacity: 1; }
 
     .logo .accent { color: var(--accent); }
-
-    .logo-icon {
-      width: 24px;
-      height: 24px;
-      border-radius: 6px;
-      background: var(--accent-subtle);
-      border: 1px solid rgba(212, 149, 106, 0.15);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 12px;
-    }
 
     .nav-right {
       display: flex;
@@ -320,13 +308,13 @@
     .t { display: block; }
     .t-gap { margin-top: 12px; }
 
-    .t-prompt { color: #6ec1e4; }
+    .t-prompt { color: var(--accent); }
     .t-user { color: var(--text); }
     .t-dim { color: #4a4a52; }
     .t-sys { color: #78787f; font-style: italic; }
-    .t-tool { color: var(--accent); font-weight: 500; }
-    .t-arg { color: #a8d8a8; }
-    .t-str { color: #e8b090; }
+    .t-tool { color: var(--accent-bright); font-weight: 500; }
+    .t-arg { color: #67e8f9; }
+    .t-str { color: #fbbf24; }
     .t-num { color: var(--teal); }
     .t-border { color: #333338; }
     .t-body { color: var(--text-secondary); }
@@ -479,22 +467,26 @@
       text-align: center;
     }
 
-    .badge-row {
+    .compat-grid {
       display: flex;
       justify-content: center;
       gap: 12px;
       flex-wrap: wrap;
       margin-bottom: 64px;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
     }
 
-    .integration-badge {
+    .compat-item {
       display: inline-flex;
       align-items: center;
-      padding: 8px 18px;
-      border-radius: 999px;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: 8px;
       background: var(--bg-card);
       border: 1px solid var(--border);
-      font-family: var(--sans);
+      font-family: var(--mono);
       font-size: 13px;
       font-weight: 400;
       color: var(--text-secondary);
@@ -502,8 +494,14 @@
       cursor: default;
     }
 
-    .integration-badge:hover {
-      border-color: var(--border-hover);
+    .compat-item::before {
+      content: '\25CF';
+      color: var(--accent);
+      font-size: 8px;
+    }
+
+    .compat-item:hover {
+      border-color: var(--accent);
       color: var(--text);
     }
 
@@ -682,7 +680,7 @@
       .ps-grid { grid-template-columns: 1fr; }
       .setup-grid { flex-direction: column; }
       .speed-grid { grid-template-columns: 1fr; }
-      .badge-row { gap: 8px; }
+      .compat-grid { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -713,13 +711,6 @@
   <nav id="nav">
     <div class="wrap">
       <a href="#" class="logo">
-        <div class="logo-icon">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="1" width="5" height="12" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
-            <rect x="8" y="1" width="5" height="5" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
-            <rect x="8" y="8" width="5" height="5" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
-          </svg>
-        </div>
         <span class="accent">cmux</span>Layer
       </a>
       <div class="nav-right">
@@ -950,20 +941,20 @@
   <section class="integrations-section" id="setup">
     <div class="wrap">
       <div class="section-label">Works with</div>
-      <h2 class="section-heading">Any MCP client. Any agent.</h2>
+      <h2 class="section-heading">Any MCP client</h2>
 
-      <div class="badge-row reveal">
-        <span class="integration-badge">Claude Code</span>
-        <span class="integration-badge">Cursor</span>
-        <span class="integration-badge">VS Code</span>
-        <span class="integration-badge">Zed</span>
-        <span class="integration-badge">Codex</span>
-        <span class="integration-badge">Gemini CLI</span>
-        <span class="integration-badge">Kiro</span>
+      <div class="compat-grid reveal">
+        <span class="compat-item">Claude Code</span>
+        <span class="compat-item">Cursor</span>
+        <span class="compat-item">Zed</span>
+        <span class="compat-item">VS Code</span>
+        <span class="compat-item">Codex</span>
+        <span class="compat-item">Kiro</span>
+        <span class="compat-item">Gemini CLI</span>
       </div>
 
       <div class="section-label">Get started</div>
-      <h2 class="section-heading">Three steps. Under a minute.</h2>
+      <h2 class="section-heading">Three steps</h2>
 
       <div class="setup-grid">
         <div class="setup-card reveal">
@@ -998,8 +989,8 @@
   <!-- CTA -->
   <section class="cta-section">
     <div class="wrap">
-      <h2 class="cta-heading reveal">Give your agents<br>hands in the terminal.</h2>
-      <p class="cta-sub reveal reveal-d1">Open source. TypeScript. 296 tests. Built for cmux.</p>
+      <h2 class="cta-heading reveal">Stop being the clipboard.</h2>
+      <p class="cta-sub reveal reveal-d1">Open source. TypeScript. One socket. Built for cmux.</p>
       <div class="hero-actions reveal reveal-d2">
         <a href="#setup" class="btn btn-primary">Get started</a>
         <a href="https://github.com/EtanHey/cmuxlayer" class="btn btn-ghost">
@@ -1016,9 +1007,9 @@
       <div class="footer-left">Part of the <a href="https://etanheyman.com">Golems</a> ecosystem</div>
       <div class="footer-right">
         <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
-        <a href="https://github.com/manaflow-ai/cmux">cmux</a>
+        <a href="https://www.npmjs.com/package/cmuxlayer">npm</a>
         <a href="https://github.com/EtanHey/brainlayer">BrainLayer</a>
-        <a href="https://etanhey.github.io/voicelayer">VoiceLayer</a>
+        <a href="https://github.com/EtanHey/voicelayer">VoiceLayer</a>
       </div>
     </div>
   </footer>
