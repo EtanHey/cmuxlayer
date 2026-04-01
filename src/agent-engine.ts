@@ -125,9 +125,9 @@ const LIFECYCLE_LOGS = {
  */
 export function buildLaunchCommand(cli: CliType, repo: string): string {
   const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safeRepo || safeRepo !== repo) {
+  if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
     throw new Error(
-      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed.`,
+      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed. "." and ".." are not permitted.`,
     );
   }
   switch (cli) {
@@ -141,8 +141,6 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
       return `cd ~/Gits/${safeRepo} && kiro-cli`;
     case "cursor":
       return `cd ~/Gits/${safeRepo} && cursor agent`;
-    default:
-      return `cd ~/Gits/${safeRepo} && ${cli}`;
   }
 }
 

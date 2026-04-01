@@ -509,6 +509,16 @@ describe("buildLaunchCommand", () => {
     expect(() => buildLaunchCommand("claude", "")).toThrow(/Invalid repo name/);
   });
 
+  it("rejects path-traversal names . and ..", () => {
+    expect(() => buildLaunchCommand("codex", ".")).toThrow(/Invalid repo name/);
+    expect(() => buildLaunchCommand("codex", "..")).toThrow(
+      /Invalid repo name/,
+    );
+    expect(() => buildLaunchCommand("claude", ".")).toThrow(
+      /Invalid repo name/,
+    );
+  });
+
   it("allows dots, hyphens, underscores in repo names", () => {
     expect(buildLaunchCommand("claude", "my-project")).toBe(
       "my-projectClaude -s",
