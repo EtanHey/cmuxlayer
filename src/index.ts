@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * @golems/cmux-mcp — MCP server for programmatic cmux terminal control.
+ * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * Exposes 11 tools:
- *   list_surfaces, new_split, send_input, send_key, read_screen,
- *   rename_tab, notify, set_status, set_progress, close_surface,
- *   browser_surface
+ * 22 MCP tools across two categories:
+ *   Core (11): list_surfaces, new_split, send_input, send_key, read_screen,
+ *              rename_tab, notify, set_status, set_progress, close_surface,
+ *              browser_surface
+ *   Agent lifecycle (11): spawn_agent, send_to_agent, read_agent_output,
+ *                         get_agent_state, list_agents, my_agents, wait_for,
+ *                         wait_for_all, stop_agent, kill, interact
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -21,6 +24,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("[cmux-mcp] fatal", error);
+  console.error("[cmuxlayer] fatal", error);
   process.exit(1);
 });
