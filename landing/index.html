@@ -734,21 +734,6 @@
     .demo-titlebar .dot { width: 10px; height: 10px; }
     .demo-titlebar-text { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-left: 8px; }
 
-    /* Workspace tabs */
-    .demo-ws-tabs {
-      display: flex; gap: 0;
-      background: rgba(255,255,255,0.015);
-      border-bottom: 1px solid rgba(255,255,255,0.04);
-    }
-    .demo-ws-tab {
-      padding: 5px 14px;
-      font-family: var(--mono); font-size: 10px;
-      color: var(--text-dim);
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
-    }
-    .demo-ws-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(34,197,94,0.03); }
-
     /* Split layout */
     .demo-layout { display: flex; min-height: 380px; }
 
@@ -1241,11 +1226,6 @@
           <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
           <span class="demo-titlebar-text">cmux &mdash; workspace:1</span>
         </div>
-        <div class="demo-ws-tabs">
-          <div class="demo-ws-tab active">orcClaude</div>
-          <div class="demo-ws-tab">coachClaude</div>
-          <div class="demo-ws-tab">shellClaude</div>
-        </div>
         <div class="demo-layout">
           <div class="demo-left">
             <div class="demo-pane-bar">
@@ -1341,16 +1321,21 @@
       const sleep = ms => new Promise(r => setTimeout(r, ms));
 
       async function typeIn(el, text, speed) {
-        const cur = '<span class="demo-cursor"></span>';
+        // Create a dedicated span for typed text + cursor
+        const typingSpan = document.createElement('span');
+        el.appendChild(typingSpan);
         for (let i = 0; i <= text.length; i++) {
-          const before = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
-          el.innerHTML = before + esc(text.slice(0, i)) + cur;
+          typingSpan.innerHTML = esc(text.slice(0, i)) + '<span class="demo-cursor"></span>';
+          el.scrollTop = el.scrollHeight;
           await sleep(speed + Math.random() * speed * 0.6);
         }
         await sleep(300);
-        el.innerHTML = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
+        typingSpan.textContent = text;
       }
-      function appendOrc(html) { orc.innerHTML += html + '\n'; orc.scrollTop = orc.scrollHeight; }
+      function appendOrc(html) {
+        orc.innerHTML += html + '\n';
+        orc.scrollTop = orc.scrollHeight;
+      }
 
       // ── Centralized agent state ──
       const agentState = {};  // keyed by tab name
