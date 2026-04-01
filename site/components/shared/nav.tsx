@@ -73,7 +73,7 @@ export function Nav({ product, links = [] }: NavProps) {
           ))}
           <a
             href={current.github}
-            className="text-text-secondary no-underline text-sm hover:text-text transition-colors inline-flex items-center gap-1.5"
+            className="group text-text-secondary no-underline text-sm hover:text-text transition-colors inline-flex items-center gap-1.5"
           >
             GitHub{" "}
             <span className="inline-block transition-transform group-hover:translate-x-0.5">
