@@ -120,7 +120,7 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).toHaveBeenCalled();
     });
 
-    it("launches Claude with repo setup and API-key auth disabled", async () => {
+    it("launches Claude via repoGolem launcher", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "sonnet",
@@ -133,11 +133,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toContain("unset ANTHROPIC_API_KEY");
-      expect(launchCmd).toContain(
-        "if command -v brainlayerClaude >/dev/null 2>&1; then cd ~/Gits/brainlayer && brainlayerClaude -s; else cd ~/Gits/brainlayer && claude --dangerously-skip-permissions; fi",
-      );
-      expect(launchCmd).toContain("claude --dangerously-skip-permissions");
+      expect(launchCmd).toBe("cd ~/Gits/brainlayer && brainlayerClaude -s");
     });
 
     it("writes initial state file", async () => {

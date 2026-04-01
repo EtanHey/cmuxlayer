@@ -455,7 +455,7 @@ export class CmuxSocketClient {
     if (opts?.workspace) {
       args.push(this.rawV1Arg("--workspace"), opts.workspace);
     }
-    args.push(title);
+    args.push(this.rawV1Arg("--title"), title);
     await this.sendV1Args("rename_tab", args);
   }
 

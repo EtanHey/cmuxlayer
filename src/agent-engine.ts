@@ -126,11 +126,7 @@ function buildLaunchCommand(cli: CliType, repo: string): string {
   const cdCmd = `cd ~/Gits/${safeRepo}`;
   switch (cli) {
     case "claude":
-      return [
-        "source ~/.zshrc >/dev/null 2>&1 || true",
-        "unset ANTHROPIC_API_KEY",
-        `if command -v ${safeRepo}Claude >/dev/null 2>&1; then ${cdCmd} && ${safeRepo}Claude -s; else ${cdCmd} && claude --dangerously-skip-permissions; fi`,
-      ].join("; ");
+      return `${cdCmd} && ${safeRepo}Claude -s`;
     case "codex":
       return `${cdCmd} && codex`;
     case "gemini":
