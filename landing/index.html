@@ -734,21 +734,6 @@
     .demo-titlebar .dot { width: 10px; height: 10px; }
     .demo-titlebar-text { font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-left: 8px; }
 
-    /* Workspace tabs */
-    .demo-ws-tabs {
-      display: flex; gap: 0;
-      background: rgba(255,255,255,0.015);
-      border-bottom: 1px solid rgba(255,255,255,0.04);
-    }
-    .demo-ws-tab {
-      padding: 5px 14px;
-      font-family: var(--mono); font-size: 10px;
-      color: var(--text-dim);
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
-    }
-    .demo-ws-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(34,197,94,0.03); }
-
     /* Split layout */
     .demo-layout { display: flex; min-height: 380px; }
 
@@ -786,15 +771,24 @@
       color: var(--text-dim);
       border-bottom: 2px solid transparent;
       transition: all 0.2s;
+      cursor: pointer;
+      user-select: none;
     }
+    .demo-tab:hover { color: var(--text-secondary); background: rgba(255,255,255,0.02); }
     .demo-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(34,197,94,0.04); }
 
     /* Pane content */
     .demo-pane-body {
       flex: 1; padding: 10px 12px;
       font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
-      overflow: hidden; white-space: pre-wrap; color: var(--text-secondary);
+      overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; color: var(--text-secondary);
+      max-height: 340px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(34,197,94,0.2) transparent;
     }
+    .demo-pane-body::-webkit-scrollbar { width: 6px; }
+    .demo-pane-body::-webkit-scrollbar-track { background: transparent; }
+    .demo-pane-body::-webkit-scrollbar-thumb { background: rgba(34,197,94,0.2); border-radius: 3px; }
 
     /* Status bar */
     .demo-statusbar {
@@ -806,6 +800,15 @@
     }
     .s-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; }
     .s-green { background: var(--accent); }
+
+    /* Cron pulse */
+    .cron-flash {
+      animation: cronPulse 0.6s ease-out;
+    }
+    @keyframes cronPulse {
+      0% { background: rgba(34,197,94,0.08); }
+      100% { background: transparent; }
+    }
 
     /* Typing cursor */
     .demo-cursor {
@@ -1226,11 +1229,6 @@
           <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
           <span class="demo-titlebar-text">cmux &mdash; workspace:1</span>
         </div>
-        <div class="demo-ws-tabs">
-          <div class="demo-ws-tab active">orcClaude</div>
-          <div class="demo-ws-tab">coachClaude</div>
-          <div class="demo-ws-tab">shellClaude</div>
-        </div>
         <div class="demo-layout">
           <div class="demo-left">
             <div class="demo-pane-bar">
@@ -1279,8 +1277,8 @@
       <div class="footer-right">
         <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
         <a href="https://www.npmjs.com/package/cmuxlayer">npm</a>
-        <a href="https://etanhey.github.io/voicelayer/">VoiceLayer</a>
-        <a href="https://etanhey.github.io/brainlayer/">BrainLayer</a>
+        <a href="https://voicelayer.etanheyman.com">VoiceLayer</a>
+        <a href="https://brainlayer.etanheyman.com">BrainLayer</a>
       </div>
     </div>
   </footer>
@@ -1304,54 +1302,88 @@
     // ── Animated Terminal Demo ──
     (function() {
       const orc = document.getElementById('d-orc');
-      const agent = document.getElementById('d-agent');
-      const tabs = document.getElementById('d-tabs');
+      const agentEl = document.getElementById('d-agent');
+      const tabsEl = document.getElementById('d-tabs');
       const dSurfaces = document.getElementById('d-surfaces');
       const dAgents = document.getElementById('d-agents');
       const dLatency = document.getElementById('d-latency');
       const dStatus = document.getElementById('d-status');
       if (!orc) return;
 
-      // Helpers
+      // ── Helpers ──
       const c = (cls, text) => `<span class="${cls}">${text}</span>`;
-      const dim = t => c('c-d', t);
-      const grn = t => c('c-g', t);
-      const brg = t => c('c-gb', t);
-      const amb = t => c('c-a', t);
-      const cyn = t => c('c-c', t);
-      const tea = t => c('c-t', t);
-      const wht = t => c('c-w', t);
-      const sec = t => c('c-s', t);
-      const bdr = t => dim(t);
-
+      const dim = t => c('c-d', t); const grn = t => c('c-g', t);
+      const brg = t => c('c-gb', t); const amb = t => c('c-a', t);
+      const cyn = t => c('c-c', t); const tea = t => c('c-t', t);
+      const wht = t => c('c-w', t); const sec = t => c('c-s', t);
       function ctxBar(pct) {
-        const f = Math.round(pct / 5.5);
-        const e = 18 - f;
+        const f = Math.round(pct / 5.5), e = 18 - f;
         return grn('\u2588'.repeat(f)) + dim('\u2588'.repeat(e)) + ' ' + tea(pct + '%');
       }
-
-      async function typeIn(el, text, speed) {
-        const cursor = '<span class="demo-cursor"></span>';
-        for (let i = 0; i <= text.length; i++) {
-          const before = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
-          el.innerHTML = before + esc(text.slice(0, i)) + cursor;
-          await sleep(speed + Math.random() * speed * 0.6);
-        }
-        // Remove cursor after a beat
-        await sleep(300);
-        el.innerHTML = el.innerHTML.replace(/<span class="demo-cursor"><\/span>/g, '');
-      }
-
       function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
       const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-      function appendOrc(html) { orc.innerHTML += html + '\n'; orc.scrollTop = orc.scrollHeight; }
-      function setAgent(html) { agent.innerHTML = html; }
-      function setTabs(arr, active) {
-        tabs.innerHTML = arr.map(t =>
-          `<div class="demo-tab${t === active ? ' active' : ''}">${esc(t)}</div>`
-        ).join('');
+      async function typeIn(el, text, speed) {
+        // Create a dedicated span for typed text + cursor
+        const typingSpan = document.createElement('span');
+        el.appendChild(typingSpan);
+        for (let i = 0; i <= text.length; i++) {
+          typingSpan.innerHTML = esc(text.slice(0, i)) + '<span class="demo-cursor"></span>';
+          el.scrollTop = el.scrollHeight;
+          await sleep(speed + Math.random() * speed * 0.6);
+        }
+        await sleep(300);
+        typingSpan.textContent = text;
       }
+      function appendOrc(html) {
+        orc.innerHTML += html + '\n';
+        orc.scrollTop = orc.scrollHeight;
+      }
+
+      // ── Centralized agent state ──
+      const agentState = {};  // keyed by tab name
+      let tabList = [];
+      let activeTab = null;   // what the ANIMATION wants to show
+      let userTab = null;     // what the USER clicked (null = follow animation)
+      let userTabTimeout = null;
+
+      function updateAgentState(name, html) {
+        agentState[name] = html;
+        renderAgentView();
+      }
+
+      function renderAgentView() {
+        const visibleTab = userTab || activeTab;
+        // Render tabs
+        tabsEl.innerHTML = tabList.map(t =>
+          `<div class="demo-tab${t === visibleTab ? ' active' : ''}" data-dtab="${esc(t)}" title="Click to view">${esc(t)}</div>`
+        ).join('');
+        // Attach click handlers
+        tabsEl.querySelectorAll('.demo-tab').forEach(tab => {
+          tab.addEventListener('click', () => {
+            userTab = tab.dataset.dtab;
+            if (userTabTimeout) clearTimeout(userTabTimeout);
+            userTabTimeout = setTimeout(() => { userTab = null; }, 5000);
+            renderAgentView();
+          });
+        });
+        // Render content
+        if (visibleTab && agentState[visibleTab]) {
+          agentEl.innerHTML = agentState[visibleTab];
+        }
+      }
+
+      function setActiveTab(name) {
+        activeTab = name;
+        renderAgentView();
+      }
+
+      function setTabList(arr, autoActive) {
+        tabList = arr;
+        activeTab = autoActive;
+        renderAgentView();
+      }
+
       function setStat(s, a, st) {
         dSurfaces.textContent = s + ' surfaces';
         dAgents.textContent = a + ' agents';
@@ -1363,12 +1395,31 @@
         dLatency.textContent = (0.1 + Math.random() * 0.2).toFixed(1) + 'ms';
       }, 1800);
 
+      // Cron pulse — flash the status bar
+      let cronInterval = null;
+      function startCron() {
+        const bar = document.querySelector('.demo-statusbar');
+        cronInterval = setInterval(() => {
+          bar.classList.remove('cron-flash');
+          void bar.offsetWidth; // force reflow
+          bar.classList.add('cron-flash');
+        }, 3000);
+      }
+      function stopCron() {
+        if (cronInterval) { clearInterval(cronInterval); cronInterval = null; }
+      }
+
       // ── The Movie Script ──
       async function runCycle() {
         // Reset
-        orc.innerHTML = ''; tabs.innerHTML = '';
-        agent.innerHTML = dim('no active agents');
+        orc.innerHTML = '';
+        Object.keys(agentState).forEach(k => delete agentState[k]);
+        tabList = []; activeTab = null;
+        userTab = null;
+        if (userTabTimeout) { clearTimeout(userTabTimeout); userTabTimeout = null; }
+        tabsEl.innerHTML = ''; agentEl.innerHTML = dim('no active agents');
         setStat(2, 0, 'ready');
+        stopCron();
 
         // Phase 1 — Prompt
         appendOrc(grn('\u276F') + ' ' + wht('Deploy the voice fix and optimize brain search'));
@@ -1379,15 +1430,15 @@
 
         // Phase 2 — Spawn agent 1
         appendOrc('');
-        appendOrc(bdr('\u250C\u2500') + ' ' + brg('spawn_agent') + '(' + cyn('repo') + '=' + amb('"voicelayer"') + ', ' + cyn('model') + '=' + amb('"opus"') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('spawn_agent') + '(' + cyn('repo') + '=' + amb('"voicelayer"') + ', ' + cyn('model') + '=' + amb('"opus"') + ')');
         await sleep(600);
-        appendOrc(bdr('\u2502') + '  ' + dim('agent_id:') + ' ' + amb('opus-voice-a3f7'));
-        appendOrc(bdr('\u2502') + '  ' + dim('surface:') + '  ' + amb('surface:3') + '  ' + dim('state:') + ' ' + grn('creating'));
-        appendOrc(bdr('\u2514\u2500') + ' ' + dim('cli: claude'));
+        appendOrc(dim('\u2502') + '  ' + dim('agent_id:') + ' ' + amb('opus-voice-a3f7'));
+        appendOrc(dim('\u2502') + '  ' + dim('surface:') + '  ' + amb('surface:3') + '  ' + dim('state:') + ' ' + grn('creating'));
+        appendOrc(dim('\u2514\u2500') + ' ' + dim('cli: claude'));
         setStat(3, 1, 'spawning');
-        setTabs(['voiceFix'], 'voiceFix');
-        setAgent(
-          dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('cli: claude\n') +
+        setTabList(['voiceFix'], 'voiceFix');
+        updateAgentState('voiceFix',
+          dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('cli: claude') + '\n' +
           dim('model: ') + sec('claude-opus-4-6') + '  ' + dim('state: ') + grn('booting') + '\n\n' +
           sec('> Claude Code v1.0.23\n') +
           sec('> Model: claude-opus-4-6 (1M context)\n') +
@@ -1398,68 +1449,89 @@
 
         // Phase 3 — Spawn agent 2
         appendOrc('');
-        appendOrc(bdr('\u250C\u2500') + ' ' + brg('spawn_agent') + '(' + cyn('repo') + '=' + amb('"brainlayer"') + ', ' + cyn('model') + '=' + amb('"sonnet"') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('spawn_agent') + '(' + cyn('repo') + '=' + amb('"brainlayer"') + ', ' + cyn('model') + '=' + amb('"sonnet"') + ')');
         await sleep(500);
-        appendOrc(bdr('\u2502') + '  ' + dim('agent_id:') + ' ' + amb('sonnet-brain-c1d4'));
-        appendOrc(bdr('\u2502') + '  ' + dim('surface:') + '  ' + amb('surface:4') + '  ' + dim('state:') + ' ' + grn('creating'));
-        appendOrc(bdr('\u2514\u2500') + ' ' + dim('cli: claude'));
+        appendOrc(dim('\u2502') + '  ' + dim('agent_id:') + ' ' + amb('sonnet-brain-c1d4'));
+        appendOrc(dim('\u2502') + '  ' + dim('surface:') + '  ' + amb('surface:4') + '  ' + dim('state:') + ' ' + grn('creating'));
+        appendOrc(dim('\u2514\u2500') + ' ' + dim('cli: claude'));
         setStat(4, 2, 'spawning');
-        setTabs(['voiceFix', 'brainOpt'], 'voiceFix');
+        setTabList(['voiceFix', 'brainOpt'], 'voiceFix');
+        updateAgentState('brainOpt',
+          dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('cli: claude') + '\n' +
+          dim('model: ') + sec('claude-sonnet-4-6') + '  ' + dim('state: ') + grn('booting') + '\n\n' +
+          sec('> Claude Code v1.0.23\n') +
+          sec('> Loading repo: brainlayer')
+        );
         await sleep(800);
 
-        // Phase 4 — Agents working (show voiceFix activity)
+        // Phase 3.5 — Set up cron monitoring
+        appendOrc('');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('CronCreate') + '(' + cyn('interval') + '=' + amb('"*/30s"') + ', ' + cyn('cmd') + '=' + amb('"read_screen parsed_only=true"') + ')');
+        await sleep(400);
+        appendOrc(dim('\u2514\u2500') + ' ' + dim('cron:') + ' ' + amb('cron-1') + '  ' + grn('active') + '  ' + dim('polling every 30s'));
+        startCron();
+        await sleep(600);
+
+        // Phase 4 — Agents working (both update in background)
         setStat(4, 2, 'agents working');
-        const workSteps = [
+        const voiceSteps = [
           { tok: '42K', pct: 21, cost: '$0.23', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nFound fallback issue at line 147' },
           { tok: '87K', pct: 43, cost: '$0.61', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nFound fallback issue at line 147\n\nEditing src/tts/edge-tts.ts\n  + if (!stream) return fallbackToGoogleTTS(text)' },
-          { tok: '134K', pct: 67, cost: '$1.12', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nFound fallback issue at line 147\n\nEditing src/tts/edge-tts.ts\n  + if (!stream) return fallbackToGoogleTTS(text)\n\nRunning: bun test src/tts/\n  ' + grn('\u2713') + ' edge-tts falls back on timeout\n  ' + grn('\u2713') + ' google-tts returns audio buffer' },
+          { tok: '134K', pct: 67, cost: '$1.12', state: 'working', out: 'Reading src/tts/edge-tts.ts...\nEditing src/tts/edge-tts.ts\n  + if (!stream) return fallbackToGoogleTTS(text)\n\nRunning: bun test src/tts/\n  ' + grn('\u2713') + ' edge-tts falls back on timeout\n  ' + grn('\u2713') + ' google-tts returns audio buffer' },
         ];
-        for (const step of workSteps) {
-          setAgent(
-            dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('state: ') + grn(step.state) + '\n' +
-            dim('model: ') + sec('claude-opus-4-6') + '  ' + dim('tokens: ') + tea(step.tok) + '\n' +
-            dim('ctx: ') + ctxBar(step.pct) + '  ' + dim('cost: ') + tea(step.cost) + '\n\n' +
-            sec(step.out)
+        const brainSteps = [
+          { tok: '31K', pct: 15, cost: '$0.11', state: 'working', out: 'Reading src/search/hybrid.ts' },
+          { tok: '68K', pct: 34, cost: '$0.24', state: 'working', out: 'Rewrote hybrid_search() to use\npre-filtered candidate set before\nsemantic ranking.' },
+          { tok: '96K', pct: 48, cost: '$0.34', state: 'working', out: 'Rewrote hybrid_search() to use\npre-filtered candidate set.\n\nBenchmark: 48ms \u2192 11ms (4.3x faster)' },
+        ];
+
+        setActiveTab('voiceFix');
+        for (let i = 0; i < voiceSteps.length; i++) {
+          const vs = voiceSteps[i];
+          const bs = brainSteps[i] || brainSteps[brainSteps.length - 1];
+          updateAgentState('voiceFix',
+            dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('state: ') + grn(vs.state) + '\n' +
+            dim('model: ') + sec('claude-opus-4-6') + '  ' + dim('tokens: ') + tea(vs.tok) + '\n' +
+            dim('ctx: ') + ctxBar(vs.pct) + '  ' + dim('cost: ') + tea(vs.cost) + '\n\n' +
+            sec(vs.out)
+          );
+          updateAgentState('brainOpt',
+            dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('state: ') + grn(bs.state) + '\n' +
+            dim('model: ') + sec('claude-sonnet-4-6') + '  ' + dim('tokens: ') + tea(bs.tok) + '\n' +
+            dim('ctx: ') + ctxBar(bs.pct) + '  ' + dim('cost: ') + tea(bs.cost) + '\n\n' +
+            sec(bs.out)
           );
           await sleep(2000);
         }
 
-        // Phase 5 — Switch to brainOpt tab
-        setTabs(['voiceFix', 'brainOpt'], 'brainOpt');
-        setAgent(
-          dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('state: ') + grn('working') + '\n' +
-          dim('model: ') + sec('claude-sonnet-4-6') + '  ' + dim('tokens: ') + tea('96K') + '\n' +
-          dim('ctx: ') + ctxBar(48) + '  ' + dim('cost: ') + tea('$0.34') + '\n\n' +
-          sec('Optimizing FTS5 query in brain_search.\n') +
-          sec('Rewrote hybrid_search() to use pre-filtered\n') +
-          sec('candidate set before semantic ranking.\n\n') +
-          sec('Benchmark: 48ms \u2192 11ms (4.3x faster)')
-        );
+        // Phase 5 — Auto-switch to brainOpt tab (user can override)
+        setActiveTab('brainOpt');
         await sleep(3000);
 
         // Phase 6 — Monitor from orchestrator
-        setTabs(['voiceFix', 'brainOpt'], 'voiceFix');
+        stopCron();
+        setActiveTab('voiceFix');
         appendOrc('');
-        appendOrc(bdr('\u250C\u2500') + ' ' + brg('read_screen') + '(' + cyn('surface') + '=' + amb('"surface:3"') + ', ' + cyn('parsed_only') + '=' + tea('true') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('read_screen') + '(' + cyn('surface') + '=' + amb('"surface:3"') + ', ' + cyn('parsed_only') + '=' + tea('true') + ')');
         await sleep(600);
-        appendOrc(bdr('\u2502') + '  ' + dim('agent:') + ' ' + sec('claude') + '  ' + dim('status:') + ' ' + grn('idle') + '  ' + dim('model:') + ' ' + sec('opus-4-6'));
-        appendOrc(bdr('\u2502') + '  ' + dim('tokens:') + ' ' + tea('142K') + '  ' + dim('ctx:') + ' ' + tea('71%') + '  ' + dim('cost:') + ' ' + tea('$1.12'));
-        appendOrc(bdr('\u2514\u2500') + ' ' + grn('done_signal: "CLAUDE_COUNTER: 7"'));
+        appendOrc(dim('\u2502') + '  ' + dim('agent:') + ' ' + sec('claude') + '  ' + dim('status:') + ' ' + grn('idle') + '  ' + dim('model:') + ' ' + sec('opus-4-6'));
+        appendOrc(dim('\u2502') + '  ' + dim('tokens:') + ' ' + tea('142K') + '  ' + dim('ctx:') + ' ' + tea('71%') + '  ' + dim('cost:') + ' ' + tea('$1.12'));
+        appendOrc(dim('\u2514\u2500') + ' ' + grn('done_signal: "CLAUDE_COUNTER: 7"'));
         await sleep(1000);
 
         // Phase 7 — wait_for_all
         appendOrc('');
-        appendOrc(bdr('\u250C\u2500') + ' ' + brg('wait_for_all') + '(' + cyn('target') + '=' + amb('"done"') + ')');
+        appendOrc(dim('\u250C\u2500') + ' ' + brg('wait_for_all') + '(' + cyn('target') + '=' + amb('"done"') + ')');
         await sleep(800);
-        appendOrc(bdr('\u2502') + '  ' + grn('\u2713') + ' ' + dim('opus-voice-a3f7:') + '  ' + grn('done') + ' ' + dim('(34s)'));
+        appendOrc(dim('\u2502') + '  ' + grn('\u2713') + ' ' + dim('opus-voice-a3f7:') + '  ' + grn('done') + ' ' + dim('(34s)'));
         await sleep(500);
-        appendOrc(bdr('\u2502') + '  ' + grn('\u2713') + ' ' + dim('sonnet-brain-c1d4:') + ' ' + grn('done') + ' ' + dim('(51s)'));
-        appendOrc(bdr('\u2514\u2500') + ' ' + grn('all agents finished'));
+        appendOrc(dim('\u2502') + '  ' + grn('\u2713') + ' ' + dim('sonnet-brain-c1d4:') + ' ' + grn('done') + ' ' + dim('(51s)'));
+        appendOrc(dim('\u2514\u2500') + ' ' + grn('all agents finished'));
         setStat(4, 2, 'all done');
         await sleep(1000);
 
-        // Phase 8 — Results
-        setAgent(
+        // Phase 8 — Results (both agents show done)
+        updateAgentState('voiceFix',
           dim('agent: ') + amb('opus-voice-a3f7') + '  ' + dim('state: ') + grn('\u2713 done') + '\n' +
           dim('tokens: ') + tea('142K') + '  ' + dim('cost: ') + tea('$1.12') + '\n\n' +
           dim('files:\n') +
@@ -1467,6 +1539,15 @@
           sec('  tests/tts.test.ts (+47)\n\n') +
           grn('\u2713') + ' ' + sec('Committed: ') + amb('fix: edge-tts fallback to google-tts')
         );
+        updateAgentState('brainOpt',
+          dim('agent: ') + amb('sonnet-brain-c1d4') + '  ' + dim('state: ') + grn('\u2713 done') + '\n' +
+          dim('tokens: ') + tea('96K') + '  ' + dim('cost: ') + tea('$0.34') + '\n\n' +
+          dim('files:\n') +
+          sec('  src/search/hybrid.ts (+31 -8)\n') +
+          sec('  tests/search.test.ts (+22)\n\n') +
+          grn('\u2713') + ' ' + sec('Committed: ') + amb('perf: optimize FTS5 hybrid search')
+        );
+        setActiveTab('voiceFix');
         await sleep(1200);
 
         appendOrc('');
@@ -1489,12 +1570,10 @@
         entries.forEach(async e => {
           if (e.isIntersecting) {
             demoObs.disconnect();
-            const frame = document.getElementById('demo');
-            const layout = frame.querySelector('.demo-layout');
+            const layout = document.querySelector('.demo-layout');
             layout.style.transition = 'opacity 0.6s ease';
-            // Respect reduced motion preference
             if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-              await runCycle(); // Run once, don't loop
+              await runCycle();
               return;
             }
             while (true) {
@@ -1503,7 +1582,7 @@
                 await runCycle();
                 layout.style.opacity = '0.15';
                 await sleep(800);
-              } catch(e) { await sleep(3000); }
+              } catch(err) { await sleep(3000); }
             }
           }
         });
