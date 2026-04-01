@@ -41,7 +41,7 @@ const coreTools: Tool[] = [
 const agentTools: Tool[] = [
   {
     name: "spawn_agent",
-    desc: "Launch a Claude, Codex, Gemini, or Cursor agent in a new pane",
+    desc: "Launch a Claude, Codex, Gemini, Cursor, or Kiro agent in a new pane",
   },
   {
     name: "send_to_agent",
@@ -74,6 +74,10 @@ const agentTools: Tool[] = [
   {
     name: "kill",
     desc: "Force-kill an unresponsive agent process",
+  },
+  {
+    name: "my_agents",
+    desc: "Get all children of a parent agent with live screen status",
   },
   {
     name: "interact",

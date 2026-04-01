@@ -623,7 +623,7 @@ export function AnimatedDemo() {
     appendOrc("");
     appendOrc(
       grn("\u2501\u2501\u2501 ") +
-        wht("2 agents \u00B7 2 PRs \u00B7 310 tests passing") +
+        wht("2 agents \u00B7 2 PRs \u00B7 326 tests passing") +
         grn(" \u2501\u2501\u2501"),
     );
     setStat(4, 0, "\u2713 complete");
