@@ -22,6 +22,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://cmuxlayer.etanheyman.com"),
+  alternates: { canonical: "/" },
   title: "cmuxLayer — Terminal MCP for AI Agents",
   description:
     "MCP server that gives AI agents programmatic control over terminal panes. 22 tools. Split, read, send, automate. One Unix socket.",
