@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 11 core tools + 10 agent lifecycle tools.
+ * cmux MCP server — registers 11 core tools + 11 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1394,6 +1394,97 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             force: args.force,
           };
           return okFormatted(formatOk("kill", { count: killed.length }), data);
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+    // 21. my_agents
+    server.tool(
+      "my_agents",
+      "Get all children of a parent agent with live status from read_screen. Combines registry state + parsed screen output in one call.",
+      {
+        parent_agent_id: z
+          .string()
+          .optional()
+          .describe(
+            "Parent agent ID. If omitted, returns all root agents (no parent).",
+          ),
+      },
+      async (args) => {
+        try {
+          let agents: AgentRecord[];
+          if (args.parent_agent_id) {
+            // Look up children directly — parent record may be gone
+            // but children still reference it via parent_agent_id
+            agents = engine.getRegistry().getChildren(args.parent_agent_id);
+          } else {
+            agents = engine
+              .listAgents()
+              .filter((a) => a.parent_agent_id === null);
+          }
+
+          const SCREEN_TIMEOUT = 3000;
+          const enriched = await Promise.all(
+            agents.map(async (agent) => {
+              let screenData: ParsedScreenResult | null = null;
+              try {
+                const screen = await Promise.race([
+                  client.readScreen(agent.surface_id, { lines: 20 }),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(
+                      () => reject(new Error("timeout")),
+                      SCREEN_TIMEOUT,
+                    ),
+                  ),
+                ]);
+                screenData = enrichParsedScreen(
+                  parseScreen(screen.text),
+                  screen.text,
+                  pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                );
+              } catch {
+                // Surface may be closed, unavailable, or timed out
+              }
+
+              return {
+                agent_id: agent.agent_id,
+                repo: agent.repo,
+                state: agent.state,
+                model: agent.model,
+                cli: agent.cli,
+                surface_id: agent.surface_id,
+                token_count: screenData?.token_count ?? null,
+                context_pct: screenData?.context_pct ?? null,
+                cost: screenData?.cost ?? null,
+                task_summary: agent.task_summary,
+                spawn_depth: agent.spawn_depth,
+                created_at: agent.created_at,
+                quality: agent.quality,
+              };
+            }),
+          );
+
+          const lines = enriched.map((a) => {
+            const ctx = a.context_pct !== null ? `${a.context_pct}%` : "—";
+            const cost = a.cost !== null ? `$${a.cost.toFixed(2)}` : "—";
+            const tokens =
+              a.token_count !== null
+                ? `${Math.round(a.token_count / 1000)}K`
+                : "—";
+            return `${a.agent_id}  ${a.state}  ${tokens}  ${ctx}  ${cost}`;
+          });
+
+          const formatted =
+            `┌─ my_agents ─ ${enriched.length} agent${enriched.length !== 1 ? "s" : ""}\n` +
+            lines.map((l) => `│ ${l}`).join("\n") +
+            "\n└─";
+
+          return okFormatted(formatted, {
+            agents: enriched,
+            count: enriched.length,
+            parent_agent_id: args.parent_agent_id ?? null,
+          });
         } catch (e) {
           return err(e);
         }

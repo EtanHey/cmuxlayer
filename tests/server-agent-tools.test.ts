@@ -19,10 +19,11 @@ const AGENT_TOOLS = [
   "list_agents",
   "stop_agent",
   "send_to_agent",
+  "my_agents",
 ] as const;
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 7 agent lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 8 agent lifecycle tools when lifecycle is enabled", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
@@ -56,7 +57,7 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 21 (11 low-level + 8 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 22 (11 low-level + 9 agent lifecycle + 2 v2)", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
@@ -66,7 +67,7 @@ describe("agent lifecycle tool registration", () => {
       stateDir: TEST_DIR,
     });
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(21);
+    expect(Object.keys(registeredTools)).toHaveLength(22);
   });
 });
 
@@ -214,5 +215,116 @@ describe("agent lifecycle tool handlers", () => {
     );
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not in an interactive state/);
+  });
+
+  it("my_agents returns root agents when no parent_agent_id", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const myAgents = (server as any)._registeredTools["my_agents"];
+
+    await spawn.handler(
+      { repo: "voicelayer", model: "opus", cli: "claude", prompt: "fix tts" },
+      {} as any,
+    );
+    await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "opt search",
+      },
+      {} as any,
+    );
+
+    const result = await myAgents.handler({}, {} as any);
+    const data = result.structuredContent;
+    expect(data.count).toBe(2);
+    expect(data.agents).toHaveLength(2);
+    expect(data.agents[0].repo).toBeDefined();
+    expect(data.agents[0].state).toBeDefined();
+    expect(data.agents[0].task_summary).toBeDefined();
+    expect(data.parent_agent_id).toBeNull();
+  });
+
+  it("my_agents returns children of a specific parent", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const myAgents = (server as any)._registeredTools["my_agents"];
+
+    const parentResult = await spawn.handler(
+      {
+        repo: "orchestrator",
+        model: "opus",
+        cli: "claude",
+        prompt: "orchestrate",
+      },
+      {} as any,
+    );
+    const parentId = parentResult.structuredContent.agent_id;
+
+    await spawn.handler(
+      {
+        repo: "voicelayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "fix",
+        parent_agent_id: parentId,
+      },
+      {} as any,
+    );
+
+    const result = await myAgents.handler(
+      { parent_agent_id: parentId },
+      {} as any,
+    );
+    const data = result.structuredContent;
+    expect(data.count).toBe(1);
+    expect(data.agents[0].repo).toBe("voicelayer");
+    expect(data.parent_agent_id).toBe(parentId);
+  });
+
+  it("my_agents returns empty array for nonexistent parent (orphan-safe)", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const myAgents = (server as any)._registeredTools["my_agents"];
+
+    const result = await myAgents.handler(
+      { parent_agent_id: "nonexistent-id" },
+      {} as any,
+    );
+    const data = result.structuredContent;
+    expect(data.count).toBe(0);
+    expect(data.agents).toHaveLength(0);
+  });
+
+  it("my_agents includes screen data fields (null when no real screen)", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const myAgents = (server as any)._registeredTools["my_agents"];
+
+    await spawn.handler(
+      { repo: "golems", model: "opus", cli: "claude", prompt: "audit" },
+      {} as any,
+    );
+
+    const result = await myAgents.handler({}, {} as any);
+    const agent = result.structuredContent.agents[0];
+    expect(agent).toHaveProperty("token_count");
+    expect(agent).toHaveProperty("context_pct");
+    expect(agent).toHaveProperty("cost");
+    expect(agent).toHaveProperty("spawn_depth");
+    expect(agent).toHaveProperty("created_at");
+    expect(agent).toHaveProperty("quality");
   });
 });
