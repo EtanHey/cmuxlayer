@@ -616,10 +616,10 @@
       cursor: default;
     }
 
-    .compat-item::before {
-      content: '\25CF';
-      color: var(--accent);
-      font-size: 8px;
+    .compat-icon {
+      font-size: 14px;
+      line-height: 1;
+      flex-shrink: 0;
     }
 
     .compat-item:hover {
@@ -629,17 +629,14 @@
 
     /* ─── Setup ─── */
     .setup-grid {
-      display: flex;
-      align-items: stretch;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
       gap: 24px;
       max-width: 780px;
       margin: 0 auto;
     }
 
     .setup-card {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
       text-align: left;
     }
 
@@ -657,7 +654,6 @@
       line-height: 1.6;
       font-weight: 300;
       margin-bottom: 10px;
-      flex: 1;
     }
 
     .setup-code {
@@ -667,6 +663,8 @@
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 6px;
+      overflow: hidden;
+      white-space: nowrap;
       padding: 8px 12px;
       font-family: var(--mono);
       font-size: 12px;
@@ -885,7 +883,7 @@
       .pipeline { flex-wrap: wrap; gap: 16px; }
       .pipe-arrow { display: none; }
       .pipe-step { flex: 0 0 40%; }
-      .setup-grid { flex-direction: column; }
+      .setup-grid { grid-template-columns: 1fr; }
       .compat-grid { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
@@ -1180,11 +1178,11 @@
       <h2 class="section-heading">Five CLI agents</h2>
 
       <div class="compat-grid reveal">
-        <span class="compat-item">Claude Code</span>
-        <span class="compat-item">Cursor</span>
-        <span class="compat-item">Codex</span>
-        <span class="compat-item">Gemini CLI</span>
-        <span class="compat-item">Kiro</span>
+        <span class="compat-item"><span class="compat-icon" style="color:#d4956a;">&#x2726;</span> Claude Code</span>
+        <span class="compat-item"><span class="compat-icon" style="color:#a78bfa;">&#x25E8;</span> Cursor</span>
+        <span class="compat-item"><span class="compat-icon" style="color:#10b981;">&#x25C8;</span> Codex</span>
+        <span class="compat-item"><span class="compat-icon" style="color:#60a5fa;">&#x2735;</span> Gemini CLI</span>
+        <span class="compat-item"><span class="compat-icon" style="color:#f97316;">&#x25B2;</span> Kiro</span>
       </div>
 
       <div class="section-label">Get started</div>
