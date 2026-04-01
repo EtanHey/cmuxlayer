@@ -20,13 +20,12 @@
       --text: #fafaf9;
       --text-secondary: #a8a29e;
       --text-dim: #6b6660;
-      --accent: #22d3ee;
-      --accent-bright: #67e8f9;
-      --accent-subtle: rgba(34, 211, 238, 0.08);
-      --accent-glow: rgba(34, 211, 238, 0.12);
+      --accent: #d4956a;
+      --accent-bright: #e8b090;
+      --accent-subtle: rgba(212, 149, 106, 0.08);
+      --accent-glow: rgba(212, 149, 106, 0.12);
       --teal: #5eead4;
       --red: #cf6060;
-      --green: #4ade80;
       --display: 'Newsreader', Georgia, serif;
       --sans: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
       --mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
@@ -111,7 +110,7 @@
       height: 24px;
       border-radius: 6px;
       background: var(--accent-subtle);
-      border: 1px solid rgba(34, 211, 238, 0.15);
+      border: 1px solid rgba(212, 149, 106, 0.15);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -327,7 +326,7 @@
     .t-sys { color: #78787f; font-style: italic; }
     .t-tool { color: var(--accent); font-weight: 500; }
     .t-arg { color: #a8d8a8; }
-    .t-str { color: var(--accent-bright); }
+    .t-str { color: #e8b090; }
     .t-num { color: var(--teal); }
     .t-border { color: #333338; }
     .t-body { color: var(--text-secondary); }
@@ -480,64 +479,47 @@
       text-align: center;
     }
 
-    .logo-row {
+    .badge-row {
       display: flex;
       justify-content: center;
-      gap: 40px;
+      gap: 12px;
       flex-wrap: wrap;
       margin-bottom: 64px;
     }
 
-    .logo-item {
-      display: flex;
-      flex-direction: column;
+    .integration-badge {
+      display: inline-flex;
       align-items: center;
-      gap: 10px;
-      transition: transform 0.2s;
-    }
-
-    .logo-item:hover { transform: translateY(-3px); }
-
-    .logo-box {
-      width: 52px;
-      height: 52px;
-      border-radius: 12px;
+      padding: 8px 18px;
+      border-radius: 999px;
       background: var(--bg-card);
       border: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 11px;
-      transition: border-color 0.25s;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-secondary);
+      transition: border-color 0.25s, color 0.2s;
+      cursor: default;
     }
 
-    .logo-box svg {
-      width: 100%;
-      height: 100%;
-    }
-
-    .logo-item:hover .logo-box {
+    .integration-badge:hover {
       border-color: var(--border-hover);
+      color: var(--text);
     }
-
-    .logo-name {
-      font-size: 12px;
-      color: var(--text-dim);
-      transition: color 0.2s;
-    }
-
-    .logo-item:hover .logo-name { color: var(--text-secondary); }
 
     /* ─── Setup ─── */
     .setup-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      display: flex;
+      align-items: stretch;
       gap: 24px;
       max-width: 780px;
       margin: 0 auto;
     }
 
     .setup-card {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
       text-align: left;
     }
 
@@ -555,6 +537,7 @@
       line-height: 1.6;
       font-weight: 300;
       margin-bottom: 10px;
+      flex: 1;
     }
 
     .setup-code {
@@ -697,9 +680,9 @@
       .nav-right a:not(.nav-gh) { display: none; }
       .hero { padding: 140px 0 60px; }
       .ps-grid { grid-template-columns: 1fr; }
-      .setup-grid { grid-template-columns: 1fr; }
+      .setup-grid { flex-direction: column; }
       .speed-grid { grid-template-columns: 1fr; }
-      .logo-row { gap: 24px; }
+      .badge-row { gap: 8px; }
       footer .wrap { flex-direction: column; gap: 12px; }
     }
 
@@ -732,9 +715,9 @@
       <a href="#" class="logo">
         <div class="logo-icon">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="1" width="5" height="12" rx="1" stroke="#22d3ee" stroke-width="1.5" fill="none"/>
-            <rect x="8" y="1" width="5" height="5" rx="1" stroke="#22d3ee" stroke-width="1.5" fill="none"/>
-            <rect x="8" y="8" width="5" height="5" rx="1" stroke="#22d3ee" stroke-width="1.5" fill="none"/>
+            <rect x="1" y="1" width="5" height="12" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
+            <rect x="8" y="1" width="5" height="5" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
+            <rect x="8" y="8" width="5" height="5" rx="1" stroke="#d4956a" stroke-width="1.5" fill="none"/>
           </svg>
         </div>
         <span class="accent">cmux</span>Layer
@@ -969,73 +952,14 @@
       <div class="section-label">Works with</div>
       <h2 class="section-heading">Any MCP client. Any agent.</h2>
 
-      <div class="logo-row reveal">
-        <!-- Claude -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M16.604 2.985c-.48-.227-1.043-.01-1.27.474L9.263 16.16c-.226.483-.01 1.056.47 1.283.48.228 1.044.01 1.27-.474l6.07-12.7c.228-.484.012-1.057-.469-1.284zM7.652 7.335c-.386-.35-.98-.32-1.327.067L2.103 12.36a.976.976 0 000 1.28l4.222 4.957c.347.387.94.418 1.327.067a.967.967 0 00.066-1.34L3.95 13l3.768-4.325a.967.967 0 00-.066-1.34zM16.348 7.335c.386-.35.98-.32 1.327.067l4.222 4.958a.976.976 0 010 1.28l-4.222 4.957a.942.942 0 01-1.327.067.967.967 0 01-.066-1.34L20.05 13l-3.768-4.325a.967.967 0 01.066-1.34z" fill="#D97757"/>
-            </svg>
-          </div>
-          <span class="logo-name">Claude Code</span>
-        </div>
-        <!-- Cursor -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="#fafaf9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <span class="logo-name">Cursor</span>
-        </div>
-        <!-- VS Code -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M16.5 1.5l-9 8.5L3 6.5l-1.5 1 5 4.5-5 4.5 1.5 1 4.5-3.5 9 8.5 4-2V3.5l-4-2zm0 4v13l-6.5-6.5 6.5-6.5z" fill="#007ACC"/>
-            </svg>
-          </div>
-          <span class="logo-name">VS Code</span>
-        </div>
-        <!-- Zed -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M4 5h16L4 19h16" stroke="#fafaf9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <span class="logo-name">Zed</span>
-        </div>
-        <!-- Codex -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="12" cy="12" r="9" stroke="#10a37f" stroke-width="1.5"/>
-              <path d="M12 7v10M7 12h10" stroke="#10a37f" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <span class="logo-name">Codex</span>
-        </div>
-        <!-- Gemini -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c1.85 0 3.58-.51 5.06-1.39C14.24 19.14 12 16.32 12 13c0-3.32 2.24-6.14 5.06-7.61A9.93 9.93 0 0012 2z" fill="#4285f4"/>
-              <path d="M22 12c0 5.52-4.48 10-10 10-1.85 0-3.58-.51-5.06-1.39C9.76 19.14 12 16.32 12 13c0-3.32-2.24-6.14-5.06-7.61A9.93 9.93 0 0112 2c5.52 0 10 4.48 10 10z" fill="#34a853"/>
-            </svg>
-          </div>
-          <span class="logo-name">Gemini</span>
-        </div>
-        <!-- Kiro -->
-        <div class="logo-item">
-          <div class="logo-box">
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M12 3l9 5v8l-9 5-9-5V8l9-5z" stroke="#ff9900" stroke-width="1.5" stroke-linejoin="round"/>
-              <path d="M12 8v8" stroke="#ff9900" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <span class="logo-name">Kiro</span>
-        </div>
+      <div class="badge-row reveal">
+        <span class="integration-badge">Claude Code</span>
+        <span class="integration-badge">Cursor</span>
+        <span class="integration-badge">VS Code</span>
+        <span class="integration-badge">Zed</span>
+        <span class="integration-badge">Codex</span>
+        <span class="integration-badge">Gemini CLI</span>
+        <span class="integration-badge">Kiro</span>
       </div>
 
       <div class="section-label">Get started</div>
@@ -1089,11 +1013,12 @@
   <!-- Footer -->
   <footer>
     <div class="wrap">
-      <div class="footer-left">cmuxLayer &mdash; by <a href="https://etanheyman.com">Etan Heyman</a></div>
+      <div class="footer-left">Part of the <a href="https://etanheyman.com">Golems</a> ecosystem</div>
       <div class="footer-right">
         <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
         <a href="https://github.com/manaflow-ai/cmux">cmux</a>
         <a href="https://github.com/EtanHey/brainlayer">BrainLayer</a>
+        <a href="https://etanhey.github.io/voicelayer">VoiceLayer</a>
       </div>
     </div>
   </footer>
@@ -1114,11 +1039,26 @@
 
     document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
-    // Copy helper
+    // Copy to clipboard
     function copyText(el, text) {
       navigator.clipboard.writeText(text).then(() => {
-        el.style.borderColor = 'var(--green)';
-        setTimeout(() => { el.style.borderColor = ''; }, 1500);
+        const icon = el.querySelector('.copy-btn, .copy-icon');
+        if (!icon) return;
+        const original = icon.innerHTML || '';
+        const isSvg = icon.tagName.toLowerCase() === 'svg';
+
+        if (isSvg) {
+          // For SVG elements in setup cards
+          const parent = icon.parentElement;
+          const check = document.createElement('span');
+          check.textContent = 'copied';
+          check.style.cssText = 'font-size:11px;color:var(--accent);font-family:var(--mono);';
+          parent.replaceChild(check, icon);
+          setTimeout(() => parent.replaceChild(icon, check), 1500);
+        } else {
+          icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M3 8.5l3 3 7-7"/></svg>';
+          setTimeout(() => { icon.innerHTML = original; }, 1500);
+        }
       });
     }
   </script>
