@@ -22,6 +22,7 @@ import {
   formatOk,
 } from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import { sanitizeTerminalInput } from "./sanitize.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
 type TextContent = { type: "text"; text: string };
@@ -30,6 +31,37 @@ type ToolReturn = {
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
+
+/** ToolAnnotations for MCP spec compliance */
+const ANNOTATIONS = {
+  readOnly: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  } as const,
+  mutating: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  } as const,
+  destructive: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  } as const,
+  idempotentMutating: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  } as const,
+};
+
+// Re-export for test access
+export { sanitizeTerminalInput } from "./sanitize.js";
 
 const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
@@ -260,6 +292,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .default(8)
         .describe("Number of preview lines"),
     },
+    ANNOTATIONS.readOnly,
     async (args) => {
       try {
         const workspaces = await client.listWorkspaces();
@@ -356,6 +389,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .default(true)
         .describe("Focus the new pane"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         const result = await client.newSplit(args.direction, {
@@ -409,9 +443,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .describe("Rename tab suffix to this task name"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
-        await client.send(args.surface, args.text, {
+        const sanitizedText = sanitizeTerminalInput(args.text);
+        await client.send(args.surface, sanitizedText, {
           workspace: args.workspace,
         });
         if (args.press_enter) {
@@ -452,6 +488,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       key: z.string().describe("Key name (e.g. 'return', 'escape', 'tab')"),
       workspace: z.string().optional().describe("Target workspace ref"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         await client.sendKey(args.surface, args.key, {
@@ -493,6 +530,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "If true, return only parsed fields (omit raw content). Best for agent monitoring.",
         ),
     },
+    ANNOTATIONS.readOnly,
     async (args) => {
       try {
         const result = await client.readScreen(args.surface, {
@@ -561,6 +599,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .default(false)
         .describe("Only replace the task suffix, keeping launcher prefix"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         let finalTitle = args.title;
@@ -599,6 +638,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace: z.string().optional().describe("Target workspace ref"),
       surface: z.string().optional().describe("Target surface ref"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         await client.notify({
@@ -638,6 +678,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .describe("Hex color"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         parseReservedModeKey(args.key, args.value);
@@ -669,6 +710,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace: z.string().optional().describe("Target workspace ref"),
       surface: z.string().optional().describe("Target surface ref"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         await client.setProgress(args.value, {
@@ -692,6 +734,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
     },
+    ANNOTATIONS.destructive,
     async (args) => {
       try {
         await client.closeSurface(args.surface, {
@@ -738,6 +781,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .describe("Timeout for wait action"),
     },
+    ANNOTATIONS.mutating,
     async (args) => {
       try {
         const browserArgs: string[] = [];
@@ -901,6 +945,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .describe("Maximum cost cap in USD for this agent"),
       },
+      ANNOTATIONS.mutating,
       async (args) => {
         try {
           const result = await engine.spawnAgent({
@@ -944,6 +989,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(300000)
           .describe("Timeout in milliseconds (default: 5 minutes)"),
       },
+      ANNOTATIONS.mutating,
       async (args) => {
         try {
           const result = await engine.waitFor(
@@ -981,6 +1027,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(300000)
           .describe("Timeout in milliseconds (default: 5 minutes)"),
       },
+      ANNOTATIONS.mutating,
       async (args) => {
         try {
           const results = await engine.waitForAll(
@@ -1008,6 +1055,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       {
         agent_id: z.string().describe("Agent ID"),
       },
+      ANNOTATIONS.readOnly,
       async (args) => {
         try {
           const state = engine.getAgentState(args.agent_id);
@@ -1044,6 +1092,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
       },
+      ANNOTATIONS.readOnly,
       async (args) => {
         try {
           const agents = engine.listAgents({
@@ -1075,6 +1124,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(false)
           .describe("Force kill instead of graceful Ctrl+C"),
       },
+      ANNOTATIONS.destructive,
       async (args) => {
         try {
           await engine.stopAgent(args.agent_id, args.force);
@@ -1103,6 +1153,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(true)
           .describe("Press enter after sending text"),
       },
+      ANNOTATIONS.mutating,
       async (args) => {
         try {
           await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
@@ -1133,6 +1184,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Number of screen lines to scan (default: 200)"),
         workspace: z.string().optional().describe("Target workspace ref"),
       },
+      ANNOTATIONS.readOnly,
       async (args) => {
         try {
           const opts: Record<string, unknown> = {
@@ -1212,6 +1264,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .describe("Slash command to run (required for action=skill)"),
       },
+      ANNOTATIONS.mutating,
       async (args) => {
         try {
           // Runtime validation per action (Decision 2)
@@ -1349,6 +1402,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(false)
           .describe("Force kill (SIGKILL) instead of graceful (Ctrl+C)"),
       },
+      ANNOTATIONS.destructive,
       async (args) => {
         try {
           const killed: string[] = [];
@@ -1415,6 +1469,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "Parent agent ID. If omitted, returns all root agents (no parent).",
           ),
       },
+      ANNOTATIONS.readOnly,
       async (args) => {
         try {
           let agents: AgentRecord[];

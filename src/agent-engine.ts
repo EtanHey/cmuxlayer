@@ -4,6 +4,7 @@
  */
 
 import { StateManager } from "./state-manager.js";
+import { sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import type { CmuxNewSplitResult, CmuxReadScreenResult } from "./types.js";
 import {
@@ -603,7 +604,7 @@ export class AgentEngine {
       );
     }
 
-    await this.client.send(agent.surface_id, text, {});
+    await this.client.send(agent.surface_id, sanitizeTerminalInput(text), {});
     if (pressEnter) {
       await this.client.sendKey(agent.surface_id, "return", {});
     }
