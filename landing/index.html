@@ -723,7 +723,9 @@
       border: 1px solid rgba(34, 197, 94, 0.15);
       background: #0a0a0c;
       overflow: hidden;
-      box-shadow: 0 0 60px rgba(34, 197, 94, 0.04);
+      box-shadow:
+        0 0 60px rgba(34, 197, 94, 0.04),
+        0 20px 60px rgba(0, 0, 0, 0.4);
     }
 
     .demo-titlebar {
@@ -886,7 +888,7 @@
     }
 
     .ctx-empty {
-      color: #2a2a2e;
+      color: #1e1e22;
       letter-spacing: -2px;
       font-size: 11px;
     }
@@ -1286,7 +1288,7 @@
   <section class="demo-section">
     <div class="wrap-wide">
       <div class="section-label reveal">Live preview</div>
-      <h2 class="section-heading reveal">This is what cmux looks like</h2>
+      <h2 class="section-heading reveal">Two agents. One orchestrator. Zero tab-switching.</h2>
 
       <div class="demo-frame reveal">
         <div class="demo-titlebar">
@@ -1429,8 +1431,11 @@
     document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
     // Demo tabs
+    let tabCycleId = null;
     document.querySelectorAll('.demo-tab').forEach(tab => {
       tab.addEventListener('click', () => {
+        // Stop auto-cycle on manual click
+        if (tabCycleId) { clearInterval(tabCycleId); tabCycleId = null; }
         const target = tab.dataset.tab;
         tab.closest('.demo-right').querySelectorAll('.demo-tab').forEach(t => t.classList.remove('active'));
         tab.closest('.demo-right').querySelectorAll('.demo-tab-panel').forEach(p => p.classList.remove('active'));
@@ -1444,7 +1449,7 @@
       const el = document.getElementById('demo-typing');
       const cursor = document.getElementById('demo-cursor');
       if (!el) return;
-      const text = 'Spawning agents and running pipeline...';
+      const text = 'Both agents done. Tests green. Pushing to main.';
       let i = 0;
       function type() {
         if (i <= text.length) {
@@ -1453,6 +1458,8 @@
           setTimeout(type, 45 + Math.random() * 35);
         } else {
           if (cursor) cursor.style.display = 'none';
+          // Auto-cycle tabs after typing finishes
+          setTimeout(startTabCycle, 2000);
         }
       }
       // Start typing when demo scrolls into view
@@ -1462,6 +1469,31 @@
         });
       }, { threshold: 0.3 });
       demoObs.observe(el.closest('.demo-frame'));
+    })();
+
+    // Auto-cycle demo tabs
+    function startTabCycle() {
+      const tabs = document.querySelectorAll('.demo-tab');
+      const panels = document.querySelectorAll('.demo-tab-panel');
+      if (!tabs.length) return;
+      const order = ['web', 'tests', 'api'];
+      let idx = 0;
+      tabCycleId = setInterval(() => {
+        const target = order[idx % order.length];
+        tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === target));
+        panels.forEach(p => p.classList.toggle('active', p.dataset.panel === target));
+        idx++;
+      }, 3000);
+    }
+
+    // Latency flicker in status bar
+    (function() {
+      const el = document.getElementById('demo-latency');
+      if (!el) return;
+      setInterval(() => {
+        const v = (0.15 + Math.random() * 0.15).toFixed(1);
+        el.textContent = 'latency: ' + v + 'ms';
+      }, 2000);
     })();
 
     // Copy to clipboard
