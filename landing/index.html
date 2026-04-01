@@ -711,6 +711,192 @@
       font-weight: 300;
     }
 
+    /* ─── Interactive Pane Demo ─── */
+    .demo-section {
+      padding: 100px 0;
+    }
+
+    .demo-frame {
+      max-width: 900px;
+      margin: 0 auto;
+      border-radius: 12px;
+      border: 1px solid rgba(34, 197, 94, 0.15);
+      background: #0a0a0c;
+      overflow: hidden;
+      box-shadow: 0 0 60px rgba(34, 197, 94, 0.04);
+    }
+
+    .demo-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.025);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .demo-titlebar .dot { width: 10px; height: 10px; }
+
+    .demo-titlebar-text {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-left: 8px;
+    }
+
+    .demo-layout {
+      display: flex;
+      min-height: 360px;
+    }
+
+    /* Left pane — orchestrator */
+    .demo-left {
+      flex: 0 0 45%;
+      border-right: 2px solid rgba(34, 197, 94, 0.12);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .demo-pane-bar {
+      display: flex;
+      align-items: center;
+      padding: 6px 12px;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .demo-pane-title {
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .demo-pane-meta {
+      color: var(--text-dim);
+      margin-left: auto;
+    }
+
+    .demo-pane-content {
+      flex: 1;
+      padding: 12px 14px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.75;
+      overflow: hidden;
+    }
+
+    .demo-line { display: block; }
+    .demo-line-gap { margin-top: 8px; }
+    .d-green { color: var(--accent); }
+    .d-bright { color: var(--accent-bright); }
+    .d-amber { color: var(--amber); }
+    .d-cyan { color: var(--cyan); }
+    .d-dim { color: #3a3a40; }
+    .d-body { color: var(--text-secondary); }
+    .d-teal { color: var(--teal); }
+    .d-white { color: var(--text); }
+
+    /* Right pane — tabbed agents */
+    .demo-right {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .demo-tabs {
+      display: flex;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .demo-tab {
+      padding: 6px 16px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.2s, border-color 0.2s, background 0.2s;
+      user-select: none;
+    }
+
+    .demo-tab:hover {
+      color: var(--text-secondary);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .demo-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: rgba(34, 197, 94, 0.04);
+    }
+
+    .demo-tab-panel {
+      display: none;
+      flex: 1;
+      padding: 12px 14px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.75;
+      overflow: hidden;
+    }
+
+    .demo-tab-panel.active { display: block; }
+
+    /* Status bar */
+    .demo-statusbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 5px 14px;
+      background: rgba(34, 197, 94, 0.04);
+      border-top: 1px solid rgba(34, 197, 94, 0.1);
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+
+    .demo-status-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+
+    .demo-status-dot.green { background: var(--accent); }
+    .demo-status-dot.amber { background: var(--amber); }
+
+    /* Typing cursor */
+    .typing-cursor {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      background: var(--accent);
+      vertical-align: text-bottom;
+      animation: blink 1s step-end infinite;
+    }
+
+    /* Context bar in demo */
+    .ctx-filled {
+      color: var(--accent);
+      letter-spacing: -2px;
+      font-size: 11px;
+    }
+
+    .ctx-empty {
+      color: #2a2a2e;
+      letter-spacing: -2px;
+      font-size: 11px;
+    }
+
+    @media (max-width: 768px) {
+      .demo-layout { flex-direction: column; min-height: auto; }
+      .demo-left { flex: none; border-right: none; border-bottom: 2px solid rgba(34, 197, 94, 0.12); }
+      .demo-pane-content, .demo-tab-panel { font-size: 11px; }
+    }
+
     /* ─── Footer ─── */
     footer {
       padding: 32px 0;
@@ -1096,6 +1282,108 @@
 
   <div class="wrap"><div class="divider"></div></div>
 
+  <!-- Interactive Demo -->
+  <section class="demo-section">
+    <div class="wrap-wide">
+      <div class="section-label reveal">Live preview</div>
+      <h2 class="section-heading reveal">This is what cmux looks like</h2>
+
+      <div class="demo-frame reveal">
+        <div class="demo-titlebar">
+          <div class="dot dot-r"></div>
+          <div class="dot dot-y"></div>
+          <div class="dot dot-g"></div>
+          <span class="demo-titlebar-text">cmux &mdash; workspace:1 &mdash; 4 surfaces</span>
+        </div>
+
+        <div class="demo-layout">
+          <!-- Left: Orchestrator pane -->
+          <div class="demo-left">
+            <div class="demo-pane-bar">
+              <span class="demo-pane-title">orchestrator</span>
+              <span class="demo-pane-meta">surface:1</span>
+            </div>
+            <div class="demo-pane-content">
+              <span class="demo-line"><span class="d-green">&#10095;</span> <span class="d-white">Run the full deploy pipeline</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-body" id="demo-typing"></span><span class="typing-cursor" id="demo-cursor"></span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">&#9484;&#9472;</span> <span class="d-bright">spawn_agent</span>(<span class="d-cyan">repo</span>=<span class="d-amber">"api"</span>)</span>
+              <span class="demo-line"><span class="d-dim">&#9492;&#9472;</span> <span class="d-green">&#10003;</span> <span class="d-dim">agent:</span> <span class="d-amber">sonnet-api-a3f7</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">&#9484;&#9472;</span> <span class="d-bright">spawn_agent</span>(<span class="d-cyan">repo</span>=<span class="d-amber">"web"</span>)</span>
+              <span class="demo-line"><span class="d-dim">&#9492;&#9472;</span> <span class="d-green">&#10003;</span> <span class="d-dim">agent:</span> <span class="d-amber">opus-web-c1d4</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">&#9484;&#9472;</span> <span class="d-bright">wait_for_all</span>(<span class="d-cyan">agents</span>=<span class="d-amber">["sonnet-api-a3f7", "opus-web-c1d4"]</span>)</span>
+              <span class="demo-line"><span class="d-dim">&#9474;</span>  <span class="d-body">waiting for 2 agents...</span></span>
+              <span class="demo-line"><span class="d-dim">&#9474;</span>  <span class="d-green">&#10003;</span> <span class="d-dim">sonnet-api-a3f7:</span> <span class="d-green">done</span> <span class="d-dim">(47s)</span></span>
+              <span class="demo-line"><span class="d-dim">&#9474;</span>  <span class="d-green">&#10003;</span> <span class="d-dim">opus-web-c1d4:</span>  <span class="d-green">done</span> <span class="d-dim">(1m12s)</span></span>
+              <span class="demo-line"><span class="d-dim">&#9492;&#9472;</span> <span class="d-green">all done</span></span>
+            </div>
+          </div>
+
+          <!-- Right: Tabbed agent views -->
+          <div class="demo-right">
+            <div class="demo-tabs">
+              <div class="demo-tab active" data-tab="api">api-agent</div>
+              <div class="demo-tab" data-tab="web">web-agent</div>
+              <div class="demo-tab" data-tab="tests">test-runner</div>
+            </div>
+
+            <!-- Tab: API agent -->
+            <div class="demo-tab-panel active" data-panel="api">
+              <span class="demo-line"><span class="d-dim">agent:</span> <span class="d-amber">sonnet-api-a3f7</span>  <span class="d-dim">cli:</span> <span class="d-body">claude</span></span>
+              <span class="demo-line"><span class="d-dim">model:</span> <span class="d-body">claude-sonnet-4-6</span>  <span class="d-dim">state:</span> <span class="d-green">done</span></span>
+              <span class="demo-line"><span class="d-dim">ctx:</span> <span class="ctx-filled">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="ctx-empty">&#9608;&#9608;&#9608;&#9608;&#9608;</span> <span class="d-teal">72%</span>  <span class="d-dim">cost:</span> <span class="d-teal">$0.84</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">&#9472;&#9472;&#9472; output &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span></span>
+              <span class="demo-line"><span class="d-body">Fixed rate limiter: sliding window now resets</span></span>
+              <span class="demo-line"><span class="d-body">per-user instead of globally. Added 3 tests.</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">files:</span> <span class="d-body">src/middleware/rate-limit.ts (+47 -12)</span></span>
+              <span class="demo-line"><span class="d-dim">       </span> <span class="d-body">tests/rate-limit.test.ts (+89)</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-green">&#10003;</span> <span class="d-body">Committed:</span> <span class="d-amber">fix: per-user sliding window rate limiter</span></span>
+            </div>
+
+            <!-- Tab: Web agent -->
+            <div class="demo-tab-panel" data-panel="web">
+              <span class="demo-line"><span class="d-dim">agent:</span> <span class="d-amber">opus-web-c1d4</span>  <span class="d-dim">cli:</span> <span class="d-body">claude</span></span>
+              <span class="demo-line"><span class="d-dim">model:</span> <span class="d-body">claude-opus-4-6</span>  <span class="d-dim">state:</span> <span class="d-green">done</span></span>
+              <span class="demo-line"><span class="d-dim">ctx:</span> <span class="ctx-filled">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span><span class="ctx-empty">&#9608;&#9608;</span> <span class="d-teal">89%</span>  <span class="d-dim">cost:</span> <span class="d-teal">$2.31</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">&#9472;&#9472;&#9472; output &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span></span>
+              <span class="demo-line"><span class="d-body">Added metrics dashboard page with charts for</span></span>
+              <span class="demo-line"><span class="d-body">request latency, error rate, and throughput.</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-dim">files:</span> <span class="d-body">src/pages/metrics.tsx (+234)</span></span>
+              <span class="demo-line"><span class="d-dim">       </span> <span class="d-body">src/components/Chart.tsx (+87)</span></span>
+              <span class="demo-line"><span class="d-dim">       </span> <span class="d-body">src/api/metrics.ts (+41)</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-green">&#10003;</span> <span class="d-body">Committed:</span> <span class="d-amber">feat: add metrics dashboard with latency charts</span></span>
+            </div>
+
+            <!-- Tab: Test runner -->
+            <div class="demo-tab-panel" data-panel="tests">
+              <span class="demo-line"><span class="d-dim">surface:4</span>  <span class="d-dim">type:</span> <span class="d-body">terminal</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-green">$</span> <span class="d-white">bun test</span></span>
+              <span class="demo-line demo-line-gap"><span class="d-body">bun test v1.2.4</span></span>
+              <span class="demo-line"><span class="d-body">src/middleware/rate-limit.test.ts:</span></span>
+              <span class="demo-line">  <span class="d-green">&#10003;</span> <span class="d-body">resets per user, not global</span></span>
+              <span class="demo-line">  <span class="d-green">&#10003;</span> <span class="d-body">allows burst then throttles</span></span>
+              <span class="demo-line">  <span class="d-green">&#10003;</span> <span class="d-body">sliding window expires correctly</span></span>
+              <span class="demo-line"><span class="d-body">src/pages/metrics.test.tsx:</span></span>
+              <span class="demo-line">  <span class="d-green">&#10003;</span> <span class="d-body">renders latency chart</span></span>
+              <span class="demo-line">  <span class="d-green">&#10003;</span> <span class="d-body">fetches metrics on mount</span></span>
+              <span class="demo-line demo-line-gap"> <span class="d-teal">47</span> <span class="d-dim">pass</span>  <span class="d-teal">0</span> <span class="d-dim">fail</span>  <span class="d-dim">Ran</span> <span class="d-teal">47</span> <span class="d-dim">tests [1.84s]</span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Status bar -->
+        <div class="demo-statusbar">
+          <span><span class="demo-status-dot green"></span>socket connected</span>
+          <span>4 surfaces</span>
+          <span>2 agents</span>
+          <span id="demo-latency">latency: 0.2ms</span>
+          <span style="margin-left: auto;">workspace:1</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap"><div class="divider"></div></div>
+
   <!-- CTA -->
   <section class="cta-section">
     <div class="wrap">
@@ -1114,11 +1402,11 @@
   <!-- Footer -->
   <footer>
     <div class="wrap">
-      <div class="footer-left">Part of the <a href="https://etanheyman.com">Golems</a> ecosystem</div>
+      <div class="footer-left">Built by <a href="https://etanheyman.com">Etan Heyman</a></div>
       <div class="footer-right">
         <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
         <a href="https://www.npmjs.com/package/cmuxlayer">npm</a>
-        <a href="https://github.com/EtanHey/voicelayer">VoiceLayer</a>
+        <a href="https://etanhey.github.io/voicelayer/">VoiceLayer</a>
         <a href="https://etanhey.github.io/brainlayer/">BrainLayer</a>
       </div>
     </div>
@@ -1139,6 +1427,42 @@
     }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
 
     document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    // Demo tabs
+    document.querySelectorAll('.demo-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.tab;
+        tab.closest('.demo-right').querySelectorAll('.demo-tab').forEach(t => t.classList.remove('active'));
+        tab.closest('.demo-right').querySelectorAll('.demo-tab-panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        tab.closest('.demo-right').querySelector(`[data-panel="${target}"]`).classList.add('active');
+      });
+    });
+
+    // Typing animation in orchestrator
+    (function() {
+      const el = document.getElementById('demo-typing');
+      const cursor = document.getElementById('demo-cursor');
+      if (!el) return;
+      const text = 'Spawning agents and running pipeline...';
+      let i = 0;
+      function type() {
+        if (i <= text.length) {
+          el.textContent = text.slice(0, i);
+          i++;
+          setTimeout(type, 45 + Math.random() * 35);
+        } else {
+          if (cursor) cursor.style.display = 'none';
+        }
+      }
+      // Start typing when demo scrolls into view
+      const demoObs = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (e.isIntersecting) { type(); demoObs.disconnect(); }
+        });
+      }, { threshold: 0.3 });
+      demoObs.observe(el.closest('.demo-frame'));
+    })();
 
     // Copy to clipboard
     function copyText(el, text) {
