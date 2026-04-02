@@ -124,6 +124,30 @@ export class AgentRegistry {
   }
 
   /**
+   * Purge terminal-state agents (done/error) whose surface no longer exists.
+   * Clears sidebar clutter from dead agents, failed spawns, and orphaned entries.
+   * Agents whose surface is still alive are kept (user may want to inspect output).
+   */
+  async purgeTerminal(): Promise<number> {
+    const surfaces = await this.surfaceProvider();
+    const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
+    let purged = 0;
+
+    for (const [id, agent] of this.agents) {
+      if (
+        TERMINAL_STATES.has(agent.state) &&
+        !liveSurfaceRefs.has(agent.surface_id)
+      ) {
+        this.agents.delete(id);
+        this.stateMgr.removeState(id);
+        purged++;
+      }
+    }
+
+    return purged;
+  }
+
+  /**
    * Get direct children of parentId.
    */
   getChildren(parentId: string): AgentRecord[] {

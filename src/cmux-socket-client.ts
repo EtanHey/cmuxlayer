@@ -455,7 +455,9 @@ export class CmuxSocketClient {
     if (opts?.workspace) {
       args.push(this.rawV1Arg("--workspace"), opts.workspace);
     }
-    args.push(this.rawV1Arg("--title"), title);
+    // Title is a positional arg (matching CLI: cmux rename-tab --surface X "title")
+    // NOT a --title flag — the V1 protocol ignores unknown flags silently.
+    args.push(title);
     await this.sendV1Args("rename_tab", args);
   }
 
