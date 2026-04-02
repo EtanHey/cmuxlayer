@@ -20,7 +20,7 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
-      - run: npm ci
+      - run: npm ci || npm install
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
