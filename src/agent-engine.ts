@@ -125,6 +125,11 @@ const LIFECYCLE_LOGS = {
  * For other CLIs: uses `cd ~/Gits/<repo> && <cli>` since they
  * don't have launcher functions yet.
  */
+// Env vars for headless/spawned agent sessions:
+// - MCP_CONNECTION_NONBLOCKING: skip MCP connection wait (Claude Code 2.1.90+)
+// - CLAUDE_CODE_NO_FLICKER: stable alt-screen rendering for terminal parsing
+const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
+
 export function buildLaunchCommand(cli: CliType, repo: string): string {
   const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
   if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
@@ -134,15 +139,16 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
   }
   switch (cli) {
     case "claude":
+      // repoGolem launcher handles env vars via ralph-registry
       return `${safeRepo}Claude -s`;
     case "codex":
-      return `cd ~/Gits/${safeRepo} && codex`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex`;
     case "gemini":
-      return `cd ~/Gits/${safeRepo} && gemini`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini`;
     case "kiro":
-      return `cd ~/Gits/${safeRepo} && kiro-cli`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli`;
     case "cursor":
-      return `cd ~/Gits/${safeRepo} && cursor agent`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent`;
   }
 }
 
