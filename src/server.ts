@@ -911,9 +911,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       notifyLifecycleEvent,
     });
 
-    // Reconstitute registry from disk on startup (async, best-effort)
+    // Reconstitute registry from disk on startup (async, best-effort).
+    // Enable startup purge so the first sweep clears stale terminal-state
+    // agents from previous cmux sessions.
     registry
       .reconstitute()
+      .then(() => engine.enableStartupPurge())
       .catch((e) =>
         console.error("[cmux-mcp] registry reconstitution failed:", e),
       );

@@ -124,8 +124,35 @@ export class AgentRegistry {
   }
 
   /**
+   * Startup purge: remove ALL terminal-state agents (done/error) unconditionally.
+   * Called after reconstitute() to clear stale entries from previous cmux sessions.
+   *
+   * More aggressive than purgeTerminal() because it doesn't check surface existence:
+   * after cmux restart, surface refs get recycled (surface:3 in a new session
+   * ≠ surface:3 from before), so a live surface ref doesn't mean the agent is alive.
+   *
+   * Non-terminal agents with dead surfaces are already handled by reconcileSurfaces()
+   * (marked as error during reconstitute), then caught here as terminal.
+   *
+   * Returns the IDs of purged agents for sidebar cleanup.
+   */
+  purgeAllTerminal(): string[] {
+    const purgedIds: string[] = [];
+
+    for (const [id, agent] of this.agents) {
+      if (TERMINAL_STATES.has(agent.state)) {
+        this.agents.delete(id);
+        this.stateMgr.removeState(id);
+        purgedIds.push(id);
+      }
+    }
+
+    return purgedIds;
+  }
+
+  /**
    * Purge terminal-state agents (done/error) whose surface no longer exists.
-   * Clears sidebar clutter from dead agents, failed spawns, and orphaned entries.
+   * Used by the periodic sweep — less aggressive than purgeStale().
    * Agents whose surface is still alive are kept (user may want to inspect output).
    */
   async purgeTerminal(): Promise<number> {
