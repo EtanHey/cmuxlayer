@@ -2,6 +2,18 @@ export function Cta() {
   return (
     <section className="py-[100px] pb-20 text-center">
       <div className="max-w-[960px] mx-auto px-6">
+        {/* Contextual cross-sell */}
+        <p className="text-[13px] text-text-dim mb-12 font-light">
+          Pair with{" "}
+          <a
+            href="https://brainlayer.etanheyman.com"
+            className="text-[#d4956a] no-underline hover:underline"
+          >
+            BrainLayer
+          </a>{" "}
+          to give orchestrated agents persistent memory across sessions.
+        </p>
+
         <h2 className="font-display text-[clamp(26px,4vw,42px)] font-semibold tracking-[-0.03em] mb-3">
           Stop being the clipboard.
         </h2>
