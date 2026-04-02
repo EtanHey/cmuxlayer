@@ -475,27 +475,27 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("claude", "golems")).toBe("golemsClaude -s");
   });
 
-  it("uses cd + raw command for codex", () => {
+  it("uses cd + env vars + raw command for codex", () => {
     expect(buildLaunchCommand("codex", "brainlayer")).toBe(
-      "cd ~/Gits/brainlayer && codex",
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex",
     );
   });
 
-  it("uses cd + raw command for gemini", () => {
+  it("uses cd + env vars + raw command for gemini", () => {
     expect(buildLaunchCommand("gemini", "voicelayer")).toBe(
-      "cd ~/Gits/voicelayer && gemini",
+      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
     );
   });
 
-  it("uses cd + kiro-cli for kiro", () => {
+  it("uses cd + env vars + kiro-cli for kiro", () => {
     expect(buildLaunchCommand("kiro", "golems")).toBe(
-      "cd ~/Gits/golems && kiro-cli",
+      "cd ~/Gits/golems && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli",
     );
   });
 
-  it("uses cd + cursor agent for cursor", () => {
+  it("uses cd + env vars + cursor agent for cursor", () => {
     expect(buildLaunchCommand("cursor", "cmuxlayer")).toBe(
-      "cd ~/Gits/cmuxlayer && cursor agent",
+      "cd ~/Gits/cmuxlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent",
     );
   });
 
@@ -529,5 +529,21 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("claude", "my.project")).toBe(
       "my.projectClaude -s",
     );
+  });
+
+  it("includes CLAUDE_CODE_NO_FLICKER=1 for non-Claude CLIs", () => {
+    const cmd = buildLaunchCommand("codex", "brainlayer");
+    expect(cmd).toContain("CLAUDE_CODE_NO_FLICKER=1");
+  });
+
+  it("includes MCP_CONNECTION_NONBLOCKING=1 for non-Claude CLIs", () => {
+    const cmd = buildLaunchCommand("gemini", "voicelayer");
+    expect(cmd).toContain("MCP_CONNECTION_NONBLOCKING=1");
+  });
+
+  it("does NOT include env vars for claude (launcher handles them)", () => {
+    const cmd = buildLaunchCommand("claude", "brainlayer");
+    expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
+    expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
   });
 });
