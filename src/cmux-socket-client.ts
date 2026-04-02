@@ -194,7 +194,7 @@ export class CmuxSocketClient {
 
   /**
    * Send a V1 plain-text command. Some cmux operations (set_status,
-   * set_progress, log, rename_tab) only exist as V1 commands.
+   * set_progress, log) only exist as V1 commands.
    */
   private sendV1(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -451,14 +451,15 @@ export class CmuxSocketClient {
     title: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const args: V1Arg[] = [this.rawV1Arg("--surface"), surface];
-    if (opts?.workspace) {
-      args.push(this.rawV1Arg("--workspace"), opts.workspace);
-    }
-    // Title is a positional arg (matching CLI: cmux rename-tab --surface X "title")
-    // NOT a --title flag — the V1 protocol ignores unknown flags silently.
-    args.push(title);
-    await this.sendV1Args("rename_tab", args);
+    // Use V2 tab.action — the V1 protocol has no rename command.
+    // The old V1 "rename_tab" silently failed with "Unknown command".
+    const params: Record<string, unknown> = {
+      action: "rename",
+      surface_id: surface,
+      title,
+    };
+    if (opts?.workspace) params.workspace_id = opts.workspace;
+    await this.call("tab.action", params);
   }
 
   async notify(opts?: {
