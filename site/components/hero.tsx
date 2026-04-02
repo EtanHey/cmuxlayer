@@ -6,7 +6,7 @@ export function Hero() {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText("npm install cmuxlayer").then(() => {
+    navigator.clipboard.writeText("npm install -g cmuxlayer").then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -55,14 +55,20 @@ export function Hero() {
 
       <div className="max-w-[960px] mx-auto px-6">
         <h1 className="font-display text-[clamp(40px,6vw,68px)] font-bold tracking-[-0.035em] leading-[1.08] mb-6 max-w-[700px] mx-auto relative hero-fade">
-          Your agents can&apos;t touch
+          One terminal.
           <br />
-          the terminal. <em className="italic text-accent">Fix that.</em>
+          <em className="italic text-accent">Many agents.</em>
         </h1>
 
-        <p className="text-[17px] text-text-secondary max-w-[500px] mx-auto mb-10 leading-[1.65] font-light relative hero-fade hero-fade-d1">
-          MCP server that gives AI agents programmatic control over terminal
-          panes. Split, read, send, automate &mdash; through one Unix socket.
+        <p className="text-[17px] text-text-secondary max-w-[540px] mx-auto mb-4 leading-[1.65] font-light relative hero-fade hero-fade-d1">
+          Claude Code in one tab, Codex in another, Gemini in a third &mdash;
+          and you&apos;re the message bus between them. cmuxLayer gives AI
+          agents programmatic control over terminal workspaces. Spawn, monitor,
+          coordinate &mdash; all through MCP.
+        </p>
+
+        <p className="text-[13px] text-text-dim mb-10 relative hero-fade hero-fade-d1">
+          free &middot; open source &middot; 22 MCP tools
         </p>
 
         <div className="flex items-center justify-center gap-3 mb-12 relative hero-fade hero-fade-d2 max-[480px]:flex-col">
@@ -89,7 +95,7 @@ export function Hero() {
             onClick={handleCopy}
           >
             <code className="text-text flex-1">
-              <span className="text-text-dim">$</span> npm install cmuxlayer
+              <span className="text-text-dim">$</span> npm install -g cmuxlayer
             </code>
             <button
               className="bg-transparent border-none text-text-dim cursor-pointer p-0 transition-colors duration-200 flex items-center justify-center w-6 h-6 shrink-0 hover:text-accent"

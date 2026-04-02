@@ -1,6 +1,7 @@
 import { Nav } from "@/components/shared/nav";
 import { Hero } from "@/components/hero";
 import { StatStrip } from "@/components/stat-strip";
+import { Comparison } from "@/components/comparison";
 import { Terminal } from "@/components/terminal";
 import { Pipeline } from "@/components/pipeline";
 import { Tools } from "@/components/tools";
@@ -25,6 +26,8 @@ export default function Home() {
       />
       <Hero />
       <StatStrip />
+      <Divider />
+      <Comparison />
       <Divider />
       <Terminal />
       <Divider />
