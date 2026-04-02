@@ -17,7 +17,9 @@
 npm install -g cmuxlayer
 ```
 
-Add to your MCP config (Claude Code, Cursor, VS Code, etc.):
+Requires [cmux](https://github.com/manaflow-ai/cmux) to be running.
+
+Add to your MCP config (Claude Code, Cursor, VS Code, Claude Desktop):
 
 ```json
 {
@@ -29,82 +31,111 @@ Add to your MCP config (Claude Code, Cursor, VS Code, etc.):
 }
 ```
 
-Requires [cmux](https://github.com/manaflow-ai/cmux) to be running.
+> **Config locations:** Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-## What it does
+## What You Can Do
 
-Spawn split panes, send commands, read screen output, and manage agent lifecycles — all through typed MCP tools. `read_screen` returns raw terminal text alongside parsed agent metadata (status, model, tokens, context %, done signals) for Claude Code, Codex, Gemini, Cursor, and Kiro.
+Tell your AI agent things like:
+
+- *"Split a pane to the right and run my test suite there"*
+- *"Spawn a Claude Code agent in a new pane to refactor auth.ts"*
+- *"Read the screen of surface:2 and tell me if the build passed"*
+- *"Wait for all agents to finish, then read their output"*
+- *"Set the sidebar status to show our deploy progress"*
+
+Under the hood, cmuxLayer exposes 22 MCP tools for terminal control, screen reading, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, Cursor, and Kiro.
 
 ## MCP Tools (22)
 
-All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) so MCP clients can enforce safety policies automatically.
+All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
+
+**Terminal control** — `new_split` `send_input` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+
+**Agent lifecycle** — `spawn_agent` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
+
+**Workspace** — `list_surfaces` `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
+
+<details>
+<summary>Full tool reference (22 tools)</summary>
 
 ### Read-only (6)
 
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
 | `list_surfaces` | List all surfaces across workspaces |
-| `read_screen` | Read terminal screen with parsed agent status |
-| `get_agent_state` | Get full state of a tracked agent |
-| `list_agents` | List all agents with optional filters |
-| `my_agents` | Get children of a parent agent with live screen status |
-| `read_agent_output` | Extract structured output between delimiter markers |
+| `read_screen` | Read terminal output with parsed agent status |
+| `get_agent_state` | Full state of a tracked agent |
+| `list_agents` | All agents, with optional filters |
+| `my_agents` | Children of a parent agent with live screen status |
+| `read_agent_output` | Structured output between delimiter markers |
 
 ### Mutating (13)
 
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `new_split` | Create a new terminal or browser split pane |
-| `send_input` | Send text input to a terminal surface |
+| `new_split` | Create a terminal or browser split pane |
+| `send_input` | Send text to a surface |
 | `send_key` | Send key press (return, escape, ctrl-c, etc.) |
 | `rename_tab` | Rename a surface tab |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
-| `set_progress` | Set sidebar progress indicator (0.0-1.0) |
-| `browser_surface` | Interact with browser surfaces (navigate, click, eval) |
+| `set_progress` | Set progress indicator (0.0-1.0) |
+| `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent in a new pane |
-| `send_to_agent` | Send a prompt or message to a running agent |
-| `wait_for` | Block until an agent reaches a target state |
+| `send_to_agent` | Send a prompt to a running agent |
+| `wait_for` | Block until agent reaches a target state |
 | `wait_for_all` | Block until multiple agents finish |
-| `interact` | Send interactive input (confirm, cancel, skill, resume) |
+| `interact` | Send interactive input (confirm, cancel, resume) |
 
 ### Destructive (3)
 
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
 | `close_surface` | Close a terminal or browser pane |
-| `stop_agent` | Gracefully stop a running agent |
-| `kill` | Force-kill one or more agent processes |
+| `stop_agent` | Gracefully stop an agent |
+| `kill` | Force-kill agent processes |
+
+</details>
 
 ## Supported Agents
 
-| CLI | Command |
-|-----|---------|
-| Claude Code | `claude` |
-| Codex | `codex` |
-| Gemini CLI | `gemini` |
-| Cursor | `cursor agent` |
-| Kiro | `kiro-cli` |
+| CLI | Command | Auto-detected |
+|-----|---------|---------------|
+| Claude Code | `claude` | status, model, tokens, context % |
+| Codex | `codex` | status, model |
+| Gemini CLI | `gemini` | status, model |
+| Cursor | `cursor agent` | status |
+| Kiro | `kiro-cli` | status |
 
-`read_screen` auto-detects agent type and parses status, model, token count, and context percentage from terminal output.
+`read_screen` auto-detects agent type and parses metadata from terminal output.
 
 ## Architecture
 
 ```
-AI Agent  ─── MCP ───>  cmuxLayer
-                         ├── Persistent Unix socket (0.1ms, 1,423x faster than CLI)
-                         ├── Agent lifecycle engine (spawn → monitor → teardown)
-                         ├── Screen parser (auto-detect Claude/Codex/Gemini/Cursor/Kiro)
-                         ├── Mode policy (autonomous vs manual control)
+AI Agent  ─── MCP ───>  cmuxLayer  ─── Unix socket ───>  cmux
+                         ├── Agent engine (spawn → monitor → teardown)
+                         ├── Screen parser (5 agent formats)
+                         ├── Mode policy (autonomous vs manual)
                          └── State manager + event log
 ```
 
-The socket client connects to cmux via Unix socket at the path from `cmux socket-path`. Auto-reconnects on disconnect, falls back to CLI subprocess if socket is unavailable.
+The socket client connects to cmux via Unix socket. Auto-reconnects on disconnect, falls back to CLI subprocess if socket is unavailable.
 
-| Method | Latency |
-|--------|---------|
-| CLI subprocess | ~142ms |
-| Persistent socket | ~0.1ms (**1,423x faster**) |
+| Connection | Latency | Speedup |
+|------------|---------|---------|
+| CLI subprocess | ~142ms | baseline |
+| Unix socket | ~0.1ms | **1,423x** |
+
+## Troubleshooting
+
+**cmux is not running**
+cmuxLayer requires a running [cmux](https://github.com/manaflow-ai/cmux) instance. Install it first, then start a cmux session before using cmuxLayer.
+
+**Tools not appearing in Claude Code**
+Restart Claude Code after adding the MCP config. Run `claude mcp list` to verify cmuxlayer is connected.
+
+**Socket connection failed**
+cmuxLayer auto-discovers the socket at `~/Library/Application Support/cmux/cmux.sock`. If you're using a custom socket path, set `CMUX_SOCKET_PATH` in your environment.
 
 ## Testing
 
