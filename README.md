@@ -6,7 +6,7 @@
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
 </p>
 
-[![npm](https://img.shields.io/npm/v/cmuxlayer?color=22c55e)](https://www.npmjs.com/package/cmuxlayer)
+[![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-22%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-335%20passing-brightgreen.svg)](#testing)
