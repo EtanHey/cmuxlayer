@@ -75,6 +75,15 @@ const MOCK_RESPONSES: Record<string, unknown> = {
     type: "terminal",
   },
   "surface.rename": {},
+  "tab.action": {
+    surface_ref: "surface:1",
+    action: "rename",
+    title: "",
+    workspace_ref: "workspace:1",
+    tab_ref: "tab:1",
+    pane_ref: "pane:1",
+    window_ref: "window:1",
+  },
   "status.set": {},
   "status.clear": {},
   "status.list": { entries: [{ key: "agent", value: "active", icon: "bolt" }] },
@@ -93,6 +102,8 @@ const MOCK_RESPONSES: Record<string, unknown> = {
 
 let mockServer: net.Server;
 let lastV1Command = "";
+let lastV2Request: { method: string; params: Record<string, unknown> } | null =
+  null;
 
 function startMockServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -116,6 +127,7 @@ function startMockServer(): Promise<void> {
           try {
             const req = JSON.parse(line);
             const method = req.method as string;
+            lastV2Request = { method, params: req.params ?? {} };
             const result = MOCK_RESPONSES[method];
 
             if (result !== undefined) {
@@ -147,7 +159,6 @@ function startMockServer(): Promise<void> {
                 "clear_progress",
                 "log",
                 "list_status",
-                "rename_tab",
               ].includes(cmd)
             ) {
               if (cmd === "list_status") {
@@ -192,6 +203,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   lastV1Command = "";
+  lastV2Request = null;
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -358,25 +370,35 @@ describe("CmuxSocketClient", () => {
     );
   });
 
-  it("sends title as positional arg for renameTab V1 command", async () => {
+  it("renameTab sends V2 tab.action with rename params", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
     await client.renameTab("surface:1", "build logs", {
       workspace: "workspace:1",
     });
 
-    // Title is positional (matching CLI format), NOT a --title flag
-    expect(lastV1Command).toBe(
-      `rename_tab --surface surface:1 --workspace workspace:1 "build logs"`,
-    );
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("tab.action");
+    expect(lastV2Request!.params).toEqual({
+      action: "rename",
+      surface_id: "surface:1",
+      title: "build logs",
+      workspace_id: "workspace:1",
+    });
   });
 
-  it("sends title as positional arg for renameTab without workspace", async () => {
+  it("renameTab sends V2 tab.action without workspace when omitted", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
     await client.renameTab("surface:1", "agent run");
 
-    expect(lastV1Command).toBe(`rename_tab --surface surface:1 "agent run"`);
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("tab.action");
+    expect(lastV2Request!.params).toEqual({
+      action: "rename",
+      surface_id: "surface:1",
+      title: "agent run",
+    });
   });
 });
 
