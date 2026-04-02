@@ -135,7 +135,7 @@ export function Footer({ product }: FooterProps) {
                 href={link.href}
                 {...(link.external && {
                   target: "_blank",
-                  rel: "noopener",
+                  rel: "noopener noreferrer",
                 })}
                 className="text-[13px] text-text-dim no-underline hover:text-text-secondary transition-colors"
               >
