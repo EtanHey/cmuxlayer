@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.etanhey/cmuxlayer",
+  "title": "cmuxLayer",
+  "description": "Terminal orchestration for AI agents — spawn panes, read screens, coordinate agent lifecycles across Claude Code, Codex, Gemini, Cursor, and Kiro. 22 MCP tools with ToolAnnotations. Persistent Unix socket (1,423x faster than CLI).",
+  "version": "0.1.0",
+  "websiteUrl": "https://cmuxlayer.etanheyman.com",
+  "repository": {
+    "url": "https://github.com/EtanHey/cmuxlayer",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "cmuxlayer",
+      "version": "0.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CMUXLAYER_ENABLE_CLAUDE_CHANNELS",
+          "description": "Set to 1 to enable one-way Claude Code channel notifications for agent lifecycle events",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
