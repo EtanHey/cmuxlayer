@@ -39,7 +39,7 @@ Spawn split panes, send commands, read screen output, and manage agent lifecycle
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) so MCP clients can enforce safety policies automatically.
 
-### Read-only (5)
+### Read-only (6)
 
 | Tool | Description |
 |------|-------------|
