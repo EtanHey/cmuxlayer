@@ -304,11 +304,35 @@ export class AgentEngine {
     }
   }
 
+  /** Whether a startup purge is pending (opt-in via enableStartupPurge) */
+  private startupPurgePending = false;
+
+  /**
+   * Enable startup purge on the next sweep. Call after reconstitute()
+   * to clear stale terminal-state agents from previous cmux sessions.
+   */
+  enableStartupPurge(): void {
+    this.startupPurgePending = true;
+  }
+
   /**
    * Public sweep: reconcile registry, purge dead entries, then sync sidebar.
+   * If enableStartupPurge() was called, the first sweep also purges all
+   * terminal-state agents unconditionally — these are stale entries from
+   * previous cmux sessions whose surface refs may have been recycled.
    */
   async runSweep(): Promise<void> {
     await this.registry.reconcile();
+
+    if (this.startupPurgePending) {
+      this.startupPurgePending = false;
+      const purgedIds = this.registry.purgeAllTerminal();
+      // Seed sidebar snapshot so syncSidebar clears their cmux entries
+      for (const id of purgedIds) {
+        this.sidebarSnapshot.set(id, "__purged__");
+      }
+    }
+
     await this.registry.purgeTerminal();
     await this.syncSidebar();
   }

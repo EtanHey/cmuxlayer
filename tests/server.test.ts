@@ -80,11 +80,13 @@ describe("Claude channels", () => {
     rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
 
+    // Use "working" state (not terminal) so the agent survives startup purge.
+    // Terminal-state agents from previous sessions are silently purged on startup.
     const stateMgr = new StateManager(CHANNEL_TEST_DIR);
     stateMgr.writeState({
       agent_id: "a1",
       surface_id: "surface:42",
-      state: "done",
+      state: "working",
       repo: "brainlayer",
       model: "codex",
       cli: "codex",
@@ -159,28 +161,17 @@ describe("Claude channels", () => {
         "method" in message &&
         message.method === "notifications/claude/channel",
     );
-    expect(notifications).toHaveLength(2);
-    expect(notifications).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          params: expect.objectContaining({
-            meta: expect.objectContaining({
-              event: "spawned",
-              agent_id: "a1",
-              repo: "brainlayer",
-            }),
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toEqual(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          meta: expect.objectContaining({
+            event: "spawned",
+            agent_id: "a1",
+            repo: "brainlayer",
           }),
         }),
-        expect.objectContaining({
-          params: expect.objectContaining({
-            meta: expect.objectContaining({
-              event: "done",
-              agent_id: "a1",
-              repo: "brainlayer",
-            }),
-          }),
-        }),
-      ]),
+      }),
     );
 
     await server.close();
