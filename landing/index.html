@@ -686,7 +686,7 @@
 
     .setup-code:hover { border-color: var(--accent); }
 
-    .setup-code span { flex: 1; }
+    .setup-code span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
     .setup-code .copy-icon {
       color: var(--text-dim);
@@ -847,14 +847,70 @@
 
     /* ─── Footer ─── */
     footer {
-      padding: 32px 0;
+      padding: 40px 0 0;
       border-top: 1px solid var(--border);
     }
 
-    footer .wrap {
+    .footer-eco {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px 32px;
+    }
+
+    .footer-eco-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-dim);
+      margin-bottom: 16px;
+    }
+
+    .footer-eco-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .footer-eco-grid a {
+      font-size: 13px;
+      text-decoration: none;
+      transition: color 0.2s;
+      color: var(--text-dim);
+    }
+
+    .footer-eco-grid a:hover { color: var(--text-secondary); }
+
+    .footer-eco-grid a.current {
+      color: var(--text);
+      font-weight: 500;
+      cursor: default;
+    }
+
+    .footer-eco-grid a span {
+      display: block;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-weight: 300;
+      margin-top: 2px;
+    }
+
+    .footer-eco-tagline {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-weight: 300;
+      margin-top: 16px;
+    }
+
+    .footer-bottom {
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-bottom .wrap {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      padding: 20px 0;
     }
 
     .footer-left {
@@ -897,7 +953,8 @@
       .pipe-step { flex: 0 0 40%; }
       .setup-grid { grid-template-columns: 1fr; }
       .logo-row { gap: 24px; }
-      footer .wrap { flex-direction: column; gap: 12px; }
+      .footer-eco-grid { grid-template-columns: 1fr; }
+      .footer-bottom .wrap { flex-direction: column; gap: 12px; }
     }
 
     @media (max-width: 480px) {
@@ -1299,13 +1356,22 @@
 
   <!-- Footer -->
   <footer>
-    <div class="wrap">
-      <div class="footer-left">Built by <a href="https://etanheyman.com">Etan Heyman</a></div>
-      <div class="footer-right">
-        <a href="https://github.com/EtanHey/cmuxlayer">GitHub</a>
-        <a href="https://www.npmjs.com/package/cmuxlayer">npm</a>
-        <a href="https://voicelayer.etanheyman.com">VoiceLayer</a>
-        <a href="https://brainlayer.etanheyman.com">BrainLayer</a>
+    <div class="footer-eco">
+      <div class="footer-eco-label">Golems Ecosystem</div>
+      <div class="footer-eco-grid">
+        <a href="https://brainlayer.etanheyman.com">BrainLayer<span>Persistent memory for AI agents</span></a>
+        <a href="https://voicelayer.etanheyman.com">VoiceLayer<span>Voice I/O for AI agents</span></a>
+        <a href="#" class="current">cmuxLayer<span>Terminal orchestration for AI agents</span></a>
+      </div>
+      <p class="footer-eco-tagline">Three open-source MCP servers. One agent toolkit.</p>
+    </div>
+    <div class="footer-bottom">
+      <div class="wrap">
+        <div class="footer-left">Built by <a href="https://etanheyman.com">Etan Heyman</a></div>
+        <div class="footer-right">
+          <a href="https://github.com/EtanHey/cmuxlayer" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/EtanHey/cmuxlayer#quick-start" target="_blank" rel="noopener noreferrer">npm</a>
+        </div>
       </div>
     </div>
   </footer>
