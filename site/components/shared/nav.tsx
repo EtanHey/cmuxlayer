@@ -51,15 +51,24 @@ export function Nav({ product, links = [] }: NavProps) {
       style={{ background: "rgba(9, 9, 11, 0.8)" }}
     >
       <div className="max-w-[960px] mx-auto px-6 flex items-center justify-between">
-        <a
-          href="#"
-          className="font-mono font-medium text-[15px] tracking-tight opacity-90 hover:opacity-100 transition-opacity no-underline text-text"
-        >
-          <span style={{ color: current.accent }}>
-            {product === "cmuxlayer" ? "cmux" : current.label.slice(0, -5)}
-          </span>
-          Layer
-        </a>
+        <div className="flex items-center gap-3">
+          <a
+            href="#"
+            className="font-mono font-medium text-[15px] tracking-tight opacity-90 hover:opacity-100 transition-opacity no-underline text-text"
+          >
+            <span style={{ color: current.accent }}>
+              {product === "cmuxlayer" ? "cmux" : current.label.slice(0, -5)}
+            </span>
+            Layer
+          </a>
+          <a
+            href="https://etanheyman.com"
+            className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] text-text-dim no-underline border border-border hover:border-border-hover hover:text-text-secondary transition-colors"
+          >
+            Part of Golems
+            <span className="text-[10px]">&#8599;</span>
+          </a>
+        </div>
 
         <div className="flex items-center gap-6">
           {links.map((link) => (
