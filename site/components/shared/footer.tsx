@@ -1,69 +1,78 @@
 type Product = "brainlayer" | "voicelayer" | "cmuxlayer";
 
-interface EcosystemProduct {
+interface EcoProduct {
   name: string;
-  tagline: string;
+  desc: string;
   href: string;
-  accent: string;
 }
 
-const ECOSYSTEM: Record<Product, EcosystemProduct[]> = {
-  cmuxlayer: [
-    {
-      name: "BrainLayer",
-      tagline: "Persistent memory for AI agents",
-      href: "https://brainlayer.etanheyman.com",
-      accent: "#d4956a",
-    },
-    {
-      name: "VoiceLayer",
-      tagline: "Voice I/O for AI agents",
-      href: "https://voicelayer.etanheyman.com",
-      accent: "#38BDF8",
-    },
-  ],
-  voicelayer: [
-    {
-      name: "BrainLayer",
-      tagline: "Persistent memory for AI agents",
-      href: "https://brainlayer.etanheyman.com",
-      accent: "#d4956a",
-    },
-    {
-      name: "cmuxLayer",
-      tagline: "Agent orchestration across terminals",
-      href: "https://cmuxlayer.etanheyman.com",
-      accent: "#22c55e",
-    },
-  ],
-  brainlayer: [
-    {
-      name: "VoiceLayer",
-      tagline: "Voice I/O for AI agents",
-      href: "https://voicelayer.etanheyman.com",
-      accent: "#38BDF8",
-    },
-    {
-      name: "cmuxLayer",
-      tagline: "Agent orchestration across terminals",
-      href: "https://cmuxlayer.etanheyman.com",
-      accent: "#22c55e",
-    },
-  ],
-};
+const ECOSYSTEM: EcoProduct[] = [
+  {
+    name: "BrainLayer",
+    desc: "Persistent memory for AI agents",
+    href: "https://brainlayer.etanheyman.com",
+  },
+  {
+    name: "VoiceLayer",
+    desc: "Voice I/O for AI agents",
+    href: "https://voicelayer.etanheyman.com",
+  },
+  {
+    name: "cmuxLayer",
+    desc: "Terminal orchestration for AI agents",
+    href: "https://cmuxlayer.etanheyman.com",
+  },
+];
 
-const PRODUCT_LINKS: Record<Product, { label: string; href: string }[]> = {
-  cmuxlayer: [
-    { label: "GitHub", href: "https://github.com/EtanHey/cmuxlayer" },
-    { label: "npm", href: "https://github.com/EtanHey/cmuxlayer#install" },
-  ],
+const PRODUCT_LINKS: Record<
+  Product,
+  { label: string; href: string; external?: boolean }[]
+> = {
   voicelayer: [
-    { label: "GitHub", href: "https://github.com/EtanHey/voicelayer" },
-    { label: "npm", href: "https://npmjs.com/package/voicelayer-mcp" },
+    {
+      label: "GitHub",
+      href: "https://github.com/EtanHey/voicelayer",
+      external: true,
+    },
+    {
+      label: "Docs",
+      href: "https://etanhey.github.io/voicelayer/docs/",
+      external: true,
+    },
+    {
+      label: "npm",
+      href: "https://npmjs.com/package/voicelayer-mcp",
+      external: true,
+    },
   ],
   brainlayer: [
-    { label: "GitHub", href: "https://github.com/EtanHey/brainlayer" },
-    { label: "PyPI", href: "https://pypi.org/project/brainlayer/" },
+    {
+      label: "GitHub",
+      href: "https://github.com/EtanHey/brainlayer",
+      external: true,
+    },
+    {
+      label: "Docs",
+      href: "https://brainlayer.etanheyman.com/docs",
+      external: true,
+    },
+    {
+      label: "PyPI",
+      href: "https://pypi.org/project/brainlayer/",
+      external: true,
+    },
+  ],
+  cmuxlayer: [
+    {
+      label: "GitHub",
+      href: "https://github.com/EtanHey/cmuxlayer",
+      external: true,
+    },
+    {
+      label: "npm",
+      href: "https://github.com/EtanHey/cmuxlayer#quick-start",
+      external: true,
+    },
   ],
 };
 
@@ -72,43 +81,44 @@ interface FooterProps {
 }
 
 export function Footer({ product }: FooterProps) {
-  const siblings = ECOSYSTEM[product];
   const links = PRODUCT_LINKS[product];
 
   return (
-    <footer className="border-t border-border">
-      {/* Ecosystem section */}
-      <div className="max-w-[960px] mx-auto px-6 py-10">
-        <div className="text-[11px] uppercase tracking-[0.1em] text-text-dim mb-5 font-medium text-center">
-          Golems Ecosystem
+    <footer className="py-10 border-t border-border">
+      <div className="mx-auto max-w-[960px] px-6">
+        {/* Ecosystem section */}
+        <div className="mb-8">
+          <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-text-dim mb-4">
+            Golems Ecosystem
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {ECOSYSTEM.map((p) => {
+              const isCurrent = p.href.includes(product);
+              return (
+                <a
+                  key={p.name}
+                  href={isCurrent ? "#" : p.href}
+                  className={`text-[13px] no-underline transition-colors ${
+                    isCurrent
+                      ? "text-text font-medium cursor-default"
+                      : "text-text-dim hover:text-text-secondary"
+                  }`}
+                >
+                  {p.name}
+                  <span className="block text-[11px] text-text-dim font-light mt-0.5">
+                    {p.desc}
+                  </span>
+                </a>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-text-dim font-light mt-4">
+            Three open-source MCP servers. One agent toolkit.
+          </p>
         </div>
-        <div className="flex justify-center gap-8 max-md:flex-col max-md:items-center max-md:gap-4">
-          {siblings.map((sib) => (
-            <a
-              key={sib.href}
-              href={sib.href}
-              className="group flex flex-col items-center gap-1 no-underline"
-            >
-              <span
-                className="text-sm font-medium transition-colors"
-                style={{ color: sib.accent }}
-              >
-                {sib.name}
-              </span>
-              <span className="text-[12px] text-text-dim group-hover:text-text-secondary transition-colors">
-                {sib.tagline}
-              </span>
-            </a>
-          ))}
-        </div>
-        <p className="text-[12px] text-text-dim text-center mt-6 font-light">
-          Three open-source MCP servers. One agent toolkit.
-        </p>
-      </div>
 
-      {/* Bottom bar */}
-      <div className="border-t border-border">
-        <div className="max-w-[960px] mx-auto px-6 py-5 flex items-center justify-between max-md:flex-col max-md:gap-3">
+        {/* Bottom row */}
+        <div className="flex items-center justify-between max-md:flex-col max-md:gap-3 pt-4 border-t border-border">
           <div className="text-[13px] text-text-dim font-light">
             Built by{" "}
             <a
@@ -121,8 +131,12 @@ export function Footer({ product }: FooterProps) {
           <div className="flex gap-5">
             {links.map((link) => (
               <a
-                key={link.href}
+                key={link.label}
                 href={link.href}
+                {...(link.external && {
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                })}
                 className="text-[13px] text-text-dim no-underline hover:text-text-secondary transition-colors"
               >
                 {link.label}

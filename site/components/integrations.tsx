@@ -85,7 +85,7 @@ function SetupCard({ step }: { step: SetupStep }) {
           className="flex items-center gap-2 bg-bg-card border border-border rounded-[6px] overflow-hidden whitespace-nowrap px-3 py-2 font-mono text-xs text-text cursor-pointer transition-[border-color] duration-200 hover:border-accent"
           onClick={handleCopy}
         >
-          <span className="flex-1">{step.code}</span>
+          <span className="flex-1 min-w-0 truncate">{step.code}</span>
           <span className="text-text-dim transition-colors duration-200 shrink-0 flex items-center justify-center hover:text-accent">
             {copied ? (
               <span className="text-[11px] text-accent font-mono">copied</span>
@@ -96,7 +96,9 @@ function SetupCard({ step }: { step: SetupStep }) {
         </div>
       ) : (
         <div className="flex items-center gap-2 bg-bg-card border border-border rounded-[6px] overflow-hidden whitespace-nowrap px-3 py-2 font-mono text-xs cursor-default">
-          <span className="flex-1 text-accent">It just works.</span>
+          <span className="flex-1 min-w-0 truncate text-accent">
+            It just works.
+          </span>
         </div>
       )}
     </div>
