@@ -31,7 +31,7 @@ Add to your MCP config (Claude Code, Cursor, VS Code, Claude Desktop):
 }
 ```
 
-> **Config locations:** Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop `~/Library/Application Support/Claude/claude_desktop_config.json`
+> **Config locations:** Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
 ## What You Can Do
 
@@ -111,7 +111,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 
 ## Architecture
 
-```
+```text
 AI Agent  ─── MCP ───>  cmuxLayer  ─── Unix socket ───>  cmux
                          ├── Agent engine (spawn → monitor → teardown)
                          ├── Screen parser (5 agent formats)
@@ -135,7 +135,7 @@ cmuxLayer requires a running [cmux](https://github.com/manaflow-ai/cmux) instanc
 Restart Claude Code after adding the MCP config. Run `claude mcp list` to verify cmuxlayer is connected.
 
 **Socket connection failed**
-cmuxLayer auto-discovers the socket at `~/Library/Application Support/cmux/cmux.sock`. If you're using a custom socket path, set `CMUX_SOCKET_PATH` in your environment.
+cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/cmux/cmux.sock`). Override with `CMUX_SOCKET_PATH` if needed.
 
 ## Testing
 
