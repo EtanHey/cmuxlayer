@@ -358,26 +358,25 @@ describe("CmuxSocketClient", () => {
     );
   });
 
-  it("sends --title flag for renameTab V1 command", async () => {
+  it("sends title as positional arg for renameTab V1 command", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
     await client.renameTab("surface:1", "build logs", {
       workspace: "workspace:1",
     });
 
+    // Title is positional (matching CLI format), NOT a --title flag
     expect(lastV1Command).toBe(
-      `rename_tab --surface surface:1 --workspace workspace:1 --title "build logs"`,
+      `rename_tab --surface surface:1 --workspace workspace:1 "build logs"`,
     );
   });
 
-  it("sends --title flag for renameTab without workspace", async () => {
+  it("sends title as positional arg for renameTab without workspace", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
     await client.renameTab("surface:1", "agent run");
 
-    expect(lastV1Command).toBe(
-      `rename_tab --surface surface:1 --title "agent run"`,
-    );
+    expect(lastV1Command).toBe(`rename_tab --surface surface:1 "agent run"`);
   });
 });
 

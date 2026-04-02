@@ -901,6 +901,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       log: (message, eventOpts) => client.log(message, eventOpts),
       setStatus: (key, value, statusOpts) =>
         client.setStatus(key, value, statusOpts),
+      clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
       readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
       send: (surface, text, sendOpts) => client.send(surface, text, sendOpts),
       sendKey: (surface, key, keyOpts) => client.sendKey(surface, key, keyOpts),

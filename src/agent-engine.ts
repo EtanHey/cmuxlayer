@@ -74,6 +74,7 @@ interface AgentEngineClient {
     key: string,
     opts?: { workspace?: string },
   ): Promise<void>;
+  clearStatus(key: string, opts?: { workspace?: string }): Promise<void>;
   setProgress(
     value: number,
     opts?: { label?: string; workspace?: string; surface?: string },
@@ -276,6 +277,19 @@ export class AgentEngine {
       }
     }
 
+    // Clean up sidebar entries for agents that were purged from the registry
+    const currentAgentIds = new Set(agents.map((a) => a.agent_id));
+    for (const [agentId] of this.sidebarSnapshot) {
+      if (!currentAgentIds.has(agentId)) {
+        try {
+          await this.client.clearStatus(agentId);
+        } catch {
+          // Best-effort sidebar cleanup
+        }
+        this.sidebarSnapshot.delete(agentId);
+      }
+    }
+
     // Progress bar
     if (total > 0) {
       await this.client.setProgress(done / total, {
@@ -285,10 +299,11 @@ export class AgentEngine {
   }
 
   /**
-   * Public sweep: reconcile registry then sync sidebar.
+   * Public sweep: reconcile registry, purge dead entries, then sync sidebar.
    */
   async runSweep(): Promise<void> {
     await this.registry.reconcile();
+    await this.registry.purgeTerminal();
     await this.syncSidebar();
   }
 
