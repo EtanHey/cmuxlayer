@@ -54,7 +54,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 25 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, Cursor, and Kiro.
+Under the hood, cmuxLayer exposes 25 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## MCP Tools (25)
 
@@ -119,8 +119,6 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | Codex | `codex` | status, model, context % |
 | Gemini CLI | `gemini` | status, model, tokens, context % |
 | Cursor | `cursor agent` | status, model, tokens, context % |
-| Kiro | `kiro-cli` | status |
-
 `read_screen` auto-detects agent type and parses metadata from terminal output.
 
 ## Architecture
