@@ -124,4 +124,69 @@ describe("layout policy", () => {
       collapsePane: false,
     });
   });
+
+  it("does not collapse when closing a non-worker surface while a dedicated worker pane exists elsewhere", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive"]),
+      makePane("pane:right", 1, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const policy = chooseSurfaceClosePolicy(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+      "surface:interactive",
+    );
+
+    expect(policy).toEqual({
+      surface: "surface:interactive",
+      pane: "pane:left",
+      collapsePane: false,
+    });
+  });
+
+  it("does not claim collapse semantics when no surfaces are classified as workers", () => {
+    const panes = [makePane("pane:left", 0, ["surface:interactive"])];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive"]),
+    ];
+
+    const policy = chooseSurfaceClosePolicy(
+      panes,
+      paneSurfaces,
+      new Set(),
+      "surface:interactive",
+    );
+
+    expect(policy).toEqual({
+      surface: "surface:interactive",
+      pane: "pane:left",
+      collapsePane: false,
+    });
+  });
+
+  it("reuses the rightmost dedicated worker pane when multiple worker panes exist", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive"]),
+      makePane("pane:right", 1, ["surface:worker-1"]),
+      makePane("pane:rightmost", 2, ["surface:worker-2"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+      makePaneSurfaces("pane:rightmost", ["surface:worker-2"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1", "surface:worker-2"]),
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:rightmost" });
+  });
 });
