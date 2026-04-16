@@ -20,6 +20,13 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
       title: "",
       type: "terminal",
     } satisfies CmuxNewSplitResult),
+    newSurface: vi.fn().mockResolvedValue({
+      workspace: "ws:1",
+      surface: "surface:new",
+      pane: "pane:1",
+      title: "",
+      type: "terminal",
+    }),
     send: vi.fn().mockResolvedValue(undefined),
     sendKey: vi.fn().mockResolvedValue(undefined),
     readScreen: vi.fn().mockResolvedValue({
@@ -162,6 +169,150 @@ describe("AgentEngine", () => {
       const events = stateMgr.getEventLog().readForAgent(result.agent_id);
       expect(events.length).toBeGreaterThanOrEqual(1);
       expect(events.some((e) => e.to_state === "booting")).toBe(true);
+    });
+
+    it("creates the initial worker pane as a right split when only one pane exists", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: "pane:left",
+        surfaces: [makeSurface("surface:interactive")],
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "ws:1",
+        type: "terminal",
+      });
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("creates the first worker as a right split even when user panes already exist", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-left"],
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-right"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:right"
+              ? [makeSurface("surface:interactive-right")]
+              : [makeSurface("surface:interactive-left")],
+        }),
+      );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "ws:1",
+        type: "terminal",
+      });
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("reuses the rightmost pane as worker tabs when a worker pane already exists", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-1",
+          state: "working",
+          surface_id: "surface:worker-1",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:worker-1")];
+      await engine.getRegistry().reconstitute();
+
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 2,
+            surface_refs: ["surface:worker-1", "surface:worker-2"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:right"
+              ? [makeSurface("surface:worker-1"), makeSurface("surface:worker-2")]
+              : [makeSurface("surface:interactive")],
+        }),
+      );
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "ws:1",
+        surface: "surface:new",
+        pane: "pane:right",
+        title: "",
+        type: "terminal",
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
   });
 
