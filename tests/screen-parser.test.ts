@@ -162,11 +162,11 @@ Thinking...
 `);
 
     expect(parsed.agent_type).toBe("gemini");
-    expect(parsed.status).toBe("working");
+    expect(parsed.status).toBe("thinking");
     expect(parsed.model).toBe("gemini-3.1-pro");
   });
 
-  it("parses Cursor Agent working state with status strip, k tokens, and mode bar", () => {
+  it("parses Cursor Agent thinking state with status strip, k tokens, and mode bar", () => {
     const parsed = parseScreen(`
 Auto · 22.5% · 4 files edited
 
@@ -179,7 +179,7 @@ ctrl+c to stop
 `);
 
     expect(parsed.agent_type).toBe("cursor");
-    expect(parsed.status).toBe("working");
+    expect(parsed.status).toBe("thinking");
     expect(parsed.token_count).toBe(3300);
     expect(parsed.context_pct).toBe(23);
   });
@@ -238,6 +238,27 @@ Using claude-sonnet-4-20250514
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.model).toBe("claude-sonnet-4-20250514");
+  });
+
+  it.each([
+    ["Claude thinking indicator", "✶ thinking"],
+    ["Claude high-effort thinking indicator", "thinking with high effort"],
+    ["Claude whimsical loading phrase", "Reticulating splines..."],
+    ["Cursor running spinner", "Running 24k tokens"],
+    ["Cursor generating spinner", "Generating 5.2k tokens"],
+  ])("detects thinking status for %s", (_label, screen) => {
+    const parsed = parseScreen(screen);
+
+    expect(parsed.status).toBe("thinking");
+  });
+
+  it.each([
+    ["user prose", "I was thinking about cooking"],
+    ["non-spinner running text", "Running the tests"],
+  ])("does not misclassify %s as thinking", (_label, screen) => {
+    const parsed = parseScreen(screen);
+
+    expect(parsed.status).toBe("idle");
   });
 
   it("detects idle shell output and strips ANSI sequences", () => {
