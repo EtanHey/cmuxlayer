@@ -104,6 +104,8 @@ const GEMINI_MODEL_RE =
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
+const THINKING_RE =
+  /(?:^|\n)\s*(?:(?:[✻✢✳✶]\s*)?thinking(?:\s+with\s+[a-z-]+\s+effort)?(?:\s*(?:\.{3,}|…))?|(?:Reticulating splines|Perambulating|Cooked|Crunched|Razzmatazzing|Schlepping|Nucleating|Seasoning)(?:\s*(?:\.{3,}|…))?|(?:⬡\s*)?(?:Running|Generating)(?:\s*(?:\.{3,}|…))?\s+[0-9][0-9,]*(?:\.[0-9]+)?[km]?\s+tokens)\s*$/im;
 
 /** Cursor Agent CLI — mode bar, hex status, context strip, follow-up prompt */
 const CURSOR_MODE_BAR_RE =
@@ -426,6 +428,10 @@ function inferStatus(
     return "frozen";
   }
 
+  if (THINKING_RE.test(text)) {
+    return "thinking";
+  }
+
   if (agentType === "codex" && CODEX_WORKING_RE.test(joined)) {
     return "working";
   }
@@ -453,7 +459,6 @@ function inferStatus(
   }
 
   const workingMarkers = [
-    "thinking",
     " /loop",
     "bypass permissions on",
     "esc to interrupt",

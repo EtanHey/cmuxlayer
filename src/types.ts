@@ -62,7 +62,12 @@ export type ParsedScreenAgentType =
   | "gemini"
   | "cursor"
   | "unknown";
-export type ParsedScreenStatus = "frozen" | "working" | "idle" | "done";
+export type ParsedScreenStatus =
+  | "frozen"
+  | "thinking"
+  | "working"
+  | "idle"
+  | "done";
 
 export interface ParsedScreenResult {
   agent_type: ParsedScreenAgentType;
