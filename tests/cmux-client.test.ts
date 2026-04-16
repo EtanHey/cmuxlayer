@@ -225,6 +225,78 @@ describe("CmuxClient.newSurface", () => {
   });
 });
 
+describe("CmuxClient.moveSurface", () => {
+  it("calls cmux move-surface with surface and optional flags", async () => {
+    const data = {
+      ok: true,
+      workspace: "workspace:2",
+      surface: "surface:9",
+      pane: "pane:3",
+    };
+    const { client, exec } = mockClient(data);
+
+    const result = await client.moveSurface({
+      surface: "surface:9",
+      pane: "pane:3",
+      workspace: "workspace:2",
+      before: "surface:10",
+      index: 1,
+      focus: false,
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "move-surface",
+      "--surface",
+      "surface:9",
+      "--pane",
+      "pane:3",
+      "--workspace",
+      "workspace:2",
+      "--before",
+      "surface:10",
+      "--index",
+      "1",
+      "--focus",
+      "false",
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      workspace: "workspace:2",
+      surface: "surface:9",
+      pane: "pane:3",
+    });
+  });
+});
+
+describe("CmuxClient.reorderSurface", () => {
+  it("calls cmux reorder-surface with index placement", async () => {
+    const data = {
+      ok: true,
+      surface: "surface:9",
+    };
+    const { client, exec } = mockClient(data);
+
+    const result = await client.reorderSurface({
+      surface: "surface:9",
+      index: 2,
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "reorder-surface",
+      "--surface",
+      "surface:9",
+      "--index",
+      "2",
+    ]);
+    expect(result).toEqual({
+      ok: true,
+      surface: "surface:9",
+    });
+  });
+});
+
 describe("CmuxClient.send", () => {
   it("calls cmux send with surface and text", async () => {
     const { client, exec } = mockClient({});
