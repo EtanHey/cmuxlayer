@@ -1400,6 +1400,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       setProgress: (value, progressOpts) =>
         client.setProgress(value, progressOpts),
       newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),
+      newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+      listPanes: (paneOpts) => client.listPanes(paneOpts),
+      listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
       notifyLifecycleEvent,
     });
 

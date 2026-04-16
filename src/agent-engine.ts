@@ -7,7 +7,10 @@ import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import type {
+  CmuxPane,
+  CmuxPaneSurfaces,
   CmuxNewSplitResult,
+  CmuxNewSurfaceResult,
   CmuxReadScreenResult,
   CmuxSendOptions,
 } from "./types.js";
@@ -21,6 +24,7 @@ import {
   type WaitResult,
 } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
+import { chooseAgentSpawnPlacement } from "./layout-policy.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -95,6 +99,21 @@ interface AgentEngineClient {
       focus?: boolean;
     },
   ): Promise<CmuxNewSplitResult>;
+  newSurface(opts: {
+    pane: string;
+    type?: "terminal" | "browser";
+    workspace?: string;
+    title?: string;
+    url?: string;
+  }): Promise<CmuxNewSurfaceResult>;
+  listPanes(opts?: { workspace?: string }): Promise<{
+    workspace_ref?: string;
+    panes: CmuxPane[];
+  }>;
+  listPaneSurfaces(opts?: {
+    workspace?: string;
+    pane?: string;
+  }): Promise<CmuxPaneSurfaces>;
   notifyLifecycleEvent(
     event: AgentLifecycleEvent,
     agent: AgentRecord,
@@ -390,11 +409,36 @@ export class AgentEngine {
       parentAgentId = params.parent_agent_id;
     }
 
-    // 1. Create cmux surface
-    const surface = await this.client.newSplit("right", {
-      workspace: params.workspace,
-      type: "terminal",
-    });
+    // 1. Create cmux surface using the deterministic worker layout policy.
+    let surface: CmuxNewSplitResult | CmuxNewSurfaceResult;
+    try {
+      const panes = await this.client.listPanes({ workspace: params.workspace });
+      const paneSurfaces = await Promise.all(
+        panes.panes.map((pane) =>
+          this.client.listPaneSurfaces({
+            workspace: params.workspace,
+            pane: pane.ref,
+          }),
+        ),
+      );
+      const placement = chooseAgentSpawnPlacement(panes.panes, paneSurfaces);
+      surface =
+        placement.kind === "surface"
+          ? await this.client.newSurface({
+              pane: placement.pane,
+              type: "terminal",
+              workspace: params.workspace,
+            })
+          : await this.client.newSplit("right", {
+              workspace: params.workspace,
+              type: "terminal",
+            });
+    } catch {
+      surface = await this.client.newSplit("right", {
+        workspace: params.workspace,
+        type: "terminal",
+      });
+    }
 
     // 2. Write initial state (creating → booting)
     const now = new Date().toISOString();
