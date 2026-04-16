@@ -120,6 +120,19 @@ export class CmuxClient {
     return new Error(`cmux ${args[0]} failed: ${error.message}${suffix}`);
   }
 
+  private assertSupportedSendOptions(opts?: CmuxSendOptions): void {
+    const unsupported = [
+      opts?.chunk_size !== undefined ? "chunk_size" : null,
+      opts?.chunk_delay_ms !== undefined ? "chunk_delay_ms" : null,
+    ].filter((value): value is string => value !== null);
+
+    if (unsupported.length > 0) {
+      throw new Error(
+        `CmuxClient.send does not support ${unsupported.join(", ")}; chunking is handled by send_input in the server layer`,
+      );
+    }
+  }
+
   private mapSplitResult(
     parsed: Record<string, unknown>,
     fallbackType: "terminal" | "browser",
@@ -261,6 +274,7 @@ export class CmuxClient {
     text: string,
     opts?: CmuxSendOptions,
   ): Promise<void> {
+    this.assertSupportedSendOptions(opts);
     const args = ["send", "--surface", surface];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
     args.push(text);

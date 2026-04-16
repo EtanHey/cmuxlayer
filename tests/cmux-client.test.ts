@@ -256,24 +256,17 @@ describe("CmuxClient.send", () => {
     ]);
   });
 
-  it("accepts chunking options without changing the CLI command shape", async () => {
+  it("rejects server-only chunking options at the client boundary", async () => {
     const { client, exec } = mockClient({});
 
-    await client.send("surface:1", "chunk me", {
-      workspace: "workspace:2",
-      chunk_size: 180,
-      chunk_delay_ms: 7,
-    });
-
-    expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
-      "send",
-      "--surface",
-      "surface:1",
-      "--workspace",
-      "workspace:2",
-      "chunk me",
-    ]);
+    await expect(
+      client.send("surface:1", "chunk me", {
+        workspace: "workspace:2",
+        chunk_size: 180,
+        chunk_delay_ms: 7,
+      }),
+    ).rejects.toThrow(/does not support chunk_size, chunk_delay_ms/i);
+    expect(exec).not.toHaveBeenCalled();
   });
 });
 

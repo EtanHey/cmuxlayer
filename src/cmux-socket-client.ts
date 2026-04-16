@@ -86,6 +86,20 @@ export class CmuxSocketClient {
     this.cliFallback = opts?.cliFallback;
   }
 
+  private assertSupportedSendOptions(opts?: CmuxSendOptions): void {
+    const unsupported = [
+      opts?.chunk_size !== undefined ? "chunk_size" : null,
+      opts?.chunk_delay_ms !== undefined ? "chunk_delay_ms" : null,
+    ].filter((value): value is string => value !== null);
+
+    if (unsupported.length > 0) {
+      throw new CmuxSocketError(
+        `CmuxSocketClient.send does not support ${unsupported.join(", ")}; chunking is handled by send_input in the server layer`,
+        "unsupported_send_option",
+      );
+    }
+  }
+
   // ── Low-level: send a V2 request, get a V2 response ────────────────
 
   private sendV2(
@@ -411,6 +425,7 @@ export class CmuxSocketClient {
     text: string,
     opts?: CmuxSendOptions,
   ): Promise<void> {
+    this.assertSupportedSendOptions(opts);
     const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
       surface_id: surface,

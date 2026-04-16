@@ -927,6 +927,90 @@ describe("tool handler integration", () => {
     expect(otherSurfaceParsed.surface).toBe("surface:2");
   });
 
+  it("send_input rejects concurrent foreground sends on the same surface", async () => {
+    let releaseSend: ((value: { stdout: string; stderr: string }) => void) | null =
+      null;
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("send") && !releaseSend) {
+        return new Promise((resolve) => {
+          releaseSend = resolve;
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+
+    const firstPromise = tool.handler(
+      { surface: "surface:1", text: "echo first" },
+      {} as any,
+    );
+    await Promise.resolve();
+
+    const second = await tool.handler(
+      { surface: "surface:1", text: "echo second" },
+      {} as any,
+    );
+    expect(second.isError).toBe(true);
+    const secondParsed =
+      second.structuredContent ?? JSON.parse(second.content[0].text);
+    expect(secondParsed.error).toMatch(/surface surface:1 is busy/i);
+
+    releaseSend?.({ stdout: "{}", stderr: "" });
+    const first = await firstPromise;
+    const firstParsed =
+      first.structuredContent ?? JSON.parse(first.content[0].text);
+    expect(firstParsed.ok).toBe(true);
+  });
+
+  it("background delivery blocks other same-surface write tools", async () => {
+    vi.useFakeTimers();
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const sendInput = registeredTools["send_input"];
+    const sendKey = registeredTools["send_key"];
+    const renameTab = registeredTools["rename_tab"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    await sendInput.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 120,
+        background: true,
+      },
+      {} as any,
+    );
+
+    const keyResult = await sendKey.handler(
+      { surface: "surface:1", key: "return" },
+      {} as any,
+    );
+    expect(keyResult.isError).toBe(true);
+    const keyParsed =
+      keyResult.structuredContent ?? JSON.parse(keyResult.content[0].text);
+    expect(keyParsed.error).toMatch(/delivery.*in progress/i);
+
+    const renameResult = await renameTab.handler(
+      { surface: "surface:1", title: "blocked" },
+      {} as any,
+    );
+    expect(renameResult.isError).toBe(true);
+    const renameParsed =
+      renameResult.structuredContent ?? JSON.parse(renameResult.content[0].text);
+    expect(renameParsed.error).toMatch(/delivery.*in progress/i);
+  });
+
   it("send_input retries a transient socket failure before succeeding", async () => {
     vi.useFakeTimers();
     let sendAttempts = 0;

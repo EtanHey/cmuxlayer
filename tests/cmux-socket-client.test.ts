@@ -231,6 +231,17 @@ describe("CmuxSocketClient", () => {
     await client.send("surface:1", "echo hello", { workspace: "workspace:1" });
   });
 
+  it("rejects server-only chunking options at the socket boundary", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await expect(
+      client.send("surface:1", "echo hello", {
+        workspace: "workspace:1",
+        chunk_size: 180,
+      }),
+    ).rejects.toThrow(/does not support chunk_size/i);
+  });
+
   it("readScreen returns screen content", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     const result = await client.readScreen("surface:1", {
