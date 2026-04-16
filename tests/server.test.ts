@@ -7,10 +7,11 @@ import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 
-// The 11 low-level tools from the design doc
+// The 12 low-level tools from the design doc
 const EXPECTED_TOOLS = [
   "list_surfaces",
   "new_split",
+  "new_surface",
   "send_input",
   "send_key",
   "read_screen",
@@ -54,7 +55,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 11 tools", () => {
+  it("registers all 12 tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -785,6 +786,69 @@ describe("tool handler integration", () => {
         "--surface",
         "surface:2",
         "Build Task",
+      ]),
+    );
+  });
+
+  it("new_surface handler calls cmux new-surface", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workspace: "workspace:1",
+        surface: "surface:3",
+        pane: "pane:1",
+        title: "New Tab",
+        type: "terminal",
+      }),
+      stderr: "",
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["new_surface"];
+
+    const result = await tool.handler({ pane: "pane:1" }, {} as any);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:1"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:3");
+  });
+
+  it("new_surface renames the new surface when a title is provided", async () => {
+    mockExec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          surface: "surface:3",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["new_surface"];
+
+    await tool.handler(
+      { pane: "pane:1", title: "Build Logs" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenNthCalledWith(
+      2,
+      "cmux",
+      expect.arrayContaining([
+        "rename-tab",
+        "--surface",
+        "surface:3",
+        "Build Logs",
       ]),
     );
   });

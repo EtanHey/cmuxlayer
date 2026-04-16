@@ -49,6 +49,14 @@ export interface CmuxNewSplitResult {
   type: "terminal" | "browser";
 }
 
+export interface CmuxNewSurfaceResult {
+  workspace: string;
+  surface: string;
+  pane: string;
+  title: string;
+  type: "terminal" | "browser";
+}
+
 export interface CmuxReadScreenResult {
   surface: string;
   text: string;
