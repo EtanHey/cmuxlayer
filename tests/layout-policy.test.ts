@@ -1,0 +1,127 @@
+import { describe, expect, it } from "vitest";
+import {
+  chooseAgentSpawnPlacement,
+  chooseSurfaceClosePolicy,
+} from "../src/layout-policy.js";
+import type { CmuxPane, CmuxPaneSurfaces, CmuxSurface } from "../src/types.js";
+
+function makePane(
+  ref: string,
+  index: number,
+  surfaceRefs: string[],
+): CmuxPane {
+  return {
+    ref,
+    index,
+    focused: index === 0,
+    surface_count: surfaceRefs.length,
+    surface_refs: surfaceRefs,
+    selected_surface_ref: surfaceRefs[0],
+  };
+}
+
+function makeSurface(ref: string, index: number): CmuxSurface {
+  return {
+    ref,
+    title: "",
+    type: "terminal",
+    index,
+    selected: index === 0,
+  };
+}
+
+function makePaneSurfaces(
+  pane: string,
+  surfaceRefs: string[],
+): CmuxPaneSurfaces {
+  return {
+    workspace_ref: "ws:1",
+    window_ref: "window:1",
+    pane_ref: pane,
+    surfaces: surfaceRefs.map((ref, index) => makeSurface(ref, index)),
+  };
+}
+
+describe("layout policy", () => {
+  it("creates a fresh right split when the only existing worker shares a pane with interactive surfaces", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive", "surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+    );
+
+    expect(placement).toEqual({ kind: "split", direction: "right" });
+  });
+
+  it("reuses the rightmost dedicated worker pane for subsequent workers", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive"]),
+      makePane("pane:right", 1, ["surface:worker-1", "surface:worker-2"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1", "surface:worker-2"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1", "surface:worker-2"]),
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("marks a dedicated single-worker pane as collapsible when its last tab closes", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive"]),
+      makePane("pane:right", 1, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const policy = chooseSurfaceClosePolicy(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+      "surface:worker-1",
+    );
+
+    expect(policy).toEqual({
+      surface: "surface:worker-1",
+      pane: "pane:right",
+      collapsePane: true,
+    });
+  });
+
+  it("does not mark mixed panes as collapsible worker panes", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:interactive", "surface:worker-1"]),
+    ];
+
+    const policy = chooseSurfaceClosePolicy(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+      "surface:worker-1",
+    );
+
+    expect(policy).toEqual({
+      surface: "surface:worker-1",
+      pane: "pane:left",
+      collapsePane: false,
+    });
+  });
+});

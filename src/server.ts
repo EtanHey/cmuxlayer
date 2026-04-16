@@ -24,6 +24,7 @@ import {
 } from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
+import { chooseSurfaceClosePolicy } from "./layout-policy.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
 type TextContent = { type: "text"; text: string };
@@ -1227,10 +1228,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.destructive,
     async (args) => {
       try {
+        let closePolicy:
+          | ReturnType<typeof chooseSurfaceClosePolicy>
+          | undefined;
+
+        try {
+          const identified = args.workspace
+            ? null
+            : await client.identify(args.surface);
+          const workspace =
+            args.workspace ??
+            identified?.caller?.workspace_ref ??
+            identified?.focused?.workspace_ref;
+          if (workspace) {
+            const panes = await client.listPanes({ workspace });
+            const paneSurfaces = await Promise.all(
+              panes.panes.map((pane) =>
+                client.listPaneSurfaces({ workspace, pane: pane.ref }),
+              ),
+            );
+            const workerSurfaceIds = new Set(
+              stateMgr.listStates().map((record) => record.surface_id),
+            );
+            closePolicy = chooseSurfaceClosePolicy(
+              panes.panes,
+              paneSurfaces,
+              workerSurfaceIds,
+              args.surface,
+            );
+          }
+        } catch {
+          // Layout hints are best-effort only; the close itself must still run.
+        }
+
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
         });
-        const data = { surface: args.surface };
+        const data = {
+          surface: args.surface,
+          pane: closePolicy?.pane ?? undefined,
+          collapse_pane: closePolicy?.collapsePane ?? false,
+        };
         return okFormatted(formatOk("close_surface", data), data);
       } catch (e) {
         return err(e);

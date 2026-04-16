@@ -1380,6 +1380,107 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("close_surface reports pane collapse when closing the last dedicated worker tab", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-layout");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:worker-1",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "Layout policy",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:1" },
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:worker-1"],
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockImplementation(async ({ pane }) => ({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: pane,
+        surfaces:
+          pane === "pane:right"
+            ? [
+                {
+                  ref: "surface:worker-1",
+                  title: "worker",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [
+                {
+                  ref: "surface:interactive",
+                  title: "interactive",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ],
+      })),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["close_surface"];
+
+    const result = await tool.handler({ surface: "surface:worker-1" }, {} as any);
+
+    expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:worker-1", {
+      workspace: undefined,
+    });
+    expect(result.structuredContent).toMatchObject({
+      surface: "surface:worker-1",
+      pane: "pane:right",
+      collapse_pane: true,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("rename_tab handler calls cmux rename-tab", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 

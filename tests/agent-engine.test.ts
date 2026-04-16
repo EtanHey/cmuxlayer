@@ -259,7 +259,14 @@ describe("AgentEngine", () => {
           surface_id: "surface:worker-1",
         }),
       );
-      liveSurfaces = [makeSurface("surface:worker-1")];
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-2",
+          state: "working",
+          surface_id: "surface:worker-2",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:worker-1"), makeSurface("surface:worker-2")];
       await engine.getRegistry().reconstitute();
 
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
