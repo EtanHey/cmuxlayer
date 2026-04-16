@@ -205,7 +205,63 @@ describe("AgentEngine", () => {
       expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
 
+    it("creates the first worker as a right split even when user panes already exist", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-left"],
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:interactive-right"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:right"
+              ? [makeSurface("surface:interactive-right")]
+              : [makeSurface("surface:interactive-left")],
+        }),
+      );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "ws:1",
+        type: "terminal",
+      });
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
     it("reuses the rightmost pane as worker tabs when a worker pane already exists", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-1",
+          state: "working",
+          surface_id: "surface:worker-1",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:worker-1")];
+      await engine.getRegistry().reconstitute();
+
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
           {

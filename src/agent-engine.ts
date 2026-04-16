@@ -421,7 +421,14 @@ export class AgentEngine {
           }),
         ),
       );
-      const placement = chooseAgentSpawnPlacement(panes.panes, paneSurfaces);
+      const workerSurfaceIds = new Set(
+        this.registry.list().map((agent) => agent.surface_id),
+      );
+      const placement = chooseAgentSpawnPlacement(
+        panes.panes,
+        paneSurfaces,
+        workerSurfaceIds,
+      );
       surface =
         placement.kind === "surface"
           ? await this.client.newSurface({
@@ -429,7 +436,7 @@ export class AgentEngine {
               type: "terminal",
               workspace: params.workspace,
             })
-          : await this.client.newSplit("right", {
+          : await this.client.newSplit(placement.direction, {
               workspace: params.workspace,
               type: "terminal",
             });

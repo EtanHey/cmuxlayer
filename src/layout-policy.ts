@@ -12,25 +12,26 @@ export type AgentSpawnPlacement =
 export function chooseAgentSpawnPlacement(
   panes: CmuxPane[],
   paneSurfaces: CmuxPaneSurfaces[],
+  workerSurfaceIds: ReadonlySet<string>,
 ): AgentSpawnPlacement {
-  if (panes.length <= 1) {
+  if (workerSurfaceIds.size === 0) {
     return { kind: "split", direction: "right" };
   }
 
   const groupsByPane = new Map(
     paneSurfaces.map((group) => [group.pane_ref, group]),
   );
-  const terminalPanes = panes.filter((pane) =>
+  const workerPanes = panes.filter((pane) =>
     groupsByPane
       .get(pane.ref)
-      ?.surfaces.some((surface) => surface.type === "terminal"),
+      ?.surfaces.some((surface) => workerSurfaceIds.has(surface.ref)),
   );
 
-  if (terminalPanes.length === 0) {
+  if (workerPanes.length === 0) {
     return { kind: "split", direction: "right" };
   }
 
-  const rightmostPane = [...terminalPanes].sort((a, b) => a.index - b.index).at(-1);
+  const rightmostPane = [...workerPanes].sort((a, b) => a.index - b.index).at(-1);
   if (!rightmostPane) {
     return { kind: "split", direction: "right" };
   }
