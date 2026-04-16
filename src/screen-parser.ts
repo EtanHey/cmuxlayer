@@ -94,14 +94,16 @@ const MODEL_EMOJI_RE =
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CODEX_HEADER_RE =
-  /^(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\s*(?:[·•]\s*(?:(\d+)%\s+left(?:\s*[·•]\s*[^\n]+)?|[^\n]+))$/m;
+  /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
+const CODEX_CONTEXT_LEFT_RE =
+  /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
-const GEMINI_WORKING_RE = /(?:^|\n)\s*(?:✦\s*)?Working\b/im;
+const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
@@ -360,8 +362,8 @@ function parseModelAndCost(
 }
 
 function parseCodexContextPct(text: string): number | null {
-  const match = text.match(CODEX_HEADER_RE);
-  return match?.[2] ? Number.parseInt(match[2], 10) : null;
+  const match = text.match(CODEX_CONTEXT_LEFT_RE);
+  return match?.[1] ? Number.parseInt(match[1], 10) : null;
 }
 
 function parseCodexActions(text: string): string[] {

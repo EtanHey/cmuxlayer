@@ -167,6 +167,17 @@ Working (2m 08s • esc to interrupt)
     expect(parsed.context_pct).toBeNull();
   });
 
+  it("parses Codex context-left headers with trailing whitespace", () => {
+    const parsed = parseScreen(`
+gpt-5.4 high · 87% left   
+Working (2m 06s • esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.context_pct).toBe(13);
+  });
+
   it("parses Gemini-style output from explicit Gemini CLI markers", () => {
     const parsed = parseScreen(`
 Gemini CLI
@@ -193,6 +204,18 @@ Gemini CLI
     expect(parsed.model).toBe("gemini-2.5-flash-lite");
     expect(parsed.token_count).toBe(100000);
     expect(parsed.context_pct).toBe(10);
+  });
+
+  it("does not treat Gemini prose that starts with Working as a working status line", () => {
+    const parsed = parseScreen(`
+Gemini CLI
+Model: gemini-2.5-flash
+Working with existing APIs is the safer migration path here.
+`);
+
+    expect(parsed.agent_type).toBe("gemini");
+    expect(parsed.model).toBe("gemini-2.5-flash");
+    expect(parsed.status).toBe("idle");
   });
 
   it("parses Cursor Agent thinking state with status strip, k tokens, and mode bar", () => {
