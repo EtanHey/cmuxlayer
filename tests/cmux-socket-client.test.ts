@@ -439,6 +439,22 @@ describe("CmuxSocketClient V2→CLI fallback", () => {
           type: "terminal" as const,
         };
       },
+      moveSurface: async (opts: unknown) => {
+        cliCalls.push({ method: "moveSurface", args: [opts] });
+        return {
+          ok: true,
+          workspace: "workspace:2",
+          surface: "surface:cli-tab",
+          pane: "pane:cli",
+        };
+      },
+      reorderSurface: async (opts: unknown) => {
+        cliCalls.push({ method: "reorderSurface", args: [opts] });
+        return {
+          ok: true,
+          surface: "surface:cli-tab",
+        };
+      },
       closeSurface: async (surface: string, opts?: unknown) => {
         cliCalls.push({ method: "closeSurface", args: [surface, opts] });
       },
@@ -511,6 +527,44 @@ describe("CmuxSocketClient V2→CLI fallback", () => {
     expect(cliCalls[0].args[0]).toMatchObject({
       pane: "pane:1",
       workspace: "workspace:1",
+    });
+    expect(result.surface).toBe("surface:cli-tab");
+  });
+
+  it("moveSurface uses CLI fallback", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+    const result = await client.moveSurface({
+      surface: "surface:1",
+      workspace: "workspace:1",
+      pane: "pane:2",
+    });
+    expect(cliCalls).toHaveLength(1);
+    expect(cliCalls[0].method).toBe("moveSurface");
+    expect(cliCalls[0].args[0]).toMatchObject({
+      surface: "surface:1",
+      workspace: "workspace:1",
+      pane: "pane:2",
+    });
+    expect(result.surface).toBe("surface:cli-tab");
+  });
+
+  it("reorderSurface uses CLI fallback", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+    const result = await client.reorderSurface({
+      surface: "surface:1",
+      after: "surface:2",
+    });
+    expect(cliCalls).toHaveLength(1);
+    expect(cliCalls[0].method).toBe("reorderSurface");
+    expect(cliCalls[0].args[0]).toMatchObject({
+      surface: "surface:1",
+      after: "surface:2",
     });
     expect(result.surface).toBe("surface:cli-tab");
   });

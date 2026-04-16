@@ -16,6 +16,8 @@ import type {
   CmuxPane,
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
+  CmuxMoveSurfaceResult,
+  CmuxReorderSurfaceResult,
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
@@ -418,6 +420,37 @@ export class CmuxSocketClient {
       );
     }
     return this.cliFallback.newSurface(opts);
+  }
+
+  async moveSurface(opts: {
+    surface: string;
+    pane?: string;
+    workspace?: string;
+    before?: string;
+    after?: string;
+    index?: number;
+    focus?: boolean;
+  }): Promise<CmuxMoveSurfaceResult> {
+    if (!this.cliFallback) {
+      throw new CmuxSocketError(
+        "move-surface is only available through the CLI fallback",
+      );
+    }
+    return this.cliFallback.moveSurface(opts);
+  }
+
+  async reorderSurface(opts: {
+    surface: string;
+    index?: number;
+    before?: string;
+    after?: string;
+  }): Promise<CmuxReorderSurfaceResult> {
+    if (!this.cliFallback) {
+      throw new CmuxSocketError(
+        "reorder-surface is only available through the CLI fallback",
+      );
+    }
+    return this.cliFallback.reorderSurface(opts);
   }
 
   async send(

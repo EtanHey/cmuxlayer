@@ -11,6 +11,8 @@ import type {
   CmuxPaneSurfaces,
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
+  CmuxMoveSurfaceResult,
+  CmuxReorderSurfaceResult,
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
@@ -163,6 +165,29 @@ export class CmuxClient {
     };
   }
 
+  private mapMoveSurfaceResult(
+    parsed: Record<string, unknown>,
+  ): CmuxMoveSurfaceResult {
+    return {
+      ok: (parsed.ok as boolean) ?? true,
+      workspace:
+        (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
+      surface:
+        (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
+    };
+  }
+
+  private mapReorderSurfaceResult(
+    parsed: Record<string, unknown>,
+  ): CmuxReorderSurfaceResult {
+    return {
+      ok: (parsed.ok as boolean) ?? true,
+      surface:
+        (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+    };
+  }
+
   private async resolveWorkspaceFromSurface(surface: string): Promise<string> {
     const identified = await this.identify(surface);
     const workspace =
@@ -267,6 +292,54 @@ export class CmuxClient {
     const raw = await this.run(args);
     const parsed = this.parse<Record<string, unknown>>(raw, "new-surface");
     return this.mapSurfaceResult(parsed, opts.type ?? "terminal");
+  }
+
+  async moveSurface(opts: {
+    surface: string;
+    pane?: string;
+    workspace?: string;
+    before?: string;
+    after?: string;
+    index?: number;
+    focus?: boolean;
+  }): Promise<CmuxMoveSurfaceResult> {
+    const args = ["move-surface", "--surface", opts.surface];
+    if (opts.pane) args.push("--pane", opts.pane);
+    if (opts.workspace) args.push("--workspace", opts.workspace);
+    if (opts.before) args.push("--before", opts.before);
+    if (opts.after) args.push("--after", opts.after);
+    if (opts.index !== undefined) args.push("--index", String(opts.index));
+    if (opts.focus !== undefined) args.push("--focus", String(opts.focus));
+
+    const raw = await this.run(args);
+    const parsed = this.parse<Record<string, unknown>>(raw, "move-surface");
+    return this.mapMoveSurfaceResult(parsed);
+  }
+
+  async reorderSurface(opts: {
+    surface: string;
+    index?: number;
+    before?: string;
+    after?: string;
+  }): Promise<CmuxReorderSurfaceResult> {
+    const targetCount =
+      Number(opts.index !== undefined) +
+      Number(Boolean(opts.before)) +
+      Number(Boolean(opts.after));
+    if (targetCount !== 1) {
+      throw new Error(
+        "reorder-surface requires exactly one of index, before, or after",
+      );
+    }
+
+    const args = ["reorder-surface", "--surface", opts.surface];
+    if (opts.index !== undefined) args.push("--index", String(opts.index));
+    if (opts.before) args.push("--before", opts.before);
+    if (opts.after) args.push("--after", opts.after);
+
+    const raw = await this.run(args);
+    const parsed = this.parse<Record<string, unknown>>(raw, "reorder-surface");
+    return this.mapReorderSurfaceResult(parsed);
   }
 
   async send(

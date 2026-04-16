@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 11 core tools + 11 agent lifecycle tools.
+ * cmux MCP server — registers 14 core tools + 11 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -799,7 +799,82 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 4. send_input
+  // 4. move_surface
+  server.tool(
+    "move_surface",
+    "Move a surface (tab) between panes or workspaces",
+    {
+      surface: z.string().describe("Surface ref to move"),
+      pane: z.string().optional().describe("Target pane ref"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      before: z.string().optional().describe("Insert before this surface ref"),
+      after: z.string().optional().describe("Insert after this surface ref"),
+      index: z.number().int().optional().describe("Insert at this tab index"),
+      focus: z
+        .boolean()
+        .optional()
+        .describe("Whether to focus the moved surface"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const result = await client.moveSurface({
+          surface: args.surface,
+          pane: args.pane,
+          workspace: args.workspace,
+          before: args.before,
+          after: args.after,
+          index: args.index,
+          focus: args.focus,
+        });
+        const data = { ...result };
+        return okFormatted(
+          formatOk("move_surface", {
+            surface: result.surface,
+            pane: result.pane,
+            workspace: result.workspace,
+          }),
+          data,
+        );
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 5. reorder_surface
+  server.tool(
+    "reorder_surface",
+    "Reorder a surface (tab) within its current pane",
+    {
+      surface: z.string().describe("Surface ref to reorder"),
+      index: z.number().int().optional().describe("Move to this tab index"),
+      before: z.string().optional().describe("Insert before this surface ref"),
+      after: z.string().optional().describe("Insert after this surface ref"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const result = await client.reorderSurface({
+          surface: args.surface,
+          index: args.index,
+          before: args.before,
+          after: args.after,
+        });
+        const data = { ...result };
+        return okFormatted(
+          formatOk("reorder_surface", {
+            surface: result.surface,
+          }),
+          data,
+        );
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 6. send_input
   server.tool(
     "send_input",
     "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Set background=true to return immediately with a delivery_id while chunking continues in the background. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",
@@ -890,7 +965,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 4. send_key
+  // 7. send_key
   server.tool(
     "send_key",
     "Send a key press to a terminal surface. Use this after send_input to reliably submit commands — especially when targeting interactive programs like Claude sessions.",
@@ -913,7 +988,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 5. read_screen
+  // 8. read_screen
   server.tool(
     "read_screen",
     "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content).",
