@@ -17,6 +17,7 @@ import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
   CmuxReadScreenResult,
+  CmuxSendOptions,
   CmuxStatusEntry,
 } from "./types.js";
 import type { CmuxClient } from "./cmux-client.js";
@@ -408,7 +409,7 @@ export class CmuxSocketClient {
   async send(
     surface: string,
     text: string,
-    opts?: { workspace?: string },
+    opts?: CmuxSendOptions,
   ): Promise<void> {
     const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {

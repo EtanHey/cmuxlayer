@@ -255,6 +255,26 @@ describe("CmuxClient.send", () => {
       "ls",
     ]);
   });
+
+  it("accepts chunking options without changing the CLI command shape", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.send("surface:1", "chunk me", {
+      workspace: "workspace:2",
+      chunk_size: 180,
+      chunk_delay_ms: 7,
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "send",
+      "--surface",
+      "surface:1",
+      "--workspace",
+      "workspace:2",
+      "chunk me",
+    ]);
+  });
 });
 
 describe("CmuxClient.sendKey", () => {

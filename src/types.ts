@@ -64,6 +64,12 @@ export interface CmuxReadScreenResult {
   scrollback_used: boolean;
 }
 
+export interface CmuxSendOptions {
+  workspace?: string;
+  chunk_size?: number;
+  chunk_delay_ms?: number;
+}
+
 export type ParsedScreenAgentType =
   | "claude"
   | "codex"

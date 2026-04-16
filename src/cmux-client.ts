@@ -12,6 +12,7 @@ import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
   CmuxReadScreenResult,
+  CmuxSendOptions,
   CmuxStatusEntry,
 } from "./types.js";
 
@@ -258,7 +259,7 @@ export class CmuxClient {
   async send(
     surface: string,
     text: string,
-    opts?: { workspace?: string },
+    opts?: CmuxSendOptions,
   ): Promise<void> {
     const args = ["send", "--surface", surface];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
