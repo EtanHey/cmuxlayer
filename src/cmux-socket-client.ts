@@ -15,6 +15,7 @@ import type {
   CmuxPaneSurfaces,
   CmuxPane,
   CmuxNewSplitResult,
+  CmuxNewSurfaceResult,
   CmuxReadScreenResult,
   CmuxStatusEntry,
 } from "./types.js";
@@ -387,6 +388,21 @@ export class CmuxSocketClient {
       }
       throw e;
     }
+  }
+
+  async newSurface(opts: {
+    pane: string;
+    type?: "terminal" | "browser";
+    workspace?: string;
+    title?: string;
+    url?: string;
+  }): Promise<CmuxNewSurfaceResult> {
+    if (!this.cliFallback) {
+      throw new CmuxSocketError(
+        "new-surface is only available through the CLI fallback",
+      );
+    }
+    return this.cliFallback.newSurface(opts);
   }
 
   async send(

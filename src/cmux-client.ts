@@ -10,6 +10,7 @@ import type {
   CmuxWorkspace,
   CmuxPaneSurfaces,
   CmuxNewSplitResult,
+  CmuxNewSurfaceResult,
   CmuxReadScreenResult,
   CmuxStatusEntry,
 } from "./types.js";
@@ -133,6 +134,21 @@ export class CmuxClient {
     };
   }
 
+  private mapSurfaceResult(
+    parsed: Record<string, unknown>,
+    fallbackType: "terminal" | "browser",
+  ): CmuxNewSurfaceResult {
+    return {
+      workspace:
+        (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
+      surface:
+        (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
+      title: (parsed.title as string) ?? "",
+      type: (parsed.type as "terminal" | "browser") ?? fallbackType,
+    };
+  }
+
   private async resolveWorkspaceFromSurface(surface: string): Promise<string> {
     const identified = await this.identify(surface);
     const workspace =
@@ -213,6 +229,30 @@ export class CmuxClient {
     const raw = await this.run(args);
     const parsed = this.parse<Record<string, unknown>>(raw, "new-split");
     return this.mapSplitResult(parsed, "terminal");
+  }
+
+  async newSurface(opts: {
+    pane: string;
+    type?: "terminal" | "browser";
+    workspace?: string;
+    title?: string;
+    url?: string;
+  }): Promise<CmuxNewSurfaceResult> {
+    if (opts.type !== "browser" && opts.url) {
+      throw new Error("Terminal surfaces do not accept a browser URL");
+    }
+
+    // AIDEV-NOTE: cmux new-surface does not expose a title flag. Titles are
+    // applied by the server/tool layer via renameTab after creation, matching
+    // the existing new_split behavior.
+    const args = ["new-surface", "--pane", opts.pane];
+    if (opts.type) args.push("--type", opts.type);
+    if (opts.workspace) args.push("--workspace", opts.workspace);
+    if (opts.url) args.push("--url", opts.url);
+
+    const raw = await this.run(args);
+    const parsed = this.parse<Record<string, unknown>>(raw, "new-surface");
+    return this.mapSurfaceResult(parsed, opts.type ?? "terminal");
   }
 
   async send(

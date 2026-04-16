@@ -423,7 +423,53 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 3. send_input
+  // 3. new_surface
+  server.tool(
+    "new_surface",
+    "Create a new surface (tab) in an existing pane",
+    {
+      pane: z.string().describe("Target pane ref"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+      type: z
+        .enum(["terminal", "browser"])
+        .optional()
+        .default("terminal")
+        .describe("Surface type"),
+      title: z.string().optional().describe("Tab title"),
+      url: z.string().optional().describe("URL for browser surfaces"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const result = await client.newSurface({
+          pane: args.pane,
+          workspace: args.workspace,
+          type: args.type,
+          url: args.url,
+        });
+        if (args.title) {
+          await client.renameTab(result.surface, args.title, {
+            workspace: result.workspace || args.workspace,
+          });
+          result.title = args.title;
+        }
+        const data = { ...result };
+        return okFormatted(
+          formatOk("new_surface", {
+            pane: args.pane,
+            surface: result.surface,
+            type: result.type,
+            title: result.title,
+          }),
+          data,
+        );
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 4. send_input
   server.tool(
     "send_input",
     "Send text input to a terminal surface. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",

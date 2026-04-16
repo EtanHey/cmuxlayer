@@ -185,6 +185,46 @@ describe("CmuxClient.newSplit", () => {
   });
 });
 
+describe("CmuxClient.newSurface", () => {
+  it("calls cmux new-surface with pane and optional flags", async () => {
+    const data = {
+      workspace: "workspace:1",
+      surface: "surface:9",
+      pane: "pane:2",
+      title: "New Tab",
+      type: "browser",
+    };
+    const { client, exec } = mockClient(data);
+
+    const result = await client.newSurface({
+      pane: "pane:2",
+      workspace: "workspace:1",
+      type: "browser",
+      url: "https://example.com",
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "new-surface",
+      "--pane",
+      "pane:2",
+      "--type",
+      "browser",
+      "--workspace",
+      "workspace:1",
+      "--url",
+      "https://example.com",
+    ]);
+    expect(result).toEqual({
+      workspace: "workspace:1",
+      surface: "surface:9",
+      pane: "pane:2",
+      title: "New Tab",
+      type: "browser",
+    });
+  });
+});
+
 describe("CmuxClient.send", () => {
   it("calls cmux send with surface and text", async () => {
     const { client, exec } = mockClient({});
