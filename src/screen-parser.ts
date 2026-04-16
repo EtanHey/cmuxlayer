@@ -93,14 +93,17 @@ const MODEL_EMOJI_RE =
 // Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
-const CODEX_MODEL_RE =
-  /^(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\s*[·•]\s*(\d+)%\s+left/m;
+const CODEX_HEADER_RE =
+  /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
+const CODEX_CONTEXT_LEFT_RE =
+  /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const GEMINI_MODEL_RE =
-  /(?:^|\n)\s*(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
+  /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
+const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
@@ -114,8 +117,10 @@ const CURSOR_HEX_RUNNING_RE = /⬡\s+Running\.\.\./i;
 const CURSOR_HEX_IDLE_RE = /⬡\s+Idle\b/i;
 const CURSOR_TOKEN_LINE_RE =
   /⬡\s+(?:Running\.\.\.|Idle)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*([km])?\s*tokens\b/i;
+const CURSOR_ACTIVITY_TOKEN_RE =
+  /(?:^|\n)\s*(?:⬢|⬡|•)?\s*(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*([km])?\s*tokens\b/im;
 const CURSOR_STATUS_PCT_RE =
-  /(?:^|\n)\s*(?:Auto|Agent)\s*·\s*(\d+(?:\.\d+)?)\s*%\s*·/i;
+  /(?:^|\n)\s*(?:Auto|Agent)\s*·\s*(\d+(?:\.\d+)?)\s*%(?:\s*·|\s*(?:\n|$))/i;
 const CURSOR_FOLLOWUP_RE = /→\s*Add a follow-up/i;
 const CURSOR_STOP_RE = /ctrl\+c to stop/i;
 const CURSOR_SESSION_COMPLETE_RE =
@@ -170,7 +175,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   }
 
   if (
-    CODEX_MODEL_RE.test(text) ||
+    CODEX_HEADER_RE.test(text) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
   ) {
@@ -180,7 +185,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   if (/Gemini CLI/i.test(text)) {
     return "gemini";
   }
-  if (GEMINI_MODEL_RE.test(text) && !CODEX_MODEL_RE.test(text)) {
+  if (GEMINI_MODEL_RE.test(text) && !CODEX_HEADER_RE.test(text)) {
     return "gemini";
   }
 
@@ -313,7 +318,7 @@ function parseModelAndCost(
   agentType: ParsedScreenAgentType,
 ): { model: string | null; cost: number | null } {
   if (agentType === "codex") {
-    const codexMatch = text.match(CODEX_MODEL_RE);
+    const codexMatch = text.match(CODEX_HEADER_RE);
     return {
       model: codexMatch?.[1]?.trim() ?? null,
       cost: null,
@@ -357,8 +362,8 @@ function parseModelAndCost(
 }
 
 function parseCodexContextPct(text: string): number | null {
-  const match = text.match(CODEX_MODEL_RE);
-  return match ? Number.parseInt(match[2], 10) : null;
+  const match = text.match(CODEX_CONTEXT_LEFT_RE);
+  return match?.[1] ? Number.parseInt(match[1], 10) : null;
 }
 
 function parseCodexActions(text: string): string[] {
@@ -375,7 +380,7 @@ function parseCursorScaledTokenCount(raw: string, suffix?: string): number {
 }
 
 function parseCursorTokenCount(text: string): number | null {
-  const m = text.match(CURSOR_TOKEN_LINE_RE);
+  const m = text.match(CURSOR_TOKEN_LINE_RE) ?? text.match(CURSOR_ACTIVITY_TOKEN_RE);
   if (!m) return null;
   const value = parseCursorScaledTokenCount(m[1], m[2]);
   return Number.isFinite(value) ? value : null;
@@ -473,9 +478,12 @@ function inferStatus(
 
   if (
     agentType === "gemini" &&
-    /Gemini CLI/i.test(text) &&
-    /Thinking/i.test(text)
+    (/Gemini CLI/i.test(text) && /Thinking/i.test(text))
   ) {
+    return "working";
+  }
+
+  if (agentType === "gemini" && GEMINI_WORKING_RE.test(text)) {
     return "working";
   }
 

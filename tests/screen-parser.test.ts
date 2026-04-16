@@ -153,6 +153,31 @@ Working (2m 06s • esc to interrupt)
     expect(parsed.actions).toContain('Ran rg -n "read_screen" src tests');
   });
 
+  it("parses Codex model when the header omits the context-left segment", () => {
+    const parsed = parseScreen(`
+Improve documentation in @filename
+
+gpt-5.4 xhigh · ~/Gits/cmuxlayer
+Working (2m 08s • esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("working");
+    expect(parsed.model).toBe("gpt-5.4 xhigh");
+    expect(parsed.context_pct).toBeNull();
+  });
+
+  it("parses Codex context-left headers with trailing whitespace", () => {
+    const parsed = parseScreen(`
+gpt-5.4 high · 87% left   
+Working (2m 06s • esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.context_pct).toBe(13);
+  });
+
   it("parses Gemini-style output from explicit Gemini CLI markers", () => {
     const parsed = parseScreen(`
 Gemini CLI
@@ -164,6 +189,33 @@ Thinking...
     expect(parsed.agent_type).toBe("gemini");
     expect(parsed.status).toBe("thinking");
     expect(parsed.model).toBe("gemini-3.1-pro");
+  });
+
+  it("parses Gemini model bullets and working status icons", () => {
+    const parsed = parseScreen(`
+Gemini CLI
+✦ Working
+- Model: gemini-2.5-flash-lite
+100,000 tokens
+`);
+
+    expect(parsed.agent_type).toBe("gemini");
+    expect(parsed.status).toBe("working");
+    expect(parsed.model).toBe("gemini-2.5-flash-lite");
+    expect(parsed.token_count).toBe(100000);
+    expect(parsed.context_pct).toBe(10);
+  });
+
+  it("does not treat Gemini prose that starts with Working as a working status line", () => {
+    const parsed = parseScreen(`
+Gemini CLI
+Model: gemini-2.5-flash
+Working with existing APIs is the safer migration path here.
+`);
+
+    expect(parsed.agent_type).toBe("gemini");
+    expect(parsed.model).toBe("gemini-2.5-flash");
+    expect(parsed.status).toBe("idle");
   });
 
   it("parses Cursor Agent thinking state with status strip, k tokens, and mode bar", () => {
@@ -201,6 +253,24 @@ Model: gpt-5.2 high
     expect(parsed.token_count).toBe(12450);
     expect(parsed.context_pct).toBe(10);
     expect(parsed.model).toBe("gpt-5.2 high");
+  });
+
+  it("parses Cursor token counts from calling status lines", () => {
+    const parsed = parseScreen(`
+⬢ Calling     1.59k tokens
+
+│ → Add a follow-up
+ctrl+c to stop │
+
+▶︎ Auto-run all commands (shift+tab to turn off)
+
+Auto · 16.1%
+/ commands · @ files · ! shell
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.token_count).toBe(1590);
+    expect(parsed.context_pct).toBe(16);
   });
 
   it("detects Cursor session completion as done_signal and status done", () => {
