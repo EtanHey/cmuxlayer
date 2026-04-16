@@ -57,6 +57,18 @@ export interface CmuxNewSurfaceResult {
   type: "terminal" | "browser";
 }
 
+export interface CmuxMoveSurfaceResult {
+  ok: boolean;
+  workspace: string;
+  surface: string;
+  pane: string;
+}
+
+export interface CmuxReorderSurfaceResult {
+  ok: boolean;
+  surface: string;
+}
+
 export interface CmuxReadScreenResult {
   surface: string;
   text: string;
