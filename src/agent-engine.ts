@@ -6,7 +6,11 @@
 import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
-import type { CmuxNewSplitResult, CmuxReadScreenResult } from "./types.js";
+import type {
+  CmuxNewSplitResult,
+  CmuxReadScreenResult,
+  CmuxSendOptions,
+} from "./types.js";
 import {
   generateAgentId,
   MAX_SPAWN_DEPTH,
@@ -67,7 +71,7 @@ interface AgentEngineClient {
   send(
     surface: string,
     text: string,
-    opts?: { workspace?: string },
+    opts?: CmuxSendOptions,
   ): Promise<void>;
   sendKey(
     surface: string,

@@ -327,6 +327,19 @@ describe("CmuxClient.send", () => {
       "ls",
     ]);
   });
+
+  it("rejects server-only chunking options at the client boundary", async () => {
+    const { client, exec } = mockClient({});
+
+    await expect(
+      client.send("surface:1", "chunk me", {
+        workspace: "workspace:2",
+        chunk_size: 180,
+        chunk_delay_ms: 7,
+      }),
+    ).rejects.toThrow(/does not support chunk_size, chunk_delay_ms/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
 });
 
 describe("CmuxClient.sendKey", () => {

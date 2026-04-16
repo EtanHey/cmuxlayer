@@ -4,6 +4,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
@@ -67,6 +68,40 @@ const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
 const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmux agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
+const SEND_INPUT_CHUNK_THRESHOLD = 500;
+const SEND_INPUT_CHUNK_DELAY_MS = 5;
+const SEND_INPUT_RETRY_ATTEMPTS = 3;
+const SEND_INPUT_RETRY_DELAY_MS = 25;
+
+type DeliveryStatus = "delivering" | "delivered" | "failed";
+
+interface DeliveryRecord {
+  delivery_id: string;
+  surface: string;
+  workspace?: string;
+  status: DeliveryStatus;
+  total_chunks: number;
+  sent_chunks: number;
+  chunk_size: number;
+  chunk_delay_ms: number;
+  chunks: string[];
+  press_enter: boolean;
+  rename_to_task?: string;
+  started_at: string;
+  completed_at?: string;
+  error?: string;
+  failed_chunk?: number;
+}
+
+class DeliveryError extends Error {
+  constructor(
+    message: string,
+    readonly failed_chunk?: number,
+  ) {
+    super(message);
+    this.name = "DeliveryError";
+  }
+}
 
 function ok(data: Record<string, unknown>): ToolReturn {
   const payload = { ok: true, ...data };
@@ -88,9 +123,12 @@ function okFormatted(
   };
 }
 
-function err(error: unknown): ToolReturn {
+function err(
+  error: unknown,
+  extra: Record<string, unknown> = {},
+): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
-  const payload = { ok: false, error: message };
+  const payload = { ok: false, error: message, ...extra };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
@@ -105,6 +143,37 @@ function requireValue(
   if (value === undefined || value === "") {
     throw new Error(message);
   }
+}
+
+function chunkTerminalInput(text: string, chunkSize: number): string[] {
+  if (!text || text.length <= chunkSize) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > chunkSize) {
+    const newlineIndex = remaining.lastIndexOf("\n", chunkSize);
+    const splitAt = newlineIndex >= 0 ? newlineIndex + 1 : chunkSize;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableDeliveryError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /socket|connection_|connection closed|timeout/i.test(message);
 }
 
 function pickLatestSurfaceModel(
@@ -219,6 +288,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const stateDir =
     opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
   const stateMgr = new StateManager(stateDir);
+  const deliveries = new Map<string, DeliveryRecord>();
+  const latestDeliveryBySurface = new Map<string, string>();
+  const activeDeliveryBySurface = new Map<string, string>();
+  const activeSurfaceWrites = new Map<string, string>();
   const enableClaudeChannels =
     opts?.enableClaudeChannels ??
     process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1";
@@ -240,6 +313,263 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     });
   }
+
+  const snapshotDelivery = (record: DeliveryRecord) => ({
+    delivery_id: record.delivery_id,
+    surface: record.surface,
+    status: record.status,
+    sent_chunks: record.sent_chunks,
+    total_chunks: record.total_chunks,
+    chunk_size: record.chunk_size,
+    started_at: record.started_at,
+    completed_at: record.completed_at ?? null,
+    failed_chunk: record.failed_chunk ?? null,
+    error: record.error ?? null,
+  });
+
+  const getSurfaceDelivery = (surface: string) => {
+    const deliveryId = latestDeliveryBySurface.get(surface);
+    if (!deliveryId) {
+      return null;
+    }
+
+    const record = deliveries.get(deliveryId);
+    return record ? snapshotDelivery(record) : null;
+  };
+
+  const getSurfaceWriteConflict = (surface: string) => {
+    const activeDeliveryId = activeDeliveryBySurface.get(surface);
+    if (activeDeliveryId) {
+      const record = deliveries.get(activeDeliveryId);
+      if (record?.status === "delivering") {
+        return new Error(
+          `delivery ${activeDeliveryId} is still in progress for ${surface}`,
+        );
+      }
+
+      activeDeliveryBySurface.delete(surface);
+    }
+
+    if (activeSurfaceWrites.has(surface)) {
+      return new Error(`surface ${surface} is busy`);
+    }
+
+    return null;
+  };
+
+  const acquireSurfaceWrite = (surface: string, owner: string) => {
+    const conflict = getSurfaceWriteConflict(surface);
+    if (conflict) {
+      throw conflict;
+    }
+
+    activeSurfaceWrites.set(surface, owner);
+  };
+
+  const releaseSurfaceWrite = (surface: string, owner: string) => {
+    if (activeSurfaceWrites.get(surface) === owner) {
+      activeSurfaceWrites.delete(surface);
+    }
+  };
+
+  const withSurfaceWrite = async <T>(
+    surface: string,
+    fn: () => Promise<T>,
+    owner = `surface-write:${randomUUID()}`,
+  ): Promise<T> => {
+    acquireSurfaceWrite(surface, owner);
+    try {
+      return await fn();
+    } finally {
+      releaseSurfaceWrite(surface, owner);
+    }
+  };
+
+  const pruneCompletedDeliveryHistory = (surface: string) => {
+    const latestDeliveryId = latestDeliveryBySurface.get(surface);
+    for (const [deliveryId, record] of deliveries.entries()) {
+      if (record.surface !== surface) continue;
+      if (deliveryId === latestDeliveryId) continue;
+      if (record.status === "delivering") continue;
+      deliveries.delete(deliveryId);
+    }
+  };
+
+  const finishDelivery = (
+    record: DeliveryRecord,
+    status: DeliveryStatus,
+    error?: string,
+    failedChunk?: number,
+  ) => {
+    record.status = status;
+    record.completed_at = new Date().toISOString();
+    record.error = error;
+    record.failed_chunk = failedChunk;
+    record.chunks = [];
+    latestDeliveryBySurface.set(record.surface, record.delivery_id);
+    if (activeDeliveryBySurface.get(record.surface) === record.delivery_id) {
+      activeDeliveryBySurface.delete(record.surface);
+    }
+    releaseSurfaceWrite(record.surface, record.delivery_id);
+    pruneCompletedDeliveryHistory(record.surface);
+  };
+
+  const sendChunkWithRetry = async (
+    surface: string,
+    chunk: string,
+    opts: { workspace?: string },
+    chunkNumber: number,
+    totalChunks: number,
+  ) => {
+    let attempt = 0;
+    let lastError: unknown;
+
+    while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+      try {
+        await client.send(surface, chunk, opts);
+        return;
+      } catch (error) {
+        lastError = error;
+        attempt += 1;
+        if (
+          !isRetryableDeliveryError(error) ||
+          attempt >= SEND_INPUT_RETRY_ATTEMPTS
+        ) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw new DeliveryError(
+            `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
+            chunkNumber,
+          );
+        }
+        await delay(SEND_INPUT_RETRY_DELAY_MS);
+      }
+    }
+
+    const message =
+      lastError instanceof Error ? lastError.message : String(lastError);
+    throw new DeliveryError(
+      `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
+      chunkNumber,
+    );
+  };
+
+  const sendKeyWithRetry = async (
+    surface: string,
+    key: string,
+    workspace?: string,
+  ) => {
+    let attempt = 0;
+
+    while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
+      try {
+        await client.sendKey(surface, key, { workspace });
+        return;
+      } catch (error) {
+        attempt += 1;
+        if (
+          !isRetryableDeliveryError(error) ||
+          attempt >= SEND_INPUT_RETRY_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await delay(SEND_INPUT_RETRY_DELAY_MS);
+      }
+    }
+  };
+
+  const applySendInputPostActions = async (opts: {
+    surface: string;
+    workspace?: string;
+    press_enter: boolean;
+    rename_to_task?: string;
+  }) => {
+    if (opts.press_enter) {
+      await delay(50);
+      await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+    }
+
+    if (opts.rename_to_task) {
+      const surfaces = await client.listPaneSurfaces({
+        workspace: opts.workspace,
+      });
+      const surface = surfaces.surfaces.find((s) => s.ref === opts.surface);
+      const currentTitle = surface?.title ?? "";
+      const newTitle = replaceTaskSuffix(currentTitle, opts.rename_to_task);
+      await client.renameTab(opts.surface, newTitle, {
+        workspace: opts.workspace,
+      });
+    }
+  };
+
+  const deliverInputChunks = async (opts: {
+    surface: string;
+    workspace?: string;
+    chunks: string[];
+    chunk_size: number;
+    chunk_delay_ms: number;
+    press_enter: boolean;
+    rename_to_task?: string;
+    onChunkDelivered?: (sentChunks: number) => void;
+  }) => {
+    for (const [index, chunk] of opts.chunks.entries()) {
+      await sendChunkWithRetry(
+        opts.surface,
+        chunk,
+        {
+          workspace: opts.workspace,
+        },
+        index + 1,
+        opts.chunks.length,
+      );
+      opts.onChunkDelivered?.(index + 1);
+      if (index < opts.chunks.length - 1) {
+        await delay(opts.chunk_delay_ms);
+      }
+    }
+
+    await applySendInputPostActions({
+      surface: opts.surface,
+      workspace: opts.workspace,
+      press_enter: opts.press_enter,
+      rename_to_task: opts.rename_to_task,
+    });
+  };
+
+  const startBackgroundDelivery = (record: DeliveryRecord) => {
+    acquireSurfaceWrite(record.surface, record.delivery_id);
+    deliveries.set(record.delivery_id, record);
+    latestDeliveryBySurface.set(record.surface, record.delivery_id);
+    activeDeliveryBySurface.set(record.surface, record.delivery_id);
+    pruneCompletedDeliveryHistory(record.surface);
+
+    const run = async () => {
+      try {
+        await deliverInputChunks({
+          surface: record.surface,
+          workspace: record.workspace,
+          chunks: record.chunks,
+          chunk_size: record.chunk_size,
+          chunk_delay_ms: record.chunk_delay_ms,
+          press_enter: record.press_enter,
+          rename_to_task: record.rename_to_task,
+          onChunkDelivered: (sentChunks) => {
+            record.sent_chunks = sentChunks;
+          },
+        });
+        finishDelivery(record, "delivered");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const failedChunk =
+          error instanceof DeliveryError ? error.failed_chunk : undefined;
+        finishDelivery(record, "failed", message, failedChunk);
+      }
+    };
+
+    setTimeout(() => {
+      void run();
+    }, 0);
+  };
 
   const findSurfaceByRef = async (
     surfaceRef: string,
@@ -547,11 +877,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Send text input to a terminal surface. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",
+    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Set background=true to return immediately with a delivery_id while chunking continues in the background. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
       workspace: z.string().optional().describe("Target workspace ref"),
+      chunk_size: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .default(200)
+        .describe("Chunk size for automatic long-text delivery"),
+      background: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Return immediately with a delivery_id and continue chunked delivery in the background",
+        ),
       press_enter: z
         .boolean()
         .optional()
@@ -568,33 +912,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         const sanitizedText = sanitizeTerminalInput(args.text);
-        await client.send(args.surface, sanitizedText, {
-          workspace: args.workspace,
+        const chunks =
+          sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
+            ? chunkTerminalInput(sanitizedText, args.chunk_size)
+            : [sanitizedText];
+
+        if (args.background) {
+          const record: DeliveryRecord = {
+            delivery_id: randomUUID(),
+            surface: args.surface,
+            workspace: args.workspace,
+            status: "delivering",
+            total_chunks: chunks.length,
+            sent_chunks: 0,
+            chunk_size: args.chunk_size,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            chunks,
+            press_enter: args.press_enter,
+            rename_to_task: args.rename_to_task,
+            started_at: new Date().toISOString(),
+          };
+          startBackgroundDelivery(record);
+
+          const data = {
+            surface: args.surface,
+            delivery_id: record.delivery_id,
+            status: record.status,
+          };
+          return okFormatted(formatOk("send_input", data), data);
+        }
+
+        await withSurfaceWrite(args.surface, async () => {
+          await deliverInputChunks({
+            surface: args.surface,
+            workspace: args.workspace,
+            chunks,
+            chunk_size: args.chunk_size,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: args.press_enter,
+            rename_to_task: args.rename_to_task,
+          });
         });
-        if (args.press_enter) {
-          // Small delay to let the terminal process the text input before
-          // sending the return key. Without this, the enter keypress can
-          // arrive before the text is fully inserted into the terminal's
-          // input buffer, causing the enter to be swallowed.
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          await client.sendKey(args.surface, "return", {
-            workspace: args.workspace,
-          });
-        }
-        if (args.rename_to_task) {
-          const surfaces = await client.listPaneSurfaces({
-            workspace: args.workspace,
-          });
-          const surface = surfaces.surfaces.find((s) => s.ref === args.surface);
-          const currentTitle = surface?.title ?? "";
-          const newTitle = replaceTaskSuffix(currentTitle, args.rename_to_task);
-          await client.renameTab(args.surface, newTitle, {
-            workspace: args.workspace,
-          });
-        }
+
         const data = { surface: args.surface };
         return okFormatted(formatOk("send_input", data), data);
       } catch (e) {
+        if (e instanceof DeliveryError) {
+          return err(e, { failed_chunk: e.failed_chunk ?? null });
+        }
         return err(e);
       }
     },
@@ -612,8 +977,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
-        await client.sendKey(args.surface, args.key, {
-          workspace: args.workspace,
+        await withSurfaceWrite(args.surface, async () => {
+          await sendKeyWithRetry(args.surface, args.key, args.workspace);
         });
         const data = { surface: args.surface, key: args.key };
         return okFormatted(formatOk("send_key", data), data);
@@ -626,7 +991,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 8. read_screen
   server.tool(
     "read_screen",
-    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors. Use parsed_only=true for monitoring (omits raw terminal content).",
+    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content).",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -671,6 +1036,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface: result.surface,
             title: surface?.title ?? null,
             parsed,
+            delivery: getSurfaceDelivery(result.surface),
           };
           const formatted = formatReadScreen(
             result.surface,
@@ -690,6 +1056,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           content: result.text,
           scrollback_used: result.scrollback_used,
           parsed,
+          delivery: getSurfaceDelivery(result.surface),
         };
         const formatted = formatReadScreen(
           result.surface,
@@ -732,8 +1099,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const currentTitle = surface?.title ?? "";
           finalTitle = replaceTaskSuffix(currentTitle, args.title);
         }
-        await client.renameTab(args.surface, finalTitle, {
-          workspace: args.workspace,
+        await withSurfaceWrite(args.surface, async () => {
+          await client.renameTab(args.surface, finalTitle, {
+            workspace: args.workspace,
+          });
         });
         const data = { surface: args.surface, title: finalTitle };
         return okFormatted(formatOk("rename_tab", data), data);
@@ -1024,8 +1393,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         client.setStatus(key, value, statusOpts),
       clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
       readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
-      send: (surface, text, sendOpts) => client.send(surface, text, sendOpts),
-      sendKey: (surface, key, keyOpts) => client.sendKey(surface, key, keyOpts),
+      send: (surface, text, sendOpts) =>
+        withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
+      sendKey: (surface, key, keyOpts) =>
+        withSurfaceWrite(surface, () => client.sendKey(surface, key, keyOpts)),
       setProgress: (value, progressOpts) =>
         client.setProgress(value, progressOpts),
       newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),
@@ -1442,7 +1813,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
-              await client.sendKey(agent.surface_id, "c-c", {});
+              await withSurfaceWrite(agent.surface_id, () =>
+                client.sendKey(agent.surface_id, "c-c", {}),
+              );
               const d = { agent_id: args.agent, action: "interrupt" };
               return okFormatted(formatOk("interact:interrupt", d), d);
             }

@@ -27,6 +27,18 @@ const EXPECTED_TOOLS = [
 
 const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
 
+async function advanceTimers(ms: number): Promise<void> {
+  const advanceAsync = (vi as any).advanceTimersByTimeAsync;
+  if (typeof advanceAsync === "function") {
+    await advanceAsync.call(vi, ms);
+    return;
+  }
+
+  vi.advanceTimersByTime(ms);
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("createServer", () => {
   it("returns an McpServer with a connect method", async () => {
     const server = createServer({ skipAgentLifecycle: true });
@@ -161,8 +173,7 @@ describe("Claude channels", () => {
     };
 
     await server.connect(serverTransport);
-    vi.advanceTimersByTime(5000);
-    await Promise.resolve();
+    await advanceTimers(5000);
 
     const notifications = messages.filter(
       (message) =>
@@ -735,6 +746,334 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["send-key"]),
     );
+  });
+
+  it("send_input chunks long text transparently before sending", async () => {
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: longText, chunk_size: 120 },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledTimes(5);
+    for (const [index, call] of mockExec.mock.calls.entries()) {
+      expect(call[0]).toBe("cmux");
+      expect(call[1]).toEqual(expect.arrayContaining(["send"]));
+      const chunk = call[1][call[1].length - 1];
+      expect(typeof chunk).toBe("string");
+      expect((chunk as string).length).toBeLessThanOrEqual(121);
+      if (index < mockExec.mock.calls.length - 1) {
+        expect((chunk as string).endsWith("\n")).toBe(true);
+      }
+    }
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("send_input can deliver long text in the background and expose status via read_screen", async () => {
+    vi.useFakeTimers();
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:1",
+            text: "$ ",
+            lines: 1,
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-workspaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({ workspaces: [] }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const sendTool = registeredTools["send_input"];
+    const readTool = registeredTools["read_screen"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    const result = await sendTool.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 120,
+        background: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.status).toBe("delivering");
+    expect(parsed.delivery_id).toEqual(expect.any(String));
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+    ).toHaveLength(0);
+
+    const readWhileDelivering = await readTool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+    const readWhileDeliveringParsed =
+      readWhileDelivering.structuredContent ??
+      JSON.parse(readWhileDelivering.content[0].text);
+    expect(readWhileDeliveringParsed.delivery).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      status: "delivering",
+      sent_chunks: 0,
+      total_chunks: 5,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      await advanceTimers(5);
+      if (
+        mockExec.mock.calls.filter(([, args]) => args.includes("send"))
+          .length === 5
+      ) {
+        break;
+      }
+    }
+
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+    ).toHaveLength(5);
+
+    await Promise.resolve();
+
+    const readAfterDelivery = await readTool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+    const readAfterDeliveryParsed =
+      readAfterDelivery.structuredContent ??
+      JSON.parse(readAfterDelivery.content[0].text);
+    expect(readAfterDeliveryParsed.delivery).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      status: "delivered",
+      sent_chunks: 5,
+      total_chunks: 5,
+    });
+  });
+
+  it("send_input background mode blocks the same surface but allows other surfaces", async () => {
+    vi.useFakeTimers();
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    const first = await tool.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 120,
+        background: true,
+      },
+      {} as any,
+    );
+    const firstParsed =
+      first.structuredContent ?? JSON.parse(first.content[0].text);
+    expect(firstParsed.status).toBe("delivering");
+
+    const sameSurface = await tool.handler(
+      { surface: "surface:1", text: "echo nope" },
+      {} as any,
+    );
+    expect(sameSurface.isError).toBe(true);
+    const sameSurfaceParsed =
+      sameSurface.structuredContent ?? JSON.parse(sameSurface.content[0].text);
+    expect(sameSurfaceParsed.error).toMatch(/delivery.*in progress/i);
+
+    const otherSurface = await tool.handler(
+      { surface: "surface:2", text: "echo ok" },
+      {} as any,
+    );
+    const otherSurfaceParsed =
+      otherSurface.structuredContent ?? JSON.parse(otherSurface.content[0].text);
+    expect(otherSurfaceParsed.ok).toBe(true);
+    expect(otherSurfaceParsed.surface).toBe("surface:2");
+  });
+
+  it("send_input rejects concurrent foreground sends on the same surface", async () => {
+    let releaseSend: ((value: { stdout: string; stderr: string }) => void) | null =
+      null;
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("send") && !releaseSend) {
+        return new Promise((resolve) => {
+          releaseSend = resolve;
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+
+    const firstPromise = tool.handler(
+      { surface: "surface:1", text: "echo first" },
+      {} as any,
+    );
+    await Promise.resolve();
+
+    const second = await tool.handler(
+      { surface: "surface:1", text: "echo second" },
+      {} as any,
+    );
+    expect(second.isError).toBe(true);
+    const secondParsed =
+      second.structuredContent ?? JSON.parse(second.content[0].text);
+    expect(secondParsed.error).toMatch(/surface surface:1 is busy/i);
+
+    releaseSend?.({ stdout: "{}", stderr: "" });
+    const first = await firstPromise;
+    const firstParsed =
+      first.structuredContent ?? JSON.parse(first.content[0].text);
+    expect(firstParsed.ok).toBe(true);
+  });
+
+  it("background delivery blocks other same-surface write tools", async () => {
+    vi.useFakeTimers();
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const sendInput = registeredTools["send_input"];
+    const sendKey = registeredTools["send_key"];
+    const renameTab = registeredTools["rename_tab"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    await sendInput.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 120,
+        background: true,
+      },
+      {} as any,
+    );
+
+    const keyResult = await sendKey.handler(
+      { surface: "surface:1", key: "return" },
+      {} as any,
+    );
+    expect(keyResult.isError).toBe(true);
+    const keyParsed =
+      keyResult.structuredContent ?? JSON.parse(keyResult.content[0].text);
+    expect(keyParsed.error).toMatch(/delivery.*in progress/i);
+
+    const renameResult = await renameTab.handler(
+      { surface: "surface:1", title: "blocked" },
+      {} as any,
+    );
+    expect(renameResult.isError).toBe(true);
+    const renameParsed =
+      renameResult.structuredContent ?? JSON.parse(renameResult.content[0].text);
+    expect(renameParsed.error).toMatch(/delivery.*in progress/i);
+  });
+
+  it("send_input retries a transient socket failure before succeeding", async () => {
+    vi.useFakeTimers();
+    let sendAttempts = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("send")) {
+        sendAttempts += 1;
+        if (sendAttempts === 1) {
+          return Promise.reject(new Error("socket closed before receiving response"));
+        }
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+
+    const resultPromise = tool.handler(
+      { surface: "surface:1", text: "echo retry me" },
+      {} as any,
+    );
+
+    await advanceTimers(25);
+
+    const result = await resultPromise;
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(sendAttempts).toBe(2);
+  });
+
+  it("send_input reports the failed chunk when retries are exhausted", async () => {
+    vi.useFakeTimers();
+    let sendAttempts = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("send")) {
+        sendAttempts += 1;
+        return Promise.reject(new Error("socket connection_error"));
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+
+    const resultPromise = tool.handler(
+      { surface: "surface:1", text: "echo fail me" },
+      {} as any,
+    );
+
+    await advanceTimers(50);
+
+    const result = await resultPromise;
+    expect(result.isError).toBe(true);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.failed_chunk).toBe(1);
+    expect(parsed.error).toMatch(/chunk 1\/1 failed/i);
+    expect(sendAttempts).toBe(3);
   });
 
   it("new_split handler calls cmux new-split", async () => {
