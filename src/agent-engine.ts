@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 import {
   generateAgentId,
+  isCrashRecoveryEligible,
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   type AgentRecord,
@@ -305,13 +306,7 @@ export class AgentEngine {
   }
 
   private isRecoverableCrash(agent: AgentRecord): boolean {
-    return (
-      agent.state === "error" &&
-      agent.crash_recover === true &&
-      agent.user_killed !== true &&
-      !!agent.cli_session_id &&
-      (agent.error?.includes("disappeared") ?? false)
-    );
+    return isCrashRecoveryEligible(agent);
   }
 
   private async markCrashRecoveryExhausted(agent: AgentRecord): Promise<void> {

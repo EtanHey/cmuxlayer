@@ -412,6 +412,35 @@ describe("AgentEngine", () => {
         `Max crash recoveries exceeded: ${MAX_CHILDREN}`,
       );
     });
+
+    it("keeps crash recovery eligible after a transient respawn failure", async () => {
+      (mockClient.send as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error("send failed"))
+        .mockResolvedValue(undefined);
+
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-retry",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
+      expect(engine.getAgentState("agent-retry")?.state).toBe("booting");
+      expect(engine.getAgentState("agent-retry")?.respawn_attempts).toBe(2);
+    });
   });
 
   describe("boot session capture", () => {

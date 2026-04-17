@@ -241,4 +241,28 @@ describe("AgentRegistry", () => {
       expect(registry.get("new-agent")!.state).toBe("ready");
     });
   });
+
+  describe("purgeTerminal", () => {
+    it("purges crash_recover errors that are no longer recoverable", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "stale-recovery-error",
+          state: "error",
+          surface_id: "surface:gone",
+          crash_recover: true,
+          cli_session_id: null,
+          error: "Crash recovery failed: missing session id",
+        }),
+      );
+
+      const surfaceProvider = async () => [] as CmuxSurface[];
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+
+      const purged = await registry.purgeTerminal();
+
+      expect(purged).toBe(1);
+      expect(registry.get("stale-recovery-error")).toBeNull();
+    });
+  });
 });
