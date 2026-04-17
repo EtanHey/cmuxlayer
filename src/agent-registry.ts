@@ -5,7 +5,12 @@
  */
 
 import { StateManager } from "./state-manager.js";
-import type { AgentRecord, AgentState } from "./agent-types.js";
+import {
+  isCrashRecoveryEligible,
+  shouldRetainCrashRecoveryError,
+  type AgentRecord,
+  type AgentState,
+} from "./agent-types.js";
 import type { CmuxSurface } from "./types.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
@@ -140,6 +145,9 @@ export class AgentRegistry {
     const purgedIds: string[] = [];
 
     for (const [id, agent] of this.agents) {
+      if (shouldRetainCrashRecoveryError(agent)) {
+        continue;
+      }
       if (TERMINAL_STATES.has(agent.state)) {
         this.agents.delete(id);
         this.stateMgr.removeState(id);
@@ -161,6 +169,9 @@ export class AgentRegistry {
     let purged = 0;
 
     for (const [id, agent] of this.agents) {
+      if (shouldRetainCrashRecoveryError(agent)) {
+        continue;
+      }
       if (
         TERMINAL_STATES.has(agent.state) &&
         !liveSurfaceRefs.has(agent.surface_id)

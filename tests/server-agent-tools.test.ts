@@ -118,6 +118,69 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.state).toBe("booting");
   });
 
+  it("spawn_agent persists crash_recover=true in agent state", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "fix gap F",
+        crash_recover: true,
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+
+    expect(state.crash_recover).toBe(true);
+  });
+
+  it("spawn_agent defaults crash_recover to false", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "fix gap F",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+
+    expect(state.crash_recover).toBe(false);
+  });
+
   it("list_agents returns agents after spawn", async () => {
     const server = createServer({
       exec: mockExec,

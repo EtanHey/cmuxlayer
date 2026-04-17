@@ -18,10 +18,12 @@ export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
+export const MAX_RESPAWN_ATTEMPTS = 10;
 
 export interface AgentRecord {
   agent_id: string;
   surface_id: string;
+  workspace_id?: string | null;
   state: AgentState;
   repo: string;
   model: string;
@@ -40,6 +42,45 @@ export interface AgentRecord {
   // Quality fields (Task 19)
   quality: AgentQuality;
   max_cost_per_agent: number | null;
+  // Crash recovery fields (Task 20)
+  crash_recover?: boolean;
+  respawn_attempts?: number;
+  user_killed?: boolean;
+}
+
+export function hasRecoverableCrashError(error: string | null): boolean {
+  if (!error) return false;
+  return (
+    error.includes("disappeared") || error.startsWith("Crash recovery failed:")
+  );
+}
+
+export function isCrashRecoveryExhausted(error: string | null): boolean {
+  return error?.startsWith("Max crash recoveries exceeded:") ?? false;
+}
+
+export function isCrashRecoveryEligible(
+  agent: Pick<
+    AgentRecord,
+    "state" | "crash_recover" | "user_killed" | "cli_session_id" | "error"
+  >,
+): boolean {
+  return (
+    agent.state === "error" &&
+    agent.crash_recover === true &&
+    agent.user_killed !== true &&
+    !!agent.cli_session_id &&
+    hasRecoverableCrashError(agent.error)
+  );
+}
+
+export function shouldRetainCrashRecoveryError(
+  agent: Pick<
+    AgentRecord,
+    "state" | "crash_recover" | "user_killed" | "cli_session_id" | "error"
+  >,
+): boolean {
+  return isCrashRecoveryEligible(agent) || isCrashRecoveryExhausted(agent.error);
 }
 
 export interface StateTransition {

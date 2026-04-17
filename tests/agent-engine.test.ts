@@ -2,11 +2,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentEngine, buildLaunchCommand } from "../src/agent-engine.js";
+import {
+  AgentEngine,
+  buildLaunchCommand,
+  buildResumeCommand,
+} from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
-import type { AgentRecord } from "../src/agent-types.js";
+import {
+  MAX_RESPAWN_ATTEMPTS,
+  type AgentRecord,
+} from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -75,6 +82,9 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
+    crash_recover: false,
+    respawn_attempts: 0,
+    user_killed: false,
     ...overrides,
   };
 }
@@ -321,6 +331,220 @@ describe("AgentEngine", () => {
       });
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
+
+    it("respawns a crashed agent with its captured session id when crash recovery is enabled", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-crash",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).toHaveBeenCalled();
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "ws:1" },
+      );
+      expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
+        workspace: "ws:1",
+      });
+
+      const recovered = engine.getAgentState("agent-crash");
+      expect(recovered?.state).toBe("booting");
+      expect(recovered?.surface_id).toBe("surface:new");
+      expect(recovered?.respawn_attempts).toBe(1);
+    });
+
+    it("does not respawn an errored agent the user intentionally stopped", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop",
+          state: "error",
+          surface_id: "surface:42",
+          repo: "brainlayer",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+          error: "Surface surface:42 disappeared",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.stopAgent("agent-stop");
+      expect(engine.getAgentState("agent-stop")).toMatchObject({
+        state: "error",
+        user_killed: true,
+      });
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("stops retrying once crash recovery hits the max respawn ceiling", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-loop",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+          respawn_attempts: MAX_RESPAWN_ATTEMPTS,
+          error: "Surface surface:gone disappeared",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(engine.getAgentState("agent-loop")?.error).toContain(
+        `Max crash recoveries exceeded: ${MAX_RESPAWN_ATTEMPTS}`,
+      );
+    });
+
+    it("keeps crash recovery eligible after a transient respawn failure", async () => {
+      (mockClient.send as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error("send failed"))
+        .mockResolvedValue(undefined);
+
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-retry",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
+      expect(engine.getAgentState("agent-retry")?.state).toBe("booting");
+      expect(engine.getAgentState("agent-retry")?.respawn_attempts).toBe(2);
+    });
+
+    it("transitions crash recovery failures in creating state back to error", async () => {
+      const transition = stateMgr.transition.bind(stateMgr);
+      vi.spyOn(stateMgr, "transition").mockImplementation((...args) => {
+        const [agentId, nextState] = args;
+        if (agentId === "agent-creating" && nextState === "booting") {
+          throw new Error("boot fail");
+        }
+        return transition(...args);
+      });
+
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-creating",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(engine.getAgentState("agent-creating")).toMatchObject({
+        state: "error",
+        error: "Crash recovery failed: boot fail",
+      });
+    });
+  });
+
+  describe("boot session capture", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it.each([
+      [
+        "codex",
+        "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        `gpt-5.4
+Working (12s • esc to interrupt)
+To continue this session, run codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e`,
+      ],
+      [
+        "claude",
+        "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",
+        `Claude Code
+Session ID: 5b9f4f35-2942-4c8b-b1af-d89d4e36c95d`,
+      ],
+      [
+        "cursor",
+        "9e26fe1a-2374-4b15-b9b2-646ac7a8c2ef",
+        `Cursor Agent
+chatId: 9e26fe1a-2374-4b15-b9b2-646ac7a8c2ef`,
+      ],
+      [
+        "gemini",
+        "8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274",
+        `Gemini CLI
+Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
+      ],
+    ] as const)(
+      "captures %s session ids from the boot banner within the first sweep",
+      async (cli, sessionId, banner) => {
+        liveSurfaces = [makeSurface("surface:new")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:new",
+          text: banner,
+          lines: 80,
+          scrollback_used: true,
+        });
+
+        engine.startSweep(1000);
+        const result = await engine.spawnAgent({
+          repo: "brainlayer",
+          model: "sonnet",
+          cli,
+          prompt: "Fix gap F",
+        });
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(engine.getAgentState(result.agent_id)?.cli_session_id).toBe(
+          sessionId,
+        );
+      },
+    );
   });
 
   describe("waitFor", () => {
@@ -703,5 +927,27 @@ describe("buildLaunchCommand", () => {
     const cmd = buildLaunchCommand("claude", "brainlayer");
     expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
     expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
+  });
+});
+
+describe("buildResumeCommand", () => {
+  const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+
+  it("uses the verified resume command for each supported CLI", () => {
+    expect(buildResumeCommand("claude", "brainlayer", sessionId)).toBe(
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(buildResumeCommand("codex", "brainlayer", sessionId)).toBe(
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(buildResumeCommand("cursor", "brainlayer", sessionId)).toBe(
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(buildResumeCommand("gemini", "brainlayer", sessionId)).toBe(
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(buildResumeCommand("kiro", "brainlayer", sessionId)).toBe(
+      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
   });
 });

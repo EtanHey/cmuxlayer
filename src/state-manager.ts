@@ -22,6 +22,10 @@ import {
   type StateTransition,
 } from "./agent-types.js";
 
+type AgentRecordPatch = Partial<
+  Omit<AgentRecord, "agent_id" | "created_at" | "updated_at" | "version" | "state">
+>;
+
 export class StateManager {
   private baseDir: string;
   private eventLog: EventLog;
@@ -114,18 +118,9 @@ export class StateManager {
   }
 
   /**
-   * Update arbitrary fields on an agent record without state-transition validation.
-   * Used for quality and deletion_intent updates.
+   * Update arbitrary non-state fields on an agent record without transition validation.
    */
-  updateRecord(
-    agentId: string,
-    fields: Partial<
-      Pick<
-        AgentRecord,
-        "deletion_intent" | "quality" | "max_cost_per_agent" | "parent_agent_id"
-      >
-    >,
-  ): AgentRecord {
+  updateRecord(agentId: string, fields: AgentRecordPatch): AgentRecord {
     const current = this.readState(agentId);
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -150,7 +145,7 @@ export class StateManager {
       event: "transition",
       from_state: current.state,
       to_state: current.state,
-      surface_id: current.surface_id,
+      surface_id: updated.surface_id,
       source: "updateRecord",
       error: null,
     });

@@ -1608,6 +1608,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .number()
           .optional()
           .describe("Maximum cost cap in USD for this agent"),
+        crash_recover: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When true, automatically respawn the agent after unexpected PTY death using its captured CLI session ID.",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -1620,6 +1627,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
             max_cost_per_agent: args.max_cost_per_agent,
+            crash_recover: args.crash_recover,
           });
           return okFormatted(
             formatOk("spawn_agent", {
