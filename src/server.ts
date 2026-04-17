@@ -788,7 +788,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }),
         );
 
-        const verboseWorkspaces = workspaces.workspaces as Array<
+        const verboseWorkspaces = workspaces.workspaces as unknown as Array<
           Record<string, unknown>
         >;
         const responseWorkspaces = args.verbose
