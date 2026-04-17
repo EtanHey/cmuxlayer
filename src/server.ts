@@ -146,6 +146,89 @@ function requireValue(
   }
 }
 
+type ListSurfacesRemoteState =
+  | "local"
+  | "connected"
+  | "disconnected"
+  | "unavailable";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function summarizeRemoteState(remoteValue: unknown): ListSurfacesRemoteState {
+  const remote = asRecord(remoteValue);
+  if (!remote) {
+    return "local";
+  }
+
+  const state =
+    typeof remote.state === "string"
+      ? (remote.state as ListSurfacesRemoteState | string)
+      : undefined;
+  const connected = remote.connected === true || state === "connected";
+  if (connected) {
+    return "connected";
+  }
+
+  const hasRemoteHints =
+    remote.enabled === true ||
+    remote.has_ssh_options === true ||
+    remote.has_identity_file === true ||
+    (typeof remote.destination === "string" && remote.destination.length > 0) ||
+    (remote.port !== null && remote.port !== undefined) ||
+    (remote.local_proxy_port !== null &&
+      remote.local_proxy_port !== undefined);
+
+  if (!hasRemoteHints && (state === undefined || state === "disconnected")) {
+    return "local";
+  }
+
+  if (state === "unavailable") {
+    return hasRemoteHints ? "unavailable" : "local";
+  }
+
+  return "disconnected";
+}
+
+function toMinimalWorkspace(
+  workspace: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ref: typeof workspace.ref === "string" ? workspace.ref : "",
+    title: typeof workspace.title === "string" ? workspace.title : "",
+    current_directory:
+      typeof workspace.current_directory === "string"
+        ? workspace.current_directory
+        : null,
+    remote_state: summarizeRemoteState(workspace.remote),
+  };
+}
+
+function toMinimalSurface(
+  surface: Record<string, unknown>,
+): Record<string, unknown> {
+  const minimal: Record<string, unknown> = {
+    ref: typeof surface.ref === "string" ? surface.ref : "",
+    title: typeof surface.title === "string" ? surface.title : "",
+    type: typeof surface.type === "string" ? surface.type : "terminal",
+    workspace_ref:
+      typeof surface.workspace_ref === "string" ? surface.workspace_ref : "",
+  };
+
+  if (typeof surface.screen_preview === "string") {
+    minimal.screen_preview = surface.screen_preview;
+  }
+  if (typeof surface.screen_preview_error === "string") {
+    minimal.screen_preview_error = surface.screen_preview_error;
+  }
+
+  return minimal;
+}
+
 function chunkTerminalInput(text: string, chunkSize: number): string[] {
   if (!text || text.length <= chunkSize) {
     return [text];
@@ -609,6 +692,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     "List all surfaces (terminal/browser panes) across workspaces",
     {
       workspace: z.string().optional().describe("Filter by workspace ref"),
+      verbose: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Return the current full schema instead of the condensed default"),
       include_screen_preview: z
         .boolean()
         .optional()
@@ -646,40 +734,79 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ),
           ),
         );
-        const surfaces = await Promise.all(
-          surfaceGroups.flatMap((group) =>
-            group.surfaces.map(async (surface) => {
-              const enrichedSurface: Record<string, unknown> = {
-                ...surface,
-                workspace_ref: group.workspace_ref,
-                window_ref: group.window_ref,
-                pane_ref: group.pane_ref,
-              };
+        const uniqueSurfaceEntries: Array<{
+          group: {
+            workspace_ref: string;
+            window_ref: string;
+            pane_ref: string;
+            surfaces: CmuxSurface[];
+          };
+          surface: CmuxSurface;
+        }> = [];
+        const seenSurfaceRefs = new Set<string>();
+        let anonymousSurfaceIndex = 0;
 
-              if (args.include_screen_preview && surface.type === "terminal") {
-                try {
-                  const preview = await client.readScreen(surface.ref, {
-                    workspace: group.workspace_ref,
-                    lines: args.preview_lines,
-                  });
-                  enrichedSurface.screen_preview = preview.text;
-                } catch (error) {
-                  enrichedSurface.screen_preview_error =
-                    error instanceof Error ? error.message : String(error);
-                }
+        for (const group of surfaceGroups) {
+          for (const surface of group.surfaces) {
+            const dedupeKey =
+              typeof surface.ref === "string" && surface.ref.length > 0
+                ? surface.ref
+                : `${group.workspace_ref}:${group.pane_ref}:anonymous:${anonymousSurfaceIndex++}`;
+
+            if (seenSurfaceRefs.has(dedupeKey)) {
+              continue;
+            }
+
+            seenSurfaceRefs.add(dedupeKey);
+            uniqueSurfaceEntries.push({ group, surface });
+          }
+        }
+
+        const verboseSurfaces = await Promise.all(
+          uniqueSurfaceEntries.map(async ({ group, surface }) => {
+            const enrichedSurface: Record<string, unknown> = {
+              ...surface,
+              workspace_ref: group.workspace_ref,
+              window_ref: group.window_ref,
+              pane_ref: group.pane_ref,
+            };
+
+            if (args.include_screen_preview && surface.type === "terminal") {
+              try {
+                const preview = await client.readScreen(surface.ref, {
+                  workspace: group.workspace_ref,
+                  lines: args.preview_lines,
+                });
+                enrichedSurface.screen_preview = preview.text;
+              } catch (error) {
+                enrichedSurface.screen_preview_error =
+                  error instanceof Error ? error.message : String(error);
               }
+            }
 
-              return enrichedSurface;
-            }),
-          ),
+            return enrichedSurface;
+          }),
         );
-        const data = {
-          workspaces: workspaces.workspaces,
-          surfaces,
-          workspace_ref: args.workspace,
+
+        const verboseWorkspaces = workspaces.workspaces as unknown as Array<
+          Record<string, unknown>
+        >;
+        const responseWorkspaces = args.verbose
+          ? verboseWorkspaces
+          : verboseWorkspaces.map((workspace) => toMinimalWorkspace(workspace));
+        const responseSurfaces = args.verbose
+          ? verboseSurfaces
+          : verboseSurfaces.map((surface) => toMinimalSurface(surface));
+
+        const data: Record<string, unknown> = {
+          workspaces: responseWorkspaces,
+          surfaces: responseSurfaces,
         };
+        if (args.workspace) {
+          data.workspace_ref = args.workspace;
+        }
         const formatted = formatListSurfaces(
-          surfaces as Array<{
+          responseSurfaces as Array<{
             ref?: string;
             title?: string;
             type?: string;
@@ -687,7 +814,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             pane_ref?: string;
             screen_preview?: string;
           }>,
-          workspaces.workspaces as Array<{ ref: string; title?: string }>,
+          responseWorkspaces as Array<{ ref: string; title?: string }>,
         );
         return okFormatted(formatted, data);
       } catch (e) {

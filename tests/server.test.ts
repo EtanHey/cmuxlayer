@@ -222,7 +222,7 @@ describe("tool handler integration", () => {
     expect(result.structuredContent.ok).toBe(true);
   });
 
-  it("list_surfaces aggregates pane surfaces and includes optional previews", async () => {
+  it("list_surfaces dedupes overlapping pane results and returns the condensed default schema", async () => {
     mockExec = vi
       .fn()
       .mockResolvedValueOnce({
@@ -231,9 +231,40 @@ describe("tool handler integration", () => {
             {
               ref: "workspace:1",
               title: "Main",
+              id: "workspace-uuid-1",
               index: 0,
               selected: true,
               pinned: false,
+              current_directory: "/tmp/main",
+              remote: {
+                state: "disconnected",
+                connected: false,
+                enabled: false,
+                destination: null,
+                detail: null,
+                daemon: { state: "unavailable" },
+                proxy: { state: "unavailable" },
+                heartbeat: { count: 0, age_seconds: null, last_seen_at: null },
+              },
+            },
+            {
+              ref: "workspace:2",
+              title: "Empty",
+              id: "workspace-uuid-2",
+              index: 1,
+              selected: false,
+              pinned: false,
+              current_directory: null,
+              remote: {
+                state: "disconnected",
+                connected: false,
+                enabled: false,
+                destination: null,
+                detail: null,
+                daemon: { state: "unavailable" },
+                proxy: { state: "unavailable" },
+                heartbeat: { count: 0, age_seconds: null, last_seen_at: null },
+              },
             },
           ],
         }),
@@ -256,11 +287,19 @@ describe("tool handler integration", () => {
               ref: "pane:2",
               index: 1,
               focused: false,
-              surface_count: 1,
-              surface_refs: ["surface:2"],
+              surface_count: 2,
+              surface_refs: ["surface:1", "surface:2"],
               selected_surface_ref: "surface:2",
             },
           ],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:2",
+          window_ref: "window:2",
+          panes: [],
         }),
         stderr: "",
       })
@@ -275,7 +314,11 @@ describe("tool handler integration", () => {
               title: "One",
               type: "terminal",
               index: 0,
-              selected: true,
+              focused: true,
+              id: "surface-uuid-1",
+              pane_id: "pane-uuid-1",
+              index_in_pane: 0,
+              selected_in_pane: true,
             },
           ],
         }),
@@ -288,21 +331,28 @@ describe("tool handler integration", () => {
           pane_ref: "pane:2",
           surfaces: [
             {
+              ref: "surface:1",
+              title: "One",
+              type: "terminal",
+              index: 0,
+              focused: true,
+              id: "surface-uuid-1",
+              pane_id: "pane-uuid-1",
+              index_in_pane: 0,
+              selected_in_pane: true,
+            },
+            {
               ref: "surface:2",
               title: "Two",
               type: "browser",
               index: 0,
-              selected: true,
+              focused: false,
+              id: "surface-uuid-2",
+              pane_id: "pane-uuid-2",
+              index_in_pane: 1,
+              selected_in_pane: true,
             },
           ],
-        }),
-        stderr: "",
-      })
-      .mockResolvedValueOnce({
-        stdout: JSON.stringify({
-          surface_ref: "surface:1",
-          text: "line1\nline2",
-          lines: 5,
         }),
         stderr: "",
       });
@@ -311,14 +361,7 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["list_surfaces"];
 
-    const result = await tool.handler(
-      {
-        workspace: "workspace:1",
-        include_screen_preview: true,
-        preview_lines: 5,
-      },
-      {} as any,
-    );
+    const result = await tool.handler({}, {} as any);
 
     expect(mockExec).toHaveBeenCalledWith("cmux", [
       "--json",
@@ -326,35 +369,45 @@ describe("tool handler integration", () => {
       "--workspace",
       "workspace:1",
     ]);
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "--json",
-        "read-screen",
-        "--surface",
-        "surface:1",
-        "--workspace",
-        "workspace:1",
-        "--lines",
-        "5",
-      ]),
-    );
+    expect(mockExec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "list-panes",
+      "--workspace",
+      "workspace:2",
+    ]);
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.surfaces).toHaveLength(2);
-    expect(parsed.surfaces[0]).toMatchObject({
+    expect(parsed.surfaces.map((surface: { ref: string }) => surface.ref)).toEqual(
+      ["surface:1", "surface:2"],
+    );
+    expect(parsed.workspaces).toEqual([
+      {
+        ref: "workspace:1",
+        title: "Main",
+        current_directory: "/tmp/main",
+        remote_state: "local",
+      },
+      {
+        ref: "workspace:2",
+        title: "Empty",
+        current_directory: null,
+        remote_state: "local",
+      },
+    ]);
+    expect(parsed.surfaces[0]).toEqual({
       ref: "surface:1",
-      pane_ref: "pane:1",
       workspace_ref: "workspace:1",
-      screen_preview: "line1\nline2",
+      title: "One",
+      type: "terminal",
     });
-    expect(parsed.surfaces[1]).toMatchObject({
+    expect(parsed.surfaces[1]).toEqual({
       ref: "surface:2",
-      pane_ref: "pane:2",
       workspace_ref: "workspace:1",
+      title: "Two",
+      type: "browser",
     });
-    expect(parsed.workspace_ref).toBe("workspace:1");
   });
 
   it("list_surfaces keeps working when a screen preview fails", async () => {
@@ -429,6 +482,152 @@ describe("tool handler integration", () => {
     expect(parsed.surfaces[0].screen_preview_error).toMatch(
       /surface unavailable/,
     );
+  });
+
+  it("list_surfaces preserves the current full schema behind verbose=true while still deduping", async () => {
+    mockExec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              id: "workspace-uuid-1",
+              index: 0,
+              selected: true,
+              pinned: false,
+              current_directory: "/tmp/main",
+              remote: {
+                state: "connected",
+                connected: true,
+                enabled: true,
+                destination: "ssh://box",
+                detail: "ready",
+              },
+            },
+          ],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:1"],
+              selected_surface_ref: "surface:1",
+            },
+            {
+              ref: "pane:2",
+              index: 1,
+              focused: false,
+              surface_count: 2,
+              surface_refs: ["surface:1", "surface:2"],
+              selected_surface_ref: "surface:2",
+            },
+          ],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [
+            {
+              ref: "surface:1",
+              title: "One",
+              type: "terminal",
+              id: "surface-uuid-1",
+              pane_id: "pane-uuid-1",
+              index: 0,
+              index_in_pane: 0,
+              focused: true,
+              selected_in_pane: true,
+            },
+          ],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:2",
+          surfaces: [
+            {
+              ref: "surface:1",
+              title: "One",
+              type: "terminal",
+              id: "surface-uuid-1",
+              pane_id: "pane-uuid-1",
+              index: 0,
+              index_in_pane: 0,
+              focused: true,
+              selected_in_pane: true,
+            },
+            {
+              ref: "surface:2",
+              title: "Two",
+              type: "browser",
+              id: "surface-uuid-2",
+              pane_id: "pane-uuid-2",
+              index: 1,
+              index_in_pane: 1,
+              focused: false,
+              selected_in_pane: true,
+            },
+          ],
+        }),
+        stderr: "",
+      });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["list_surfaces"];
+
+    const result = await tool.handler({ verbose: true }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.surfaces).toHaveLength(2);
+    expect(parsed.workspaces[0]).toMatchObject({
+      ref: "workspace:1",
+      title: "Main",
+      id: "workspace-uuid-1",
+      index: 0,
+      selected: true,
+      pinned: false,
+      current_directory: "/tmp/main",
+      remote: {
+        state: "connected",
+        connected: true,
+        enabled: true,
+        destination: "ssh://box",
+        detail: "ready",
+      },
+    });
+    expect(parsed.surfaces[0]).toMatchObject({
+      ref: "surface:1",
+      title: "One",
+      type: "terminal",
+      id: "surface-uuid-1",
+      pane_id: "pane-uuid-1",
+      index: 0,
+      index_in_pane: 0,
+      focused: true,
+      selected_in_pane: true,
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+    });
   });
 
   it("read_screen handler calls cmux read-screen", async () => {
