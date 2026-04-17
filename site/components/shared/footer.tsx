@@ -4,6 +4,7 @@ interface EcoProduct {
   name: string;
   desc: string;
   href: string;
+  product: Product;
 }
 
 const ECOSYSTEM: EcoProduct[] = [
@@ -11,16 +12,19 @@ const ECOSYSTEM: EcoProduct[] = [
     name: "BrainLayer",
     desc: "Persistent memory for AI agents",
     href: "https://brainlayer.etanheyman.com",
+    product: "brainlayer",
   },
   {
     name: "VoiceLayer",
     desc: "Voice I/O for AI agents",
     href: "https://voicelayer.etanheyman.com",
+    product: "voicelayer",
   },
   {
     name: "cmuxLayer",
     desc: "Terminal orchestration for AI agents",
     href: "https://cmuxlayer.etanheyman.com",
+    product: "cmuxlayer",
   },
 ];
 
@@ -93,7 +97,7 @@ export function Footer({ product }: FooterProps) {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {ECOSYSTEM.map((p) => {
-              const isCurrent = p.href.includes(product);
+              const isCurrent = p.product === product;
               return (
                 <a
                   key={p.name}
