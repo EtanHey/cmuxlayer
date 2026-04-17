@@ -52,8 +52,16 @@ const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+const SESSION_ID_PATTERN =
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
-  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+  new RegExp(`\\b${SESSION_ID_PATTERN}\\b`, "gi");
+const CONTEXTUAL_SESSION_ID_PATTERNS = [
+  new RegExp(`(?:codex\\s+resume|--resume(?:-id)?|resume-id)\\s+(${SESSION_ID_PATTERN})`, "i"),
+  new RegExp(`session\\s+id:\\s*(${SESSION_ID_PATTERN})`, "i"),
+  new RegExp(`chatid:\\s*(${SESSION_ID_PATTERN})`, "i"),
+  new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
+] as const;
 
 interface AgentEngineClient {
   log(
@@ -208,7 +216,16 @@ export function buildResumeCommand(
 }
 
 export function extractSessionId(text: string): string | null {
-  return text.match(SESSION_ID_RE)?.[0] ?? null;
+  for (const pattern of CONTEXTUAL_SESSION_ID_PATTERNS) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  const matches = [...text.matchAll(SESSION_ID_RE)].map((match) => match[0]);
+  const uniqueMatches = [...new Set(matches)];
+  return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
 export class AgentEngine {
@@ -310,6 +327,47 @@ export class AgentEngine {
     return isCrashRecoveryEligible(agent);
   }
 
+  private async persistCrashRecoveryFailure(
+    agentId: string,
+    message: string,
+  ): Promise<void> {
+    const current = this.registry.get(agentId);
+    if (!current) {
+      return;
+    }
+
+    try {
+      if (TERMINAL_STATES.has(current.state)) {
+        const failed = this.stateMgr.updateRecord(agentId, {
+          error: `Crash recovery failed: ${message}`,
+        });
+        this.registry.set(agentId, failed);
+        return;
+      }
+
+      const failed = this.stateMgr.transition(agentId, "error", {
+        error: `Crash recovery failed: ${message}`,
+      });
+      this.registry.set(agentId, failed);
+    } catch (persistError) {
+      const persistMessage =
+        persistError instanceof Error ? persistError.message : String(persistError);
+      if (persistMessage.includes("Agent not found")) {
+        this.registry.remove(agentId);
+        await this.client.log(
+          `crash-recovery: dropped missing agent ${agentId} after failure`,
+          { level: "warning", source: "cmux-mcp" },
+        );
+        return;
+      }
+
+      await this.client.log(
+        `crash-recovery: failed to persist error for ${agentId}: ${persistMessage}`,
+        { level: "error", source: "cmux-mcp" },
+      );
+    }
+  }
+
   private async markCrashRecoveryExhausted(agent: AgentRecord): Promise<void> {
     const updated = this.stateMgr.updateRecord(agent.agent_id, {
       error: `Max crash recoveries exceeded: ${MAX_RESPAWN_ATTEMPTS}`,
@@ -328,12 +386,18 @@ export class AgentEngine {
         continue;
       }
 
-      if ((agent.respawn_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS) {
+      const nextRespawnAttempt = (agent.respawn_attempts ?? 0) + 1;
+      if (nextRespawnAttempt > MAX_RESPAWN_ATTEMPTS) {
         await this.markCrashRecoveryExhausted(agent);
         continue;
       }
 
       try {
+        const attempted = this.stateMgr.updateRecord(agent.agent_id, {
+          respawn_attempts: nextRespawnAttempt,
+        });
+        this.registry.set(agent.agent_id, attempted);
+
         const surface = await this.createAgentSurface(agent.workspace_id ?? undefined);
         const creating = this.stateMgr.transition(agent.agent_id, "creating", {
           error: null,
@@ -346,7 +410,7 @@ export class AgentEngine {
           surface_id: surface.surface,
           workspace_id: surface.workspace,
           crash_recover: true,
-          respawn_attempts: (agent.respawn_attempts ?? 0) + 1,
+          respawn_attempts: nextRespawnAttempt,
           user_killed: false,
           deletion_intent: false,
           error: null,
@@ -378,18 +442,7 @@ export class AgentEngine {
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const current = this.registry.get(agent.agent_id);
-        if (current && !TERMINAL_STATES.has(current.state)) {
-          const failed = this.stateMgr.transition(agent.agent_id, "error", {
-            error: `Crash recovery failed: ${message}`,
-          });
-          this.registry.set(agent.agent_id, failed);
-        } else {
-          const failed = this.stateMgr.updateRecord(agent.agent_id, {
-            error: `Crash recovery failed: ${message}`,
-          });
-          this.registry.set(agent.agent_id, failed);
-        }
+        await this.persistCrashRecoveryFailure(agent.agent_id, message);
       }
     }
   }
@@ -822,24 +875,36 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    const marked = this.stateMgr.updateRecord(agentId, {
-      user_killed: opts?.userInitiated ?? true,
-    });
-    this.registry.set(agentId, marked);
+    const userInitiated = opts?.userInitiated ?? true;
 
     if (TERMINAL_STATES.has(agent.state)) {
+      if (agent.state === "error" && userInitiated && agent.user_killed !== true) {
+        const marked = this.stateMgr.updateRecord(agentId, {
+          user_killed: true,
+        });
+        this.registry.set(agentId, marked);
+      }
       return; // Already stopped
     }
 
-    if (force && marked.pid) {
+    if (force && agent.pid) {
       try {
-        process.kill(marked.pid, "SIGKILL");
+        process.kill(agent.pid, "SIGKILL");
       } catch {
         // Process may already be dead — that's fine
       }
     } else {
       // Graceful: send Ctrl+C
-      await this.client.sendKey(marked.surface_id, "c-c", {});
+      await this.client.sendKey(agent.surface_id, "c-c", {});
+    }
+
+    const current = this.registry.get(agentId) ?? agent;
+    let marked = current;
+    if ((current.user_killed ?? false) !== userInitiated) {
+      marked = this.stateMgr.updateRecord(agentId, {
+        user_killed: userInitiated,
+      });
+      this.registry.set(agentId, marked);
     }
 
     // Transition to done

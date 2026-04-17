@@ -6,6 +6,7 @@ import {
   AgentEngine,
   buildLaunchCommand,
   buildResumeCommand,
+  extractSessionId,
 } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -482,6 +483,76 @@ describe("AgentEngine", () => {
         error: "Crash recovery failed: boot fail",
       });
     });
+
+    it("counts failed recovery attempts even when surface creation fails immediately", async () => {
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("cmux unavailable"),
+      );
+
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-preflight",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-preflight")).toMatchObject({
+        state: "error",
+        respawn_attempts: 1,
+        error: "Crash recovery failed: cmux unavailable",
+      });
+    });
+
+    it("continues recovering other agents when one recovery record disappears mid-catch", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-missing",
+          state: "error",
+          surface_id: "surface:gone-1",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+          error: "Surface surface:gone-1 disappeared",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-ok",
+          state: "error",
+          surface_id: "surface:gone-2",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+          error: "Surface surface:gone-2 disappeared",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      stateMgr.removeState("agent-missing");
+
+      await expect(engine.runSweep()).resolves.toBeUndefined();
+
+      expect(engine.getAgentState("agent-missing")).toBeNull();
+      expect(engine.getAgentState("agent-ok")).toMatchObject({
+        state: "booting",
+        respawn_attempts: 1,
+      });
+    });
   });
 
   describe("boot session capture", () => {
@@ -763,6 +834,47 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(["done", "error"]).toContain(state!.state);
     });
 
+    it("does not mark naturally completed agents as user-killed", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-done",
+          state: "done",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.stopAgent("agent-done");
+
+      expect(engine.getAgentState("agent-done")).toMatchObject({
+        state: "done",
+        user_killed: false,
+      });
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+    });
+
+    it("does not mark user_killed when the stop signal fails", async () => {
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("tty busy"),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-busy",
+          state: "working",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.stopAgent("agent-busy")).rejects.toThrow("tty busy");
+      expect(engine.getAgentState("agent-busy")).toMatchObject({
+        state: "working",
+        user_killed: false,
+      });
+    });
+
     it("throws for non-existent agent", async () => {
       await engine.getRegistry().reconstitute();
       await expect(engine.stopAgent("nonexistent")).rejects.toThrow(
@@ -949,5 +1061,27 @@ describe("buildResumeCommand", () => {
     expect(buildResumeCommand("kiro", "brainlayer", sessionId)).toBe(
       "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
+  });
+});
+
+describe("extractSessionId", () => {
+  it("prefers contextual session markers over unrelated earlier UUIDs", () => {
+    const traceId = "11111111-2222-3333-4444-555555555555";
+    const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+
+    expect(
+      extractSessionId(
+        `trace_id=${traceId}\nTo continue this session, run codex resume ${sessionId}`,
+      ),
+    ).toBe(sessionId);
+    expect(
+      extractSessionId(`request ${traceId}\nSession ID: ${sessionId}`),
+    ).toBe(sessionId);
+    expect(
+      extractSessionId(`request ${traceId}\nchatId: ${sessionId}`),
+    ).toBe(sessionId);
+    expect(
+      extractSessionId(`request ${traceId}\nResumable session: ${sessionId}`),
+    ).toBe(sessionId);
   });
 });
