@@ -22,6 +22,7 @@ export const MAX_CHILDREN = 10;
 export interface AgentRecord {
   agent_id: string;
   surface_id: string;
+  workspace_id?: string | null;
   state: AgentState;
   repo: string;
   model: string;
@@ -40,6 +41,10 @@ export interface AgentRecord {
   // Quality fields (Task 19)
   quality: AgentQuality;
   max_cost_per_agent: number | null;
+  // Crash recovery fields (Task 20)
+  crash_recover?: boolean;
+  respawn_attempts?: number;
+  user_killed?: boolean;
 }
 
 export interface StateTransition {

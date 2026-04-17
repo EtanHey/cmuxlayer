@@ -140,6 +140,9 @@ export class AgentRegistry {
     const purgedIds: string[] = [];
 
     for (const [id, agent] of this.agents) {
+      if (agent.state === "error" && agent.crash_recover === true) {
+        continue;
+      }
       if (TERMINAL_STATES.has(agent.state)) {
         this.agents.delete(id);
         this.stateMgr.removeState(id);
@@ -161,6 +164,9 @@ export class AgentRegistry {
     let purged = 0;
 
     for (const [id, agent] of this.agents) {
+      if (agent.state === "error" && agent.crash_recover === true) {
+        continue;
+      }
       if (
         TERMINAL_STATES.has(agent.state) &&
         !liveSurfaceRefs.has(agent.surface_id)

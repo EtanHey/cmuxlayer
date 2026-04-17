@@ -34,6 +34,7 @@ export interface SpawnAgentParams {
   workspace?: string;
   parent_agent_id?: string;
   max_cost_per_agent?: number;
+  crash_recover?: boolean;
 }
 
 export interface SpawnAgentResult {
@@ -47,6 +48,10 @@ export type AgentLifecycleEvent = "spawned" | "done" | "errored";
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
+const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
+const BOOT_SESSION_CAPTURE_LINES = 80;
+const SESSION_ID_RE =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 interface AgentEngineClient {
   log(
@@ -153,13 +158,18 @@ const LIFECYCLE_LOGS = {
 // - CLAUDE_CODE_NO_FLICKER: stable alt-screen rendering for terminal parsing
 const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
 
-export function buildLaunchCommand(cli: CliType, repo: string): string {
+function sanitizeRepoName(repo: string): string {
   const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
   if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
     throw new Error(
       `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed. "." and ".." are not permitted.`,
     );
   }
+  return safeRepo;
+}
+
+export function buildLaunchCommand(cli: CliType, repo: string): string {
+  const safeRepo = sanitizeRepoName(repo);
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
@@ -173,6 +183,30 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
     case "cursor":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent`;
   }
+}
+
+export function buildResumeCommand(
+  cli: CliType,
+  repo: string,
+  sessionId: string,
+): string {
+  const safeRepo = sanitizeRepoName(repo);
+  switch (cli) {
+    case "claude":
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} claude --dangerously-skip-permissions --resume ${sessionId}`;
+    case "codex":
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex resume ${sessionId}`;
+    case "gemini":
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
+    case "kiro":
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
+    case "cursor":
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent --resume ${sessionId}`;
+  }
+}
+
+export function extractSessionId(text: string): string | null {
+  return text.match(SESSION_ID_RE)?.[0] ?? null;
 }
 
 export class AgentEngine {
@@ -197,6 +231,171 @@ export class AgentEngine {
 
   getRegistry(): AgentRegistry {
     return this.registry;
+  }
+
+  private async createAgentSurface(
+    workspace?: string,
+  ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
+    try {
+      const panes = await this.client.listPanes({ workspace });
+      const paneSurfaces = await Promise.all(
+        panes.panes.map((pane) =>
+          this.client.listPaneSurfaces({
+            workspace,
+            pane: pane.ref,
+          }),
+        ),
+      );
+      const workerSurfaceIds = new Set(
+        this.registry.list().map((agent) => agent.surface_id),
+      );
+      const placement = chooseAgentSpawnPlacement(
+        panes.panes,
+        paneSurfaces,
+        workerSurfaceIds,
+      );
+      return placement.kind === "surface"
+        ? this.client.newSurface({
+            pane: placement.pane,
+            type: "terminal",
+            workspace,
+          })
+        : this.client.newSplit(placement.direction, {
+            workspace,
+            type: "terminal",
+          });
+    } catch {
+      return this.client.newSplit("right", {
+        workspace,
+        type: "terminal",
+      });
+    }
+  }
+
+  private isBootCaptureWindowOpen(agent: AgentRecord): boolean {
+    if (agent.state !== "booting") return false;
+    const since = Date.parse(agent.updated_at);
+    if (Number.isNaN(since)) return false;
+    return Date.now() - since <= BOOT_SESSION_CAPTURE_WINDOW_MS;
+  }
+
+  private async maybeCaptureBootSessionId(agent: AgentRecord): Promise<AgentRecord> {
+    if (agent.cli_session_id || !this.isBootCaptureWindowOpen(agent)) {
+      return agent;
+    }
+
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+        scrollback: true,
+      });
+      const sessionId = extractSessionId(screen.text);
+      if (!sessionId) {
+        return agent;
+      }
+
+      const updated = this.stateMgr.updateRecord(agent.agent_id, {
+        cli_session_id: sessionId,
+      });
+      this.registry.set(agent.agent_id, updated);
+      return updated;
+    } catch {
+      return agent;
+    }
+  }
+
+  private isRecoverableCrash(agent: AgentRecord): boolean {
+    return (
+      agent.state === "error" &&
+      agent.crash_recover === true &&
+      agent.user_killed !== true &&
+      !!agent.cli_session_id &&
+      (agent.error?.includes("disappeared") ?? false)
+    );
+  }
+
+  private async markCrashRecoveryExhausted(agent: AgentRecord): Promise<void> {
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      error: `Max crash recoveries exceeded: ${MAX_CHILDREN}`,
+    });
+    this.registry.set(agent.agent_id, updated);
+    await this.client.log(
+      `crash-recovery: max crash recoveries exceeded for ${agent.agent_id}`,
+      { level: "error", source: "cmux-mcp" },
+    );
+  }
+
+  private async recoverCrashedAgents(): Promise<void> {
+    const erroredAgents = this.registry.list({ state: "error" });
+    for (const agent of erroredAgents) {
+      if (!this.isRecoverableCrash(agent)) {
+        continue;
+      }
+
+      if ((agent.respawn_attempts ?? 0) >= MAX_CHILDREN) {
+        await this.markCrashRecoveryExhausted(agent);
+        continue;
+      }
+
+      try {
+        const surface = await this.createAgentSurface(agent.workspace_id ?? undefined);
+        const creating = this.stateMgr.transition(agent.agent_id, "creating", {
+          error: null,
+          pid: null,
+          cli_session_id: agent.cli_session_id,
+        });
+        this.registry.set(agent.agent_id, creating);
+
+        const patched = this.stateMgr.updateRecord(agent.agent_id, {
+          surface_id: surface.surface,
+          workspace_id: surface.workspace,
+          crash_recover: true,
+          respawn_attempts: (agent.respawn_attempts ?? 0) + 1,
+          user_killed: false,
+          deletion_intent: false,
+          error: null,
+          pid: null,
+        });
+        this.registry.set(agent.agent_id, patched);
+
+        const booting = this.stateMgr.transition(agent.agent_id, "booting", {
+          error: null,
+          pid: null,
+          cli_session_id: agent.cli_session_id,
+        });
+        this.registry.set(agent.agent_id, booting);
+
+        const resumeCmd = buildResumeCommand(
+          agent.cli,
+          agent.repo,
+          agent.cli_session_id!,
+        );
+        await this.client.send(surface.surface, resumeCmd, {
+          workspace: surface.workspace,
+        });
+        await this.client.sendKey(surface.surface, "return", {
+          workspace: surface.workspace,
+        });
+        await this.client.log(
+          `crash-recovery: respawned ${agent.agent_id} on ${surface.surface}`,
+          { level: "warning", source: "cmux-mcp" },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const current = this.registry.get(agent.agent_id);
+        if (current && current.state === "booting") {
+          const failed = this.stateMgr.transition(agent.agent_id, "error", {
+            error: `Crash recovery failed: ${message}`,
+          });
+          this.registry.set(agent.agent_id, failed);
+        } else {
+          const failed = this.stateMgr.updateRecord(agent.agent_id, {
+            error: `Crash recovery failed: ${message}`,
+          });
+          this.registry.set(agent.agent_id, failed);
+        }
+      }
+    }
   }
 
   private async emitLifecycleEvent(
@@ -233,7 +432,8 @@ export class AgentEngine {
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
 
-    for (const agent of agents) {
+    for (const originalAgent of agents) {
+      const agent = await this.maybeCaptureBootSessionId(originalAgent);
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;
@@ -293,7 +493,7 @@ export class AgentEngine {
               // 1. Respawn loses all work-in-progress context (new agent starts from scratch)
               // 2. The parent orchestrator should decide retry strategy, not the sweep
               // 3. Each respawn adds a dead child — repeated cycles hit MAX_CHILDREN with corpses
-              await this.stopAgent(agentId, false);
+              await this.stopAgent(agentId, false, { userInitiated: false });
               await this.client.log(
                 `context-limit: killing depth ${agent.spawn_depth} agent ${repo}`,
                 { level: "warning", source: "cmux-mcp" },
@@ -346,6 +546,7 @@ export class AgentEngine {
    */
   async runSweep(): Promise<void> {
     await this.registry.reconcile();
+    await this.recoverCrashedAgents();
 
     if (this.startupPurgePending) {
       this.startupPurgePending = false;
@@ -410,48 +611,14 @@ export class AgentEngine {
     }
 
     // 1. Create cmux surface using the deterministic worker layout policy.
-    let surface: CmuxNewSplitResult | CmuxNewSurfaceResult;
-    try {
-      const panes = await this.client.listPanes({ workspace: params.workspace });
-      const paneSurfaces = await Promise.all(
-        panes.panes.map((pane) =>
-          this.client.listPaneSurfaces({
-            workspace: params.workspace,
-            pane: pane.ref,
-          }),
-        ),
-      );
-      const workerSurfaceIds = new Set(
-        this.registry.list().map((agent) => agent.surface_id),
-      );
-      const placement = chooseAgentSpawnPlacement(
-        panes.panes,
-        paneSurfaces,
-        workerSurfaceIds,
-      );
-      surface =
-        placement.kind === "surface"
-          ? await this.client.newSurface({
-              pane: placement.pane,
-              type: "terminal",
-              workspace: params.workspace,
-            })
-          : await this.client.newSplit(placement.direction, {
-              workspace: params.workspace,
-              type: "terminal",
-            });
-    } catch {
-      surface = await this.client.newSplit("right", {
-        workspace: params.workspace,
-        type: "terminal",
-      });
-    }
+    const surface = await this.createAgentSurface(params.workspace);
 
     // 2. Write initial state (creating → booting)
     const now = new Date().toISOString();
     const record: AgentRecord = {
       agent_id: agentId,
       surface_id: surface.surface,
+      workspace_id: surface.workspace,
       state: "booting",
       repo: params.repo,
       model: params.model,
@@ -468,6 +635,9 @@ export class AgentEngine {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: params.max_cost_per_agent ?? null,
+      crash_recover: params.crash_recover ?? false,
+      respawn_attempts: 0,
+      user_killed: false,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
@@ -646,7 +816,11 @@ export class AgentEngine {
   /**
    * Stop an agent gracefully (Ctrl+C) or forcefully (kill PID).
    */
-  async stopAgent(agentId: string, force?: boolean): Promise<void> {
+  async stopAgent(
+    agentId: string,
+    force?: boolean,
+    opts?: { userInitiated?: boolean },
+  ): Promise<void> {
     const agent = this.registry.get(agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -656,15 +830,20 @@ export class AgentEngine {
       return; // Already stopped
     }
 
-    if (force && agent.pid) {
+    const marked = this.stateMgr.updateRecord(agentId, {
+      user_killed: opts?.userInitiated ?? true,
+    });
+    this.registry.set(agentId, marked);
+
+    if (force && marked.pid) {
       try {
-        process.kill(agent.pid, "SIGKILL");
+        process.kill(marked.pid, "SIGKILL");
       } catch {
         // Process may already be dead — that's fine
       }
     } else {
       // Graceful: send Ctrl+C
-      await this.client.sendKey(agent.surface_id, "c-c", {});
+      await this.client.sendKey(marked.surface_id, "c-c", {});
     }
 
     // Transition to done
