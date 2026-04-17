@@ -10,7 +10,10 @@ import {
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
-import { MAX_CHILDREN, type AgentRecord } from "../src/agent-types.js";
+import {
+  MAX_RESPAWN_ATTEMPTS,
+  type AgentRecord,
+} from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -364,23 +367,26 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
-    it("does not respawn an agent the user intentionally stopped", async () => {
+    it("does not respawn an errored agent the user intentionally stopped", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-stop",
-          state: "working",
+          state: "error",
           surface_id: "surface:42",
           repo: "brainlayer",
           cli: "codex",
           cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
           crash_recover: true,
+          error: "Surface surface:42 disappeared",
         }),
       );
-      liveSurfaces = [makeSurface("surface:42")];
       await engine.getRegistry().reconstitute();
 
       await engine.stopAgent("agent-stop");
-      expect(engine.getAgentState("agent-stop")?.user_killed).toBe(true);
+      expect(engine.getAgentState("agent-stop")).toMatchObject({
+        state: "error",
+        user_killed: true,
+      });
 
       liveSurfaces = [];
       await engine.runSweep();
@@ -399,7 +405,7 @@ describe("AgentEngine", () => {
           cli: "codex",
           cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
           crash_recover: true,
-          respawn_attempts: MAX_CHILDREN,
+          respawn_attempts: MAX_RESPAWN_ATTEMPTS,
           error: "Surface surface:gone disappeared",
         }),
       );
@@ -409,7 +415,7 @@ describe("AgentEngine", () => {
 
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(engine.getAgentState("agent-loop")?.error).toContain(
-        `Max crash recoveries exceeded: ${MAX_CHILDREN}`,
+        `Max crash recoveries exceeded: ${MAX_RESPAWN_ATTEMPTS}`,
       );
     });
 
@@ -440,6 +446,41 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
       expect(engine.getAgentState("agent-retry")?.state).toBe("booting");
       expect(engine.getAgentState("agent-retry")?.respawn_attempts).toBe(2);
+    });
+
+    it("transitions crash recovery failures in creating state back to error", async () => {
+      const transition = stateMgr.transition.bind(stateMgr);
+      vi.spyOn(stateMgr, "transition").mockImplementation((...args) => {
+        const [agentId, nextState] = args;
+        if (agentId === "agent-creating" && nextState === "booting") {
+          throw new Error("boot fail");
+        }
+        return transition(...args);
+      });
+
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-creating",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(engine.getAgentState("agent-creating")).toMatchObject({
+        state: "error",
+        error: "Crash recovery failed: boot fail",
+      });
     });
   });
 

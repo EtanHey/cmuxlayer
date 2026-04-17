@@ -18,6 +18,7 @@ export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
+export const MAX_RESPAWN_ATTEMPTS = 10;
 
 export interface AgentRecord {
   agent_id: string;

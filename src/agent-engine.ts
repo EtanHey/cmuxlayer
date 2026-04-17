@@ -19,6 +19,7 @@ import {
   isCrashRecoveryEligible,
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
+  MAX_RESPAWN_ATTEMPTS,
   type AgentRecord,
   type AgentState,
   type CliType,
@@ -311,7 +312,7 @@ export class AgentEngine {
 
   private async markCrashRecoveryExhausted(agent: AgentRecord): Promise<void> {
     const updated = this.stateMgr.updateRecord(agent.agent_id, {
-      error: `Max crash recoveries exceeded: ${MAX_CHILDREN}`,
+      error: `Max crash recoveries exceeded: ${MAX_RESPAWN_ATTEMPTS}`,
     });
     this.registry.set(agent.agent_id, updated);
     await this.client.log(
@@ -327,7 +328,7 @@ export class AgentEngine {
         continue;
       }
 
-      if ((agent.respawn_attempts ?? 0) >= MAX_CHILDREN) {
+      if ((agent.respawn_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS) {
         await this.markCrashRecoveryExhausted(agent);
         continue;
       }
@@ -378,7 +379,7 @@ export class AgentEngine {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const current = this.registry.get(agent.agent_id);
-        if (current && current.state === "booting") {
+        if (current && !TERMINAL_STATES.has(current.state)) {
           const failed = this.stateMgr.transition(agent.agent_id, "error", {
             error: `Crash recovery failed: ${message}`,
           });
@@ -821,14 +822,14 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    if (TERMINAL_STATES.has(agent.state)) {
-      return; // Already stopped
-    }
-
     const marked = this.stateMgr.updateRecord(agentId, {
       user_killed: opts?.userInitiated ?? true,
     });
     this.registry.set(agentId, marked);
+
+    if (TERMINAL_STATES.has(agent.state)) {
+      return; // Already stopped
+    }
 
     if (force && marked.pid) {
       try {
