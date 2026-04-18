@@ -6,6 +6,10 @@
 import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
+import {
+  resolveAgentRoute as resolvePublicAgentRoute,
+  toPublicAgent,
+} from "./agent-facade.js";
 import type {
   CmuxPane,
   CmuxPaneSurfaces,
@@ -20,9 +24,11 @@ import {
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   MAX_RESPAWN_ATTEMPTS,
+  type AgentRoute,
   type AgentRecord,
   type AgentState,
   type CliType,
+  type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
@@ -746,6 +752,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
       };
     }
 
@@ -756,6 +763,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
         error: initial.error ?? "Agent is in error state",
       };
     }
@@ -767,6 +775,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
         error: "Agent has already completed",
       };
     }
@@ -783,6 +792,7 @@ export class AgentEngine {
             state: current?.state ?? "error",
             elapsed,
             source: "timeout",
+            agent: current ? toPublicAgent(current) : null,
             error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"`,
           });
           return;
@@ -798,6 +808,7 @@ export class AgentEngine {
             state: "error",
             elapsed,
             source: "sweep",
+            agent: null,
             error: "Agent disappeared during wait",
           });
           return;
@@ -810,6 +821,7 @@ export class AgentEngine {
             state: current.state,
             elapsed,
             source: "sweep",
+            agent: toPublicAgent(current),
           });
           return;
         }
@@ -825,6 +837,7 @@ export class AgentEngine {
             state: current.state,
             elapsed,
             source: "sweep",
+            agent: toPublicAgent(current),
             error:
               current.error ?? `Agent entered terminal state: ${current.state}`,
           });
@@ -855,11 +868,24 @@ export class AgentEngine {
     return this.registry.get(agentId);
   }
 
+  getPublicAgent(agentId: string): PublicAgent | null {
+    const agent = this.registry.get(agentId);
+    return agent ? toPublicAgent(agent) : null;
+  }
+
   /**
    * List agents with optional filters.
    */
   listAgents(filter?: AgentFilter): AgentRecord[] {
     return this.registry.list(filter);
+  }
+
+  listPublicAgents(filter?: AgentFilter): PublicAgent[] {
+    return this.listAgents(filter).map(toPublicAgent);
+  }
+
+  resolveAgentRoute(agentId: string): AgentRoute {
+    return resolvePublicAgentRoute(this.listAgents(), agentId);
   }
 
   /**
@@ -944,9 +970,10 @@ export class AgentEngine {
       );
     }
 
-    await this.client.send(agent.surface_id, sanitizeTerminalInput(text), {});
+    const route = this.resolveAgentRoute(agentId);
+    await this.client.send(route.surface_id, sanitizeTerminalInput(text), {});
     if (pressEnter) {
-      await this.client.sendKey(agent.surface_id, "return", {});
+      await this.client.sendKey(route.surface_id, "return", {});
     }
   }
 }

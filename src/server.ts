@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 14 core tools + 11 agent lifecycle tools.
+ * cmux MCP server — registers 14 core tools + 12 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,7 +14,7 @@ import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord, AgentState } from "./agent-types.js";
 import {
   formatListSurfaces,
   formatReadScreen,
@@ -73,6 +73,7 @@ const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
+const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
@@ -1571,6 +1572,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       notifyLifecycleEvent,
     });
 
+    const deliverAgentInput = async (args: {
+      agent_id: string;
+      text: string;
+      press_enter: boolean;
+    }) => {
+      const route = engine.resolveAgentRoute(args.agent_id);
+      if (!INTERACTIVE_AGENT_STATES.has(route.state)) {
+        throw new Error(
+          `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
+            `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}`,
+        );
+      }
+
+      const sanitizedText = sanitizeTerminalInput(args.text);
+      const chunks =
+        sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
+          ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
+          : [sanitizedText];
+
+      await withSurfaceWrite(route.surface_id, async () => {
+        await deliverInputChunks({
+          surface: route.surface_id,
+          chunks,
+          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+          press_enter: args.press_enter,
+        });
+      });
+    };
+
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
     // agents from previous cmux sessions.
@@ -1647,11 +1678,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 12. wait_for
     server.tool(
       "wait_for",
-      "Block until an agent reaches a target state (ready, done, error). Checks retroactively first.",
+      "Block until an agent reaches a target state. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography.",
       {
         agent_id: z.string().describe("Agent ID from spawn_agent"),
         target_state: z
           .enum(["ready", "working", "idle", "done", "error"])
+          .optional()
+          .default("done")
           .describe("State to wait for"),
         timeout_ms: z
           .number()
@@ -1664,9 +1697,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          const targetState = args.target_state ?? "done";
           const result = await engine.waitFor(
             args.agent_id,
-            args.target_state,
+            targetState,
             args.timeout_ms,
           );
           return okFormatted(
@@ -1674,7 +1708,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_id: args.agent_id,
               state: result.state,
             }),
-            { ...result },
+            {
+              agent_id: args.agent_id,
+              ...result,
+            },
           );
         } catch (e) {
           return err(e);
@@ -1767,7 +1804,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         try {
-          const agents = engine.listAgents({
+          const agents = engine.listPublicAgents({
             state: args.state,
             repo: args.repo,
             model: args.model,
@@ -1812,10 +1849,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     );
 
-    // 17. send_to_agent
+    // 17. send_to
     server.tool(
-      "send_to_agent",
-      "Send text input to an agent. Agent must be in ready or idle state.",
+      "send_to",
+      "Send text input to an agent by `agent_id`. Resolves the backing surface internally so clients do not need pane or surface references.",
       {
         agent_id: z.string().describe("Agent ID"),
         text: z.string().describe("Text to send"),
@@ -1828,7 +1865,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
-          await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
+          await deliverAgentInput({
+            agent_id: args.agent_id,
+            text: args.text,
+            press_enter: args.press_enter,
+          });
+          const data = { agent_id: args.agent_id };
+          return okFormatted(formatOk("send_to", data), data);
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    // 18. send_to_agent
+    server.tool(
+      "send_to_agent",
+      "Deprecated for client integrations: use `send_to` instead. Internal/advanced path for sending text input to an agent in `ready` or `idle` state.",
+      {
+        agent_id: z.string().describe("Agent ID"),
+        text: z.string().describe("Text to send"),
+        press_enter: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe("Press enter after sending text"),
+      },
+      ANNOTATIONS.mutating,
+      async (args) => {
+        try {
+          await deliverAgentInput({
+            agent_id: args.agent_id,
+            text: args.text,
+            press_enter: args.press_enter,
+          });
           const data = { agent_id: args.agent_id };
           return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
@@ -1836,7 +1906,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       },
     );
-    // 18. read_agent_output
+    // 19. read_agent_output
     server.tool(
       "read_agent_output",
       "Extract structured output from an agent's terminal between delimiter markers (e.g., REVIEW_OUTPUT_START / REVIEW_OUTPUT_END). Returns the content between the markers, or null if not found.",
