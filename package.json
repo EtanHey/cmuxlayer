@@ -13,7 +13,8 @@
     }
   },
   "bin": {
-    "cmuxlayer": "./dist/index.js"
+    "cmuxlayer": "./dist/index.js",
+    "cmuxlayer-app-server": "./dist/app-server-index.js"
   },
   "author": "Etan Heyman",
   "license": "Apache-2.0",
