@@ -114,6 +114,7 @@ export interface WaitResult {
   state: AgentState;
   elapsed: number;
   source: "immediate" | "poll" | "sweep" | "watch" | "timeout";
+  agent: PublicAgent | null;
   error?: string;
 }
 

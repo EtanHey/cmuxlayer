@@ -752,6 +752,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
       };
     }
 
@@ -762,6 +763,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
         error: initial.error ?? "Agent is in error state",
       };
     }
@@ -773,6 +775,7 @@ export class AgentEngine {
         state: initial.state,
         elapsed: Date.now() - start,
         source: "immediate",
+        agent: toPublicAgent(initial),
         error: "Agent has already completed",
       };
     }
@@ -789,6 +792,7 @@ export class AgentEngine {
             state: current?.state ?? "error",
             elapsed,
             source: "timeout",
+            agent: current ? toPublicAgent(current) : null,
             error: `Timed out after ${timeoutMs}ms waiting for state "${targetState}"`,
           });
           return;
@@ -804,6 +808,7 @@ export class AgentEngine {
             state: "error",
             elapsed,
             source: "sweep",
+            agent: null,
             error: "Agent disappeared during wait",
           });
           return;
@@ -816,6 +821,7 @@ export class AgentEngine {
             state: current.state,
             elapsed,
             source: "sweep",
+            agent: toPublicAgent(current),
           });
           return;
         }
@@ -831,6 +837,7 @@ export class AgentEngine {
             state: current.state,
             elapsed,
             source: "sweep",
+            agent: toPublicAgent(current),
             error:
               current.error ?? `Agent entered terminal state: ${current.state}`,
           });

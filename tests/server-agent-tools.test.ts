@@ -20,6 +20,7 @@ const AGENT_TOOLS = [
   "list_agents",
   "stop_agent",
   "send_to_agent",
+  "read_agent_output",
   "my_agents",
 ] as const;
 
@@ -283,7 +284,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(result.content[0].text).toMatch(/not in an interactive state/);
   });
 
-  it("send_to routes to the agent surface without exposing pane math", async () => {
+  it("send_to sanitizes and chunks delivery through the agent surface", async () => {
     const server = createServer({
       exec: mockExec,
       stateDir: TEST_DIR,
@@ -308,16 +309,33 @@ describe("agent lifecycle tool handlers", () => {
     const registry = engine.getRegistry();
     const agent = registry.get(agentId);
     registry.set(agentId, { ...agent, state: "ready" });
+    mockExec.mockClear();
+
+    const rawText =
+      `${"a".repeat(510)}\x1b[31mHELLO\x1b[0m\x07${"b".repeat(10)}`;
+    const sanitizedText = `${"a".repeat(510)}HELLO${"b".repeat(10)}`;
 
     const result = await sendTo.handler(
-      { agent_id: agentId, text: "hello facade", press_enter: true },
+      { agent_id: agentId, text: rawText, press_enter: true },
       {} as any,
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
+    const sendCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send"),
+    );
+    const sendKeyCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send-key"),
+    );
+    const deliveredText = sendCalls.map(([, args]) => args.at(-1)).join("");
 
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
+    expect(sendCalls).toHaveLength(2);
+    expect(sendKeyCalls).toHaveLength(1);
+    expect(deliveredText).toBe(sanitizedText);
+    expect(deliveredText).not.toContain("\x1b");
+    expect(deliveredText).not.toContain("\x07");
   });
 
   it("send_to returns an error for an unknown agent_id", async () => {
@@ -378,6 +396,52 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.state).toBe("done");
     expect(parsed.agent.session_id).toBeNull();
+  });
+
+  it("wait_for returns the engine snapshot without a second public-agent read", async () => {
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+    });
+    const waitFor = (server as any)._registeredTools["wait_for"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    vi.spyOn(engine, "waitFor").mockResolvedValue({
+      matched: true,
+      state: "done",
+      elapsed: 12,
+      source: "sweep",
+      agent: {
+        agent_id: "agent-1",
+        repo: "brainlayer",
+        model: "sonnet",
+        state: "done",
+        session_id: "sess-1",
+      },
+    } as any);
+    const getPublicAgentSpy = vi
+      .spyOn(engine, "getPublicAgent")
+      .mockImplementation(() => {
+        throw new Error("unexpected second public-agent read");
+      });
+
+    const result = await waitFor.handler(
+      { agent_id: "agent-1", timeout_ms: 5000 },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent).toEqual({
+      agent_id: "agent-1",
+      repo: "brainlayer",
+      model: "sonnet",
+      state: "done",
+      session_id: "sess-1",
+    });
+    expect(getPublicAgentSpy).not.toHaveBeenCalled();
   });
 
   it("wait_for returns an error for an unknown agent_id", async () => {

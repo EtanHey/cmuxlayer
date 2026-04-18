@@ -630,6 +630,9 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(result.matched).toBe(true);
       expect(result.source).toBe("immediate");
       expect(result.elapsed).toBeLessThan(100);
+      expect(result.agent?.agent_id).toBe("agent-ready");
+      expect(result.agent?.state).toBe("ready");
+      expect(result.agent?.session_id).toBeNull();
     });
 
     it("returns error result when agent is in error state", async () => {
@@ -646,6 +649,8 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       const result = await engine.waitFor("agent-err", "ready", 5000);
       expect(result.matched).toBe(false);
       expect(result.state).toBe("error");
+      expect(result.agent?.agent_id).toBe("agent-err");
+      expect(result.agent?.state).toBe("error");
     });
 
     it("times out when target state is never reached", async () => {
@@ -658,6 +663,8 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       const result = await engine.waitFor("agent-stuck", "ready", 500);
       expect(result.matched).toBe(false);
       expect(result.source).toBe("timeout");
+      expect(result.agent?.agent_id).toBe("agent-stuck");
+      expect(result.agent?.state).toBe("booting");
     });
 
     it("detects state change via sweep", async () => {
@@ -679,6 +686,8 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       const result = await engine.waitFor("agent-boot", "ready", 5000);
       expect(result.matched).toBe(true);
       expect(result.source).toBe("sweep");
+      expect(result.agent?.agent_id).toBe("agent-boot");
+      expect(result.agent?.state).toBe("ready");
     });
 
     it("throws for non-existent agent", async () => {

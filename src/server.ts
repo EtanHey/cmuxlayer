@@ -14,7 +14,7 @@ import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord, AgentState } from "./agent-types.js";
 import {
   formatListSurfaces,
   formatReadScreen,
@@ -73,6 +73,7 @@ const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
+const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
@@ -1571,6 +1572,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       notifyLifecycleEvent,
     });
 
+    const deliverAgentInput = async (args: {
+      agent_id: string;
+      text: string;
+      press_enter: boolean;
+    }) => {
+      const route = engine.resolveAgentRoute(args.agent_id);
+      if (!INTERACTIVE_AGENT_STATES.has(route.state)) {
+        throw new Error(
+          `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
+            `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}`,
+        );
+      }
+
+      const sanitizedText = sanitizeTerminalInput(args.text);
+      const chunks =
+        sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
+          ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
+          : [sanitizedText];
+
+      await withSurfaceWrite(route.surface_id, async () => {
+        await deliverInputChunks({
+          surface: route.surface_id,
+          chunks,
+          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+          press_enter: args.press_enter,
+        });
+      });
+    };
+
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
     // agents from previous cmux sessions.
@@ -1672,7 +1703,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             targetState,
             args.timeout_ms,
           );
-          const agent = engine.getPublicAgent(args.agent_id);
           return okFormatted(
             formatOk("wait_for", {
               agent_id: args.agent_id,
@@ -1681,7 +1711,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             {
               agent_id: args.agent_id,
               ...result,
-              agent,
             },
           );
         } catch (e) {
@@ -1836,7 +1865,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
-          await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
+          await deliverAgentInput({
+            agent_id: args.agent_id,
+            text: args.text,
+            press_enter: args.press_enter,
+          });
           const data = { agent_id: args.agent_id };
           return okFormatted(formatOk("send_to", data), data);
         } catch (e) {
@@ -1861,7 +1894,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
-          await engine.sendToAgent(args.agent_id, args.text, args.press_enter);
+          await deliverAgentInput({
+            agent_id: args.agent_id,
+            text: args.text,
+            press_enter: args.press_enter,
+          });
           const data = { agent_id: args.agent_id };
           return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
