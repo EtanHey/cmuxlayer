@@ -48,6 +48,21 @@ export interface AgentRecord {
   user_killed?: boolean;
 }
 
+export interface PublicAgent {
+  agent_id: string;
+  repo: string;
+  model: string;
+  state: AgentState;
+  session_id: string | null;
+}
+
+export interface AgentRoute {
+  agent_id: string;
+  surface_id: string;
+  state: AgentState;
+  session_id: string | null;
+}
+
 export function hasRecoverableCrashError(error: string | null): boolean {
   if (!error) return false;
   return (

@@ -5,7 +5,7 @@
  * No ANSI color codes (MCP tool output doesn't support them in Claude Code).
  */
 
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord, PublicAgent } from "./agent-types.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
 function truncate(text: string, maxLen: number = 60): string {
@@ -139,7 +139,7 @@ export function formatReadScreen(
   return result.join("\n");
 }
 
-export function formatListAgents(agents: AgentRecord[], count: number): string {
+export function formatListAgents(agents: PublicAgent[], count: number): string {
   if (count === 0) {
     return "\u250c\u2500 cmux agents\n\u2502 No agents running.\n\u2514\u2500";
   }
@@ -149,10 +149,10 @@ export function formatListAgents(agents: AgentRecord[], count: number): string {
     `\u250c\u2500 cmux agents \u2500 ${count} agent${count !== 1 ? "s" : ""}`,
   );
   lines.push(
-    `\u2502 ${pad("ID", 20)} ${pad("Repo", 16)} ${pad("State", 8)} ${pad("Model", 18)} ${pad("Surface", 12)}`,
+    `\u2502 ${pad("ID", 20)} ${pad("Repo", 16)} ${pad("State", 8)} ${pad("Model", 18)} ${pad("Session", 14)}`,
   );
   lines.push(
-    `\u251c${"─".repeat(20)}${"─".repeat(17)}${"─".repeat(9)}${"─".repeat(19)}${"─".repeat(12)}`,
+    `\u251c${"─".repeat(20)}${"─".repeat(17)}${"─".repeat(9)}${"─".repeat(19)}${"─".repeat(14)}`,
   );
 
   for (const a of agents) {
@@ -160,11 +160,8 @@ export function formatListAgents(agents: AgentRecord[], count: number): string {
     const repo = pad(truncate(a.repo, 14), 16);
     const state = pad(a.state, 8);
     const model = pad(truncate(a.model, 16), 18);
-    const surface = pad(a.surface_id, 12);
-    lines.push(`\u2502 ${id} ${repo} ${state} ${model} ${surface}`);
-    if (a.error) {
-      lines.push(`\u2502   err: ${truncate(a.error, 60)}`);
-    }
+    const session = pad(a.session_id ?? "\u2014", 14);
+    lines.push(`\u2502 ${id} ${repo} ${state} ${model} ${session}`);
   }
 
   lines.push("\u2514\u2500");

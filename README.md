@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 25 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 26 MCP tools that give AI agents programmatic control over terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,8 +8,8 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-25%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-361%20passing-brightgreen.svg)](#testing)
+[![MCP Tools](https://img.shields.io/badge/MCP-26%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-406%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -54,20 +54,20 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 25 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer exposes 26 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
-## MCP Tools (25)
+## MCP Tools (26)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
 **Terminal control** — `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
+**Agent lifecycle** — `spawn_agent` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
 
 **Workspace** — `list_surfaces` `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
 <details>
-<summary>Full tool reference (25 tools)</summary>
+<summary>Full tool reference (26 tools)</summary>
 
 ### Read-only (6)
 
@@ -80,7 +80,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `my_agents` | Children of a parent agent with live screen status |
 | `read_agent_output` | Structured output between delimiter markers |
 
-### Mutating (16)
+### Mutating (17)
 
 | Tool | What it does |
 |------|-------------|
@@ -96,8 +96,9 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `set_progress` | Set progress indicator (0.0-1.0) |
 | `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent in a new pane |
+| `send_to` | Send text to a tracked agent without knowing its surface |
 | `send_to_agent` | Send a prompt to a running agent |
-| `wait_for` | Block until agent reaches a target state |
+| `wait_for` | Block until agent reaches a target state (defaults to `done`) |
 | `wait_for_all` | Block until multiple agents finish |
 | `interact` | Send interactive input (confirm, cancel, resume) |
 
@@ -155,7 +156,7 @@ cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/
 ## Testing
 
 ```bash
-bun run test        # 361 tests via vitest
+bun run test        # 406 tests via vitest
 npm run typecheck   # Type checking
 ```
 
