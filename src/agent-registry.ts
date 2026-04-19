@@ -6,6 +6,14 @@
 
 import { StateManager } from "./state-manager.js";
 import {
+  AgentDiscovery,
+  discoveredStatusToAgentState,
+  inferRepoFromTitle,
+  makeAutoAgentId,
+  type DiscoveredAgent,
+} from "./agent-discovery.js";
+import {
+  type MergedAgent,
   isCrashRecoveryEligible,
   shouldRetainCrashRecoveryError,
   type AgentRecord,
@@ -22,6 +30,7 @@ export interface AgentFilter {
 }
 
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
+const BOOTING_GHOST_TIMEOUT_MS = 30_000;
 
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
@@ -116,6 +125,143 @@ export class AgentRegistry {
     return results;
   }
 
+  async listMerged(
+    discovery: AgentDiscovery,
+    opts?: { filter?: AgentFilter; force?: boolean },
+  ): Promise<MergedAgent[]> {
+    await this.reconcile();
+    await this.purgeTerminal();
+
+    const discovered = await discovery.scan(opts?.force ?? false);
+    await this.evictBootingGhosts(discovered);
+
+    const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
+    const merged: MergedAgent[] = [];
+    const seenSurfaces = new Set<string>();
+
+    for (const record of this.list()) {
+      const discoveredEntry = bySurface.get(record.surface_id);
+      const isAutoRecord = record.agent_id.startsWith("auto-");
+      seenSurfaces.add(record.surface_id);
+
+      if (
+        isAutoRecord &&
+        discoveredEntry &&
+        !discoveredEntry.read_error &&
+        !discoveredEntry.has_agent
+      ) {
+        this.agents.delete(record.agent_id);
+        this.stateMgr.removeState(record.agent_id);
+        continue;
+      }
+
+      let liveRecord = record;
+      if (
+        isAutoRecord &&
+        discoveredEntry &&
+        discoveredEntry.has_agent &&
+        !discoveredEntry.read_error
+      ) {
+        liveRecord = this.syncAutoRecord(record, discoveredEntry);
+      }
+
+      merged.push({
+        ...liveRecord,
+        discovered: isAutoRecord,
+        parsed_cli_mismatch:
+          !isAutoRecord &&
+          discoveredEntry !== undefined &&
+          discoveredEntry.cli !== "unknown" &&
+          discoveredEntry.cli !== record.cli,
+      });
+    }
+
+    for (const discoveredEntry of discovered) {
+      if (
+        !discoveredEntry.has_agent ||
+        discoveredEntry.cli === "unknown" ||
+        discoveredEntry.read_error
+      ) {
+        continue;
+      }
+      if (seenSurfaces.has(discoveredEntry.surface_id)) {
+        continue;
+      }
+
+      const agentId = makeAutoAgentId(
+        discoveredEntry.cli,
+        discoveredEntry.surface_id,
+      );
+      let record = this.stateMgr.ensureAutoRecord(agentId, discoveredEntry);
+      this.agents.set(agentId, record);
+      record = this.syncAutoRecord(record, discoveredEntry);
+
+      merged.push({
+        ...record,
+        discovered: true,
+        parsed_cli_mismatch: false,
+      });
+    }
+
+    const filtered = opts?.filter
+      ? merged.filter((agent) => {
+          if (opts.filter?.state && agent.state !== opts.filter.state) {
+            return false;
+          }
+          if (opts.filter?.repo && agent.repo !== opts.filter.repo) {
+            return false;
+          }
+          if (opts.filter?.model && agent.model !== opts.filter.model) {
+            return false;
+          }
+          return true;
+        })
+      : merged;
+
+    return filtered;
+  }
+
+  private syncAutoRecord(
+    record: AgentRecord,
+    discoveredEntry: DiscoveredAgent,
+  ): AgentRecord {
+    const agentId = record.agent_id;
+    const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
+    const model = discoveredEntry.model ?? record.model;
+    const desiredState = discoveredStatusToAgentState(
+      discoveredEntry.parsed_status,
+    );
+
+    const patch: Partial<AgentRecord> = {};
+    if (repo !== record.repo) patch.repo = repo;
+    if (model !== record.model) patch.model = model;
+    if (record.error !== null && desiredState !== "error") patch.error = null;
+    if (record.error === null && desiredState === "error") {
+      patch.error = "Auto-discovered agent reported a frozen state";
+    }
+
+    if (Object.keys(patch).length > 0) {
+      record = this.stateMgr.updateRecord(agentId, patch);
+      this.agents.set(agentId, record);
+    }
+
+    if (record.state !== desiredState) {
+      try {
+        record = this.stateMgr.transition(agentId, desiredState, {
+          error:
+            desiredState === "error"
+              ? "Auto-discovered agent reported a frozen state"
+              : null,
+        });
+        this.agents.set(agentId, record);
+      } catch {
+        // Best-effort only — invalid synthetic transitions can keep the prior state.
+      }
+    }
+
+    return record;
+  }
+
   /**
    * Update an agent in the in-memory map. Used by tools that
    * write state through the StateManager and need to sync the registry.
@@ -126,6 +272,47 @@ export class AgentRegistry {
 
   remove(agentId: string): void {
     this.agents.delete(agentId);
+  }
+
+  private async evictBootingGhosts(
+    discovered: DiscoveredAgent[],
+  ): Promise<void> {
+    const now = Date.now();
+    const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
+
+    for (const [id, agent] of [...this.agents.entries()]) {
+      if (agent.state !== "booting") {
+        continue;
+      }
+
+      const lastUpdated = Date.parse(agent.updated_at);
+      if (Number.isNaN(lastUpdated)) {
+        continue;
+      }
+      if (now - lastUpdated < BOOTING_GHOST_TIMEOUT_MS) {
+        continue;
+      }
+
+      const discoveredEntry = bySurface.get(agent.surface_id);
+      if (
+        !discoveredEntry ||
+        discoveredEntry.read_error ||
+        discoveredEntry.has_agent
+      ) {
+        continue;
+      }
+
+      try {
+        this.stateMgr.transition(id, "error", {
+          error: "Launch failed — no agent detected in surface after boot timeout",
+        });
+      } catch {
+        // Best-effort transition before eviction.
+      }
+
+      this.agents.delete(id);
+      this.stateMgr.removeState(id);
+    }
   }
 
   /**

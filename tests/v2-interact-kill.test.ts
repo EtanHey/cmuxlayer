@@ -28,26 +28,34 @@ function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
+function createV2Server(exec: ExecFn) {
+  return createServer({
+    exec,
+    stateDir: TEST_DIR,
+    disableSpawnPreflight: true,
+  });
+}
+
 describe("V2 tool registration", () => {
   it("registers interact and kill tools", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
     });
-    const server = createServer({ exec: mockExec, stateDir: TEST_DIR });
+    const server = createV2Server(mockExec);
     const tools = Object.keys((server as any)._registeredTools);
     expect(tools).toContain("interact");
     expect(tools).toContain("kill");
   });
 
-  it("total tool count is 26 (14 low-level + 10 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 27 (14 low-level + 11 agent lifecycle + 2 v2)", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
     });
-    const server = createServer({ exec: mockExec, stateDir: TEST_DIR });
+    const server = createV2Server(mockExec);
     const count = Object.keys((server as any)._registeredTools).length;
-    expect(count).toBe(26);
+    expect(count).toBe(27);
   });
 });
 
@@ -68,7 +76,7 @@ describe("interact — runtime validation", () => {
       }),
       stderr: "",
     });
-    server = createServer({ exec: mockExec, stateDir: TEST_DIR });
+    server = createV2Server(mockExec);
   });
 
   afterEach(() => {
@@ -164,7 +172,7 @@ describe("interact — agent resolution", () => {
       }),
       stderr: "",
     });
-    server = createServer({ exec: mockExec, stateDir: TEST_DIR });
+    server = createV2Server(mockExec);
   });
 
   afterEach(() => {
@@ -227,7 +235,7 @@ describe("kill — scoped targets", () => {
       }),
       stderr: "",
     });
-    server = createServer({ exec: mockExec, stateDir: TEST_DIR });
+    server = createV2Server(mockExec);
   });
 
   afterEach(() => {

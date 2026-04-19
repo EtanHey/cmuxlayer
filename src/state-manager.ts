@@ -21,6 +21,11 @@ import {
   type AgentState,
   type StateTransition,
 } from "./agent-types.js";
+import {
+  discoveredStatusToAgentState,
+  inferRepoFromTitle,
+  type DiscoveredAgent,
+} from "./agent-discovery.js";
 
 type AgentRecordPatch = Partial<
   Omit<AgentRecord, "agent_id" | "created_at" | "updated_at" | "version" | "state">
@@ -181,5 +186,40 @@ export class StateManager {
     });
 
     rmSync(agentDir, { recursive: true, force: true });
+  }
+
+  ensureAutoRecord(agentId: string, discovered: DiscoveredAgent): AgentRecord {
+    const existing = this.readState(agentId);
+    if (existing) {
+      return existing;
+    }
+
+    const now = new Date().toISOString();
+    const record: AgentRecord = {
+      agent_id: agentId,
+      surface_id: discovered.surface_id,
+      workspace_id: null,
+      state: discoveredStatusToAgentState(discovered.parsed_status),
+      repo: inferRepoFromTitle(discovered.surface_title),
+      model: discovered.model ?? "unknown",
+      cli: discovered.cli === "unknown" ? "claude" : discovered.cli,
+      cli_session_id: null,
+      task_summary: "(auto-discovered)",
+      pid: null,
+      version: 1,
+      created_at: now,
+      updated_at: now,
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    };
+    this.writeState(record);
+    return record;
   }
 }

@@ -3,6 +3,8 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
@@ -51,6 +53,10 @@ export interface SpawnAgentResult {
   state: AgentState;
 }
 
+export interface AgentEngineOptions {
+  spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+}
+
 export type AgentLifecycleEvent = "spawned" | "done" | "errored";
 
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
@@ -68,6 +74,7 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`chatid:\\s*(${SESSION_ID_PATTERN})`, "i"),
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
+const execFileAsync = promisify(execFile);
 
 interface AgentEngineClient {
   log(
@@ -234,10 +241,27 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
+async function assertClaudeLauncherAvailable(repo: string): Promise<void> {
+  const launcher = `${sanitizeRepoName(repo)}Claude`;
+  const shell = process.env.SHELL || "/bin/sh";
+  const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
+
+  try {
+    await execFileAsync(shell, ["-lc", probe]);
+  } catch {
+    throw new Error(
+      `Launcher "${launcher}" not found. For repo "${repo}" with hyphens, ` +
+        `the launcher name strips the hyphen (e.g. "skill-creator" → "skillcreatorClaude"). ` +
+        `Use the direct shell spawn path, or fix the repoGolem config.`,
+    );
+  }
+}
+
 export class AgentEngine {
   private stateMgr: StateManager;
   private registry: AgentRegistry;
   private client: AgentEngineClient;
+  private spawnPreflight: (params: SpawnAgentParams) => Promise<void>;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** agentId → last-pushed status string */
   private sidebarSnapshot = new Map<string, string>();
@@ -248,10 +272,18 @@ export class AgentEngine {
     stateMgr: StateManager,
     registry: AgentRegistry,
     client: AgentEngineClient,
+    opts?: AgentEngineOptions,
   ) {
     this.stateMgr = stateMgr;
     this.registry = registry;
     this.client = client;
+    this.spawnPreflight =
+      opts?.spawnPreflight ??
+      (async (params) => {
+        if (params.cli === "claude") {
+          await assertClaudeLauncherAvailable(params.repo);
+        }
+      });
   }
 
   getRegistry(): AgentRegistry {
@@ -664,6 +696,8 @@ export class AgentEngine {
       spawnDepth = parent.spawn_depth + 1;
       parentAgentId = params.parent_agent_id;
     }
+
+    await this.spawnPreflight(params);
 
     // 1. Create cmux surface using the deterministic worker layout policy.
     const surface = await this.createAgentSurface(params.workspace);

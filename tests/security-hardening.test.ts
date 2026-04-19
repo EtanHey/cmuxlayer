@@ -54,6 +54,7 @@ describe("B1: ToolAnnotations on all tools", () => {
     "set_progress",
     "browser_surface",
     "spawn_agent",
+    "resync_agents",
     "send_to",
     "send_to_agent",
     "wait_for",
@@ -76,9 +77,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 26 tools have annotations", () => {
+  it("all 27 tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(26);
+    expect(toolNames.length).toBe(27);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

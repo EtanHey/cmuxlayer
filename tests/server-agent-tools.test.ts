@@ -13,6 +13,7 @@ const TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 
 const AGENT_TOOLS = [
   "spawn_agent",
+  "resync_agents",
   "send_to",
   "wait_for",
   "wait_for_all",
@@ -24,16 +25,102 @@ const AGENT_TOOLS = [
   "my_agents",
 ] as const;
 
-describe("agent lifecycle tool registration", () => {
-  it("registers all 10 agent lifecycle tools when lifecycle is enabled", () => {
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
+function makeLifecycleExec(): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:new"],
+              selected_surface_ref: "surface:new",
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [
+            {
+              ref: "surface:new",
+              title: "agent-pane",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:new",
+          text: "$ ",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({
+        workspace: "ws:1",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      }),
       stderr: "",
-    });
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    };
+  });
+}
+
+function createLifecycleServer(exec: ExecFn) {
+  return createServer({
+    exec,
+    stateDir: TEST_DIR,
+    disableSpawnPreflight: true,
+  });
+}
+
+describe("agent lifecycle tool registration", () => {
+  it("registers all 11 agent lifecycle tools when lifecycle is enabled", () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
     const toolNames = Object.keys(registeredTools);
 
@@ -59,17 +146,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 26 (14 low-level + 10 agent lifecycle + 2 v2)", () => {
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
-      stderr: "",
-    });
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+  it("total tool count is 27 (14 low-level + 11 agent lifecycle + 2 v2)", () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(26);
+    expect(Object.keys(registeredTools)).toHaveLength(27);
   });
 });
 
@@ -79,16 +160,7 @@ describe("agent lifecycle tool handlers", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "ws:1",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = makeLifecycleExec();
   });
 
   afterEach(() => {
@@ -96,10 +168,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("spawn_agent returns agent_id and surface_id", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
@@ -121,10 +190,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("spawn_agent persists crash_recover=true in agent state", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
@@ -153,10 +219,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("spawn_agent defaults crash_recover to false", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
@@ -184,10 +247,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("list_agents returns agents after spawn", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
 
@@ -212,10 +272,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("get_agent_state returns full record", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
@@ -241,10 +298,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("get_agent_state returns error for unknown agent", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const getState = (server as any)._registeredTools["get_agent_state"];
 
     const result = await getState.handler(
@@ -255,10 +309,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("send_to_agent rejects agents not in interactive state", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to_agent"];
 
@@ -285,10 +336,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("send_to sanitizes and chunks delivery through the agent surface", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
 
@@ -339,10 +387,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("send_to returns an error for an unknown agent_id", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const result = await sendTo.handler(
@@ -355,10 +400,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("wait_for defaults to done when target_state is omitted", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const waitFor = (server as any)._registeredTools["wait_for"];
 
@@ -399,10 +441,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("wait_for returns the engine snapshot without a second public-agent read", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const waitFor = (server as any)._registeredTools["wait_for"];
     const engine = (server as any)._registeredTools["interact"]._engine;
 
@@ -445,10 +484,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("wait_for returns an error for an unknown agent_id", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const waitFor = (server as any)._registeredTools["wait_for"];
 
     const result = await waitFor.handler(
@@ -461,10 +497,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("my_agents returns root agents when no parent_agent_id", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
 
@@ -493,10 +526,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("my_agents returns children of a specific parent", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
 
@@ -533,10 +563,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("my_agents returns empty array for nonexistent parent (orphan-safe)", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     const result = await myAgents.handler(
@@ -549,10 +576,7 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("my_agents includes screen data fields (null when no real screen)", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const myAgents = (server as any)._registeredTools["my_agents"];
 

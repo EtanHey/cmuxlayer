@@ -13,7 +13,13 @@ import { parseReservedModeKey } from "./mode-policy.js";
 import { replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
-import { AgentEngine, type AgentLifecycleEvent } from "./agent-engine.js";
+import {
+  AgentEngine,
+  type AgentLifecycleEvent,
+  type SpawnAgentParams,
+} from "./agent-engine.js";
+import { AgentDiscovery } from "./agent-discovery.js";
+import { toPublicAgent } from "./agent-facade.js";
 import type { AgentRecord, AgentState } from "./agent-types.js";
 import {
   formatListSurfaces,
@@ -21,6 +27,7 @@ import {
   formatListAgents,
   formatAgentState,
   formatOk,
+  formatResync,
 } from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
@@ -323,6 +330,10 @@ export interface CreateServerOptions {
   skipAgentLifecycle?: boolean;
   /** Opt into Claude Code channel notifications for lifecycle events */
   enableClaudeChannels?: boolean;
+  /** Override spawn preflight checks (primarily for tests). */
+  spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
+  disableSpawnPreflight?: boolean;
 }
 
 function formatLifecycleChannelContent(
@@ -1536,6 +1547,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     };
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
+    const discovery = new AgentDiscovery({
+      listSurfaces: surfaceProvider,
+      readScreen: (surface, opts) => client.readScreen(surface, opts),
+    });
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
       agent: AgentRecord,
@@ -1570,6 +1585,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       listPanes: (paneOpts) => client.listPanes(paneOpts),
       listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
       notifyLifecycleEvent,
+    }, {
+      spawnPreflight:
+        opts?.spawnPreflight ??
+        (opts?.disableSpawnPreflight ? async () => {} : undefined),
     });
 
     const deliverAgentInput = async (args: {
@@ -1804,17 +1823,49 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         try {
-          const agents = engine.listPublicAgents({
-            state: args.state,
-            repo: args.repo,
-            model: args.model,
+          const merged = await registry.listMerged(discovery, {
+            filter: {
+              state: args.state,
+              repo: args.repo,
+              model: args.model,
+            },
           });
+          const agents = merged.map(toPublicAgent);
           const data = {
             agents: agents as unknown as Record<string, unknown>[],
             count: agents.length,
           };
           const formatted = formatListAgents(agents, agents.length);
           return okFormatted(formatted, data);
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    server.tool(
+      "resync_agents",
+      "Force-refresh the agent registry by scanning all surfaces. Evicts ghosts, registers discovered agents, and returns a diff.",
+      {},
+      ANNOTATIONS.mutating,
+      async () => {
+        try {
+          const beforeIds = new Set(registry.list().map((agent) => agent.agent_id));
+          discovery.invalidate();
+          const after = await registry.listMerged(discovery, { force: true });
+          const afterIds = new Set(after.map((agent) => agent.agent_id));
+          const diff = {
+            added: [...afterIds].filter((id) => !beforeIds.has(id)),
+            evicted: [...beforeIds].filter((id) => !afterIds.has(id)),
+            mismatches: after
+              .filter((agent) => agent.parsed_cli_mismatch)
+              .map((agent) => agent.agent_id),
+          };
+
+          return okFormatted(formatResync(diff), {
+            diff,
+            count: after.length,
+          });
         } catch (e) {
           return err(e);
         }
@@ -2216,16 +2267,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         try {
-          let agents: AgentRecord[];
-          if (args.parent_agent_id) {
-            // Look up children directly — parent record may be gone
-            // but children still reference it via parent_agent_id
-            agents = engine.getRegistry().getChildren(args.parent_agent_id);
-          } else {
-            agents = engine
-              .listAgents()
-              .filter((a) => a.parent_agent_id === null);
-          }
+          const merged = await registry.listMerged(discovery);
+          const agents = args.parent_agent_id
+            ? merged.filter((agent) => agent.parent_agent_id === args.parent_agent_id)
+            : merged.filter((agent) => agent.parent_agent_id === null);
 
           const SCREEN_TIMEOUT = 3000;
           const enriched = await Promise.all(

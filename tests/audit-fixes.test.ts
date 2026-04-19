@@ -16,6 +16,15 @@ import { CmuxSocketError } from "../src/cmux-socket-client.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-audit-fixes-test");
 
+function createAuditServer(exec: ExecFn, client?: Record<string, unknown>) {
+  return createServer({
+    exec,
+    client: client as any,
+    stateDir: TEST_DIR,
+    disableSpawnPreflight: true,
+  });
+}
+
 // ── 1. CRITICAL: read_agent_output uses .text ──────────────────────────
 
 describe("read_agent_output uses CmuxReadScreenResult.text", () => {
@@ -53,11 +62,7 @@ describe("read_agent_output uses CmuxReadScreenResult.text", () => {
       stderr: "",
     });
 
-    const server = createServer({
-      exec: mockExec,
-      client: mockClient as any,
-      stateDir: TEST_DIR,
-    });
+    const server = createAuditServer(mockExec, mockClient);
     const tool = (server as any)._registeredTools["read_agent_output"];
     expect(tool).toBeDefined();
 
@@ -95,11 +100,7 @@ describe("read_agent_output uses CmuxReadScreenResult.text", () => {
       stderr: "",
     });
 
-    const server = createServer({
-      exec: mockExec,
-      client: mockClient as any,
-      stateDir: TEST_DIR,
-    });
+    const server = createAuditServer(mockExec, mockClient);
     const tool = (server as any)._registeredTools["read_agent_output"];
 
     const result = await tool.handler(
@@ -300,10 +301,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
   });
 
   it("accepts parent_agent_id in spawn_agent", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createAuditServer(mockExec);
 
     // First spawn a parent
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -333,10 +331,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
   });
 
   it("accepts max_cost_per_agent in spawn_agent", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createAuditServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
@@ -355,10 +350,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
   });
 
   it("rejects invalid parent_agent_id", async () => {
-    const server = createServer({
-      exec: mockExec,
-      stateDir: TEST_DIR,
-    });
+    const server = createAuditServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
