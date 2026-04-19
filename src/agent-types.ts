@@ -48,6 +48,11 @@ export interface AgentRecord {
   user_killed?: boolean;
 }
 
+export interface MergedAgent extends AgentRecord {
+  discovered: boolean;
+  parsed_cli_mismatch: boolean;
+}
+
 export interface PublicAgent {
   agent_id: string;
   repo: string;

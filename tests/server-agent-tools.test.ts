@@ -13,6 +13,7 @@ const TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 
 const AGENT_TOOLS = [
   "spawn_agent",
+  "resync_agents",
   "send_to",
   "wait_for",
   "wait_for_all",
@@ -24,12 +25,93 @@ const AGENT_TOOLS = [
   "my_agents",
 ] as const;
 
-describe("agent lifecycle tool registration", () => {
-  it("registers all 10 agent lifecycle tools when lifecycle is enabled", () => {
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
+function makeLifecycleExec(): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:new"],
+              selected_surface_ref: "surface:new",
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [
+            {
+              ref: "surface:new",
+              title: "agent-pane",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:new",
+          text: "$ ",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({
+        workspace: "ws:1",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      }),
       stderr: "",
-    });
+    };
+  });
+}
+
+describe("agent lifecycle tool registration", () => {
+  it("registers all 11 agent lifecycle tools when lifecycle is enabled", () => {
+    const mockExec = makeLifecycleExec();
     const server = createServer({
       exec: mockExec,
       stateDir: TEST_DIR,
@@ -59,17 +141,14 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 26 (14 low-level + 10 agent lifecycle + 2 v2)", () => {
-    const mockExec: ExecFn = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({ workspaces: [] }),
-      stderr: "",
-    });
+  it("total tool count is 27 (14 low-level + 11 agent lifecycle + 2 v2)", () => {
+    const mockExec = makeLifecycleExec();
     const server = createServer({
       exec: mockExec,
       stateDir: TEST_DIR,
     });
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(26);
+    expect(Object.keys(registeredTools)).toHaveLength(27);
   });
 });
 
@@ -79,16 +158,7 @@ describe("agent lifecycle tool handlers", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "ws:1",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = makeLifecycleExec();
   });
 
   afterEach(() => {

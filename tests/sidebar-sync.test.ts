@@ -91,7 +91,9 @@ describe("Sidebar Sync", () => {
     liveSurfaces = [];
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
-    engine = new AgentEngine(stateMgr, registry, mockClient);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+    });
   });
 
   afterEach(() => {
