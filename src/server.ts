@@ -332,6 +332,8 @@ export interface CreateServerOptions {
   enableClaudeChannels?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
+  disableSpawnPreflight?: boolean;
 }
 
 function formatLifecycleChannelContent(
@@ -1585,7 +1587,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       notifyLifecycleEvent,
     }, {
       spawnPreflight:
-        opts?.spawnPreflight ?? (opts?.exec ? async () => {} : undefined),
+        opts?.spawnPreflight ??
+        (opts?.disableSpawnPreflight ? async () => {} : undefined),
     });
 
     const deliverAgentInput = async (args: {

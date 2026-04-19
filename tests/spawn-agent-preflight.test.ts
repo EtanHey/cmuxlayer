@@ -70,7 +70,13 @@ describe("spawn_agent launcher preflight", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     const registry = new AgentRegistry(stateMgr, async () => []);
-    engine = new AgentEngine(stateMgr, registry, mockClient);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {
+        throw new Error(
+          'Launcher "skill-creatorClaude" not found in PATH. Expected repoGolem launcher.',
+        );
+      },
+    });
   });
 
   afterEach(() => {

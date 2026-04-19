@@ -105,7 +105,11 @@ export class AgentDiscovery {
             has_agent: cli !== "unknown",
             read_error: false,
           };
-        } catch {
+        } catch (error) {
+          console.warn(
+            `[AgentDiscovery] Failed to scan surface ${surface.ref} (${surface.title})`,
+            error,
+          );
           return {
             surface_id: surface.ref,
             surface_title: surface.title,
