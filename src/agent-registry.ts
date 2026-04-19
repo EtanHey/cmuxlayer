@@ -144,30 +144,29 @@ export class AgentRegistry {
       const isAutoRecord = record.agent_id.startsWith("auto-");
       seenSurfaces.add(record.surface_id);
 
-      if (isAutoRecord && discoveredEntry && !discoveredEntry.has_agent) {
+      if (
+        isAutoRecord &&
+        discoveredEntry &&
+        !discoveredEntry.read_error &&
+        !discoveredEntry.has_agent
+      ) {
         this.agents.delete(record.agent_id);
         this.stateMgr.removeState(record.agent_id);
         continue;
       }
 
-      const repo =
-        isAutoRecord && discoveredEntry
-          ? inferRepoFromTitle(discoveredEntry.surface_title) || record.repo
-          : record.repo;
-      const model =
-        isAutoRecord && discoveredEntry?.model
-          ? discoveredEntry.model
-          : record.model;
-      const state =
-        isAutoRecord && discoveredEntry
-          ? discoveredStatusToAgentState(discoveredEntry.parsed_status)
-          : record.state;
+      let liveRecord = record;
+      if (
+        isAutoRecord &&
+        discoveredEntry &&
+        discoveredEntry.has_agent &&
+        !discoveredEntry.read_error
+      ) {
+        liveRecord = this.syncAutoRecord(record, discoveredEntry);
+      }
 
       merged.push({
-        ...record,
-        repo,
-        model,
-        state,
+        ...liveRecord,
         discovered: isAutoRecord,
         parsed_cli_mismatch:
           !isAutoRecord &&
@@ -178,7 +177,11 @@ export class AgentRegistry {
     }
 
     for (const discoveredEntry of discovered) {
-      if (!discoveredEntry.has_agent || discoveredEntry.cli === "unknown") {
+      if (
+        !discoveredEntry.has_agent ||
+        discoveredEntry.cli === "unknown" ||
+        discoveredEntry.read_error
+      ) {
         continue;
       }
       if (seenSurfaces.has(discoveredEntry.surface_id)) {
@@ -191,42 +194,10 @@ export class AgentRegistry {
       );
       let record = this.stateMgr.ensureAutoRecord(agentId, discoveredEntry);
       this.agents.set(agentId, record);
-
-      const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
-      const model = discoveredEntry.model ?? record.model;
-      const desiredState = discoveredStatusToAgentState(
-        discoveredEntry.parsed_status,
-      );
-
-      const patch: Partial<AgentRecord> = {};
-      if (repo !== record.repo) patch.repo = repo;
-      if (model !== record.model) patch.model = model;
-      if (record.error !== null && desiredState !== "error") patch.error = null;
-
-      if (Object.keys(patch).length > 0) {
-        record = this.stateMgr.updateRecord(agentId, patch);
-        this.agents.set(agentId, record);
-      }
-
-      if (record.state !== desiredState) {
-        try {
-          record = this.stateMgr.transition(agentId, desiredState, {
-            error:
-              desiredState === "error"
-                ? "Auto-discovered agent reported a frozen state"
-                : null,
-          });
-          this.agents.set(agentId, record);
-        } catch {
-          // Best-effort only — invalid synthetic transitions can stay in-memory.
-        }
-      }
+      record = this.syncAutoRecord(record, discoveredEntry);
 
       merged.push({
         ...record,
-        repo,
-        model,
-        state: desiredState,
         discovered: true,
         parsed_cli_mismatch: false,
       });
@@ -248,6 +219,47 @@ export class AgentRegistry {
       : merged;
 
     return filtered;
+  }
+
+  private syncAutoRecord(
+    record: AgentRecord,
+    discoveredEntry: DiscoveredAgent,
+  ): AgentRecord {
+    const agentId = record.agent_id;
+    const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
+    const model = discoveredEntry.model ?? record.model;
+    const desiredState = discoveredStatusToAgentState(
+      discoveredEntry.parsed_status,
+    );
+
+    const patch: Partial<AgentRecord> = {};
+    if (repo !== record.repo) patch.repo = repo;
+    if (model !== record.model) patch.model = model;
+    if (record.error !== null && desiredState !== "error") patch.error = null;
+    if (record.error === null && desiredState === "error") {
+      patch.error = "Auto-discovered agent reported a frozen state";
+    }
+
+    if (Object.keys(patch).length > 0) {
+      record = this.stateMgr.updateRecord(agentId, patch);
+      this.agents.set(agentId, record);
+    }
+
+    if (record.state !== desiredState) {
+      try {
+        record = this.stateMgr.transition(agentId, desiredState, {
+          error:
+            desiredState === "error"
+              ? "Auto-discovered agent reported a frozen state"
+              : null,
+        });
+        this.agents.set(agentId, record);
+      } catch {
+        // Best-effort only — invalid synthetic transitions can keep the prior state.
+      }
+    }
+
+    return record;
   }
 
   /**
@@ -282,7 +294,11 @@ export class AgentRegistry {
       }
 
       const discoveredEntry = bySurface.get(agent.surface_id);
-      if (!discoveredEntry || discoveredEntry.has_agent) {
+      if (
+        !discoveredEntry ||
+        discoveredEntry.read_error ||
+        discoveredEntry.has_agent
+      ) {
         continue;
       }
 

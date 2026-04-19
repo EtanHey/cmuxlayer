@@ -114,6 +114,47 @@ function makeDiscoveryExec(): ExecFn {
   });
 }
 
+function makeIdleDiscoveryExec(): ExecFn {
+  const base = makeDiscoveryExec();
+  return vi.fn().mockImplementation(async (cmd, args) => {
+    if (args.includes("read-screen")) {
+      const surface = args[args.indexOf("--surface") + 1];
+      if (surface === "surface:1") {
+        return {
+          stdout: JSON.stringify({
+            surface,
+            text: `
+✻ Working…
+  Reading src/server.ts
+
+No idle agents to reassign right now. Everything is either done or Codex is handling the last task.
+
+Token usage: total=356,835
+🤖 Sonnet 4.6
+CLAUDE_COUNTER: 92
+`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+    }
+
+    return base(cmd, args);
+  });
+}
+
+function makeReadErrorExec(): ExecFn {
+  const base = makeDiscoveryExec();
+  return vi.fn().mockImplementation(async (cmd, args) => {
+    if (args.includes("read-screen")) {
+      throw new Error("cmux read failed");
+    }
+    return base(cmd, args);
+  });
+}
+
 function makeShellPromptExec(): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
@@ -262,6 +303,100 @@ describe("resync_agents tool", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.added).toHaveLength(1);
     expect(parsed.count).toBe(1);
+  });
+
+  it("list_agents persists live state updates for existing auto-discovered agents", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState({
+      agent_id: "auto-claude-surface-1",
+      surface_id: "surface:1",
+      workspace_id: null,
+      state: "working",
+      repo: "brainlayer",
+      model: "Sonnet 4.6",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "(auto-discovered)",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-19T20:00:00.000Z",
+      updated_at: "2026-04-19T20:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const server = createServer({
+      exec: makeIdleDiscoveryExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const listResult = await (server as any)._registeredTools["list_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(listResult);
+
+    expect(parsed.count).toBe(1);
+    expect(parsed.agents[0].state).toBe("idle");
+    expect(stateMgr.readState("auto-claude-surface-1")?.state).toBe("idle");
+  });
+
+  it("resync_agents keeps existing auto agents when discovery hits read-screen errors", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState({
+      agent_id: "auto-claude-surface-1",
+      surface_id: "surface:1",
+      workspace_id: null,
+      state: "working",
+      repo: "brainlayer",
+      model: "Sonnet 4.6",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "(auto-discovered)",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-19T20:00:00.000Z",
+      updated_at: "2026-04-19T20:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const server = createServer({
+      exec: makeReadErrorExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const resyncResult = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(resyncResult);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain("auto-claude-surface-1");
+    expect(stateMgr.readState("auto-claude-surface-1")?.state).toBe("working");
+
+    const listResult = await (server as any)._registeredTools["list_agents"].handler(
+      {},
+      {} as any,
+    );
+    const listed = parseResult(listResult);
+    expect(listed.count).toBe(1);
+    expect(listed.agents[0].agent_id).toBe("auto-claude-surface-1");
   });
 
   it("resync_agents evicts ghost booting agents whose surface no longer exists", async () => {

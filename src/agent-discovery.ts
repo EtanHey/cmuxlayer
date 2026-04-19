@@ -15,6 +15,7 @@ export interface DiscoveredAgent {
   token_count: number | null;
   context_pct: number | null;
   has_agent: boolean;
+  read_error: boolean;
 }
 
 export interface DiscoveryDeps {
@@ -102,6 +103,7 @@ export class AgentDiscovery {
             token_count: parsed.token_count,
             context_pct: parsed.context_pct,
             has_agent: cli !== "unknown",
+            read_error: false,
           };
         } catch {
           return {
@@ -113,6 +115,7 @@ export class AgentDiscovery {
             token_count: null,
             context_pct: null,
             has_agent: false,
+            read_error: true,
           };
         }
       }),
