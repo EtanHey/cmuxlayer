@@ -1296,6 +1296,118 @@ describe("tool handler integration", () => {
     expect(parsed.key).toBe("ctrl-c");
   });
 
+  it("send_key auto-focuses an unfocused workspace and restores the original selection", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+          {
+            ref: "workspace:2",
+            title: "Workers",
+            index: 1,
+            selected: false,
+            pinned: false,
+          },
+        ],
+      }),
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:2" },
+      }),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_key"];
+
+    const result = await tool.handler(
+      { surface: "surface:2", key: "ctrl-c" },
+      {} as any,
+    );
+
+    expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+      1,
+      "workspace:2",
+    );
+    expect(mockClient.sendKey).toHaveBeenCalledWith("surface:2", "ctrl-c", {
+      workspace: undefined,
+    });
+    expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+      2,
+      "workspace:1",
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace_was_unfocused).toBe(true);
+  });
+
+  it("send_input reports when it temporarily focuses an unfocused workspace", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+          {
+            ref: "workspace:2",
+            title: "Workers",
+            index: 1,
+            selected: false,
+            pinned: false,
+          },
+        ],
+      }),
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:2" },
+      }),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:2", text: "echo hi" },
+      {} as any,
+    );
+
+    expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+      1,
+      "workspace:2",
+    );
+    expect(mockClient.send).toHaveBeenCalledWith("surface:2", "echo hi", {
+      workspace: undefined,
+    });
+    expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+      2,
+      "workspace:1",
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace_was_unfocused).toBe(true);
+  });
+
   it("send_input retries a transient socket failure before succeeding", async () => {
     vi.useFakeTimers();
     let sendAttempts = 0;
