@@ -306,14 +306,18 @@ export class AgentRegistry {
   }
 
   private evictMissingStateAgent(agentId: string, error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("Agent not found")) {
+    if (!this.isMissingStateAgentError(agentId, error)) {
       return false;
     }
 
     this.agents.delete(agentId);
     this.stateMgr.removeState(agentId);
     return true;
+  }
+
+  private isMissingStateAgentError(agentId: string, error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes(`Agent not found: ${agentId}`);
   }
 
   private async evictBootingGhosts(
