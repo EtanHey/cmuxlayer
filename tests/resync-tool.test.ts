@@ -480,4 +480,48 @@ describe("resync_agents tool", () => {
     expect(parsed.diff.evicted).toContain("booting-ghost");
     expect(parsed.count).toBe(0);
   });
+
+  it("resync_agents evicts registry-only phantom agents instead of failing", async () => {
+    const server = createServer({
+      exec: makeDiscoveryExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    registry.set("gpt-5.4-mcplayer-1776645230-hmep", {
+      agent_id: "gpt-5.4-mcplayer-1776645230-hmep",
+      surface_id: "surface:phantom",
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "mcplayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "phantom",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-21T00:00:00.000Z",
+      updated_at: "2026-04-21T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).toContain("gpt-5.4-mcplayer-1776645230-hmep");
+    expect(parsed.count).toBe(1);
+  });
 });
