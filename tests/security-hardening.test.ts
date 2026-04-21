@@ -42,11 +42,13 @@ describe("B1: ToolAnnotations on all tools", () => {
   const DESTRUCTIVE_TOOLS = ["kill", "close_surface", "stop_agent"];
 
   const MUTATING_TOOLS = [
+    "select_workspace",
     "new_split",
     "new_surface",
     "move_surface",
     "reorder_surface",
     "send_input",
+    "send_command",
     "send_key",
     "rename_tab",
     "notify",
@@ -77,9 +79,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 27 tools have annotations", () => {
+  it("all 29 tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(27);
+    expect(toolNames.length).toBe(29);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

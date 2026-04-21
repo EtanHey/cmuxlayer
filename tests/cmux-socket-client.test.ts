@@ -34,6 +34,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
       },
     ],
   },
+  "workspace.select": {},
   "surface.list": {
     workspace_ref: "workspace:1",
     window_ref: "window:1",
@@ -232,6 +233,16 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result.workspaces[0]).toHaveProperty("selected");
   });
 
+  it("selectWorkspace sends a workspace.select request", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.selectWorkspace("workspace:1");
+
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("workspace.select");
+    expect(lastV2Request!.params).toEqual({ workspace_id: "workspace:1" });
+  });
+
   it("send delivers text to a surface", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     // Should not throw
@@ -248,6 +259,23 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
       }),
     ).rejects.toThrow(/does not support chunk_size/i);
   });
+
+  it.each(["C-c", "ctrl-c", "^c", "Ctrl+C", "Ctrl-C"])(
+    "normalizes %s to ctrl-c before sending",
+    async (key) => {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.sendKey("surface:1", key, { workspace: "workspace:1" });
+
+      expect(lastV2Request).not.toBeNull();
+      expect(lastV2Request!.method).toBe("surface.send_key");
+      expect(lastV2Request!.params).toEqual({
+        surface_id: "surface:1",
+        key: "ctrl-c",
+        workspace_id: "workspace:1",
+      });
+    },
+  );
 
   it("readScreen returns screen content", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });

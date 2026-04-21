@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 14 core tools + 12 agent lifecycle tools.
+ * cmux MCP server — registers 16 core tools + 13 agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,6 +33,7 @@ import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { chooseSurfaceClosePolicy } from "./layout-policy.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
+import { normalizeKeyName } from "./key-names.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -835,6 +836,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    "select_workspace",
+    "Focus a workspace tab so subsequent terminal input is delivered to the intended workspace.",
+    {
+      workspace: z.string().describe("Target workspace ref"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        await client.selectWorkspace(args.workspace);
+        const data = { workspace: args.workspace };
+        return okFormatted(formatOk("select_workspace", data), data);
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
   // 2. new_split
   server.tool(
     "new_split",
@@ -1017,7 +1036,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Set background=true to return immediately with a delivery_id while chunking continues in the background. When sending commands to another Claude session, press_enter can be unreliable — for critical inputs, use send_input without press_enter, then call send_key with key 'return' separately.",
+    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
@@ -1105,22 +1124,65 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 7. send_key
+  // 7. send_command
   server.tool(
-    "send_key",
-    "Send a key press to a terminal surface. Use this after send_input to reliably submit commands — especially when targeting interactive programs like Claude sessions.",
+    "send_command",
+    "Atomically send a command and press return on the same surface. Prefer this over separate send_input + send_key calls when launching or resuming agents.",
     {
       surface: z.string().describe("Target surface ref"),
-      key: z.string().describe("Key name (e.g. 'return', 'escape', 'tab')"),
+      command: z.string().describe("Command text to send before pressing return"),
       workspace: z.string().optional().describe("Target workspace ref"),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const sanitizedCommand = sanitizeTerminalInput(args.command);
+        const chunks =
+          sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
+            ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
+            : [sanitizedCommand];
+
         await withSurfaceWrite(args.surface, async () => {
-          await sendKeyWithRetry(args.surface, args.key, args.workspace);
+          await deliverInputChunks({
+            surface: args.surface,
+            workspace: args.workspace,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: true,
+          });
         });
-        const data = { surface: args.surface, key: args.key };
+
+        const data = { surface: args.surface, command: sanitizedCommand };
+        return okFormatted(formatOk("send_command", data), data);
+      } catch (e) {
+        if (e instanceof DeliveryError) {
+          return err(e, { failed_chunk: e.failed_chunk ?? null });
+        }
+        return err(e);
+      }
+    },
+  );
+
+  // 8. send_key
+  server.tool(
+    "send_key",
+    "Send a key press to a terminal surface. Accepted Ctrl+C aliases are normalized automatically: ctrl-c, C-c, ^c, Ctrl+C, Ctrl-C.",
+    {
+      surface: z.string().describe("Target surface ref"),
+      key: z
+        .string()
+        .describe("Key name (e.g. 'return', 'escape', 'tab', 'ctrl-c')"),
+      workspace: z.string().optional().describe("Target workspace ref"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const key = normalizeKeyName(args.key);
+        await withSurfaceWrite(args.surface, async () => {
+          await sendKeyWithRetry(args.surface, key, args.workspace);
+        });
+        const data = { surface: args.surface, key };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -1128,7 +1190,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 8. read_screen
+  // 9. read_screen
   server.tool(
     "read_screen",
     "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content).",
