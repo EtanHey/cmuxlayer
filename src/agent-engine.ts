@@ -64,6 +64,9 @@ const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+const STOP_AGENT_RETRY_ATTEMPTS = 3;
+const STOP_AGENT_RETRY_DELAY_MS = 75;
+const SHELL_PROMPT_RE = /(^|\n)\s*(?:❯|>>>|\$|%|>)\s*$/m;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -189,6 +192,23 @@ function sanitizeRepoName(repo: string): string {
     );
   }
   return safeRepo;
+}
+
+function stopKeysForCli(cli: CliType): string[] {
+  switch (cli) {
+    case "claude":
+      // Claude permission prompts can absorb the first interrupt, so bias for
+      // a short burst instead of a single best-effort Ctrl+C.
+      return ["c-c", "c-c", "c-c", "c-c", "c-c"];
+    case "codex":
+      return ["escape", "c-c"];
+    default:
+      return ["c-c"];
+  }
+}
+
+function screenShowsShellPrompt(text: string): boolean {
+  return SHELL_PROMPT_RE.test(text);
 }
 
 export function buildLaunchCommand(cli: CliType, repo: string): string {
@@ -954,8 +974,34 @@ export class AgentEngine {
         // Process may already be dead — that's fine
       }
     } else {
-      // Graceful: send Ctrl+C
-      await this.client.sendKey(agent.surface_id, "c-c", {});
+      let stopped = false;
+
+      for (let attempt = 0; attempt < STOP_AGENT_RETRY_ATTEMPTS; attempt++) {
+        for (const key of stopKeysForCli(agent.cli)) {
+          await this.client.sendKey(agent.surface_id, key, {});
+        }
+
+        const screen = await this.client.readScreen(agent.surface_id, {
+          lines: 40,
+          scrollback: true,
+        });
+        if (screenShowsShellPrompt(screen.text)) {
+          stopped = true;
+          break;
+        }
+
+        if (attempt < STOP_AGENT_RETRY_ATTEMPTS - 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, STOP_AGENT_RETRY_DELAY_MS),
+          );
+        }
+      }
+
+      if (!stopped) {
+        throw new Error(
+          `Agent "${agentId}" is still running after graceful stop attempts`,
+        );
+      }
     }
 
     const current = this.registry.get(agentId) ?? agent;

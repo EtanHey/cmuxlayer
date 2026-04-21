@@ -789,12 +789,14 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
   });
 
   describe("stopAgent", () => {
-    it("sends Ctrl+C for graceful stop", async () => {
+    it("sends repeated Ctrl+C for graceful Claude stops", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-stop",
           state: "working",
           surface_id: "surface:42",
+          cli: "claude",
+          model: "sonnet",
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];
@@ -802,10 +804,39 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
 
       await engine.stopAgent("agent-stop");
 
-      expect(mockClient.sendKey).toHaveBeenCalledWith(
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(5);
+      for (const call of (mockClient.sendKey as ReturnType<typeof vi.fn>).mock
+        .calls) {
+        expect(call).toEqual(["surface:42", "c-c", {}]);
+      }
+    });
+
+    it("sends escape then Ctrl+C for graceful Codex stops", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-codex-stop",
+          state: "working",
+          surface_id: "surface:42",
+          cli: "codex",
+          model: "gpt-5.4",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.stopAgent("agent-codex-stop");
+
+      expect(mockClient.sendKey).toHaveBeenNthCalledWith(
+        1,
+        "surface:42",
+        "escape",
+        {},
+      );
+      expect(mockClient.sendKey).toHaveBeenNthCalledWith(
+        2,
         "surface:42",
         "c-c",
-        expect.anything(),
+        {},
       );
     });
 
@@ -881,6 +912,34 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
 
       await expect(engine.stopAgent("agent-busy")).rejects.toThrow("tty busy");
       expect(engine.getAgentState("agent-busy")).toMatchObject({
+        state: "working",
+        user_killed: false,
+      });
+    });
+
+    it("does not mark user_killed when the agent is still running after graceful retries", async () => {
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "Claude Code\n⏺ Working",
+        lines: 20,
+        scrollback_used: false,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stuck",
+          state: "working",
+          surface_id: "surface:42",
+          cli: "claude",
+          model: "sonnet",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.stopAgent("agent-stuck")).rejects.toThrow(
+        /still running/i,
+      );
+      expect(engine.getAgentState("agent-stuck")).toMatchObject({
         state: "working",
         user_killed: false,
       });

@@ -184,12 +184,19 @@ describe("Quality Tracking (sweep)", () => {
     await engine.getRegistry().reconstitute();
 
     // Mock readScreen: 170K tokens on Haiku (200K window) = 85% used
-    (mockClient.readScreen as any).mockResolvedValue({
-      surface: "s:2",
-      text: "✻ Working…\nToken usage: total=170,000\n🤖 Haiku 3.5 | 💰 $0.10",
-      lines: 5,
-      scrollback_used: false,
-    });
+    (mockClient.readScreen as any)
+      .mockResolvedValueOnce({
+        surface: "s:2",
+        text: "✻ Working…\nToken usage: total=170,000\n🤖 Haiku 3.5 | 💰 $0.10",
+        lines: 5,
+        scrollback_used: false,
+      })
+      .mockResolvedValue({
+        surface: "s:2",
+        text: "$ ",
+        lines: 5,
+        scrollback_used: false,
+      });
 
     await engine.runSweep();
 
@@ -280,12 +287,19 @@ describe("Quality Tracking (sweep)", () => {
     await engine.getRegistry().reconstitute();
 
     // 180K tokens on Haiku (200K window) = 90% used — above threshold
-    (mockClient.readScreen as any).mockResolvedValue({
-      surface: "s:2",
-      text: "✻ Working…\nToken usage: total=180,000\n🤖 Haiku 3.5 | 💰 $0.15",
-      lines: 5,
-      scrollback_used: false,
-    });
+    (mockClient.readScreen as any)
+      .mockResolvedValueOnce({
+        surface: "s:2",
+        text: "✻ Working…\nToken usage: total=180,000\n🤖 Haiku 3.5 | 💰 $0.15",
+        lines: 5,
+        scrollback_used: false,
+      })
+      .mockResolvedValue({
+        surface: "s:2",
+        text: "$ ",
+        lines: 5,
+        scrollback_used: false,
+      });
 
     await engine.runSweep();
 

@@ -89,6 +89,9 @@ interface DeliveryRecord {
   delivery_id: string;
   surface: string;
   workspace?: string;
+  workspace_was_unfocused?: boolean;
+  focus_workspace?: string;
+  restore_workspace?: string;
   status: DeliveryStatus;
   total_chunks: number;
   sent_chunks: number;
@@ -482,6 +485,110 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  // Some terminals drop synthetic input in background workspaces. When we know
+  // the target surface lives outside the selected workspace, temporarily focus
+  // it for the write and then restore the user's original selection.
+  const planSurfaceWorkspaceFocus = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<{
+    workspaceWasUnfocused: boolean;
+    focusWorkspace?: string;
+    restoreWorkspace?: string;
+  }> => {
+    try {
+      const identified = workspace ? null : await client.identify(surface);
+      const focusWorkspace =
+        workspace ??
+        identified?.caller?.workspace_ref ??
+        identified?.focused?.workspace_ref;
+      if (!focusWorkspace) {
+        return { workspaceWasUnfocused: false };
+      }
+
+      const originalWorkspace = (await client.listWorkspaces()).workspaces.find(
+        (entry) => entry.selected,
+      )?.ref;
+      if (!originalWorkspace || originalWorkspace === focusWorkspace) {
+        return {
+          workspaceWasUnfocused: false,
+          focusWorkspace,
+          restoreWorkspace: originalWorkspace,
+        };
+      }
+
+      return {
+        workspaceWasUnfocused: true,
+        focusWorkspace,
+        restoreWorkspace: originalWorkspace,
+      };
+    } catch {
+      return { workspaceWasUnfocused: false };
+    }
+  };
+
+  const withSurfaceWorkspaceFocus = async <T>(
+    plan: {
+      workspaceWasUnfocused: boolean;
+      focusWorkspace?: string;
+      restoreWorkspace?: string;
+    },
+    fn: () => Promise<T>,
+  ): Promise<{ result: T; workspaceWasUnfocused: boolean }> => {
+    let writeError: unknown = null;
+
+    if (plan.workspaceWasUnfocused && plan.focusWorkspace) {
+      await client.selectWorkspace(plan.focusWorkspace);
+    }
+
+    try {
+      const result = await fn();
+      return {
+        result,
+        workspaceWasUnfocused: plan.workspaceWasUnfocused,
+      };
+    } catch (error) {
+      writeError = error;
+      throw error;
+    } finally {
+      if (plan.workspaceWasUnfocused && plan.restoreWorkspace) {
+        try {
+          await client.selectWorkspace(plan.restoreWorkspace);
+        } catch (restoreError) {
+          if (writeError === null) {
+            throw restoreError;
+          }
+        }
+      }
+    }
+  };
+
+  const performManagedSurfaceWrite = async <T>(
+    surface: string,
+    workspace: string | undefined,
+    fn: () => Promise<T>,
+    owner = `surface-write:${randomUUID()}`,
+  ): Promise<{ result: T; workspaceWasUnfocused: boolean }> =>
+    withSurfaceWrite(
+      surface,
+      async () =>
+        withSurfaceWorkspaceFocus(
+          await planSurfaceWorkspaceFocus(surface, workspace),
+          fn,
+        ),
+      owner,
+    );
+
+  const writeToSurface = async <T>(
+    surface: string,
+    workspace: string | undefined,
+    fn: () => Promise<T>,
+    owner = `surface-write:${randomUUID()}`,
+  ): Promise<T> =>
+    (
+      await performManagedSurfaceWrite(surface, workspace, fn, owner)
+    ).result;
+
   const pruneCompletedDeliveryHistory = (surface: string) => {
     const latestDeliveryId = latestDeliveryBySurface.get(surface);
     for (const [deliveryId, record] of deliveries.entries()) {
@@ -642,18 +749,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const run = async () => {
       try {
-        await deliverInputChunks({
-          surface: record.surface,
-          workspace: record.workspace,
-          chunks: record.chunks,
-          chunk_size: record.chunk_size,
-          chunk_delay_ms: record.chunk_delay_ms,
-          press_enter: record.press_enter,
-          rename_to_task: record.rename_to_task,
-          onChunkDelivered: (sentChunks) => {
-            record.sent_chunks = sentChunks;
+        await withSurfaceWorkspaceFocus(
+          {
+            workspaceWasUnfocused: record.workspace_was_unfocused ?? false,
+            focusWorkspace: record.focus_workspace,
+            restoreWorkspace: record.restore_workspace,
           },
-        });
+          async () => {
+            await deliverInputChunks({
+              surface: record.surface,
+              workspace: record.workspace,
+              chunks: record.chunks,
+              chunk_size: record.chunk_size,
+              chunk_delay_ms: record.chunk_delay_ms,
+              press_enter: record.press_enter,
+              rename_to_task: record.rename_to_task,
+              onChunkDelivered: (sentChunks) => {
+                record.sent_chunks = sentChunks;
+              },
+            });
+          },
+        );
         finishDelivery(record, "delivered");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1075,12 +1191,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
             ? chunkTerminalInput(sanitizedText, args.chunk_size)
             : [sanitizedText];
+        const focusPlan = await planSurfaceWorkspaceFocus(
+          args.surface,
+          args.workspace,
+        );
 
         if (args.background) {
           const record: DeliveryRecord = {
             delivery_id: randomUUID(),
             surface: args.surface,
             workspace: args.workspace,
+            workspace_was_unfocused: focusPlan.workspaceWasUnfocused,
+            focus_workspace: focusPlan.focusWorkspace,
+            restore_workspace: focusPlan.restoreWorkspace,
             status: "delivering",
             total_chunks: chunks.length,
             sent_chunks: 0,
@@ -1097,11 +1220,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface: args.surface,
             delivery_id: record.delivery_id,
             status: record.status,
+            workspace_was_unfocused: focusPlan.workspaceWasUnfocused,
           };
           return okFormatted(formatOk("send_input", data), data);
         }
 
-        await withSurfaceWrite(args.surface, async () => {
+        const { workspaceWasUnfocused } = await performManagedSurfaceWrite(
+          args.surface,
+          args.workspace,
+          async () => {
           await deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -1111,9 +1238,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             press_enter: args.press_enter,
             rename_to_task: args.rename_to_task,
           });
-        });
+          },
+        );
 
-        const data = { surface: args.surface };
+        const data = {
+          surface: args.surface,
+          workspace_was_unfocused: workspaceWasUnfocused,
+        };
         return okFormatted(formatOk("send_input", data), data);
       } catch (e) {
         if (e instanceof DeliveryError) {
@@ -1142,7 +1273,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
             : [sanitizedCommand];
 
-        await withSurfaceWrite(args.surface, async () => {
+        const { workspaceWasUnfocused } = await performManagedSurfaceWrite(
+          args.surface,
+          args.workspace,
+          async () => {
           await deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -1151,9 +1285,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
           });
-        });
+          },
+        );
 
-        const data = { surface: args.surface, command: sanitizedCommand };
+        const data = {
+          surface: args.surface,
+          command: sanitizedCommand,
+          workspace_was_unfocused: workspaceWasUnfocused,
+        };
         return okFormatted(formatOk("send_command", data), data);
       } catch (e) {
         if (e instanceof DeliveryError) {
@@ -1179,10 +1318,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         const key = normalizeKeyName(args.key);
-        await withSurfaceWrite(args.surface, async () => {
-          await sendKeyWithRetry(args.surface, key, args.workspace);
-        });
-        const data = { surface: args.surface, key };
+        const { workspaceWasUnfocused } = await performManagedSurfaceWrite(
+          args.surface,
+          args.workspace,
+          async () => {
+            await sendKeyWithRetry(args.surface, key, args.workspace);
+          },
+        );
+        const data = {
+          surface: args.surface,
+          key,
+          workspace_was_unfocused: workspaceWasUnfocused,
+        };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -1637,9 +1784,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
       readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
       send: (surface, text, sendOpts) =>
-        withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
+        writeToSurface(surface, sendOpts?.workspace, () =>
+          client.send(surface, text, sendOpts),
+        ),
       sendKey: (surface, key, keyOpts) =>
-        withSurfaceWrite(surface, () => client.sendKey(surface, key, keyOpts)),
+        writeToSurface(surface, keyOpts?.workspace, () =>
+          client.sendKey(surface, key, keyOpts),
+        ),
       setProgress: (value, progressOpts) =>
         client.setProgress(value, progressOpts),
       newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),
@@ -2172,7 +2323,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
-              await withSurfaceWrite(agent.surface_id, () =>
+              await writeToSurface(agent.surface_id, undefined, () =>
                 client.sendKey(agent.surface_id, "c-c", {}),
               );
               const d = { agent_id: args.agent, action: "interrupt" };
