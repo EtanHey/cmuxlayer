@@ -240,6 +240,49 @@ describe("AgentRegistry", () => {
       expect(registry.list()).toHaveLength(1);
       expect(registry.get("new-agent")!.state).toBe("ready");
     });
+
+    it("does not evict auto agents for plain substring-matching errors", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-42",
+          surface_id: "surface:42",
+          repo: "stale-repo",
+          model: "old-model",
+          cli: "claude",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:42"),
+      ]);
+      await registry.reconstitute();
+
+      const removeStateSpy = vi.spyOn(stateMgr, "removeState");
+      vi.spyOn(stateMgr, "updateRecord").mockImplementation(() => {
+        throw new Error("Agent not found: auto-claude-surface-42");
+      });
+
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          {
+            surface_id: "surface:42",
+            surface_title: "brainlayerClaude",
+            cli: "claude",
+            parsed_status: "working",
+            model: "Sonnet 4.6",
+            token_count: null,
+            context_pct: null,
+            has_agent: true,
+            read_error: false,
+          },
+        ]),
+      };
+
+      await expect(registry.listMerged(discovery as any)).rejects.toThrow(
+        "Agent not found: auto-claude-surface-42",
+      );
+      expect(removeStateSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe("purgeTerminal", () => {
