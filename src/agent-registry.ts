@@ -326,7 +326,7 @@ export class AgentRegistry {
   }
 
   private evictMissingStateAgent(agentId: string): boolean {
-    if (!this.getMissingStateAgentError(agentId)) {
+    if (this.getMissingStateSentinel(agentId) === null) {
       return false;
     }
 
@@ -335,7 +335,7 @@ export class AgentRegistry {
     return true;
   }
 
-  private getMissingStateAgentError(agentId: string): AgentNotFoundError | null {
+  private getMissingStateSentinel(agentId: string): AgentNotFoundError | null {
     if (this.stateMgr.readState(agentId) !== null) {
       return null;
     }
