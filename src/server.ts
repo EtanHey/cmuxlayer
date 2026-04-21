@@ -485,6 +485,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  // Some terminals drop synthetic input in background workspaces. When we know
+  // the target surface lives outside the selected workspace, temporarily focus
+  // it for the write and then restore the user's original selection.
   const planSurfaceWorkspaceFocus = async (
     surface: string,
     workspace?: string,
@@ -494,10 +497,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     restoreWorkspace?: string;
   }> => {
     try {
+      const identified = workspace ? null : await client.identify(surface);
       const focusWorkspace =
         workspace ??
-        (await client.identify(surface)).caller?.workspace_ref ??
-        (await client.identify(surface)).focused?.workspace_ref;
+        identified?.caller?.workspace_ref ??
+        identified?.focused?.workspace_ref;
       if (!focusWorkspace) {
         return { workspaceWasUnfocused: false };
       }

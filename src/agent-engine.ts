@@ -197,6 +197,8 @@ function sanitizeRepoName(repo: string): string {
 function stopKeysForCli(cli: CliType): string[] {
   switch (cli) {
     case "claude":
+      // Claude permission prompts can absorb the first interrupt, so bias for
+      // a short burst instead of a single best-effort Ctrl+C.
       return ["c-c", "c-c", "c-c", "c-c", "c-c"];
     case "codex":
       return ["escape", "c-c"];
