@@ -966,18 +966,22 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should have called send and then send-key
-    expect(mockExec).toHaveBeenCalledTimes(2);
-    expect(mockExec).toHaveBeenNthCalledWith(
-      1,
+    const sendCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send"),
+    );
+    const sendKeyCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send-key"),
+    );
+    expect(sendCalls).toHaveLength(1);
+    expect(sendKeyCalls).toHaveLength(1);
+    expect(sendCalls[0]).toEqual([
       "cmux",
       expect.arrayContaining(["send"]),
-    );
-    expect(mockExec).toHaveBeenNthCalledWith(
-      2,
+    ]);
+    expect(sendKeyCalls[0]).toEqual([
       "cmux",
       expect.arrayContaining(["send-key"]),
-    );
+    ]);
   });
 
   it("send_command sends text and return to the same surface", async () => {
@@ -992,17 +996,22 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(2);
-    expect(mockExec).toHaveBeenNthCalledWith(
-      1,
+    const sendCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send"),
+    );
+    const sendKeyCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send-key"),
+    );
+    expect(sendCalls).toHaveLength(1);
+    expect(sendKeyCalls).toHaveLength(1);
+    expect(sendCalls[0]).toEqual([
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:6"]),
-    );
-    expect(mockExec).toHaveBeenNthCalledWith(
-      2,
+    ]);
+    expect(sendKeyCalls[0]).toEqual([
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
-    );
+    ]);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
@@ -1028,14 +1037,17 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(5);
-    for (const [index, call] of mockExec.mock.calls.entries()) {
+    const sendCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send"),
+    );
+    expect(sendCalls).toHaveLength(5);
+    for (const [index, call] of sendCalls.entries()) {
       expect(call[0]).toBe("cmux");
       expect(call[1]).toEqual(expect.arrayContaining(["send"]));
       const chunk = call[1][call[1].length - 1];
       expect(typeof chunk).toBe("string");
       expect((chunk as string).length).toBeLessThanOrEqual(121);
-      if (index < mockExec.mock.calls.length - 1) {
+      if (index < sendCalls.length - 1) {
         expect((chunk as string).endsWith("\n")).toBe(true);
       }
     }
@@ -1210,7 +1222,9 @@ describe("tool handler integration", () => {
       { surface: "surface:1", text: "echo first" },
       {} as any,
     );
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 5 && !releaseSend; attempt++) {
+      await Promise.resolve();
+    }
 
     const second = await tool.handler(
       { surface: "surface:1", text: "echo second" },

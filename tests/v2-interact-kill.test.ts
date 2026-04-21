@@ -36,6 +36,38 @@ function createV2Server(exec: ExecFn) {
   });
 }
 
+function makeV2Exec(): ExecFn {
+  return vi.fn().mockImplementation((_cmd, args: string[]) => {
+    if (args.includes("read-screen")) {
+      return Promise.resolve({
+        stdout: JSON.stringify({
+          surface: "surface:new",
+          text: "$ ",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      });
+    }
+    if (args.includes("list-workspaces")) {
+      return Promise.resolve({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+    }
+    return Promise.resolve({
+      stdout: JSON.stringify({
+        workspace: "ws:1",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      }),
+      stderr: "",
+    });
+  });
+}
+
 describe("V2 tool registration", () => {
   it("registers interact and kill tools", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
@@ -66,16 +98,7 @@ describe("interact — runtime validation", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "ws:1",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = makeV2Exec();
     server = createV2Server(mockExec);
   });
 
@@ -162,16 +185,7 @@ describe("interact — agent resolution", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "ws:1",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = makeV2Exec();
     server = createV2Server(mockExec);
   });
 
@@ -225,16 +239,7 @@ describe("kill — scoped targets", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "ws:1",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = makeV2Exec();
     server = createV2Server(mockExec);
   });
 
