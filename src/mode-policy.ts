@@ -10,7 +10,9 @@ const READ_ONLY_TOOLS = new Set(["list_surfaces", "read_screen"]);
 
 /** Tools that mutate state — blocked in manual mode */
 const MUTATING_TOOLS = new Set([
+  "select_workspace",
   "send_input",
+  "send_command",
   "send_key",
   "close_surface",
   "browser_surface",

@@ -146,11 +146,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 27 (14 low-level + 11 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 29 (16 low-level + 11 agent lifecycle + 2 v2)", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(27);
+    expect(Object.keys(registeredTools)).toHaveLength(29);
   });
 });
 

@@ -17,6 +17,7 @@ import type {
   CmuxSendOptions,
   CmuxStatusEntry,
 } from "./types.js";
+import { normalizeKeyName } from "./key-names.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -361,7 +362,12 @@ export class CmuxClient {
   ): Promise<void> {
     const args = ["send-key", "--surface", surface];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
-    args.push(key);
+    args.push(normalizeKeyName(key));
+    await this.run(args);
+  }
+
+  async selectWorkspace(workspace: string): Promise<void> {
+    const args = ["select-workspace", "--workspace", workspace];
     await this.run(args);
   }
 

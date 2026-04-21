@@ -23,6 +23,7 @@ import type {
   CmuxStatusEntry,
 } from "./types.js";
 import type { CmuxClient } from "./cmux-client.js";
+import { normalizeKeyName } from "./key-names.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
 
@@ -318,6 +319,17 @@ export class CmuxSocketClient {
     return this.call("workspace.list");
   }
 
+  async selectWorkspace(workspace: string): Promise<void> {
+    try {
+      await this.call("workspace.select", { workspace_id: workspace });
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallback.selectWorkspace(workspace);
+      }
+      throw e;
+    }
+  }
+
   async listPaneSurfaces(opts?: {
     workspace?: string;
     pane?: string;
@@ -476,7 +488,7 @@ export class CmuxSocketClient {
     const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
       surface_id: surface,
-      key,
+      key: normalizeKeyName(key),
       workspace_id: workspace,
     };
     await this.call("surface.send_key", params);
