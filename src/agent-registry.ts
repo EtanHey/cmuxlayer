@@ -32,6 +32,17 @@ export interface AgentFilter {
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const BOOTING_GHOST_TIMEOUT_MS = 30_000;
 
+class AgentNotFoundError extends Error {
+  readonly code = "AGENT_NOT_FOUND";
+  readonly agentId: string;
+
+  constructor(agentId: string) {
+    super(`Agent not found: ${agentId}`);
+    this.name = "AgentNotFoundError";
+    this.agentId = agentId;
+  }
+}
+
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
   private stateMgr: StateManager;
@@ -91,7 +102,7 @@ export class AgentRegistry {
           this.agents.set(id, updated);
           crashedIds.add(id);
         } catch (error) {
-          if (this.evictMissingStateAgent(id, error)) {
+          if (this.evictMissingStateAgent(id)) {
             crashedIds.add(id);
             continue;
           }
@@ -112,7 +123,7 @@ export class AgentRegistry {
             });
             this.agents.set(id, reparented);
           } catch (error) {
-            if (this.evictMissingStateAgent(id, error)) {
+            if (this.evictMissingStateAgent(id)) {
               continue;
             }
             throw error;
@@ -242,6 +253,15 @@ export class AgentRegistry {
     return filtered;
   }
 
+  /**
+   * Sync an auto-discovered record with the latest parsed surface state.
+   *
+   * Metadata patches go through updateRecord and are treated as hard errors:
+   * if they fail for anything other than a missing state file, callers should
+   * see the failure rather than silently continuing. Synthetic transitions are
+   * best-effort only because parser snapshots can temporarily lag behind the
+   * persisted state machine.
+   */
   private syncAutoRecord(
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
@@ -266,7 +286,7 @@ export class AgentRegistry {
         record = this.stateMgr.updateRecord(agentId, patch);
         this.agents.set(agentId, record);
       } catch (error) {
-        if (this.evictMissingStateAgent(agentId, error)) {
+        if (this.evictMissingStateAgent(agentId)) {
           return null;
         }
         throw error;
@@ -283,7 +303,7 @@ export class AgentRegistry {
         });
         this.agents.set(agentId, record);
       } catch (error) {
-        if (this.evictMissingStateAgent(agentId, error)) {
+        if (this.evictMissingStateAgent(agentId)) {
           return null;
         }
         // Best-effort only — invalid synthetic transitions can keep the prior state.
@@ -305,8 +325,8 @@ export class AgentRegistry {
     this.agents.delete(agentId);
   }
 
-  private evictMissingStateAgent(agentId: string, error: unknown): boolean {
-    if (!this.isMissingStateAgentError(agentId, error)) {
+  private evictMissingStateAgent(agentId: string): boolean {
+    if (!this.getMissingStateAgentError(agentId)) {
       return false;
     }
 
@@ -315,9 +335,12 @@ export class AgentRegistry {
     return true;
   }
 
-  private isMissingStateAgentError(agentId: string, error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return message === `Agent not found: ${agentId}`;
+  private getMissingStateAgentError(agentId: string): AgentNotFoundError | null {
+    if (this.stateMgr.readState(agentId) !== null) {
+      return null;
+    }
+
+    return new AgentNotFoundError(agentId);
   }
 
   private async evictBootingGhosts(
