@@ -317,7 +317,7 @@ export class AgentRegistry {
 
   private isMissingStateAgentError(agentId: string, error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
-    return message.includes(`Agent not found: ${agentId}`);
+    return message === `Agent not found: ${agentId}`;
   }
 
   private async evictBootingGhosts(
