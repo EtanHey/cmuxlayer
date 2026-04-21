@@ -1422,6 +1422,55 @@ describe("tool handler integration", () => {
     expect(parsed.workspace_was_unfocused).toBe(true);
   });
 
+  it("preserves the original write error when workspace restore also fails", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+          {
+            ref: "workspace:2",
+            title: "Workers",
+            index: 1,
+            selected: false,
+            pinned: false,
+          },
+        ],
+      }),
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:2" },
+      }),
+      selectWorkspace: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("restore failed")),
+      sendKey: vi.fn().mockRejectedValue(new Error("send failed")),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_key"];
+
+    const result = await tool.handler(
+      { surface: "surface:2", key: "ctrl-c" },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.error).toMatch(/send failed/i);
+    expect(parsed.error).not.toMatch(/restore failed/i);
+  });
+
   it("send_input retries a transient socket failure before succeeding", async () => {
     vi.useFakeTimers();
     let sendAttempts = 0;

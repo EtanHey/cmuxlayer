@@ -535,6 +535,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
     fn: () => Promise<T>,
   ): Promise<{ result: T; workspaceWasUnfocused: boolean }> => {
+    let writeError: unknown = null;
+
     if (plan.workspaceWasUnfocused && plan.focusWorkspace) {
       await client.selectWorkspace(plan.focusWorkspace);
     }
@@ -545,9 +547,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         result,
         workspaceWasUnfocused: plan.workspaceWasUnfocused,
       };
+    } catch (error) {
+      writeError = error;
+      throw error;
     } finally {
       if (plan.workspaceWasUnfocused && plan.restoreWorkspace) {
-        await client.selectWorkspace(plan.restoreWorkspace);
+        try {
+          await client.selectWorkspace(plan.restoreWorkspace);
+        } catch (restoreError) {
+          if (writeError === null) {
+            throw restoreError;
+          }
+        }
       }
     }
   };
