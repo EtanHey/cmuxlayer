@@ -84,11 +84,19 @@ export class AgentRegistry {
       if (TERMINAL_STATES.has(agent.state)) continue;
 
       if (!liveSurfaceRefs.has(agent.surface_id)) {
-        const updated = this.stateMgr.transition(id, "error", {
-          error: `Surface ${agent.surface_id} disappeared`,
-        });
-        this.agents.set(id, updated);
-        crashedIds.add(id);
+        try {
+          const updated = this.stateMgr.transition(id, "error", {
+            error: `Surface ${agent.surface_id} disappeared`,
+          });
+          this.agents.set(id, updated);
+          crashedIds.add(id);
+        } catch (error) {
+          if (this.evictMissingStateAgent(id, error)) {
+            crashedIds.add(id);
+            continue;
+          }
+          throw error;
+        }
       }
     }
 
@@ -98,10 +106,17 @@ export class AgentRegistry {
     if (crashedIds.size > 0) {
       for (const [id, agent] of this.agents) {
         if (agent.parent_agent_id && crashedIds.has(agent.parent_agent_id)) {
-          const reparented = this.stateMgr.updateRecord(id, {
-            parent_agent_id: null,
-          });
-          this.agents.set(id, reparented);
+          try {
+            const reparented = this.stateMgr.updateRecord(id, {
+              parent_agent_id: null,
+            });
+            this.agents.set(id, reparented);
+          } catch (error) {
+            if (this.evictMissingStateAgent(id, error)) {
+              continue;
+            }
+            throw error;
+          }
         }
       }
     }
@@ -142,7 +157,6 @@ export class AgentRegistry {
     for (const record of this.list()) {
       const discoveredEntry = bySurface.get(record.surface_id);
       const isAutoRecord = record.agent_id.startsWith("auto-");
-      seenSurfaces.add(record.surface_id);
 
       if (
         isAutoRecord &&
@@ -155,7 +169,7 @@ export class AgentRegistry {
         continue;
       }
 
-      let liveRecord = record;
+      let liveRecord: AgentRecord | null = record;
       if (
         isAutoRecord &&
         discoveredEntry &&
@@ -163,8 +177,12 @@ export class AgentRegistry {
         !discoveredEntry.read_error
       ) {
         liveRecord = this.syncAutoRecord(record, discoveredEntry);
+        if (!liveRecord) {
+          continue;
+        }
       }
 
+      seenSurfaces.add(record.surface_id);
       merged.push({
         ...liveRecord,
         discovered: isAutoRecord,
@@ -192,12 +210,15 @@ export class AgentRegistry {
         discoveredEntry.cli,
         discoveredEntry.surface_id,
       );
-      let record = this.stateMgr.ensureAutoRecord(agentId, discoveredEntry);
+      const record = this.stateMgr.ensureAutoRecord(agentId, discoveredEntry);
       this.agents.set(agentId, record);
-      record = this.syncAutoRecord(record, discoveredEntry);
+      const liveRecord = this.syncAutoRecord(record, discoveredEntry);
+      if (!liveRecord) {
+        continue;
+      }
 
       merged.push({
-        ...record,
+        ...liveRecord,
         discovered: true,
         parsed_cli_mismatch: false,
       });
@@ -224,7 +245,7 @@ export class AgentRegistry {
   private syncAutoRecord(
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
-  ): AgentRecord {
+  ): AgentRecord | null {
     const agentId = record.agent_id;
     const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
     const model = discoveredEntry.model ?? record.model;
@@ -241,8 +262,15 @@ export class AgentRegistry {
     }
 
     if (Object.keys(patch).length > 0) {
-      record = this.stateMgr.updateRecord(agentId, patch);
-      this.agents.set(agentId, record);
+      try {
+        record = this.stateMgr.updateRecord(agentId, patch);
+        this.agents.set(agentId, record);
+      } catch (error) {
+        if (this.evictMissingStateAgent(agentId, error)) {
+          return null;
+        }
+        throw error;
+      }
     }
 
     if (record.state !== desiredState) {
@@ -254,7 +282,10 @@ export class AgentRegistry {
               : null,
         });
         this.agents.set(agentId, record);
-      } catch {
+      } catch (error) {
+        if (this.evictMissingStateAgent(agentId, error)) {
+          return null;
+        }
         // Best-effort only — invalid synthetic transitions can keep the prior state.
       }
     }
@@ -272,6 +303,21 @@ export class AgentRegistry {
 
   remove(agentId: string): void {
     this.agents.delete(agentId);
+  }
+
+  private evictMissingStateAgent(agentId: string, error: unknown): boolean {
+    if (!this.isMissingStateAgentError(agentId, error)) {
+      return false;
+    }
+
+    this.agents.delete(agentId);
+    this.stateMgr.removeState(agentId);
+    return true;
+  }
+
+  private isMissingStateAgentError(agentId: string, error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message === `Agent not found: ${agentId}`;
   }
 
   private async evictBootingGhosts(
