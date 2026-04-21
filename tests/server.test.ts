@@ -11,11 +11,13 @@ import { AgentRegistry } from "../src/agent-registry.js";
 // The 12 low-level tools from the design doc
 const EXPECTED_TOOLS = [
   "list_surfaces",
+  "select_workspace",
   "new_split",
   "new_surface",
   "move_surface",
   "reorder_surface",
   "send_input",
+  "send_command",
   "send_key",
   "read_screen",
   "rename_tab",
@@ -70,7 +72,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 14 core tools", () => {
+  it("registers all 16 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -221,6 +223,36 @@ describe("tool handler integration", () => {
     expect(result.content).toBeDefined();
     expect(result.content[0].type).toBe("text");
     expect(result.structuredContent.ok).toBe(true);
+  });
+
+  it("select_workspace handler calls cmux select-workspace", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({}),
+      stderr: "",
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["select_workspace"];
+
+    const result = await tool.handler(
+      { workspace: "workspace:3" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "--json",
+        "select-workspace",
+        "--workspace",
+        "workspace:3",
+      ]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace).toBe("workspace:3");
   });
 
   it("list_surfaces dedupes overlapping pane results and returns the condensed default schema", async () => {
@@ -948,6 +980,35 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("send_command sends text and return to the same surface", async () => {
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_command"];
+
+    const result = await tool.handler(
+      { surface: "surface:6", command: "codex resume 123" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    expect(mockExec).toHaveBeenNthCalledWith(
+      1,
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      2,
+      "cmux",
+      expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.surface).toBe("surface:6");
+  });
+
   it("send_input chunks long text transparently before sending", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
@@ -1211,6 +1272,28 @@ describe("tool handler integration", () => {
     const renameParsed =
       renameResult.structuredContent ?? JSON.parse(renameResult.content[0].text);
     expect(renameParsed.error).toMatch(/delivery.*in progress/i);
+  });
+
+  it("send_key normalizes Ctrl+C aliases before dispatch", async () => {
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_key"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", key: "Ctrl+C" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send-key", "--surface", "surface:1", "ctrl-c"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.key).toBe("ctrl-c");
   });
 
   it("send_input retries a transient socket failure before succeeding", async () => {

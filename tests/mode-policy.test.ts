@@ -33,6 +33,14 @@ describe("isMutatingTool", () => {
     expect(isMutatingTool("send_key")).toBe(true);
   });
 
+  it("returns true for send_command", () => {
+    expect(isMutatingTool("send_command")).toBe(true);
+  });
+
+  it("returns true for select_workspace", () => {
+    expect(isMutatingTool("select_workspace")).toBe(true);
+  });
+
   it("returns true for close_surface", () => {
     expect(isMutatingTool("close_surface")).toBe(true);
   });
@@ -72,6 +80,12 @@ describe("assertMutationAllowed", () => {
       /manual/i,
     );
     expect(() => assertMutationAllowed("send_key", "manual")).toThrow(
+      /manual/i,
+    );
+    expect(() => assertMutationAllowed("send_command", "manual")).toThrow(
+      /manual/i,
+    );
+    expect(() => assertMutationAllowed("select_workspace", "manual")).toThrow(
       /manual/i,
     );
     expect(() => assertMutationAllowed("close_surface", "manual")).toThrow(

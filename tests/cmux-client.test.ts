@@ -356,6 +356,38 @@ describe("CmuxClient.sendKey", () => {
       "return",
     ]);
   });
+
+  it.each(["C-c", "ctrl-c", "^c", "Ctrl+C", "Ctrl-C"])(
+    "normalizes %s to ctrl-c",
+    async (key) => {
+      const { client, exec } = mockClient({});
+
+      await client.sendKey("surface:1", key);
+
+      expect(exec).toHaveBeenCalledWith("cmux", [
+        "--json",
+        "send-key",
+        "--surface",
+        "surface:1",
+        "ctrl-c",
+      ]);
+    },
+  );
+});
+
+describe("CmuxClient.selectWorkspace", () => {
+  it("calls cmux select-workspace with workspace", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.selectWorkspace("workspace:3");
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "select-workspace",
+      "--workspace",
+      "workspace:3",
+    ]);
+  });
 });
 
 describe("CmuxClient.readScreen", () => {
