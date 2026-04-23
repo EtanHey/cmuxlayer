@@ -335,6 +335,124 @@ describe("agent lifecycle tool handlers", () => {
     expect(result.content[0].text).toMatch(/not in an interactive state/);
   });
 
+  it("send_to with allow_busy=true delivers to agents in working state", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "test",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const agent = registry.get(agentId);
+    registry.set(agentId, { ...agent, state: "working" });
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "interject while working",
+        press_enter: true,
+        allow_busy: true,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const sendCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send"),
+    );
+    const deliveredText = sendCalls.map(([, args]) => args.at(-1)).join("");
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toBe(agentId);
+    expect(deliveredText).toBe("interject while working");
+  });
+
+  it("send_to without allow_busy still rejects working agents (backwards compat)", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "test",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const agent = registry.get(agentId);
+    registry.set(agentId, { ...agent, state: "working" });
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: "hello", press_enter: true },
+      {} as any,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/not in an interactive state/);
+  });
+
+  it("send_to_agent with allow_busy=true delivers to agents in working state", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to_agent"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "test",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const agent = registry.get(agentId);
+    registry.set(agentId, { ...agent, state: "working" });
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "force deliver",
+        press_enter: true,
+        allow_busy: true,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toBe(agentId);
+  });
+
   it("send_to sanitizes and chunks delivery through the agent surface", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -359,8 +477,7 @@ describe("agent lifecycle tool handlers", () => {
     registry.set(agentId, { ...agent, state: "ready" });
     mockExec.mockClear();
 
-    const rawText =
-      `${"a".repeat(510)}\x1b[31mHELLO\x1b[0m\x07${"b".repeat(10)}`;
+    const rawText = `${"a".repeat(510)}\x1b[31mHELLO\x1b[0m\x07${"b".repeat(10)}`;
     const sanitizedText = `${"a".repeat(510)}HELLO${"b".repeat(10)}`;
 
     const result = await sendTo.handler(
