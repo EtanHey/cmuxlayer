@@ -133,10 +133,7 @@ function okFormatted(
   };
 }
 
-function err(
-  error: unknown,
-  extra: Record<string, unknown> = {},
-): ToolReturn {
+function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
   const payload = { ok: false, error: message, ...extra };
   return {
@@ -189,8 +186,7 @@ function summarizeRemoteState(remoteValue: unknown): ListSurfacesRemoteState {
     remote.has_identity_file === true ||
     (typeof remote.destination === "string" && remote.destination.length > 0) ||
     (remote.port !== null && remote.port !== undefined) ||
-    (remote.local_proxy_port !== null &&
-      remote.local_proxy_port !== undefined);
+    (remote.local_proxy_port !== null && remote.local_proxy_port !== undefined);
 
   if (!hasRemoteHints && (state === undefined || state === "disconnected")) {
     return "local";
@@ -709,7 +705,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .boolean()
         .optional()
         .default(false)
-        .describe("Return the current full schema instead of the condensed default"),
+        .describe(
+          "Return the current full schema instead of the condensed default",
+        ),
       include_screen_preview: z
         .boolean()
         .optional()
@@ -1130,7 +1128,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     "Atomically send a command and press return on the same surface. Prefer this over separate send_input + send_key calls when launching or resuming agents.",
     {
       surface: z.string().describe("Target surface ref"),
-      command: z.string().describe("Command text to send before pressing return"),
+      command: z
+        .string()
+        .describe("Command text to send before pressing return"),
       workspace: z.string().optional().describe("Target workspace ref"),
     },
     ANNOTATIONS.mutating,
@@ -1630,39 +1630,49 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
-    const engine = new AgentEngine(stateMgr, registry, {
-      log: (message, eventOpts) => client.log(message, eventOpts),
-      setStatus: (key, value, statusOpts) =>
-        client.setStatus(key, value, statusOpts),
-      clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
-      readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
-      send: (surface, text, sendOpts) =>
-        withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
-      sendKey: (surface, key, keyOpts) =>
-        withSurfaceWrite(surface, () => client.sendKey(surface, key, keyOpts)),
-      setProgress: (value, progressOpts) =>
-        client.setProgress(value, progressOpts),
-      newSplit: (direction, splitOpts) => client.newSplit(direction, splitOpts),
-      newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
-      listPanes: (paneOpts) => client.listPanes(paneOpts),
-      listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
-      notifyLifecycleEvent,
-    }, {
-      spawnPreflight:
-        opts?.spawnPreflight ??
-        (opts?.disableSpawnPreflight ? async () => {} : undefined),
-    });
+    const engine = new AgentEngine(
+      stateMgr,
+      registry,
+      {
+        log: (message, eventOpts) => client.log(message, eventOpts),
+        setStatus: (key, value, statusOpts) =>
+          client.setStatus(key, value, statusOpts),
+        clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
+        readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
+        send: (surface, text, sendOpts) =>
+          withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
+        sendKey: (surface, key, keyOpts) =>
+          withSurfaceWrite(surface, () =>
+            client.sendKey(surface, key, keyOpts),
+          ),
+        setProgress: (value, progressOpts) =>
+          client.setProgress(value, progressOpts),
+        newSplit: (direction, splitOpts) =>
+          client.newSplit(direction, splitOpts),
+        newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+        listPanes: (paneOpts) => client.listPanes(paneOpts),
+        listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
+        notifyLifecycleEvent,
+      },
+      {
+        spawnPreflight:
+          opts?.spawnPreflight ??
+          (opts?.disableSpawnPreflight ? async () => {} : undefined),
+      },
+    );
 
     const deliverAgentInput = async (args: {
       agent_id: string;
       text: string;
       press_enter: boolean;
+      allow_busy?: boolean;
     }) => {
       const route = engine.resolveAgentRoute(args.agent_id);
-      if (!INTERACTIVE_AGENT_STATES.has(route.state)) {
+      if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
         throw new Error(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
-            `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}`,
+            `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}. ` +
+            `Pass allow_busy: true to bypass this gate and deliver raw keystrokes regardless of state.`,
         );
       }
 
@@ -1912,7 +1922,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async () => {
         try {
-          const beforeIds = new Set(registry.list().map((agent) => agent.agent_id));
+          const beforeIds = new Set(
+            registry.list().map((agent) => agent.agent_id),
+          );
           discovery.invalidate();
           const after = await registry.listMerged(discovery, { force: true });
           const afterIds = new Set(after.map((agent) => agent.agent_id));
@@ -1974,6 +1986,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default(true)
           .describe("Press enter after sending text"),
+        allow_busy: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -1982,6 +2001,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agent_id: args.agent_id,
             text: args.text,
             press_enter: args.press_enter,
+            allow_busy: args.allow_busy,
           });
           const data = { agent_id: args.agent_id };
           return okFormatted(formatOk("send_to", data), data);
@@ -2003,6 +2023,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default(true)
           .describe("Press enter after sending text"),
+        allow_busy: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -2011,6 +2038,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agent_id: args.agent_id,
             text: args.text,
             press_enter: args.press_enter,
+            allow_busy: args.allow_busy,
           });
           const data = { agent_id: args.agent_id };
           return okFormatted(formatOk("send_to_agent", data), data);
@@ -2331,7 +2359,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           const merged = await registry.listMerged(discovery);
           const agents = args.parent_agent_id
-            ? merged.filter((agent) => agent.parent_agent_id === args.parent_agent_id)
+            ? merged.filter(
+                (agent) => agent.parent_agent_id === args.parent_agent_id,
+              )
             : merged.filter((agent) => agent.parent_agent_id === null);
 
           const SCREEN_TIMEOUT = 3000;
