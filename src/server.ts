@@ -20,7 +20,12 @@ import {
 } from "./agent-engine.js";
 import { AgentDiscovery } from "./agent-discovery.js";
 import { toPublicAgent } from "./agent-facade.js";
-import type { AgentRecord, AgentState } from "./agent-types.js";
+import type {
+  AgentRecord,
+  AgentState,
+  DeliveryEventType,
+  DeliveryTelemetryEvent,
+} from "./agent-types.js";
 import {
   formatListSurfaces,
   formatReadScreen,
@@ -81,7 +86,17 @@ const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
+const SEND_INPUT_ENTER_DELAY_MS = 50;
+const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
+const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
+const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
+const SendToArgsSchema = z.object({
+  agent_id: z.string(),
+  text: z.string(),
+  press_enter: z.boolean().optional().default(true),
+  allow_busy: z.boolean().optional().default(false),
+});
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
@@ -265,6 +280,39 @@ function isRetryableDeliveryError(error: unknown): boolean {
   return /socket|connection_|connection closed|timeout/i.test(message);
 }
 
+
+function formatToolValidationError(toolName: string, error: z.ZodError): string {
+  const details = error.issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join(".") : "input";
+      return `${path}: ${issue.message}`;
+    })
+    .join("; ");
+  return `${toolName} invalid arguments: ${details}`;
+}
+
+function isSubmitVerifiedStatus(
+  status: ParsedScreenResult["status"] | null | undefined,
+): boolean {
+  return status === "working" || status === "thinking" || status === "done";
+}
+
+function screenShowsPendingInput(screenText: string, submittedText: string): boolean {
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const tail = trimmed.slice(-Math.min(80, trimmed.length));
+  return screenText.includes(tail);
+}
+
+function computeEnterDelayMs(bytes: number, chunkCount: number): number {
+  const extraChunks = Math.max(0, chunkCount - 1);
+  const longPayloadPenalty = bytes >= SEND_INPUT_CHUNK_THRESHOLD ? 100 : 0;
+  return Math.min(250, SEND_INPUT_ENTER_DELAY_MS + extraChunks * 50 + longPayloadPenalty);
+}
+
 function pickLatestSurfaceModel(
   stateMgr: StateManager,
   surfaceRef: string,
@@ -381,6 +429,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const stateDir =
     opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
   const stateMgr = new StateManager(stateDir);
+  const eventLog = stateMgr.getEventLog();
   const deliveries = new Map<string, DeliveryRecord>();
   const latestDeliveryBySurface = new Map<string, string>();
   const activeDeliveryBySurface = new Map<string, string>();
@@ -571,28 +620,105 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const applySendInputPostActions = async (opts: {
+  const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
+    eventLog.appendDelivery({
+      ts: new Date().toISOString(),
+      ...event,
+    });
+  };
+
+  const readParsedSurface = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
+    try {
+      const screen = await client.readScreen(surface, {
+        ...(workspace ? { workspace } : {}),
+        lines: 30,
+      });
+      const text = typeof screen === "string" ? screen : (screen.text ?? "");
+      const parsed = enrichParsedScreen(
+        parseScreen(text),
+        text,
+        pickLatestSurfaceModel(stateMgr, surface),
+      );
+      return { text, parsed };
+    } catch {
+      return null;
+    }
+  };
+
+  const maybeRenameTask = async (opts: {
     surface: string;
     workspace?: string;
-    press_enter: boolean;
     rename_to_task?: string;
   }) => {
-    if (opts.press_enter) {
-      await delay(50);
-      await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+    if (!opts.rename_to_task) {
+      return;
     }
 
-    if (opts.rename_to_task) {
-      const surfaces = await client.listPaneSurfaces({
-        workspace: opts.workspace,
-      });
-      const surface = surfaces.surfaces.find((s) => s.ref === opts.surface);
-      const currentTitle = surface?.title ?? "";
-      const newTitle = replaceTaskSuffix(currentTitle, opts.rename_to_task);
-      await client.renameTab(opts.surface, newTitle, {
-        workspace: opts.workspace,
-      });
+    const surfaces = await client.listPaneSurfaces({
+      workspace: opts.workspace,
+    });
+    const surface = surfaces.surfaces.find((s) => s.ref === opts.surface);
+    const currentTitle = surface?.title ?? "";
+    const newTitle = replaceTaskSuffix(currentTitle, opts.rename_to_task);
+    await client.renameTab(opts.surface, newTitle, {
+      workspace: opts.workspace,
+    });
+  };
+
+  const verifySubmitAfterEnter = async (opts: {
+    surface: string;
+    workspace?: string;
+    text: string;
+    bytes: number;
+    source_event: DeliveryEventType;
+    source_agent?: string | null;
+    verify_submit: boolean;
+  }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
+    if (!opts.verify_submit) {
+      return { submit_verified: null, retry_count: 0 };
     }
+
+    const startedAt = Date.now();
+    let retried = false;
+    let retryCount = 0;
+
+    while (Date.now() - startedAt < SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS) {
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      if (!snapshot) {
+        return { submit_verified: null, retry_count: retryCount };
+      }
+
+      if (snapshot.parsed.agent_type === "unknown" || !snapshot.text.trim()) {
+        return { submit_verified: null, retry_count: retryCount };
+      }
+
+      if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+        return { submit_verified: true, retry_count: retryCount };
+      }
+
+      if (!retried && screenShowsPendingInput(snapshot.text, opts.text)) {
+        await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+        await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+        retryCount += 1;
+        appendDeliveryEvent({
+          event_type: "press_enter",
+          source_agent: opts.source_agent ?? null,
+          target_surface: opts.surface,
+          bytes: opts.bytes,
+          press_enter: true,
+          submit_verified: null,
+          retry_count: retryCount,
+        });
+        retried = true;
+        continue;
+      }
+
+      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+    }
+    return { submit_verified: false, retry_count: retryCount };
   };
 
   const deliverInputChunks = async (opts: {
@@ -604,7 +730,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     press_enter: boolean;
     rename_to_task?: string;
     onChunkDelivered?: (sentChunks: number) => void;
-  }) => {
+    source_event?: DeliveryEventType;
+    source_agent?: string | null;
+    verify_submit?: boolean;
+  }): Promise<{
+    bytes: number;
+    retry_count: number;
+    submit_verified: boolean | null;
+  }> => {
     for (const [index, chunk] of opts.chunks.entries()) {
       await sendChunkWithRetry(
         opts.surface,
@@ -621,12 +754,64 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     }
 
-    await applySendInputPostActions({
+    const bytes = opts.chunks.reduce(
+      (sum, chunk) => sum + Buffer.byteLength(chunk, "utf-8"),
+      0,
+    );
+    let submit_verified: boolean | null = null;
+    let retry_count = 0;
+
+    if (opts.press_enter) {
+      await delay(computeEnterDelayMs(bytes, opts.chunks.length));
+      await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+      appendDeliveryEvent({
+        event_type: "press_enter",
+        source_agent: opts.source_agent ?? null,
+        target_surface: opts.surface,
+        bytes,
+        press_enter: true,
+        submit_verified: null,
+        retry_count,
+      });
+
+      const verification = await verifySubmitAfterEnter({
+        surface: opts.surface,
+        workspace: opts.workspace,
+        text: opts.chunks.join(""),
+        bytes,
+        source_event: opts.source_event ?? "send_command",
+        source_agent: opts.source_agent,
+        verify_submit: opts.verify_submit ?? false,
+      });
+      submit_verified = verification.submit_verified;
+      retry_count = verification.retry_count;
+    }
+
+    await maybeRenameTask({
       surface: opts.surface,
       workspace: opts.workspace,
-      press_enter: opts.press_enter,
       rename_to_task: opts.rename_to_task,
     });
+
+    if (opts.source_event) {
+      appendDeliveryEvent({
+        event_type: opts.source_event,
+        source_agent: opts.source_agent ?? null,
+        target_surface: opts.surface,
+        bytes,
+        press_enter: opts.press_enter,
+        submit_verified,
+        retry_count,
+      });
+    }
+
+    if (submit_verified === false) {
+      throw new Error(
+        `Enter submit could not be verified for ${opts.surface} within ${SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS}ms`,
+      );
+    }
+
+    return { bytes, retry_count, submit_verified };
   };
 
   const startBackgroundDelivery = (record: DeliveryRecord) => {
@@ -1142,18 +1327,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
             : [sanitizedCommand];
 
-        await withSurfaceWrite(args.surface, async () => {
-          await deliverInputChunks({
+        const delivery = await withSurfaceWrite(args.surface, async () =>
+          deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
             chunks,
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
-          });
-        });
+            source_event: "send_command",
+            verify_submit:
+              sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD,
+          }),
+        );
 
-        const data = { surface: args.surface, command: sanitizedCommand };
+        const data = {
+          surface: args.surface,
+          command: sanitizedCommand,
+          retry_count: delivery.retry_count,
+          submit_verified: delivery.submit_verified,
+        };
         return okFormatted(formatOk("send_command", data), data);
       } catch (e) {
         if (e instanceof DeliveryError) {
@@ -1666,6 +1859,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       text: string;
       press_enter: boolean;
       allow_busy?: boolean;
+      source_event: DeliveryEventType;
     }) => {
       const route = engine.resolveAgentRoute(args.agent_id);
       if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
@@ -1682,15 +1876,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
 
-      await withSurfaceWrite(route.surface_id, async () => {
-        await deliverInputChunks({
+      return withSurfaceWrite(route.surface_id, async () =>
+        deliverInputChunks({
           surface: route.surface_id,
           chunks,
           chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
           chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
           press_enter: args.press_enter,
-        });
-      });
+          source_event: args.source_event,
+          source_agent: args.agent_id,
+          verify_submit:
+            args.press_enter &&
+            INTERACTIVE_AGENT_STATES.has(route.state) &&
+            sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
+        }),
+      );
     };
 
     // Reconstitute registry from disk on startup (async, best-effort).
@@ -1979,31 +2179,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "send_to",
       "Send text input to an agent by `agent_id`. Resolves the backing surface internally so clients do not need pane or surface references.",
       {
-        agent_id: z.string().describe("Agent ID"),
-        text: z.string().describe("Text to send"),
-        press_enter: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe("Press enter after sending text"),
-        allow_busy: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
-          ),
+        ...SendToArgsSchema.shape,
+        press_enter: SendToArgsSchema.shape.press_enter.describe(
+          "Press enter after sending text",
+        ),
+        allow_busy: SendToArgsSchema.shape.allow_busy.describe(
+          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
+        ),
       },
       ANNOTATIONS.mutating,
-      async (args) => {
+      async (rawArgs) => {
         try {
-          await deliverAgentInput({
+          const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
+          if (!parsedArgs.success) {
+            return err(
+              new Error(formatToolValidationError("send_to", parsedArgs.error)),
+            );
+          }
+
+          const args = parsedArgs.data;
+          const delivery = await deliverAgentInput({
             agent_id: args.agent_id,
             text: args.text,
             press_enter: args.press_enter,
             allow_busy: args.allow_busy,
+            source_event: "send_to",
           });
-          const data = { agent_id: args.agent_id };
+          const data = {
+            agent_id: args.agent_id,
+            retry_count: delivery.retry_count,
+            submit_verified: delivery.submit_verified,
+          };
           return okFormatted(formatOk("send_to", data), data);
         } catch (e) {
           return err(e);
@@ -2016,31 +2222,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "send_to_agent",
       "Deprecated for client integrations: use `send_to` instead. Internal/advanced path for sending text input to an agent in `ready` or `idle` state.",
       {
-        agent_id: z.string().describe("Agent ID"),
-        text: z.string().describe("Text to send"),
-        press_enter: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe("Press enter after sending text"),
-        allow_busy: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
-          ),
+        ...SendToArgsSchema.shape,
+        press_enter: SendToArgsSchema.shape.press_enter.describe(
+          "Press enter after sending text",
+        ),
+        allow_busy: SendToArgsSchema.shape.allow_busy.describe(
+          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
+        ),
       },
       ANNOTATIONS.mutating,
-      async (args) => {
+      async (rawArgs) => {
         try {
-          await deliverAgentInput({
+          const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
+          if (!parsedArgs.success) {
+            return err(
+              new Error(
+                formatToolValidationError("send_to_agent", parsedArgs.error),
+              ),
+            );
+          }
+
+          const args = parsedArgs.data;
+          const delivery = await deliverAgentInput({
             agent_id: args.agent_id,
             text: args.text,
             press_enter: args.press_enter,
             allow_busy: args.allow_busy,
+            source_event: "send_to_agent",
           });
-          const data = { agent_id: args.agent_id };
+          const data = {
+            agent_id: args.agent_id,
+            retry_count: delivery.retry_count,
+            submit_verified: delivery.submit_verified,
+          };
           return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
           return err(e);
@@ -2195,8 +2409,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Dispatch action
           switch (args.action) {
             case "send": {
-              await engine.sendToAgent(args.agent, args.text!, true);
-              const d = { agent_id: args.agent, action: "send" };
+              const delivery = await deliverAgentInput({
+                agent_id: args.agent,
+                text: args.text!,
+                press_enter: true,
+                source_event: "interact",
+              });
+              const d = {
+                agent_id: args.agent,
+                action: "send",
+                retry_count: delivery.retry_count,
+                submit_verified: delivery.submit_verified,
+              };
               return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
@@ -2208,11 +2432,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             case "model": {
               const modelCmd = `/model ${args.model}`;
-              await engine.sendToAgent(args.agent, modelCmd, true);
+              const delivery = await deliverAgentInput({
+                agent_id: args.agent,
+                text: modelCmd,
+                press_enter: true,
+                source_event: "interact",
+              });
               const d = {
                 agent_id: args.agent,
                 action: "model",
                 model: args.model,
+                retry_count: delivery.retry_count,
+                submit_verified: delivery.submit_verified,
               };
               return okFormatted(formatOk("interact:model", d), d);
             }
@@ -2220,20 +2451,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const resumeCmd = args.session_id
                 ? `/resume ${args.session_id}`
                 : "/resume";
-              await engine.sendToAgent(args.agent, resumeCmd, true);
+              const delivery = await deliverAgentInput({
+                agent_id: args.agent,
+                text: resumeCmd,
+                press_enter: true,
+                source_event: "interact",
+              });
               const d = {
                 agent_id: args.agent,
                 action: "resume",
                 session_id: args.session_id,
+                retry_count: delivery.retry_count,
+                submit_verified: delivery.submit_verified,
               };
               return okFormatted(formatOk("interact:resume", d), d);
             }
             case "skill": {
-              await engine.sendToAgent(args.agent, args.command!, true);
+              const delivery = await deliverAgentInput({
+                agent_id: args.agent,
+                text: args.command!,
+                press_enter: true,
+                source_event: "interact",
+              });
               const d = {
                 agent_id: args.agent,
                 action: "skill",
                 command: args.command,
+                retry_count: delivery.retry_count,
+                submit_verified: delivery.submit_verified,
               };
               return okFormatted(formatOk("interact:skill", d), d);
             }

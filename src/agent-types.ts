@@ -114,6 +114,26 @@ export interface StateTransition {
   error: string | null;
 }
 
+export type DeliveryEventType =
+  | "send_command"
+  | "send_to"
+  | "send_to_agent"
+  | "interact"
+  | "press_enter";
+
+export interface DeliveryTelemetryEvent {
+  ts: string;
+  event_type: DeliveryEventType;
+  source_agent: string | null;
+  target_surface: string;
+  bytes: number;
+  press_enter: boolean | null;
+  submit_verified: boolean | null;
+  retry_count: number;
+}
+
+export type EventLogEntry = StateTransition | DeliveryTelemetryEvent;
+
 export interface WaitResult {
   matched: boolean;
   state: AgentState;
