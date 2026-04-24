@@ -49,6 +49,7 @@ class FakeClaudeSurfaceClient {
   readonly sendKeyCalls: string[] = [];
   readonly renameTabCalls: string[] = [];
   requiredReturns = 2;
+  completionMode: "idle" | "working" = "working";
   private pendingText = "";
   private returnCount = 0;
   private mode: "idle" | "working" = "idle";
@@ -132,7 +133,7 @@ class FakeClaudeSurfaceClient {
     this.returnCount += 1;
     if (this.returnCount >= this.requiredReturns) {
       this.pendingText = "";
-      this.mode = "working";
+      this.mode = this.completionMode;
       return;
     }
 
@@ -280,6 +281,28 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
+  it("does not verify short send_to submissions that settle back to idle", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "ping",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter((event) => event.event_type === "send_to");
+
+    expect(parsed.ok).toBe(true);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBe(null);
+    expect(events[0]?.retry_count).toBe(0);
+  });
+
   it("retries Enter for send_command on a Claude surface", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
@@ -361,5 +384,24 @@ describe("enter reliability", () => {
           event.submit_verified === true && event.retry_count === 1,
       ),
     ).toBe(true);
+  });
+
+  it("records UTF-8 byte counts in delivery telemetry", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    server = createReliabilityServer(client);
+
+    const command = "🙂".repeat(200);
+    const result = await callTool(server, "send_command", {
+      surface: client.surface,
+      command,
+    });
+    const parsed = parseResult(result);
+    const event = readEventLog().find(
+      (entry) => entry.event_type === "send_command",
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(event?.bytes).toBe(Buffer.byteLength(command, "utf-8"));
   });
 });

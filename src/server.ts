@@ -5,7 +5,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
@@ -92,6 +91,12 @@ const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
+const SendToArgsSchema = z.object({
+  agent_id: z.string(),
+  text: z.string(),
+  press_enter: z.boolean().optional().default(true),
+  allow_busy: z.boolean().optional().default(false),
+});
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
@@ -622,29 +627,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
-  const logUnverifiedSubmit = (opts: {
-    source_event: DeliveryEventType;
-    source_agent?: string | null;
-    surface: string;
-    bytes: number;
-  }) => {
-    const filePath = join(
-      "/tmp",
-      `cmux-enter-fail-${new Date().toISOString().slice(0, 10)}.log`,
-    );
-    appendFileSync(
-      filePath,
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        event_type: opts.source_event,
-        source_agent: opts.source_agent ?? null,
-        target_surface: opts.surface,
-        bytes: opts.bytes,
-      }) + "\n",
-      "utf-8",
-    );
-  };
-
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
@@ -736,8 +718,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
-
-    logUnverifiedSubmit(opts);
     return { submit_verified: false, retry_count: retryCount };
   };
 
@@ -774,7 +754,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     }
 
-    const bytes = opts.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const bytes = opts.chunks.reduce(
+      (sum, chunk) => sum + Buffer.byteLength(chunk, "utf-8"),
+      0,
+    );
     let submit_verified: boolean | null = null;
     let retry_count = 0;
 
@@ -1903,7 +1886,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           source_event: args.source_event,
           source_agent: args.agent_id,
           verify_submit:
-            args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
+            args.press_enter &&
+            INTERACTIVE_AGENT_STATES.has(route.state) &&
+            sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
         }),
       );
     };
@@ -2194,32 +2179,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "send_to",
       "Send text input to an agent by `agent_id`. Resolves the backing surface internally so clients do not need pane or surface references.",
       {
-        agent_id: z.string().describe("Agent ID"),
-        text: z.string().describe("Text to send"),
-        press_enter: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe("Press enter after sending text"),
-        allow_busy: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
-          ),
+        ...SendToArgsSchema.shape,
+        press_enter: SendToArgsSchema.shape.press_enter.describe(
+          "Press enter after sending text",
+        ),
+        allow_busy: SendToArgsSchema.shape.allow_busy.describe(
+          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
+        ),
       },
       ANNOTATIONS.mutating,
       async (rawArgs) => {
         try {
-          const parsedArgs = z
-            .object({
-              agent_id: z.string(),
-              text: z.string(),
-              press_enter: z.boolean().optional().default(true),
-              allow_busy: z.boolean().optional().default(false),
-            })
-            .safeParse(rawArgs);
+          const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
             return err(
               new Error(formatToolValidationError("send_to", parsedArgs.error)),
@@ -2251,32 +2222,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "send_to_agent",
       "Deprecated for client integrations: use `send_to` instead. Internal/advanced path for sending text input to an agent in `ready` or `idle` state.",
       {
-        agent_id: z.string().describe("Agent ID"),
-        text: z.string().describe("Text to send"),
-        press_enter: z
-          .boolean()
-          .optional()
-          .default(true)
-          .describe("Press enter after sending text"),
-        allow_busy: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
-          ),
+        ...SendToArgsSchema.shape,
+        press_enter: SendToArgsSchema.shape.press_enter.describe(
+          "Press enter after sending text",
+        ),
+        allow_busy: SendToArgsSchema.shape.allow_busy.describe(
+          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
+        ),
       },
       ANNOTATIONS.mutating,
       async (rawArgs) => {
         try {
-          const parsedArgs = z
-            .object({
-              agent_id: z.string(),
-              text: z.string(),
-              press_enter: z.boolean().optional().default(true),
-              allow_busy: z.boolean().optional().default(false),
-            })
-            .safeParse(rawArgs);
+          const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
             return err(
               new Error(
