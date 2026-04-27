@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Pre-push hook — regression harness gate
+# DO NOT BYPASS with --no-verify. DO NOT SILENCE failures.
+# Failures = real bugs, not friction. Treat as CRITICAL REVIEW TIME.
+
+set -uo pipefail
+
+[ ! -f scripts/run_tests.sh ] && { echo "⚠️  no scripts/run_tests.sh"; exit 0; }
+
+bash scripts/run_tests.sh
+exit_status=$?
+
+if [ "$exit_status" -ne 0 ]; then
+  cat <<'BANNER'
+
+🛑 PUSH BLOCKED — regression harness failed. Read failure → reproduce → fix bug.
+DO NOT bypass with --no-verify or silence the test.
+
+BANNER
+  exit "$exit_status"
+fi
