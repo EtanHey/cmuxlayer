@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.golems.cmux-memory-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/bin/cmux-memory-watchdog.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB</key>
+    <string>5</string>
+    <key>CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB</key>
+    <string>12</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/etanheyman/Library/Logs/cmux-watchdog/launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/etanheyman/Library/Logs/cmux-watchdog/launchd.stderr.log</string>
+</dict>
+</plist>
