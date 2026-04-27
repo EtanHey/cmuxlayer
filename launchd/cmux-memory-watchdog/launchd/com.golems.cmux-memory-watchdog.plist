@@ -7,13 +7,15 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/etanheyman/Gits/systems/bin/cmux-memory-watchdog.sh</string>
+    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-memory-watchdog/bin/cmux-memory-watchdog.sh</string>
   </array>
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CMUX_MEM_WATCHDOG_THRESHOLD_GB</key>
-    <string>10</string>
+    <key>CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB</key>
+    <string>5</string>
+    <key>CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB</key>
+    <string>12</string>
   </dict>
 
   <key>RunAtLoad</key>

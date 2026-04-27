@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_PATH="$ROOT_DIR/bin/cmux-memory-watchdog.sh"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+assert_file_contains() {
+  local file="$1"
+  local needle="$2"
+  [[ -f "$file" ]] || fail "missing file: $file"
+  grep -F -- "$needle" "$file" >/dev/null || fail "expected '$needle' in $file"
+}
+
+assert_file_not_contains() {
+  local file="$1"
+  local needle="$2"
+  if [[ -f "$file" ]] && grep -F -- "$needle" "$file" >/dev/null; then
+    fail "did not expect '$needle' in $file"
+  fi
+}
+
+seed_fake_commands() {
+  local root_dir="$1"
+  local log_dir="$2"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  cat >"$root_dir/bin/socat" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/socat.log"
+EOF
+  chmod +x "$root_dir/bin/socat"
+
+  cat >"$root_dir/bin/sleep" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/sleep.log"
+EOF
+  chmod +x "$root_dir/bin/sleep"
+
+  cat >"$root_dir/bin/kill" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/kill.log"
+EOF
+  chmod +x "$root_dir/bin/kill"
+
+  cat >"$root_dir/bin/ps" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '   PID  PPID   RSS      VSZ  %%CPU ELAPSED COMMAND\n'
+printf ' 4242  1000  16384   12345   0.0  01:00:00 /Applications/cmux.app/Contents/MacOS/cmux\n'
+EOF
+  chmod +x "$root_dir/bin/ps"
+
+  cat >"$root_dir/bin/pgrep" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-x" && "\${2:-}" == "cmux" ]]; then
+  if [[ -n "\${CMUX_MEM_WATCHDOG_PGREP_CMUX:-}" ]]; then
+    printf '%s' "\$CMUX_MEM_WATCHDOG_PGREP_CMUX"
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "\${1:-}" == "-f" ]]; then
+  if [[ -n "\${CMUX_MEM_WATCHDOG_PGREP_CMUXPIDS:-}" ]]; then
+    printf '%s' "\$CMUX_MEM_WATCHDOG_PGREP_CMUXPIDS"
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "\${1:-}" == "-lf" && "\${2:-}" == "cmux" ]]; then
+  printf '%s\n' "4242 cmux"
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$root_dir/bin/pgrep"
+}
+
+run_case() {
+  local name="$1"
+  local expect_breach="$2"
+  local expected_signals="$3"
+  local ps_fixture="$4"
+  local vmstat_fixture="$5"
+  local pgrep_cmux="$6"
+  local pgrep_pids="$7"
+
+  local root_dir log_dir snapshot
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
+  seed_fake_commands "$root_dir" "$log_dir"
+
+  printf '%s' "$ps_fixture" >"$root_dir/fixtures/ps.fixture"
+  printf '%s' "$vmstat_fixture" >"$root_dir/fixtures/vmstat.fixture"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB=5
+  export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
+  export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
+  export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
+  export CMUX_MEM_WATCHDOG_PS_FIXTURE="$root_dir/fixtures/ps.fixture"
+  export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+  export CMUX_MEM_WATCHDOG_PGREP_CMUX="$pgrep_cmux"
+  export CMUX_MEM_WATCHDOG_PGREP_CMUXPIDS="$pgrep_pids"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck source=../bin/cmux-memory-watchdog.sh
+  source "$SCRIPT_PATH"
+  run_once
+
+  if [[ "$expect_breach" == "1" ]]; then
+    assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+    assert_file_contains "$log_dir/kill.log" "-TERM 4242"
+    assert_file_contains "$log_dir/kill.log" "-KILL 4242"
+    snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '*.log' | head -n 1)"
+    if [[ -n "$expected_signals" ]]; then
+      assert_file_contains "$snapshot" "breached_signals=$expected_signals"
+    fi
+  else
+    assert_file_not_contains "$log_dir/kill.log" "-TERM"
+    assert_file_not_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+  fi
+
+  printf 'PASS: %s\n' "$name"
+  rm -rf "$root_dir"
+}
+
+run_case "no breach when both below threshold" \
+  0 "" \
+  $'4242 1024\n5001 512\n' \
+  $'Pages occupied by compressor: 1048576.\n' \
+  $'4242\n5001\n' \
+  $'4242\n5001\n'
+
+run_case "breach when rss above threshold" \
+  1 "rss" \
+  $'4242 4194304\n5001 2097152\n' \
+  $'Pages occupied by compressor: 1048576.\n' \
+  $'4242\n5001\n' \
+  $'4242\n5001\n'
+
+run_case "breach when compressor above threshold" \
+  1 "compressor" \
+  $'4242 1024\n5001 512\n' \
+  $'Pages occupied by compressor: 3145729.\n' \
+  $'4242\n5001\n' \
+  $'4242\n5001\n'
+
+run_case "breach when both above threshold" \
+  1 "rss,compressor" \
+  $'4242 3145728\n5001 3145728\n' \
+  $'Pages occupied by compressor: 4194305.\n' \
+  $'4242\n5001\n' \
+  $'4242\n5001\n'
+
+run_case "no cmux pid exits cleanly" \
+  0 "" \
+  $'4242 1024\n5001 1024\n' \
+  $'Pages occupied by compressor: 4194305.\n' \
+  "" \
+  ""
