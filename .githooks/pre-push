@@ -19,3 +19,5 @@ DO NOT bypass with --no-verify or silence the test.
 BANNER
   exit "$exit_status"
 fi
+
+exit 0
