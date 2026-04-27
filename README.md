@@ -160,6 +160,16 @@ bun run test        # 406 tests via vitest
 npm run typecheck   # Type checking
 ```
 
+## Git hooks
+
+Enable project hooks to run the regression gate automatically on `git push`:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This enables `.githooks/pre-push`, which runs `scripts/run_tests.sh` and blocks pushes on regression failures.
+
 ## Development
 
 ```bash
