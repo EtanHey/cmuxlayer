@@ -53,6 +53,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "transform-tty": "^1.0.11",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vitest": "^3.0.0"
