@@ -8,24 +8,25 @@
 
 import * as net from "node:net";
 import * as crypto from "node:crypto";
-import {
-  CmuxSocketError,
-  type CmuxSocketClientOptions,
-} from "./cmux-socket-client.js";
+import { CmuxSocketError } from "./cmux-socket-error.js";
+import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 
-const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
 const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_IN_FLIGHT = 256;
 
 export interface BackoffOptions {
-  /** Base delay in milliseconds (default: 100) */
+  /** Base delay in milliseconds (default: 1000) */
   baseMs?: number;
-  /** Maximum delay in milliseconds (default: 10_000) */
+  /** Maximum delay in milliseconds (default: 30_000) */
   maxMs?: number;
   /** Apply random jitter to prevent thundering herd (default: true) */
   jitter?: boolean;
 }
 
-export interface CmuxPersistentSocketOptions extends CmuxSocketClientOptions {
+export interface CmuxPersistentSocketOptions {
+  socketPath?: string;
+  timeoutMs?: number;
+  maxInFlight?: number;
   backoff?: BackoffOptions;
 }
 
@@ -54,8 +55,15 @@ export class CmuxPersistentSocket {
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  private pendingV1: Array<{
+    resolve: (v: string) => void;
+    reject: (e: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+    payload: string;
+  }> = [];
   private connected = false;
   private timeoutMs: number;
+  private maxInFlight: number;
   /** Guards against concurrent connect() calls */
   private connectPromise: Promise<void> | null = null;
 
@@ -70,8 +78,9 @@ export class CmuxPersistentSocket {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.backoffBaseMs = opts?.backoff?.baseMs ?? 100;
-    this.backoffMaxMs = opts?.backoff?.maxMs ?? 10_000;
+    this.maxInFlight = opts?.maxInFlight ?? MAX_IN_FLIGHT;
+    this.backoffBaseMs = opts?.backoff?.baseMs ?? 1000;
+    this.backoffMaxMs = opts?.backoff?.maxMs ?? 30_000;
     this.backoffJitter = opts?.backoff?.jitter ?? true;
   }
 
@@ -155,12 +164,35 @@ export class CmuxPersistentSocket {
     return this.connectPromise;
   }
 
+  private async ensureConnected(): Promise<void> {
+    if (this.connected && this.socket) return;
+    if (this.connectPromise) return this.connectPromise;
+
+    if (this._currentBackoffMs > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this._currentBackoffMs),
+      );
+    }
+
+    try {
+      await this.connect();
+    } catch (error) {
+      this.incrementBackoff();
+      throw error;
+    }
+  }
+
   private rejectAllPending(error: CmuxSocketError): void {
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
       entry.reject(error);
     }
     this.pending.clear();
+    for (const entry of this.pendingV1) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pendingV1 = [];
   }
 
   private processBuffer(): void {
@@ -172,16 +204,45 @@ export class CmuxPersistentSocket {
       if (!line.trim()) continue;
 
       try {
-        const parsed = JSON.parse(line) as V2Response;
-        const entry = this.pending.get(parsed.id);
-        if (entry) {
+        const parsed = JSON.parse(line) as Partial<V2Response>;
+        const entry =
+          typeof parsed.id === "string" ? this.pending.get(parsed.id) : null;
+        if (entry && typeof parsed.id === "string") {
           clearTimeout(entry.timer);
           this.pending.delete(parsed.id);
-          entry.resolve(parsed);
+          entry.resolve(parsed as V2Response);
+        } else if (this.pendingV1.length > 0) {
+          this.resolveNextV1(line);
         }
       } catch {
-        // Skip non-JSON lines
+        if (this.pendingV1.length > 0) {
+          this.resolveNextV1(line);
+        }
       }
+    }
+  }
+
+  private resolveNextV1(line: string): void {
+    const entry = this.pendingV1.shift();
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    entry.resolve(line.trim());
+    this.writeNextV1();
+  }
+
+  private writeNextV1(): void {
+    if (!this.socket || this.pendingV1.length === 0) return;
+    const entry = this.pendingV1[0];
+    this.socket.write(entry.payload);
+  }
+
+  private assertInFlightCapacity(): void {
+    const inFlight = this.pending.size + this.pendingV1.length;
+    if (inFlight >= this.maxInFlight) {
+      throw new CmuxSocketError(
+        `Too many in-flight cmux socket requests (${inFlight}/${this.maxInFlight})`,
+        "too_many_requests",
+      );
     }
   }
 
@@ -189,13 +250,8 @@ export class CmuxPersistentSocket {
     method: string,
     params: Record<string, unknown> = {},
   ): Promise<T> {
-    if (!this.connected || !this.socket) {
-      if (this._currentBackoffMs > 0) {
-        await new Promise((r) => setTimeout(r, this._currentBackoffMs));
-      }
-      this.incrementBackoff();
-      await this.connect();
-    }
+    this.assertInFlightCapacity();
+    await this.ensureConnected();
 
     const id = crypto.randomUUID();
     const request: V2Request = { id, method, params };
@@ -227,6 +283,34 @@ export class CmuxPersistentSocket {
       });
 
       this.socket!.write(payload);
+    });
+  }
+
+  async sendLine(command: string): Promise<string> {
+    this.assertInFlightCapacity();
+    await this.ensureConnected();
+
+    const shouldWriteNow = this.pendingV1.length === 0;
+    const payload = command + "\n";
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const index = this.pendingV1.findIndex((entry) => entry.timer === timer);
+        const wasHead = index === 0;
+        if (index !== -1) this.pendingV1.splice(index, 1);
+        reject(
+          new CmuxSocketError(
+            `Timeout after ${this.timeoutMs}ms waiting for V1: ${command.split(" ")[0]}`,
+            "timeout",
+          ),
+        );
+        if (wasHead) this.writeNextV1();
+      }, this.timeoutMs);
+
+      this.pendingV1.push({ resolve, reject, timer, payload });
+      if (shouldWriteNow) {
+        this.writeNextV1();
+      }
     });
   }
 

@@ -9,8 +9,7 @@ import {
   CmuxSocketClient,
   type CmuxSocketClientOptions,
 } from "./cmux-socket-client.js";
-
-const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
+import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 
 export interface CreateCmuxClientOptions {
   socketPath?: string;

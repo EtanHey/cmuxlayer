@@ -106,6 +106,8 @@ let mockServer: net.Server;
 let lastV1Command = "";
 let lastV2Request: { method: string; params: Record<string, unknown> } | null =
   null;
+let connectionCount = 0;
+const activeConnections = new Set<net.Socket>();
 
 function startMockServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -117,6 +119,9 @@ function startMockServer(): Promise<void> {
     }
 
     mockServer = net.createServer((conn) => {
+      connectionCount++;
+      activeConnections.add(conn);
+      conn.on("close", () => activeConnections.delete(conn));
       let buffer = "";
       conn.on("data", (chunk) => {
         buffer += chunk.toString("utf-8");
@@ -182,6 +187,9 @@ function startMockServer(): Promise<void> {
 
 function stopMockServer(): Promise<void> {
   return new Promise((resolve) => {
+    for (const conn of activeConnections) {
+      conn.destroy();
+    }
     mockServer.close(() => {
       try {
         fs.unlinkSync(MOCK_SOCKET_PATH);
@@ -212,6 +220,7 @@ afterAll(async () => {
 beforeEach(() => {
   lastV1Command = "";
   lastV2Request = null;
+  connectionCount = 0;
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -318,6 +327,20 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result.surfaces).toBeInstanceOf(Array);
     expect(result.surfaces[0].ref).toBe("surface:1");
     expect(result.surfaces[0].type).toBe("terminal");
+  });
+
+  it("reuses one socket connection for 100 concurrent listPaneSurfaces calls", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    const startedAt = Date.now();
+    await Promise.all(
+      Array.from({ length: 100 }, () =>
+        client.listPaneSurfaces({ workspace: "workspace:1" }),
+      ),
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+    expect(connectionCount).toBe(1);
   });
 
   it("listPanes returns panes", async () => {

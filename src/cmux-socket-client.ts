@@ -8,8 +8,6 @@
  *        or {"id":"<uuid>","ok":false,"error":{"code":"...","message":"..."}}\n
  */
 
-import * as net from "node:net";
-import * as crypto from "node:crypto";
 import type {
   CmuxWorkspace,
   CmuxPaneSurfaces,
@@ -24,10 +22,13 @@ import type {
 } from "./types.js";
 import type { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
+import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
+import { CmuxSocketError } from "./cmux-socket-error.js";
+import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
+export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
 
-const DEFAULT_SOCKET_PATH = "/tmp/cmux.sock";
 const REQUEST_TIMEOUT_MS = 10_000;
 const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 
@@ -40,37 +41,11 @@ type V1Arg = string | V1RawArg;
 export interface CmuxSocketClientOptions {
   socketPath?: string;
   timeoutMs?: number;
+  maxInFlight?: number;
   /** Password for socket access mode "password" */
   password?: string;
   /** CLI client fallback for V2 methods not supported by the daemon */
   cliFallback?: CmuxClient;
-}
-
-// ── Socket-level errors ────────────────────────────────────────────────
-
-export class CmuxSocketError extends Error {
-  constructor(
-    message: string,
-    public readonly code?: string,
-  ) {
-    super(message);
-    this.name = "CmuxSocketError";
-  }
-}
-
-// ── V2 JSON-RPC types ──────────────────────────────────────────────────
-
-interface V2Request {
-  id: string;
-  method: string;
-  params: Record<string, unknown>;
-}
-
-interface V2Response {
-  id: string;
-  ok: boolean;
-  result?: Record<string, unknown>;
-  error?: { code: string; message: string; data?: unknown };
 }
 
 // ── The Client ─────────────────────────────────────────────────────────
@@ -80,6 +55,7 @@ export class CmuxSocketClient {
   private timeoutMs: number;
   private password?: string;
   private cliFallback?: CmuxClient;
+  private transport: CmuxPersistentSocket;
 
   constructor(opts?: CmuxSocketClientOptions) {
     this.socketPath =
@@ -87,6 +63,11 @@ export class CmuxSocketClient {
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.password = opts?.password;
     this.cliFallback = opts?.cliFallback;
+    this.transport = new CmuxPersistentSocket({
+      socketPath: this.socketPath,
+      timeoutMs: this.timeoutMs,
+      maxInFlight: opts?.maxInFlight,
+    });
   }
 
   private assertSupportedSendOptions(opts?: CmuxSendOptions): void {
@@ -103,170 +84,12 @@ export class CmuxSocketClient {
     }
   }
 
-  // ── Low-level: send a V2 request, get a V2 response ────────────────
-
-  private sendV2(
-    method: string,
-    params: Record<string, unknown> = {},
-  ): Promise<V2Response> {
-    return new Promise((resolve, reject) => {
-      const id = crypto.randomUUID();
-      const request: V2Request = { id, method, params };
-      const payload = JSON.stringify(request) + "\n";
-
-      let authId: string | null = null;
-
-      const socket = net.createConnection({ path: this.socketPath }, () => {
-        if (this.password) {
-          // Send auth first — payload is deferred until auth succeeds
-          authId = crypto.randomUUID();
-          const authReq: V2Request = {
-            id: authId,
-            method: "auth.login",
-            params: { password: this.password },
-          };
-          socket.write(JSON.stringify(authReq) + "\n");
-        } else {
-          socket.write(payload);
-        }
-      });
-
-      let buffer = "";
-      let authDone = !this.password;
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        reject(
-          new CmuxSocketError(
-            `Timeout after ${this.timeoutMs}ms waiting for ${method}`,
-            "timeout",
-          ),
-        );
-      }, this.timeoutMs);
-
-      socket.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString("utf-8");
-
-        // Process all complete lines
-        let newlineIdx: number;
-        while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, newlineIdx);
-          buffer = buffer.slice(newlineIdx + 1);
-
-          if (!line.trim()) continue;
-
-          try {
-            const parsed = JSON.parse(line) as V2Response;
-
-            // If we sent an auth request, consume its response first
-            if (!authDone && authId && parsed.id === authId) {
-              authDone = true;
-              if (!parsed.ok) {
-                clearTimeout(timeout);
-                socket.destroy();
-                reject(
-                  new CmuxSocketError(
-                    `Auth failed: ${parsed.error?.message ?? "unknown"}`,
-                    "auth_failed",
-                  ),
-                );
-                return;
-              }
-              // Auth succeeded — now send the actual request
-              socket.write(payload);
-              continue;
-            }
-
-            // This is our actual response
-            if (parsed.id === id) {
-              clearTimeout(timeout);
-              socket.destroy();
-              resolve(parsed);
-            }
-          } catch {
-            // Non-JSON line (v1 fallback?) — skip
-          }
-        }
-      });
-
-      socket.on("error", (err: Error) => {
-        clearTimeout(timeout);
-        reject(
-          new CmuxSocketError(
-            `Socket error: ${err.message}`,
-            "connection_error",
-          ),
-        );
-      });
-
-      socket.on("close", () => {
-        clearTimeout(timeout);
-        // Reject immediately if we haven't received a response
-        reject(
-          new CmuxSocketError(
-            "Socket closed before receiving response",
-            "connection_closed",
-          ),
-        );
-      });
-    });
-  }
-
   /**
    * Send a V1 plain-text command. Some cmux operations (set_status,
    * set_progress, log) only exist as V1 commands.
    */
   private sendV1(command: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const payload = command + "\n";
-
-      const socket = net.createConnection({ path: this.socketPath }, () => {
-        socket.write(payload);
-      });
-
-      let buffer = "";
-      const timeout = setTimeout(() => {
-        socket.destroy();
-        reject(
-          new CmuxSocketError(
-            `Timeout after ${this.timeoutMs}ms waiting for V1: ${command.split(" ")[0]}`,
-            "timeout",
-          ),
-        );
-      }, this.timeoutMs);
-
-      socket.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString("utf-8");
-        if (buffer.includes("\n")) {
-          clearTimeout(timeout);
-          socket.destroy();
-          resolve(buffer.trim());
-        }
-      });
-
-      socket.on("error", (err: Error) => {
-        clearTimeout(timeout);
-        reject(
-          new CmuxSocketError(
-            `Socket error: ${err.message}`,
-            "connection_error",
-          ),
-        );
-      });
-
-      socket.on("close", () => {
-        clearTimeout(timeout);
-        if (buffer.trim()) {
-          resolve(buffer.trim());
-        } else {
-          reject(
-            new CmuxSocketError(
-              "Socket closed before receiving response",
-              "connection_closed",
-            ),
-          );
-        }
-      });
-    });
+    return this.transport.sendLine(command);
   }
 
   private quoteV1Arg(arg: string): string {
@@ -297,15 +120,11 @@ export class CmuxSocketClient {
     method: string,
     params: Record<string, unknown> = {},
   ): Promise<T> {
-    const response = await this.sendV2(method, params);
-
-    if (!response.ok) {
-      const errCode = response.error?.code ?? "unknown";
-      const errMsg = response.error?.message ?? "Unknown error";
-      throw new CmuxSocketError(`${errCode}: ${errMsg}`, errCode);
+    if (this.password) {
+      await this.transport.call("auth.login", { password: this.password });
+      this.password = undefined;
     }
-
-    return (response.result ?? {}) as T;
+    return this.transport.call<T>(method, params);
   }
 
   // ── Public API (mirrors CmuxClient interface) ──────────────────────
@@ -722,6 +541,10 @@ export class CmuxSocketClient {
       }
     }
     return this.call(method, params);
+  }
+
+  disconnect(): void {
+    this.transport.disconnect();
   }
 
   /**
