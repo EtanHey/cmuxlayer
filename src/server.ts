@@ -40,7 +40,12 @@ import {
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { chooseSurfaceClosePolicy } from "./layout-policy.js";
-import type { CmuxSurface, ParsedScreenResult } from "./types.js";
+import type {
+  CmuxNewSplitResult,
+  CmuxNewSurfaceResult,
+  CmuxSurface,
+  ParsedScreenResult,
+} from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 
@@ -915,7 +920,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const screen = await client.readScreen(opts.surface, {
           workspace: opts.workspace,
           lines: 80,
-          scrollback: true,
+          scrollback: false,
         });
         lastText = screen.text;
 
@@ -1278,6 +1283,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
     ANNOTATIONS.mutating,
     async (args) => {
+      let result: CmuxNewSplitResult | undefined;
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         if (bootPromptPath) {
@@ -1287,7 +1293,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await preflightBootPromptFile(bootPromptPath);
         }
 
-        const result = await client.newSplit(args.direction, {
+        result = await client.newSplit(args.direction, {
           workspace: args.workspace,
           surface: args.surface,
           pane: args.pane,
@@ -1329,6 +1335,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof BootPromptTimeoutError) {
+          return err(e, {
+            surface: result?.surface,
+            last_10_lines: e.last_10_lines,
+          });
+        }
+        if (e instanceof BootPromptDeliveryError) {
+          return err(e, {
+            surface: result?.surface,
+            delivered_chars: e.delivered_chars,
+          });
+        }
         return err(e);
       }
     },
@@ -1365,6 +1383,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
     ANNOTATIONS.mutating,
     async (args) => {
+      let result: CmuxNewSurfaceResult | undefined;
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         if (bootPromptPath) {
@@ -1374,7 +1393,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await preflightBootPromptFile(bootPromptPath);
         }
 
-        const result = await client.newSurface({
+        result = await client.newSurface({
           pane: args.pane,
           workspace: args.workspace,
           type: args.type,
@@ -1413,6 +1432,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof BootPromptTimeoutError) {
+          return err(e, {
+            surface: result?.surface,
+            last_10_lines: e.last_10_lines,
+          });
+        }
+        if (e instanceof BootPromptDeliveryError) {
+          return err(e, {
+            surface: result?.surface,
+            delivered_chars: e.delivered_chars,
+          });
+        }
         return err(e);
       }
     },
@@ -2296,6 +2327,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             model: args.model,
             cli: args.cli,
             prompt: args.prompt ?? "",
+            boot_prompt_pending: hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
             max_cost_per_agent: args.max_cost_per_agent,
@@ -2319,6 +2351,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               if (bootPromptDelivery.prompt_text !== null) {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   task_summary: bootPromptDelivery.prompt_text,
+                  boot_prompt_pending: false,
+                });
+                registry.set(result.agent_id, updated);
+              } else {
+                const updated = stateMgr.updateRecord(result.agent_id, {
+                  boot_prompt_pending: false,
                 });
                 registry.set(result.agent_id, updated);
               }

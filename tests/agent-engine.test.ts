@@ -717,11 +717,87 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(result.state).toBe("ready");
     });
 
+    it("does not promote booting agents while boot prompt delivery is pending", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "codex> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot")?.state).toBe("booting");
+    });
+
+    it("promotes low-confidence CLI prompts after consecutive matches", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-gemini",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "gemini",
+          task_summary: "",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "ready\n> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini")?.state).toBe("booting");
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini")?.state).toBe("ready");
+    });
+
     it("throws for non-existent agent", async () => {
       await expect(
         engine.waitFor("nonexistent", "ready", 1000),
       ).rejects.toThrow(/not found/);
     });
+  });
+
+  describe("default preflight", () => {
+    it.each([
+      ["codex", "Codex"],
+      ["cursor", "Cursor"],
+    ] as const)(
+      "rejects missing %s repoGolem launchers before creating a surface",
+      async (cli, suffix) => {
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
+        try {
+          await expect(
+            defaultEngine.spawnAgent({
+              repo: `missinglauncher${suffix}`,
+              model: "test",
+              cli,
+              prompt: "",
+            }),
+          ).rejects.toThrow(`missinglauncher${suffix}${suffix}`);
+          expect(mockClient.newSplit).not.toHaveBeenCalled();
+        } finally {
+          defaultEngine.dispose();
+        }
+      },
+    );
   });
 
   describe("waitForAll", () => {

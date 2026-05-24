@@ -42,6 +42,7 @@ export interface SpawnAgentParams {
   model: string;
   cli: CliType;
   prompt: string;
+  boot_prompt_pending?: boolean;
   workspace?: string;
   parent_agent_id?: string;
   max_cost_per_agent?: number;
@@ -242,8 +243,11 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-async function assertClaudeLauncherAvailable(repo: string): Promise<void> {
-  const launcher = `${sanitizeRepoName(repo)}Claude`;
+async function assertLauncherAvailable(
+  repo: string,
+  suffix: "Claude" | "Codex" | "Cursor",
+): Promise<void> {
+  const launcher = `${sanitizeRepoName(repo)}${suffix}`;
   const shell = process.env.SHELL || "/bin/sh";
   const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
 
@@ -268,6 +272,8 @@ export class AgentEngine {
   private sidebarSnapshot = new Map<string, string>();
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
   private loggedEvents = new Set<string>();
+  /** agentId → consecutive ready-prompt matches */
+  private readyPatternMatches = new Map<string, number>();
 
   constructor(
     stateMgr: StateManager,
@@ -282,7 +288,11 @@ export class AgentEngine {
       opts?.spawnPreflight ??
       (async (params) => {
         if (params.cli === "claude") {
-          await assertClaudeLauncherAvailable(params.repo);
+          await assertLauncherAvailable(params.repo, "Claude");
+        } else if (params.cli === "codex") {
+          await assertLauncherAvailable(params.repo, "Codex");
+        } else if (params.cli === "cursor") {
+          await assertLauncherAvailable(params.repo, "Cursor");
         }
       });
   }
@@ -364,6 +374,11 @@ export class AgentEngine {
 
   private async maybeMarkBootReady(agent: AgentRecord): Promise<AgentRecord> {
     if (agent.state !== "booting") {
+      this.readyPatternMatches.delete(agent.agent_id);
+      return agent;
+    }
+    if (agent.boot_prompt_pending) {
+      this.readyPatternMatches.delete(agent.agent_id);
       return agent;
     }
 
@@ -372,12 +387,20 @@ export class AgentEngine {
         lines: 20,
       });
       const match = matchReadyPattern(agent.cli, screen.text);
-      if (!match.matched || match.confidence !== "high") {
+      if (!match.matched) {
+        this.readyPatternMatches.delete(agent.agent_id);
+        return agent;
+      }
+
+      const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      this.readyPatternMatches.set(agent.agent_id, count);
+      if (count < Math.max(1, match.consecutive)) {
         return agent;
       }
 
       const updated = this.stateMgr.transition(agent.agent_id, "ready");
       this.registry.set(agent.agent_id, updated);
+      this.readyPatternMatches.delete(agent.agent_id);
       return updated;
     } catch {
       return agent;
@@ -751,6 +774,7 @@ export class AgentEngine {
       crash_recover: params.crash_recover ?? false,
       respawn_attempts: 0,
       user_killed: false,
+      boot_prompt_pending: params.boot_prompt_pending ?? false,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
