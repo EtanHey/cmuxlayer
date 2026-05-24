@@ -35,12 +35,14 @@ import {
 } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
 import { chooseAgentSpawnPlacement } from "./layout-policy.js";
+import { matchReadyPattern } from "./pattern-registry.js";
 
 export interface SpawnAgentParams {
   repo: string;
   model: string;
   cli: CliType;
   prompt: string;
+  boot_prompt_pending?: boolean;
   workspace?: string;
   parent_agent_id?: string;
   max_cost_per_agent?: number;
@@ -64,6 +66,7 @@ const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -198,13 +201,13 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
       // repoGolem launcher handles env vars via ralph-registry
       return `${safeRepo}Claude -s`;
     case "codex":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex`;
+      return `${safeRepo}Codex -s`;
     case "gemini":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli`;
     case "cursor":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent`;
+      return `${safeRepo}Cursor -s`;
   }
 }
 
@@ -216,15 +219,15 @@ export function buildResumeCommand(
   const safeRepo = sanitizeRepoName(repo);
   switch (cli) {
     case "claude":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} claude --dangerously-skip-permissions --resume ${sessionId}`;
+      return `${safeRepo}Claude -s --resume ${sessionId}`;
     case "codex":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex resume ${sessionId}`;
+      return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
     case "gemini":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     case "cursor":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent --resume ${sessionId}`;
+      return `${safeRepo}Cursor -s --resume ${sessionId}`;
   }
 }
 
@@ -241,8 +244,11 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-async function assertClaudeLauncherAvailable(repo: string): Promise<void> {
-  const launcher = `${sanitizeRepoName(repo)}Claude`;
+async function assertLauncherAvailable(
+  repo: string,
+  suffix: "Claude" | "Codex" | "Cursor",
+): Promise<void> {
+  const launcher = `${sanitizeRepoName(repo)}${suffix}`;
   const shell = process.env.SHELL || "/bin/sh";
   const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
 
@@ -267,6 +273,8 @@ export class AgentEngine {
   private sidebarSnapshot = new Map<string, string>();
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
   private loggedEvents = new Set<string>();
+  /** agentId → consecutive ready-prompt matches */
+  private readyPatternMatches = new Map<string, number>();
 
   constructor(
     stateMgr: StateManager,
@@ -281,7 +289,11 @@ export class AgentEngine {
       opts?.spawnPreflight ??
       (async (params) => {
         if (params.cli === "claude") {
-          await assertClaudeLauncherAvailable(params.repo);
+          await assertLauncherAvailable(params.repo, "Claude");
+        } else if (params.cli === "codex") {
+          await assertLauncherAvailable(params.repo, "Codex");
+        } else if (params.cli === "cursor") {
+          await assertLauncherAvailable(params.repo, "Cursor");
         }
       });
   }
@@ -355,6 +367,60 @@ export class AgentEngine {
         cli_session_id: sessionId,
       });
       this.registry.set(agent.agent_id, updated);
+      return updated;
+    } catch {
+      return agent;
+    }
+  }
+
+  private async maybeMarkBootReady(agent: AgentRecord): Promise<AgentRecord> {
+    if (agent.state !== "booting") {
+      this.readyPatternMatches.delete(agent.agent_id);
+      return agent;
+    }
+    if (agent.boot_prompt_pending) {
+      this.readyPatternMatches.delete(agent.agent_id);
+      const since = Date.parse(agent.updated_at);
+      if (
+        Number.isNaN(since) ||
+        Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
+      ) {
+        return agent;
+      }
+
+      try {
+        this.stateMgr.updateRecord(agent.agent_id, {
+          boot_prompt_pending: false,
+        });
+        const failed = this.stateMgr.transition(agent.agent_id, "error", {
+          error: "Boot prompt delivery interrupted before completion",
+        });
+        this.registry.set(agent.agent_id, failed);
+        return failed;
+      } catch {
+        return agent;
+      }
+    }
+
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      const match = matchReadyPattern(agent.cli, screen.text);
+      if (!match.matched) {
+        this.readyPatternMatches.delete(agent.agent_id);
+        return agent;
+      }
+
+      const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      this.readyPatternMatches.set(agent.agent_id, count);
+      if (count < Math.max(1, match.consecutive)) {
+        return agent;
+      }
+
+      const updated = this.stateMgr.transition(agent.agent_id, "ready");
+      this.registry.set(agent.agent_id, updated);
+      this.readyPatternMatches.delete(agent.agent_id);
       return updated;
     } catch {
       return agent;
@@ -520,7 +586,8 @@ export class AgentEngine {
     const done = agents.filter((a) => a.state === "done").length;
 
     for (const originalAgent of agents) {
-      const agent = await this.maybeCaptureBootSessionId(originalAgent);
+      const capturedAgent = await this.maybeCaptureBootSessionId(originalAgent);
+      const agent = await this.maybeMarkBootReady(capturedAgent);
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;
@@ -727,6 +794,7 @@ export class AgentEngine {
       crash_recover: params.crash_recover ?? false,
       respawn_attempts: 0,
       user_killed: false,
+      boot_prompt_pending: params.boot_prompt_pending ?? false,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);

@@ -5,6 +5,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
@@ -23,6 +25,7 @@ import { toPublicAgent } from "./agent-facade.js";
 import type {
   AgentRecord,
   AgentState,
+  CliType,
   DeliveryEventType,
   DeliveryTelemetryEvent,
 } from "./agent-types.js";
@@ -37,8 +40,14 @@ import {
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { chooseSurfaceClosePolicy } from "./layout-policy.js";
-import type { CmuxSurface, ParsedScreenResult } from "./types.js";
+import type {
+  CmuxNewSplitResult,
+  CmuxNewSurfaceResult,
+  CmuxSurface,
+  ParsedScreenResult,
+} from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
+import { matchReadyPattern } from "./pattern-registry.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -90,7 +99,10 @@ const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
 const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+const BOOT_PROMPT_TIMEOUT_MS = 60_000;
+const BOOT_PROMPT_READY_POLL_MS = 250;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
+const READY_PATTERN_CLIS: CliType[] = ["claude", "codex", "gemini", "kiro", "cursor"];
 const SendToArgsSchema = z.object({
   agent_id: z.string(),
   text: z.string(),
@@ -125,6 +137,26 @@ class DeliveryError extends Error {
   ) {
     super(message);
     this.name = "DeliveryError";
+  }
+}
+
+class BootPromptTimeoutError extends Error {
+  constructor(
+    message: string,
+    readonly last_10_lines: string[],
+  ) {
+    super(message);
+    this.name = "BootPromptTimeoutError";
+  }
+}
+
+class BootPromptDeliveryError extends Error {
+  constructor(
+    message: string,
+    readonly delivered_chars: number,
+  ) {
+    super(message);
+    this.name = "BootPromptDeliveryError";
   }
 }
 
@@ -269,6 +301,64 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
   }
 
   return chunks;
+}
+
+function getBootPromptPath(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function hasInlinePrompt(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function assertBootPromptMode(
+  prompt: string | undefined,
+  bootPromptPath: string | null,
+): void {
+  if (hasInlinePrompt(prompt) && bootPromptPath) {
+    throw new Error("prompt and boot_prompt_path are mutually exclusive");
+  }
+}
+
+function tailLines(text: string, count: number): string[] {
+  return text.split(/\r?\n/).filter(Boolean).slice(-count);
+}
+
+async function preflightBootPromptFile(path: string): Promise<void> {
+  try {
+    await access(path, fsConstants.R_OK);
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "ERROR";
+    if (code === "ENOENT") {
+      throw new Error(`boot_prompt_path ENOENT: ${path}`);
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      throw new Error(`boot_prompt_path permission denied: ${path}`);
+    }
+    throw error;
+  }
+}
+
+function inferLauncherCli(command: string): CliType | null {
+  if (!/(^|\s)-s(?:\s|$)/.test(command)) {
+    return null;
+  }
+
+  const match = command.match(
+    /(?:^|\s)[A-Za-z0-9_.-]+(Claude|Codex|Cursor|Gemini|Kiro)\b/,
+  );
+  if (!match) {
+    return null;
+  }
+
+  return match[1].toLowerCase() as CliType;
+}
+
+function readyPatternCandidates(cli?: CliType): CliType[] {
+  return cli ? [cli] : READY_PATTERN_CLIS;
 }
 
 async function delay(ms: number): Promise<void> {
@@ -814,6 +904,122 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return { bytes, retry_count, submit_verified };
   };
 
+  const waitForBootPromptReady = async (opts: {
+    surface: string;
+    workspace?: string;
+    cli?: CliType;
+    timeout_ms: number;
+  }): Promise<void> => {
+    const start = Date.now();
+    let lastText = "";
+    const consecutiveMatches = new Map<CliType, number>();
+    const candidates = readyPatternCandidates(opts.cli);
+
+    while (Date.now() - start < opts.timeout_ms) {
+      try {
+        const screen = await client.readScreen(opts.surface, {
+          workspace: opts.workspace,
+          lines: 80,
+          scrollback: false,
+        });
+        lastText = screen.text;
+
+        for (const candidate of candidates) {
+          const match = matchReadyPattern(candidate, screen.text);
+          const count = match.matched
+            ? (consecutiveMatches.get(candidate) ?? 0) + 1
+            : 0;
+          consecutiveMatches.set(candidate, count);
+          if (count >= match.consecutive) {
+            return;
+          }
+        }
+      } catch (error) {
+        lastText = error instanceof Error ? error.message : String(error);
+      }
+
+      const remaining = opts.timeout_ms - (Date.now() - start);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(BOOT_PROMPT_READY_POLL_MS, remaining));
+    }
+
+    throw new BootPromptTimeoutError(
+      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${opts.surface}`,
+      tailLines(lastText, 10),
+    );
+  };
+
+  const deliverBootPrompt = async (opts: {
+    surface: string;
+    workspace?: string;
+    cli?: CliType;
+    prompt?: string;
+    boot_prompt_path?: string | null;
+    timeout_ms?: number;
+  }): Promise<{
+    bytes: number;
+    retry_count: number;
+    submit_verified: boolean | null;
+    prompt_text: string | null;
+  }> => {
+    const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
+    assertBootPromptMode(opts.prompt, bootPromptPath);
+    if (!hasInlinePrompt(opts.prompt) && !bootPromptPath) {
+      return {
+        bytes: 0,
+        retry_count: 0,
+        submit_verified: null,
+        prompt_text: null,
+      };
+    }
+
+    await waitForBootPromptReady({
+      surface: opts.surface,
+      workspace: opts.workspace,
+      cli: opts.cli,
+      timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+    });
+
+    const rawPrompt = bootPromptPath
+      ? await readFile(bootPromptPath, "utf8")
+      : opts.prompt!;
+    const sanitizedText = sanitizeTerminalInput(rawPrompt);
+    const chunks =
+      sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
+        ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
+        : [sanitizedText];
+    let sentChunks = 0;
+
+    try {
+      const delivery = await withSurfaceWrite(opts.surface, async () =>
+        deliverInputChunks({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          chunks,
+          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+          press_enter: true,
+          onChunkDelivered: (count) => {
+            sentChunks = count;
+          },
+          verify_submit: sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
+        }),
+      );
+      return { ...delivery, prompt_text: rawPrompt };
+    } catch (error) {
+      const deliveredChars = chunks
+        .slice(0, sentChunks)
+        .reduce((sum, chunk) => sum + chunk.length, 0);
+      const message = error instanceof Error ? error.message : String(error);
+      throw new BootPromptDeliveryError(
+        `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
+        deliveredChars,
+      );
+    }
+  };
+
   const startBackgroundDelivery = (record: DeliveryRecord) => {
     acquireSurfaceWrite(record.surface, record.delivery_id);
     deliveries.set(record.delivery_id, record);
@@ -1040,7 +1246,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 2. new_split
   server.tool(
     "new_split",
-    "Create a new split pane (terminal or browser)",
+    "Create a new split pane (terminal or browser). For terminal panes that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
     {
       direction: z
         .enum(["left", "right", "up", "down"])
@@ -1060,11 +1266,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(true)
         .describe("Focus the new pane"),
+      boot_prompt_path: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Optional path to a prompt file to read after readiness and submit to the new terminal surface. Checked before pane creation. Mutually exclusive with inline prompt fields.",
+        ),
+      boot_prompt_timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .default(BOOT_PROMPT_TIMEOUT_MS)
+        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
     },
     ANNOTATIONS.mutating,
     async (args) => {
+      let result: CmuxNewSplitResult | undefined;
       try {
-        const result = await client.newSplit(args.direction, {
+        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
+        if (bootPromptPath) {
+          if ((args.type ?? "terminal") !== "terminal") {
+            throw new Error("boot_prompt_path is only supported for terminal surfaces");
+          }
+          await preflightBootPromptFile(bootPromptPath);
+        }
+
+        result = await client.newSplit(args.direction, {
           workspace: args.workspace,
           surface: args.surface,
           pane: args.pane,
@@ -1079,17 +1308,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           result.title = args.title;
         }
-        const data = { ...result };
+        let bootPromptDelivery:
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
+        if (bootPromptPath) {
+          bootPromptDelivery = await deliverBootPrompt({
+            surface: result.surface,
+            workspace: result.workspace || args.workspace,
+            boot_prompt_path: bootPromptPath,
+            timeout_ms: args.boot_prompt_timeout_ms,
+          });
+        }
+        const data: Record<string, unknown> = { ...result };
+        if (bootPromptDelivery) {
+          data.boot_prompt_delivered = true;
+          data.boot_prompt_bytes = bootPromptDelivery.bytes;
+        }
         return okFormatted(
           formatOk("new_split", {
             surface: result.surface,
             direction: args.direction,
             type: args.type,
             title: result.title,
+            boot_prompt_delivered: Boolean(bootPromptDelivery),
           }),
           data,
         );
       } catch (e) {
+        if (e instanceof BootPromptTimeoutError) {
+          return err(e, {
+            surface: result?.surface,
+            last_10_lines: e.last_10_lines,
+          });
+        }
+        if (e instanceof BootPromptDeliveryError) {
+          return err(e, {
+            surface: result?.surface,
+            delivered_chars: e.delivered_chars,
+          });
+        }
         return err(e);
       }
     },
@@ -1098,7 +1355,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 3. new_surface
   server.tool(
     "new_surface",
-    "Create a new surface (tab) in an existing pane",
+    "Create a new surface (tab) in an existing pane. For terminal tabs that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
     {
       pane: z.string().describe("Target pane ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -1109,11 +1366,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .describe("Surface type"),
       title: z.string().optional().describe("Tab title"),
       url: z.string().optional().describe("URL for browser surfaces"),
+      boot_prompt_path: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Optional path to a prompt file to read after readiness and submit to the new terminal surface. Checked before tab creation.",
+        ),
+      boot_prompt_timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .default(BOOT_PROMPT_TIMEOUT_MS)
+        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
     },
     ANNOTATIONS.mutating,
     async (args) => {
+      let result: CmuxNewSurfaceResult | undefined;
       try {
-        const result = await client.newSurface({
+        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
+        if (bootPromptPath) {
+          if ((args.type ?? "terminal") !== "terminal") {
+            throw new Error("boot_prompt_path is only supported for terminal surfaces");
+          }
+          await preflightBootPromptFile(bootPromptPath);
+        }
+
+        result = await client.newSurface({
           pane: args.pane,
           workspace: args.workspace,
           type: args.type,
@@ -1125,17 +1405,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           result.title = args.title;
         }
-        const data = { ...result };
+        let bootPromptDelivery:
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
+        if (bootPromptPath) {
+          bootPromptDelivery = await deliverBootPrompt({
+            surface: result.surface,
+            workspace: result.workspace || args.workspace,
+            boot_prompt_path: bootPromptPath,
+            timeout_ms: args.boot_prompt_timeout_ms,
+          });
+        }
+        const data: Record<string, unknown> = { ...result };
+        if (bootPromptDelivery) {
+          data.boot_prompt_delivered = true;
+          data.boot_prompt_bytes = bootPromptDelivery.bytes;
+        }
         return okFormatted(
           formatOk("new_surface", {
             pane: args.pane,
             surface: result.surface,
             type: result.type,
             title: result.title,
+            boot_prompt_delivered: Boolean(bootPromptDelivery),
           }),
           data,
         );
       } catch (e) {
+        if (e instanceof BootPromptTimeoutError) {
+          return err(e, {
+            surface: result?.surface,
+            last_10_lines: e.last_10_lines,
+          });
+        }
+        if (e instanceof BootPromptDeliveryError) {
+          return err(e, {
+            surface: result?.surface,
+            delivered_chars: e.delivered_chars,
+          });
+        }
         return err(e);
       }
     },
@@ -1310,17 +1618,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 7. send_command
   server.tool(
     "send_command",
-    "Atomically send a command and press return on the same surface. Prefer this over separate send_input + send_key calls when launching or resuming agents.",
+    "Atomically send a command and press return on the same surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
     {
       surface: z.string().describe("Target surface ref"),
       command: z
         .string()
         .describe("Command text to send before pressing return"),
       workspace: z.string().optional().describe("Target workspace ref"),
+      boot_prompt_path: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Optional path to a prompt file for launcher commands matching <repo>Codex|Claude|Cursor|Gemini|Kiro with -s. File is checked before sending the launcher and read after readiness.",
+        ),
+      boot_prompt_timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .default(BOOT_PROMPT_TIMEOUT_MS)
+        .describe("Timeout in milliseconds waiting for the agent ready prompt"),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
+        const launcherCli = bootPromptPath
+          ? inferLauncherCli(args.command)
+          : null;
+        if (bootPromptPath && !launcherCli) {
+          throw new Error(
+            "boot_prompt_path is only supported for agent launcher commands with -s",
+          );
+        }
+        if (bootPromptPath) {
+          await preflightBootPromptFile(bootPromptPath);
+        }
+
         const sanitizedCommand = sanitizeTerminalInput(args.command);
         const chunks =
           sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
@@ -1341,14 +1676,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }),
         );
 
+        let bootPromptDelivery:
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
+        if (bootPromptPath && launcherCli) {
+          bootPromptDelivery = await deliverBootPrompt({
+            surface: args.surface,
+            workspace: args.workspace,
+            cli: launcherCli,
+            boot_prompt_path: bootPromptPath,
+            timeout_ms: args.boot_prompt_timeout_ms,
+          });
+        }
+
         const data = {
           surface: args.surface,
           command: sanitizedCommand,
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
+          boot_prompt_delivered: Boolean(bootPromptDelivery),
+          boot_prompt_bytes: bootPromptDelivery?.bytes,
         };
         return okFormatted(formatOk("send_command", data), data);
       } catch (e) {
+        if (e instanceof BootPromptTimeoutError) {
+          return err(e, { last_10_lines: e.last_10_lines });
+        }
+        if (e instanceof BootPromptDeliveryError) {
+          return err(e, { delivered_chars: e.delivered_chars });
+        }
         if (e instanceof DeliveryError) {
           return err(e, { failed_chunk: e.failed_chunk ?? null });
         }
@@ -1907,7 +2263,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn an AI agent in a new terminal surface. Returns immediately — use wait_for to block until ready.",
+      "Spawn an AI agent in a new terminal surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
       {
         repo: z
           .string()
@@ -1918,7 +2274,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
           .describe("CLI tool to launch"),
-        prompt: z.string().describe("Task prompt to send after agent is ready"),
+        prompt: z
+          .string()
+          .optional()
+          .describe(
+            "Inline task prompt to send after the agent is ready. Mutually exclusive with boot_prompt_path.",
+          ),
+        boot_prompt_path: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "Optional path to a prompt file. The file is checked before spawning, read after readiness, sent with chunked delivery, then submitted with return. Mutually exclusive with prompt.",
+          ),
+        boot_prompt_timeout_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .default(BOOT_PROMPT_TIMEOUT_MS)
+          .describe("Timeout in milliseconds waiting for the agent ready prompt"),
         workspace: z.string().optional().describe("Target workspace ref"),
         parent_agent_id: z
           .string()
@@ -1941,24 +2316,102 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
+          assertBootPromptMode(args.prompt, bootPromptPath);
+          if (bootPromptPath) {
+            await preflightBootPromptFile(bootPromptPath);
+          }
+
           const result = await engine.spawnAgent({
             repo: args.repo,
             model: args.model,
             cli: args.cli,
-            prompt: args.prompt,
+            prompt: args.prompt ?? "",
+            boot_prompt_pending: hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
           });
+
+          let bootPromptDelivery:
+            | Awaited<ReturnType<typeof deliverBootPrompt>>
+            | undefined;
+          try {
+            if (hasInlinePrompt(args.prompt) || bootPromptPath) {
+              bootPromptDelivery = await deliverBootPrompt({
+                surface: result.surface_id,
+                workspace: args.workspace,
+                cli: args.cli,
+                prompt: args.prompt,
+                boot_prompt_path: bootPromptPath,
+                timeout_ms: args.boot_prompt_timeout_ms,
+              });
+
+              if (bootPromptDelivery.prompt_text !== null) {
+                const updated = stateMgr.updateRecord(result.agent_id, {
+                  task_summary: bootPromptDelivery.prompt_text,
+                  boot_prompt_pending: false,
+                });
+                registry.set(result.agent_id, updated);
+              } else {
+                const updated = stateMgr.updateRecord(result.agent_id, {
+                  boot_prompt_pending: false,
+                });
+                registry.set(result.agent_id, updated);
+              }
+
+              const current = engine.getAgentState(result.agent_id);
+              if (current?.state === "booting") {
+                const ready = stateMgr.transition(result.agent_id, "ready");
+                registry.set(result.agent_id, ready);
+                result.state = "ready";
+              } else if (current?.state === "ready") {
+                result.state = "ready";
+              }
+            }
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            try {
+              let updated = stateMgr.updateRecord(result.agent_id, {
+                boot_prompt_pending: false,
+              });
+              registry.set(result.agent_id, updated);
+              if (updated.state !== "done" && updated.state !== "error") {
+                updated = stateMgr.transition(result.agent_id, "error", {
+                  error: `Boot prompt failed: ${message}`,
+                });
+                registry.set(result.agent_id, updated);
+              }
+            } catch {
+              // Preserve the original boot prompt error response.
+            }
+            const extra = {
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+            };
+            if (e instanceof BootPromptTimeoutError) {
+              return err(e, { ...extra, last_10_lines: e.last_10_lines });
+            }
+            if (e instanceof BootPromptDeliveryError) {
+              return err(e, { ...extra, delivered_chars: e.delivered_chars });
+            }
+            return err(e, extra);
+          }
+
           return okFormatted(
             formatOk("spawn_agent", {
               agent_id: result.agent_id,
               repo: args.repo,
               model: args.model,
               surface: result.surface_id,
+              boot_prompt_delivered: Boolean(bootPromptDelivery),
             }),
-            { ...result },
+            {
+              ...result,
+              boot_prompt_delivered: Boolean(bootPromptDelivery),
+              boot_prompt_bytes: bootPromptDelivery?.bytes,
+            },
           );
         } catch (e) {
           return err(e);

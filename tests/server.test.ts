@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -1009,6 +1009,210 @@ describe("tool handler integration", () => {
     expect(parsed.surface).toBe("surface:6");
   });
 
+  it("send_command rejects boot_prompt_path for non-launcher commands before sending", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "echo hello",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("launcher");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("send_command sends boot_prompt_path contents after launcher readiness", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "codex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerCodex -s",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "brainlayerCodex -s",
+    ]));
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "boot prompt",
+    ]));
+  });
+
+  it("send_command reports timeout with last screen lines and leaves launcher surface alive", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "line 1\nline 2\n$ waiting",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerCodex -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Timed out");
+    expect(parsed.last_10_lines).toContain("$ waiting");
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "brainlayerCodex -s",
+    ]));
+  });
+
+  it("send_command does not treat another CLI prompt as launcher readiness", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "codex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(mockExec).not.toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "boot prompt",
+    ]));
+  });
+
+  it("send_command requires consecutive low-confidence ready matches", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let reads = 0;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        reads += 1;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: reads === 1 ? "booting\n>" : "ready\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerGemini -s",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(reads).toBe(2);
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "boot prompt",
+    ]));
+  });
+
   it("send_input chunks long text transparently before sending", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
@@ -1386,6 +1590,88 @@ describe("tool handler integration", () => {
     expect(parsed.surface).toBe("surface:2");
   });
 
+  it("new_split rejects missing boot_prompt_path before creating a pane", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workspace: "workspace:1",
+        surface: "surface:2",
+        pane: "pane:1",
+        title: "New",
+        type: "terminal",
+      }),
+      stderr: "",
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: join(CHANNEL_TEST_DIR, "missing.md"),
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("ENOENT");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("new_split reports boot prompt timeout with surface and last screen lines", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text: "line 1\nline 2\n$ waiting",
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.last_10_lines).toContain("$ waiting");
+  });
+
   it("new_split renames the new surface when a title is provided", async () => {
     mockExec = vi
       .fn()
@@ -1480,6 +1766,88 @@ describe("tool handler integration", () => {
         "Build Logs",
       ]),
     );
+  });
+
+  it("new_surface rejects missing boot_prompt_path before creating a tab", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workspace: "workspace:1",
+        surface: "surface:3",
+        pane: "pane:1",
+        title: "New Tab",
+        type: "terminal",
+      }),
+      stderr: "",
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["new_surface"];
+
+    const result = await tool.handler(
+      {
+        pane: "pane:1",
+        boot_prompt_path: join(CHANNEL_TEST_DIR, "missing.md"),
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("ENOENT");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("new_surface reports boot prompt timeout with surface and last screen lines", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "surface-mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:3",
+            pane: "pane:1",
+            title: "New Tab",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:3",
+            text: "line 1\nline 2\n$ waiting",
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_surface"];
+
+    const result = await tool.handler(
+      {
+        pane: "pane:1",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.surface).toBe("surface:3");
+    expect(parsed.last_10_lines).toContain("$ waiting");
   });
 
   it("move_surface handler calls cmux move-surface", async () => {

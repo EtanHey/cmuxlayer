@@ -357,7 +357,7 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).toHaveBeenCalled();
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
@@ -692,11 +692,139 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(result.agent?.state).toBe("ready");
     });
 
+    it("promotes booting agents to ready when their CLI prompt appears", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "codex> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      engine.startSweep(50);
+
+      const result = await engine.waitFor("agent-boot", "ready", 5000);
+
+      expect(result.matched).toBe(true);
+      expect(result.state).toBe("ready");
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:42", {
+        lines: 80,
+      });
+    });
+
+    it("does not promote booting agents while boot prompt delivery is pending", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "codex> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot")?.state).toBe("booting");
+    });
+
+    it("marks stale pending boot prompt agents as errored", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot")).toMatchObject({
+        state: "error",
+        boot_prompt_pending: false,
+        error: "Boot prompt delivery interrupted before completion",
+      });
+    });
+
+    it("promotes low-confidence CLI prompts after consecutive matches", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-gemini",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "gemini",
+          task_summary: "",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "ready\n> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini")?.state).toBe("booting");
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini")?.state).toBe("ready");
+    });
+
     it("throws for non-existent agent", async () => {
       await expect(
         engine.waitFor("nonexistent", "ready", 1000),
       ).rejects.toThrow(/not found/);
     });
+  });
+
+  describe("default preflight", () => {
+    it.each([
+      ["codex", "Codex"],
+      ["cursor", "Cursor"],
+    ] as const)(
+      "rejects missing %s repoGolem launchers before creating a surface",
+      async (cli, suffix) => {
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
+        try {
+          await expect(
+            defaultEngine.spawnAgent({
+              repo: `missinglauncher${suffix}`,
+              model: "test",
+              cli,
+              prompt: "",
+            }),
+          ).rejects.toThrow(`missinglauncher${suffix}${suffix}`);
+          expect(mockClient.newSplit).not.toHaveBeenCalled();
+        } finally {
+          defaultEngine.dispose();
+        }
+      },
+    );
   });
 
   describe("waitForAll", () => {
@@ -980,9 +1108,9 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("claude", "golems")).toBe("golemsClaude -s");
   });
 
-  it("uses cd + env vars + raw command for codex", () => {
+  it("uses repoGolem launcher for codex (no positional prompt)", () => {
     expect(buildLaunchCommand("codex", "brainlayer")).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex",
+      "brainlayerCodex -s",
     );
   });
 
@@ -998,9 +1126,9 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("uses cd + env vars + cursor agent for cursor", () => {
+  it("uses repoGolem launcher for cursor (no positional prompt)", () => {
     expect(buildLaunchCommand("cursor", "cmuxlayer")).toBe(
-      "cd ~/Gits/cmuxlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent",
+      "cmuxlayerCursor -s",
     );
   });
 
@@ -1036,9 +1164,10 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("includes CLAUDE_CODE_NO_FLICKER=1 for non-Claude CLIs", () => {
+  it("does NOT include env vars for codex (launcher handles them)", () => {
     const cmd = buildLaunchCommand("codex", "brainlayer");
-    expect(cmd).toContain("CLAUDE_CODE_NO_FLICKER=1");
+    expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
+    expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
   });
 
   it("includes MCP_CONNECTION_NONBLOCKING=1 for non-Claude CLIs", () => {
@@ -1058,13 +1187,13 @@ describe("buildResumeCommand", () => {
 
   it("uses the verified resume command for each supported CLI", () => {
     expect(buildResumeCommand("claude", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("codex", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("cursor", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCursor -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("gemini", "brainlayer", sessionId)).toBe(
       "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",

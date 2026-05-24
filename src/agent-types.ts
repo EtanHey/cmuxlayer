@@ -46,6 +46,8 @@ export interface AgentRecord {
   crash_recover?: boolean;
   respawn_attempts?: number;
   user_killed?: boolean;
+  // Boot prompt delivery guard
+  boot_prompt_pending?: boolean;
 }
 
 export interface MergedAgent extends AgentRecord {

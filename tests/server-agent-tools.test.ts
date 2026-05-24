@@ -3,7 +3,7 @@
  * Tests tool registration and handler dispatch with mocked cmux client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -26,7 +26,15 @@ const AGENT_TOOLS = [
 ] as const;
 
 function makeLifecycleExec(): ExecFn {
+  let readyText = "What can I help you with?\n>";
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("send")) {
+      const text = String(args[args.length - 1] ?? "");
+      if (text.includes("Codex")) readyText = "codex> ";
+      if (text.includes("Claude")) readyText = "What can I help you with?\n>";
+      if (text.includes("Cursor")) readyText = "cursor> ";
+    }
+
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -88,7 +96,7 @@ function makeLifecycleExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: "$ ",
+          text: readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -186,7 +194,209 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
-    expect(parsed.state).toBe("booting");
+    expect(parsed.state).toBe("ready");
+  });
+
+  it("spawn_agent sends inline prompt after the agent is ready", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "fix prompt delivery",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:new",
+    ]));
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:new",
+      "fix prompt delivery",
+    ]));
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send-key",
+      "--surface",
+      "surface:new",
+      "return",
+    ]));
+  });
+
+  it("spawn_agent sends boot_prompt_path contents after readiness", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:new",
+      "file prompt body",
+    ]));
+  });
+
+  it("spawn_agent stores boot_prompt_path contents as task_summary after delivery", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.task_summary).toBe("file prompt body");
+  });
+
+  it("spawn_agent rejects prompt and boot_prompt_path together", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "inline",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("mutually exclusive");
+  });
+
+  it("spawn_agent rejects missing boot_prompt_path before creating a surface", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: join(TEST_DIR, "missing.md"),
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("ENOENT");
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+  });
+
+  it("spawn_agent marks the agent errored when boot prompt delivery times out", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return { stdout: JSON.stringify({ panes: [] }), stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: "$ waiting",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          workspace: "ws:1",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    });
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+    const parsed =
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.agent_id).toBeDefined();
+    expect(parsed.surface_id).toBe("surface:new");
+
+    const stateResult = await getState.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.state).toBe("error");
+    expect(state.boot_prompt_pending).toBe(false);
+    expect(state.error).toContain("Boot prompt failed");
   });
 
   it("spawn_agent persists crash_recover=true in agent state", async () => {
@@ -318,7 +528,6 @@ describe("agent lifecycle tool handlers", () => {
         repo: "test",
         model: "sonnet",
         cli: "claude",
-        prompt: "test",
       },
       {} as any,
     );
@@ -526,7 +735,6 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
-        prompt: "task 1",
       },
       {} as any,
     );
