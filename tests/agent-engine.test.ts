@@ -357,7 +357,7 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).toHaveBeenCalled();
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
@@ -1160,13 +1160,13 @@ describe("buildResumeCommand", () => {
 
   it("uses the verified resume command for each supported CLI", () => {
     expect(buildResumeCommand("claude", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("codex", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("cursor", "brainlayer", sessionId)).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "brainlayerCursor -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("gemini", "brainlayer", sessionId)).toBe(
       "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",

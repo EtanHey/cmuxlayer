@@ -218,15 +218,15 @@ export function buildResumeCommand(
   const safeRepo = sanitizeRepoName(repo);
   switch (cli) {
     case "claude":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} claude --dangerously-skip-permissions --resume ${sessionId}`;
+      return `${safeRepo}Claude -s --resume ${sessionId}`;
     case "codex":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex resume ${sessionId}`;
+      return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
     case "gemini":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     case "cursor":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent --resume ${sessionId}`;
+      return `${safeRepo}Cursor -s --resume ${sessionId}`;
   }
 }
 

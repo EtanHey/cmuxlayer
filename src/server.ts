@@ -2371,6 +2371,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
           } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            try {
+              let updated = stateMgr.updateRecord(result.agent_id, {
+                boot_prompt_pending: false,
+              });
+              registry.set(result.agent_id, updated);
+              if (updated.state !== "done" && updated.state !== "error") {
+                updated = stateMgr.transition(result.agent_id, "error", {
+                  error: `Boot prompt failed: ${message}`,
+                });
+                registry.set(result.agent_id, updated);
+              }
+            } catch {
+              // Preserve the original boot prompt error response.
+            }
             const extra = {
               agent_id: result.agent_id,
               surface_id: result.surface_id,

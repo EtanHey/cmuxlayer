@@ -336,6 +336,69 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("spawn_agent marks the agent errored when boot prompt delivery times out", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return { stdout: JSON.stringify({ panes: [] }), stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: "$ waiting",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          workspace: "ws:1",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    });
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+    const parsed =
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.agent_id).toBeDefined();
+    expect(parsed.surface_id).toBe("surface:new");
+
+    const stateResult = await getState.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.state).toBe("error");
+    expect(state.boot_prompt_pending).toBe(false);
+    expect(state.error).toContain("Boot prompt failed");
+  });
+
   it("spawn_agent persists crash_recover=true in agent state", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
