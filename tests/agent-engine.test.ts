@@ -715,6 +715,9 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
 
       expect(result.matched).toBe(true);
       expect(result.state).toBe("ready");
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:42", {
+        lines: 80,
+      });
     });
 
     it("does not promote booting agents while boot prompt delivery is pending", async () => {
@@ -725,6 +728,7 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
           surface_id: "surface:42",
           cli: "codex",
           boot_prompt_pending: true,
+          updated_at: new Date().toISOString(),
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];
@@ -739,6 +743,29 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-boot")?.state).toBe("booting");
+    });
+
+    it("marks stale pending boot prompt agents as errored", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot")).toMatchObject({
+        state: "error",
+        boot_prompt_pending: false,
+        error: "Boot prompt delivery interrupted before completion",
+      });
     });
 
     it("promotes low-confidence CLI prompts after consecutive matches", async () => {

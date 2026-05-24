@@ -66,6 +66,7 @@ const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -379,12 +380,31 @@ export class AgentEngine {
     }
     if (agent.boot_prompt_pending) {
       this.readyPatternMatches.delete(agent.agent_id);
-      return agent;
+      const since = Date.parse(agent.updated_at);
+      if (
+        Number.isNaN(since) ||
+        Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
+      ) {
+        return agent;
+      }
+
+      try {
+        this.stateMgr.updateRecord(agent.agent_id, {
+          boot_prompt_pending: false,
+        });
+        const failed = this.stateMgr.transition(agent.agent_id, "error", {
+          error: "Boot prompt delivery interrupted before completion",
+        });
+        this.registry.set(agent.agent_id, failed);
+        return failed;
+      } catch {
+        return agent;
+      }
     }
 
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
-        lines: 20,
+        lines: BOOT_SESSION_CAPTURE_LINES,
       });
       const match = matchReadyPattern(agent.cli, screen.text);
       if (!match.matched) {
