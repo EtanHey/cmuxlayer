@@ -26,7 +26,15 @@ const AGENT_TOOLS = [
 ] as const;
 
 function makeLifecycleExec(): ExecFn {
+  let readyText = "What can I help you with?\n>";
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("send")) {
+      const text = String(args[args.length - 1] ?? "");
+      if (text.includes("Codex")) readyText = "codex> ";
+      if (text.includes("Claude")) readyText = "What can I help you with?\n>";
+      if (text.includes("Cursor")) readyText = "cursor> ";
+    }
+
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -88,7 +96,7 @@ function makeLifecycleExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: "codex> ",
+          text: readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -250,6 +258,35 @@ describe("agent lifecycle tool handlers", () => {
       "surface:new",
       "file prompt body",
     ]));
+  });
+
+  it("spawn_agent stores boot_prompt_path contents as task_summary after delivery", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.task_summary).toBe("file prompt body");
   });
 
   it("spawn_agent rejects prompt and boot_prompt_path together", async () => {

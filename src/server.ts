@@ -97,13 +97,7 @@ const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
-const READY_PATTERN_CLIS: CliType[] = [
-  "claude",
-  "codex",
-  "gemini",
-  "kiro",
-  "cursor",
-];
+const READY_PATTERN_CLIS: CliType[] = ["claude", "codex", "gemini", "kiro", "cursor"];
 const SendToArgsSchema = z.object({
   agent_id: z.string(),
   text: z.string(),
@@ -358,14 +352,8 @@ function inferLauncherCli(command: string): CliType | null {
   return match[1].toLowerCase() as CliType;
 }
 
-function screenHasKnownReadyPrompt(text: string, cli?: CliType): boolean {
-  if (cli && matchReadyPattern(cli, text).matched) {
-    return true;
-  }
-
-  return READY_PATTERN_CLIS.some((candidate) =>
-    candidate !== cli && matchReadyPattern(candidate, text).matched,
-  );
+function readyPatternCandidates(cli?: CliType): CliType[] {
+  return cli ? [cli] : READY_PATTERN_CLIS;
 }
 
 async function delay(ms: number): Promise<void> {
@@ -919,6 +907,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }): Promise<void> => {
     const start = Date.now();
     let lastText = "";
+    const consecutiveMatches = new Map<CliType, number>();
+    const candidates = readyPatternCandidates(opts.cli);
 
     while (Date.now() - start < opts.timeout_ms) {
       try {
@@ -929,13 +919,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         lastText = screen.text;
 
-        if (screenHasKnownReadyPrompt(screen.text, opts.cli)) {
-          return;
-        }
-
-        const parsed = parseScreen(screen.text);
-        if (parsed.agent_type !== "unknown" && parsed.status === "idle") {
-          return;
+        for (const candidate of candidates) {
+          const match = matchReadyPattern(candidate, screen.text);
+          const count = match.matched
+            ? (consecutiveMatches.get(candidate) ?? 0) + 1
+            : 0;
+          consecutiveMatches.set(candidate, count);
+          if (count >= match.consecutive) {
+            return;
+          }
         }
       } catch (error) {
         lastText = error instanceof Error ? error.message : String(error);
@@ -961,11 +953,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     prompt?: string;
     boot_prompt_path?: string | null;
     timeout_ms?: number;
-  }): Promise<{ bytes: number; retry_count: number; submit_verified: boolean | null }> => {
+  }): Promise<{
+    bytes: number;
+    retry_count: number;
+    submit_verified: boolean | null;
+    prompt_text: string | null;
+  }> => {
     const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
     assertBootPromptMode(opts.prompt, bootPromptPath);
     if (!hasInlinePrompt(opts.prompt) && !bootPromptPath) {
-      return { bytes: 0, retry_count: 0, submit_verified: null };
+      return {
+        bytes: 0,
+        retry_count: 0,
+        submit_verified: null,
+        prompt_text: null,
+      };
     }
 
     await waitForBootPromptReady({
@@ -986,7 +988,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let sentChunks = 0;
 
     try {
-      return await withSurfaceWrite(opts.surface, async () =>
+      const delivery = await withSurfaceWrite(opts.surface, async () =>
         deliverInputChunks({
           surface: opts.surface,
           workspace: opts.workspace,
@@ -1000,6 +1002,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           verify_submit: sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
         }),
       );
+      return { ...delivery, prompt_text: rawPrompt };
     } catch (error) {
       const deliveredChars = chunks
         .slice(0, sentChunks)
@@ -2292,7 +2295,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             repo: args.repo,
             model: args.model,
             cli: args.cli,
-            prompt: args.prompt ?? bootPromptPath ?? "",
+            prompt: args.prompt ?? "",
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
             max_cost_per_agent: args.max_cost_per_agent,
@@ -2302,24 +2305,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           let bootPromptDelivery:
             | Awaited<ReturnType<typeof deliverBootPrompt>>
             | undefined;
-          if (hasInlinePrompt(args.prompt) || bootPromptPath) {
-            bootPromptDelivery = await deliverBootPrompt({
-              surface: result.surface_id,
-              workspace: args.workspace,
-              cli: args.cli,
-              prompt: args.prompt,
-              boot_prompt_path: bootPromptPath,
-              timeout_ms: args.boot_prompt_timeout_ms,
-            });
+          try {
+            if (hasInlinePrompt(args.prompt) || bootPromptPath) {
+              bootPromptDelivery = await deliverBootPrompt({
+                surface: result.surface_id,
+                workspace: args.workspace,
+                cli: args.cli,
+                prompt: args.prompt,
+                boot_prompt_path: bootPromptPath,
+                timeout_ms: args.boot_prompt_timeout_ms,
+              });
 
-            const current = engine.getAgentState(result.agent_id);
-            if (current?.state === "booting") {
-              const ready = stateMgr.transition(result.agent_id, "ready");
-              registry.set(result.agent_id, ready);
-              result.state = "ready";
-            } else if (current?.state === "ready") {
-              result.state = "ready";
+              if (bootPromptDelivery.prompt_text !== null) {
+                const updated = stateMgr.updateRecord(result.agent_id, {
+                  task_summary: bootPromptDelivery.prompt_text,
+                });
+                registry.set(result.agent_id, updated);
+              }
+
+              const current = engine.getAgentState(result.agent_id);
+              if (current?.state === "booting") {
+                const ready = stateMgr.transition(result.agent_id, "ready");
+                registry.set(result.agent_id, ready);
+                result.state = "ready";
+              } else if (current?.state === "ready") {
+                result.state = "ready";
+              }
             }
+          } catch (e) {
+            const extra = {
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+            };
+            if (e instanceof BootPromptTimeoutError) {
+              return err(e, { ...extra, last_10_lines: e.last_10_lines });
+            }
+            if (e instanceof BootPromptDeliveryError) {
+              return err(e, { ...extra, delivered_chars: e.delivered_chars });
+            }
+            return err(e, extra);
           }
 
           return okFormatted(
@@ -2337,12 +2361,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
-          if (e instanceof BootPromptTimeoutError) {
-            return err(e, { last_10_lines: e.last_10_lines });
-          }
-          if (e instanceof BootPromptDeliveryError) {
-            return err(e, { delivered_chars: e.delivered_chars });
-          }
           return err(e);
         }
       },

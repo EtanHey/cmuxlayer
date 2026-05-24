@@ -1127,6 +1127,92 @@ describe("tool handler integration", () => {
     ]));
   });
 
+  it("send_command does not treat another CLI prompt as launcher readiness", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "codex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 20,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(mockExec).not.toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "boot prompt",
+    ]));
+  });
+
+  it("send_command requires consecutive low-confidence ready matches", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let reads = 0;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        reads += 1;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: reads === 1 ? "booting\n>" : "ready\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerGemini -s",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(reads).toBe(2);
+    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
+      "send",
+      "--surface",
+      "surface:1",
+      "boot prompt",
+    ]));
+  });
+
   it("send_input chunks long text transparently before sending", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 

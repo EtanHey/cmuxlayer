@@ -35,6 +35,7 @@ import {
 } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
 import { chooseAgentSpawnPlacement } from "./layout-policy.js";
+import { matchReadyPattern } from "./pattern-registry.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -361,6 +362,28 @@ export class AgentEngine {
     }
   }
 
+  private async maybeMarkBootReady(agent: AgentRecord): Promise<AgentRecord> {
+    if (agent.state !== "booting") {
+      return agent;
+    }
+
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: 20,
+      });
+      const match = matchReadyPattern(agent.cli, screen.text);
+      if (!match.matched || match.confidence !== "high") {
+        return agent;
+      }
+
+      const updated = this.stateMgr.transition(agent.agent_id, "ready");
+      this.registry.set(agent.agent_id, updated);
+      return updated;
+    } catch {
+      return agent;
+    }
+  }
+
   private isRecoverableCrash(agent: AgentRecord): boolean {
     return isCrashRecoveryEligible(agent);
   }
@@ -520,7 +543,8 @@ export class AgentEngine {
     const done = agents.filter((a) => a.state === "done").length;
 
     for (const originalAgent of agents) {
-      const agent = await this.maybeCaptureBootSessionId(originalAgent);
+      const capturedAgent = await this.maybeCaptureBootSessionId(originalAgent);
+      const agent = await this.maybeMarkBootReady(capturedAgent);
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;

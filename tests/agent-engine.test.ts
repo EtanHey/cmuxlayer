@@ -692,6 +692,31 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(result.agent?.state).toBe("ready");
     });
 
+    it("promotes booting agents to ready when their CLI prompt appears", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: "codex> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      engine.startSweep(50);
+
+      const result = await engine.waitFor("agent-boot", "ready", 5000);
+
+      expect(result.matched).toBe(true);
+      expect(result.state).toBe("ready");
+    });
+
     it("throws for non-existent agent", async () => {
       await expect(
         engine.waitFor("nonexistent", "ready", 1000),
