@@ -980,9 +980,9 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("claude", "golems")).toBe("golemsClaude -s");
   });
 
-  it("uses cd + env vars + raw command for codex", () => {
+  it("uses repoGolem launcher for codex (no positional prompt)", () => {
     expect(buildLaunchCommand("codex", "brainlayer")).toBe(
-      "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 codex",
+      "brainlayerCodex -s",
     );
   });
 
@@ -998,9 +998,9 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("uses cd + env vars + cursor agent for cursor", () => {
+  it("uses repoGolem launcher for cursor (no positional prompt)", () => {
     expect(buildLaunchCommand("cursor", "cmuxlayer")).toBe(
-      "cd ~/Gits/cmuxlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 cursor agent",
+      "cmuxlayerCursor -s",
     );
   });
 
@@ -1036,9 +1036,10 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("includes CLAUDE_CODE_NO_FLICKER=1 for non-Claude CLIs", () => {
+  it("does NOT include env vars for codex (launcher handles them)", () => {
     const cmd = buildLaunchCommand("codex", "brainlayer");
-    expect(cmd).toContain("CLAUDE_CODE_NO_FLICKER=1");
+    expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
+    expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
   });
 
   it("includes MCP_CONNECTION_NONBLOCKING=1 for non-Claude CLIs", () => {

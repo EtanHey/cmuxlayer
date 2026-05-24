@@ -198,13 +198,13 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
       // repoGolem launcher handles env vars via ralph-registry
       return `${safeRepo}Claude -s`;
     case "codex":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} codex`;
+      return `${safeRepo}Codex -s`;
     case "gemini":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli`;
     case "cursor":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} cursor agent`;
+      return `${safeRepo}Cursor -s`;
   }
 }
 

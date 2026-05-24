@@ -122,7 +122,6 @@ describe("interact — runtime validation", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test",
     });
     // Get the agent_id
     const listResult = await callTool(server, "list_agents", {});
@@ -194,7 +193,6 @@ describe("interact — agent resolution", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test",
     });
     const agentId = parseResult(spawnResult).agent_id;
 
@@ -247,7 +245,6 @@ describe("kill — scoped targets", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test",
     });
     const agentId = parseResult(spawn).agent_id;
 
@@ -264,13 +261,11 @@ describe("kill — scoped targets", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test1",
     });
     const spawn2 = await callTool(server, "spawn_agent", {
       repo: "voicelayer",
       model: "haiku",
       cli: "claude",
-      prompt: "test2",
     });
     const id1 = parseResult(spawn1).agent_id;
     const id2 = parseResult(spawn2).agent_id;
@@ -288,13 +283,11 @@ describe("kill — scoped targets", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test1",
     });
     await callTool(server, "spawn_agent", {
       repo: "voicelayer",
       model: "haiku",
       cli: "claude",
-      prompt: "test2",
     });
 
     const result = await callTool(server, "kill", { target: "all" });
@@ -316,7 +309,6 @@ describe("kill — scoped targets", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
-      prompt: "test",
     });
     const agentId = parseResult(spawn).agent_id;
 
