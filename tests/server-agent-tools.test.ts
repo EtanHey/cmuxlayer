@@ -195,6 +195,45 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
+
+    const stateTool = (server as any)._registeredTools["get_agent_state"];
+    const stateResult = await stateTool.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const persisted =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(persisted.auto_archive_on_done).toBe(true);
+  });
+
+  it("spawn_agent accepts explicit role and returns persisted role", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        role: "ic",
+        prompt: "coordinate task",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.role).toBe("ic");
+
+    const stateTool = (server as any)._registeredTools["get_agent_state"];
+    const stateResult = await stateTool.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const persisted =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(persisted.role).toBe("ic");
   });
 
   it("spawn_agent sends inline prompt after the agent is ready", async () => {

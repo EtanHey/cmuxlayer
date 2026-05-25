@@ -24,6 +24,7 @@ import { AgentDiscovery } from "./agent-discovery.js";
 import { toPublicAgent } from "./agent-facade.js";
 import type {
   AgentRecord,
+  AgentRole,
   AgentState,
   CliType,
   DeliveryEventType,
@@ -39,7 +40,12 @@ import {
 } from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
-import { chooseSurfaceClosePolicy } from "./layout-policy.js";
+import {
+  collectRoleSurfaceIds,
+  chooseAgentSpawnPlacement,
+  chooseSurfaceClosePolicy,
+  inferAgentRole,
+} from "./layout-policy.js";
 import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
@@ -519,6 +525,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const stateDir =
     opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
   const stateMgr = new StateManager(stateDir);
+  const roleSurfaceOverrides = new Map<
+    string,
+    { role: AgentRole; workspace: string | null }
+  >();
+  let lifecycleRegistry: AgentRegistry | null = null;
   const eventLog = stateMgr.getEventLog();
   const deliveries = new Map<string, DeliveryRecord>();
   const latestDeliveryBySurface = new Map<string, string>();
@@ -558,6 +569,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     failed_chunk: record.failed_chunk ?? null,
     error: record.error ?? null,
   });
+
+  const collectServerRoleSurfaceIds = (
+    liveSurfaceIds?: ReadonlySet<string>,
+    workspace?: string,
+  ) => {
+    const roleRecords = lifecycleRegistry?.list() ?? [];
+    const ids = collectRoleSurfaceIds(roleRecords);
+    if (liveSurfaceIds) {
+      for (const role of ["orchestrator", "ic", "worker"] as const) {
+        for (const surfaceId of ids[role]) {
+          if (!liveSurfaceIds.has(surfaceId)) {
+            ids[role].delete(surfaceId);
+          }
+        }
+      }
+    }
+    for (const [surfaceId, override] of roleSurfaceOverrides) {
+      if (liveSurfaceIds && !liveSurfaceIds.has(surfaceId)) {
+        if (workspace && override.workspace === workspace) {
+          roleSurfaceOverrides.delete(surfaceId);
+        }
+        continue;
+      }
+      ids[override.role].add(surfaceId);
+    }
+    return ids;
+  };
 
   const getSurfaceDelivery = (surface: string) => {
     const deliveryId = latestDeliveryBySurface.get(surface);
@@ -1261,6 +1299,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .describe("Surface type"),
       url: z.string().optional().describe("URL for browser surfaces"),
       title: z.string().optional().describe("Tab title"),
+      role: z
+        .enum(["orchestrator", "ic", "worker"])
+        .optional()
+        .describe(
+          "Optional agent role used for deterministic placement. Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker.",
+        ),
       focus: z
         .boolean()
         .optional()
@@ -1293,20 +1337,91 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await preflightBootPromptFile(bootPromptPath);
         }
 
-        result = await client.newSplit(args.direction, {
-          workspace: args.workspace,
-          surface: args.surface,
-          pane: args.pane,
-          type: args.type,
-          url: args.url,
-          title: args.title,
-          focus: args.focus,
-        });
+        const shouldInferRole =
+          Boolean(args.role) ||
+          Boolean(
+            args.title &&
+              /(Claude|Codex|Cursor)$/i.test(args.title) &&
+              !args.pane &&
+              !args.surface,
+          );
+        const inferredRole = shouldInferRole
+          ? inferAgentRole({ role: args.role, title: args.title })
+          : null;
+        let actualPlacement: "split" | "surface" = "split";
+        let actualDirection: string | null = args.direction;
+        if (inferredRole && (args.type ?? "terminal") === "terminal") {
+          if (args.pane || args.surface) {
+            throw new Error(
+              "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
+            );
+          }
+          const panes = await client.listPanes({ workspace: args.workspace });
+          const paneSurfaces = await Promise.all(
+            panes.panes.map((pane) =>
+              client.listPaneSurfaces({
+                workspace: args.workspace,
+                pane: pane.ref,
+              }),
+            ),
+          );
+          const liveSurfaceIds = new Set(
+            paneSurfaces.flatMap((group) =>
+              group.surfaces.map((surface) => surface.ref),
+            ),
+          );
+          const placement = chooseAgentSpawnPlacement(
+            panes.panes,
+            paneSurfaces,
+            collectServerRoleSurfaceIds(liveSurfaceIds, args.workspace),
+            { role: inferredRole },
+          );
+          actualPlacement = placement.kind;
+          actualDirection =
+            placement.kind === "split" ? placement.direction : null;
+          if (placement.kind === "surface" && args.focus === false) {
+            throw new Error(
+              "focus=false is not supported when role-based new_split reuses an existing pane as a tab",
+            );
+          }
+          result =
+            placement.kind === "surface"
+              ? await client.newSurface({
+                  pane: placement.pane,
+                  workspace: args.workspace,
+                  type: "terminal",
+                })
+              : await client.newSplit(placement.direction, {
+                  workspace: args.workspace,
+                  ...(placement.pane ? { pane: placement.pane } : {}),
+                  surface: args.surface,
+                  type: args.type,
+                  url: args.url,
+                  title: args.title,
+                  focus: args.focus,
+                });
+        } else {
+          result = await client.newSplit(args.direction, {
+            workspace: args.workspace,
+            surface: args.surface,
+            pane: args.pane,
+            type: args.type,
+            url: args.url,
+            title: args.title,
+            focus: args.focus,
+          });
+        }
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
             workspace: result.workspace || args.workspace,
           });
           result.title = args.title;
+        }
+        if (inferredRole && (args.type ?? "terminal") === "terminal") {
+          roleSurfaceOverrides.set(result.surface, {
+            role: inferredRole,
+            workspace: result.workspace ?? args.workspace ?? null,
+          });
         }
         let bootPromptDelivery:
           | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -1320,6 +1435,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
         const data: Record<string, unknown> = { ...result };
+        data.placement = actualPlacement;
+        data.direction = actualDirection;
+        if (inferredRole) {
+          data.role = inferredRole;
+        }
         if (bootPromptDelivery) {
           data.boot_prompt_delivered = true;
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
@@ -1327,9 +1447,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return okFormatted(
           formatOk("new_split", {
             surface: result.surface,
-            direction: args.direction,
+            direction: actualDirection,
+            placement: actualPlacement,
             type: args.type,
             title: result.title,
+            role: inferredRole ?? undefined,
             boot_prompt_delivered: Boolean(bootPromptDelivery),
           }),
           data,
@@ -2158,6 +2280,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     };
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
+    lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
@@ -2201,12 +2324,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
         listPanes: (paneOpts) => client.listPanes(paneOpts),
         listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
+        closeSurface: (surface, closeOpts) =>
+          withSurfaceWrite(surface, () =>
+            client.closeSurface(surface, closeOpts),
+          ),
         notifyLifecycleEvent,
       },
       {
         spawnPreflight:
           opts?.spawnPreflight ??
           (opts?.disableSpawnPreflight ? async () => {} : undefined),
+        roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
       },
     );
 
@@ -2301,6 +2429,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "ID of the parent agent for hierarchical spawning. Parent must exist.",
           ),
+        role: z
+          .enum(["orchestrator", "ic", "worker"])
+          .optional()
+          .describe(
+            "Optional placement role. Defaults from launcher: *Claude=orchestrator, *Codex/*Cursor=worker.",
+          ),
+        auto_archive_on_done: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe(
+            "When true, Codex worker panes that emit TASK_DONE are auto-closed after the inactivity window.",
+          ),
         max_cost_per_agent: z
           .number()
           .optional()
@@ -2330,6 +2471,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_pending: hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
+            role: args.role,
+            auto_archive_on_done: args.auto_archive_on_done ?? true,
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
           });
@@ -2405,10 +2548,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               repo: args.repo,
               model: args.model,
               surface: result.surface_id,
+              role:
+                engine.getAgentState(result.agent_id)?.role ??
+                inferAgentRole({ role: args.role, cli: args.cli }),
               boot_prompt_delivered: Boolean(bootPromptDelivery),
             }),
             {
               ...result,
+              role:
+                engine.getAgentState(result.agent_id)?.role ??
+                inferAgentRole({ role: args.role, cli: args.cli }),
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },

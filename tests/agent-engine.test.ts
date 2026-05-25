@@ -205,8 +205,8 @@ describe("AgentEngine", () => {
 
       await engine.spawnAgent({
         repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
+        model: "gpt-5.4",
+        cli: "codex",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -251,8 +251,8 @@ describe("AgentEngine", () => {
 
       await engine.spawnAgent({
         repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
+        model: "gpt-5.4",
+        cli: "codex",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -321,8 +321,8 @@ describe("AgentEngine", () => {
 
       await engine.spawnAgent({
         repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
+        model: "gpt-5.4",
+        cli: "codex",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -333,6 +333,480 @@ describe("AgentEngine", () => {
         workspace: "ws:1",
       });
       expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("persists explicit role on spawned agents", async () => {
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Coordinate work",
+        role: "ic",
+      });
+
+      expect(stateMgr.readState(result.agent_id)?.role).toBe("ic");
+    });
+
+    it("infers worker role for Codex spawns and uses the worker pane", async () => {
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+      });
+
+      expect(stateMgr.readState(result.agent_id)?.role).toBe("worker");
+      expect(stateMgr.readState(result.agent_id)?.auto_archive_on_done).toBeUndefined();
+    });
+
+    it("uses role panes created by new_split when placing spawned agents", async () => {
+      engine.dispose();
+      const surfaceProvider = async () => liveSurfaces;
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        roleSurfaceIdsProvider: () => ({
+          orchestrator: new Set(),
+          ic: new Set(),
+          worker: new Set(["surface:worker-shell"]),
+        }),
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:orc"],
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:worker-shell"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:right"
+              ? [makeSurface("surface:worker-shell")]
+              : [makeSurface("surface:orc")],
+        }),
+      );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("splits a child worker under its parent IC pane", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ic-1",
+          state: "ready",
+          surface_id: "surface:ic",
+          cli: "claude",
+          role: "ic",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:ic")];
+      await engine.getRegistry().reconstitute();
+
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:orc"],
+          },
+          {
+            ref: "pane:ic",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:ic"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:ic"
+              ? [makeSurface("surface:ic")]
+              : [makeSurface("surface:orc")],
+        }),
+      );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Implement delegated task",
+        workspace: "ws:1",
+        parent_agent_id: "ic-1",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith("down", {
+        pane: "pane:ic",
+        workspace: "ws:1",
+        type: "terminal",
+      });
+    });
+
+    it("auto-closes archived Codex worker panes after TASK_DONE inactivity", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(doneAt);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-done",
+            state: "ready",
+            surface_id: "surface:done-worker",
+            cli: "codex",
+            role: "worker",
+            auto_archive_on_done: true,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-worker")];
+        await engine.getRegistry().reconstitute();
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:done-worker",
+          text: "gpt-5.4\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+
+        await engine.runSweep();
+        expect(engine.getAgentState("worker-done")?.state).toBe("ready");
+        expect(
+          engine.getAgentState("worker-done")?.task_done_candidate_at,
+        ).toBe(doneAt.toISOString());
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 5_001));
+        await engine.runSweep();
+        expect(engine.getAgentState("worker-done")?.state).toBe("done");
+        expect(
+          engine.getAgentState("worker-done")?.task_done_detected_at,
+        ).toBeDefined();
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 5_001 + 30 * 60_000 + 1));
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).toHaveBeenCalledWith(
+          "surface:done-worker",
+          { workspace: undefined },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("prefers TASK_DONE auto-archive milliseconds over minutes when both env vars are set", async () => {
+      const previousMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
+      const previousMinutes =
+        process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES;
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS = "1";
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES = "1";
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(doneAt);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-done-ms",
+            state: "done",
+            surface_id: "surface:done-worker-ms",
+            cli: "codex",
+            role: "worker",
+            updated_at: doneAt.toISOString(),
+            auto_archive_on_done: true,
+            task_done_detected_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-worker-ms")];
+        await engine.getRegistry().reconstitute();
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 2));
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).toHaveBeenCalledWith(
+          "surface:done-worker-ms",
+          { workspace: undefined },
+        );
+      } finally {
+        if (previousMs === undefined) {
+          delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
+        } else {
+          process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS = previousMs;
+        }
+        if (previousMinutes === undefined) {
+          delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES;
+        } else {
+          process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES =
+            previousMinutes;
+        }
+        vi.useRealTimers();
+      }
+    });
+
+    it("measures TASK_DONE auto-archive delay from detection time, not updated_at", async () => {
+      vi.useFakeTimers();
+      try {
+        const detectedAt = new Date("2026-05-25T12:00:00.000Z");
+        const updatedAt = new Date(detectedAt.getTime() + 29 * 60_000);
+        vi.setSystemTime(new Date(detectedAt.getTime() + 30 * 60_000 + 1));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-detected-done",
+            state: "done",
+            surface_id: "surface:detected-done-worker",
+            cli: "codex",
+            role: "worker",
+            updated_at: updatedAt.toISOString(),
+            auto_archive_on_done: true,
+            task_done_detected_at: detectedAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:detected-done-worker")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).toHaveBeenCalledWith(
+          "surface:detected-done-worker",
+          { workspace: undefined },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("skips sidebar status writes after auto-archiving a done worker surface", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(doneAt.getTime() + 31 * 60_000));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-archived-before-status",
+            state: "done",
+            surface_id: "surface:archived-before-status",
+            cli: "codex",
+            role: "worker",
+            auto_archive_on_done: true,
+            task_done_detected_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:archived-before-status")];
+        await engine.getRegistry().reconstitute();
+        (mockClient.setStatus as ReturnType<typeof vi.fn>).mockRejectedValue(
+          new Error("surface missing"),
+        );
+
+        await expect(engine.runSweep()).resolves.toBeUndefined();
+
+        expect(mockClient.closeSurface).toHaveBeenCalledWith(
+          "surface:archived-before-status",
+          { workspace: undefined },
+        );
+        expect(mockClient.clearStatus).toHaveBeenCalledWith(
+          "worker-archived-before-status",
+          { workspace: undefined },
+        );
+        expect(mockClient.setStatus).not.toHaveBeenCalled();
+        expect(engine.getAgentState("worker-archived-before-status")).toBeNull();
+        expect(stateMgr.readState("worker-archived-before-status")).toBeNull();
+
+        (mockClient.setStatus as ReturnType<typeof vi.fn>).mockClear();
+        await engine.runSweep();
+        expect(mockClient.setStatus).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not rewrite TASK_DONE candidates during the confirmation window", async () => {
+      vi.useFakeTimers();
+      try {
+        const candidateAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(candidateAt.getTime() + 1_000));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-task-done-candidate",
+            state: "ready",
+            surface_id: "surface:task-done-candidate",
+            cli: "codex",
+            role: "worker",
+            auto_archive_on_done: true,
+            task_done_candidate_at: candidateAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:task-done-candidate")];
+        await engine.getRegistry().reconstitute();
+        const before = stateMgr.readState("worker-task-done-candidate");
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:task-done-candidate",
+          text: "gpt-5.4\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+
+        await engine.runSweep();
+
+        const after = stateMgr.readState("worker-task-done-candidate");
+        expect(after?.version).toBe(before?.version);
+        expect(after?.updated_at).toBe(before?.updated_at);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not auto-close done Codex workers without TASK_DONE provenance", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(doneAt.getTime() + 31 * 60_000));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-manual-done",
+            state: "done",
+            surface_id: "surface:manual-done-worker",
+            cli: "codex",
+            role: "worker",
+            updated_at: doneAt.toISOString(),
+            auto_archive_on_done: true,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:manual-done-worker")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not auto-close legacy Codex workers without explicit archive opt-in", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(doneAt.getTime() + 31 * 60_000));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-legacy-done",
+            state: "done",
+            surface_id: "surface:legacy-done-worker",
+            cli: "codex",
+            role: "worker",
+            updated_at: doneAt.toISOString(),
+            auto_archive_on_done: undefined,
+            task_done_detected_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:legacy-done-worker")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not mark a worker done when TASK_DONE is stale scrollback before active work", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-active",
+          state: "ready",
+          surface_id: "surface:active-worker",
+          cli: "codex",
+          role: "worker",
+          auto_archive_on_done: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:active-worker")];
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:active-worker",
+        text: "gpt-5.4\nTASK_DONE\nWorking (1m 02s • esc to interrupt)",
+        lines: 20,
+        scrollback_used: false,
+      });
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("worker-active")?.state).toBe("ready");
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses only the current screen tail for quality parsing when reusing the TASK_DONE read", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-quality",
+          state: "ready",
+          surface_id: "surface:quality-worker",
+          cli: "codex",
+          role: "worker",
+          auto_archive_on_done: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:quality-worker")];
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:quality-worker",
+        text: [
+          "gpt-5.4 high · 5% left · ~/Gits/cmuxlayer",
+          "older work",
+          "older work",
+          "older work",
+          "older work",
+          "older work",
+          "gpt-5.4 high · 90% left · ~/Gits/cmuxlayer",
+          "current prompt",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("worker-quality")?.quality).toBe("unknown");
+      expect(mockClient.send).not.toHaveBeenCalledWith(
+        "surface:quality-worker",
+        "/compact",
+        {},
+      );
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
     });
 
     it("respawns a crashed agent with its captured session id when crash recovery is enabled", async () => {

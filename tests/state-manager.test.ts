@@ -188,4 +188,63 @@ describe("StateManager", () => {
       expect(() => mgr.removeState("nonexistent")).not.toThrow();
     });
   });
+
+  describe("ensureAutoRecord", () => {
+    it("does not enable TASK_DONE auto-archive for auto-discovered agents", () => {
+      const mgr = new StateManager(TEST_DIR);
+
+      const record = mgr.ensureAutoRecord("auto-codex", {
+        surface_id: "surface:auto-codex",
+        surface_title: "brainlayerCodex",
+        cli: "codex",
+        parsed_status: "idle",
+        model: "gpt-5.4",
+        token_count: null,
+        context_pct: null,
+        has_agent: true,
+        read_error: false,
+      });
+
+      expect(record.role).toBe("worker");
+      expect(record.auto_archive_on_done).toBe(false);
+    });
+
+    it("assigns orchestrator role for auto-discovered Claude agents", () => {
+      const mgr = new StateManager(TEST_DIR);
+
+      const record = mgr.ensureAutoRecord("auto-claude", {
+        surface_id: "surface:auto-claude",
+        surface_title: "brainlayerClaude",
+        cli: "claude",
+        parsed_status: "idle",
+        model: "sonnet",
+        token_count: null,
+        context_pct: null,
+        has_agent: true,
+        read_error: false,
+      });
+
+      expect(record.role).toBe("orchestrator");
+      expect(record.auto_archive_on_done).toBe(false);
+    });
+
+    it("assigns orchestrator role when the discovered cli is unknown", () => {
+      const mgr = new StateManager(TEST_DIR);
+
+      const record = mgr.ensureAutoRecord("auto-unknown", {
+        surface_id: "surface:auto-unknown",
+        surface_title: "mystery-agent",
+        cli: "unknown",
+        parsed_status: "idle",
+        model: null,
+        token_count: null,
+        context_pct: null,
+        has_agent: true,
+        read_error: false,
+      });
+
+      expect(record.role).toBe("orchestrator");
+      expect(record.auto_archive_on_done).toBe(false);
+    });
+  });
 });

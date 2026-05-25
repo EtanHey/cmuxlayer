@@ -130,6 +130,10 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       newSurface: (surfaceOpts) => this.client.newSurface(surfaceOpts),
       listPanes: (paneOpts) => this.client.listPanes(paneOpts),
       listPaneSurfaces: (surfaceOpts) => this.client.listPaneSurfaces(surfaceOpts),
+      closeSurface: (surface, closeOpts) =>
+        this.withSurfaceWrite(surface, () =>
+          this.client.closeSurface(surface, closeOpts),
+        ),
       notifyLifecycleEvent: async () => {},
     });
   }
