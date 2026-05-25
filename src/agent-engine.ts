@@ -28,13 +28,21 @@ import {
   MAX_RESPAWN_ATTEMPTS,
   type AgentRoute,
   type AgentRecord,
+  type AgentRole,
   type AgentState,
   type CliType,
   type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
 import { parseScreen } from "./screen-parser.js";
-import { chooseAgentSpawnPlacement } from "./layout-policy.js";
+import {
+  chooseAgentSpawnPlacement,
+  collectRoleSurfaceIds,
+  inferAgentRole,
+  inferRecordRole,
+  launcherNameForCli,
+  type RoleSurfaceIds,
+} from "./layout-policy.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 
 export interface SpawnAgentParams {
@@ -45,6 +53,8 @@ export interface SpawnAgentParams {
   boot_prompt_pending?: boolean;
   workspace?: string;
   parent_agent_id?: string;
+  role?: AgentRole;
+  auto_archive_on_done?: boolean;
   max_cost_per_agent?: number;
   crash_recover?: boolean;
 }
@@ -57,6 +67,10 @@ export interface SpawnAgentResult {
 
 export interface AgentEngineOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  roleSurfaceIdsProvider?: (
+    liveSurfaceIds?: ReadonlySet<string>,
+    workspace?: string,
+  ) => RoleSurfaceIds;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored";
@@ -67,6 +81,8 @@ const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
+const TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS = 30 * 60_000;
+const TASK_DONE_CONFIRMATION_MS = 5_000;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -78,6 +94,35 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
 const execFileAsync = promisify(execFile);
+
+function autoArchiveEnabledByEnv(): boolean {
+  return !["0", "false", "off", "no"].includes(
+    (process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE ?? "").toLowerCase(),
+  );
+}
+
+function tailScreenLines(text: string, lines: number): string {
+  return text.split(/\r?\n/).slice(-lines).join("\n");
+}
+
+function taskDoneAutoArchiveMs(): number {
+  const rawMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
+  if (rawMs !== undefined) {
+    const parsed = Number(rawMs);
+    return Number.isFinite(parsed) && parsed >= 0
+      ? parsed
+      : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
+  }
+
+  const rawMinutes = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES;
+  if (rawMinutes === undefined) {
+    return TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
+  }
+  const parsed = Number(rawMinutes);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? parsed * 60_000
+    : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
+}
 
 interface AgentEngineClient {
   log(
@@ -145,6 +190,10 @@ interface AgentEngineClient {
     workspace?: string;
     pane?: string;
   }): Promise<CmuxPaneSurfaces>;
+  closeSurface(
+    surface: string,
+    opts?: { workspace?: string; collapsePane?: boolean },
+  ): Promise<void>;
   notifyLifecycleEvent(
     event: AgentLifecycleEvent,
     agent: AgentRecord,
@@ -268,6 +317,10 @@ export class AgentEngine {
   private registry: AgentRegistry;
   private client: AgentEngineClient;
   private spawnPreflight: (params: SpawnAgentParams) => Promise<void>;
+  private roleSurfaceIdsProvider?: (
+    liveSurfaceIds?: ReadonlySet<string>,
+    workspace?: string,
+  ) => RoleSurfaceIds;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** agentId → last-pushed status string */
   private sidebarSnapshot = new Map<string, string>();
@@ -285,6 +338,7 @@ export class AgentEngine {
     this.stateMgr = stateMgr;
     this.registry = registry;
     this.client = client;
+    this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params) => {
@@ -302,8 +356,20 @@ export class AgentEngine {
     return this.registry;
   }
 
+  private hasTrailingTaskDoneSignal(text: string): boolean {
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.at(-1) === "TASK_DONE";
+  }
+
   private async createAgentSurface(
     workspace?: string,
+    context?: {
+      role?: AgentRole;
+      parentAgent?: AgentRecord | null;
+    },
   ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
     try {
       const panes = await this.client.listPanes({ workspace });
@@ -315,13 +381,40 @@ export class AgentEngine {
           }),
         ),
       );
-      const workerSurfaceIds = new Set(
-        this.registry.list().map((agent) => agent.surface_id),
+      const parentAgent = context?.parentAgent ?? null;
+      const liveSurfaceIds = new Set(
+        paneSurfaces.flatMap((group) =>
+          group.surfaces.map((surface) => surface.ref),
+        ),
+      );
+      const roleSurfaceIds = collectRoleSurfaceIds(this.registry.list());
+      const extraRoleSurfaceIds =
+        this.roleSurfaceIdsProvider?.(liveSurfaceIds, workspace) ?? null;
+      if (extraRoleSurfaceIds) {
+        for (const role of ["orchestrator", "ic", "worker"] as const) {
+          for (const surfaceId of extraRoleSurfaceIds[role]) {
+            roleSurfaceIds[role].add(surfaceId);
+          }
+        }
+      }
+      const childWorkerSurfaceIds = new Set(
+        parentAgent
+          ? this.registry
+              .getChildren(parentAgent.agent_id)
+              .filter((agent) => inferRecordRole(agent) === "worker")
+              .map((agent) => agent.surface_id)
+          : [],
       );
       const placement = chooseAgentSpawnPlacement(
         panes.panes,
         paneSurfaces,
-        workerSurfaceIds,
+        roleSurfaceIds,
+        {
+          role: context?.role ?? "worker",
+          parentRole: parentAgent ? inferRecordRole(parentAgent) : null,
+          parentSurfaceId: parentAgent?.surface_id ?? null,
+          childWorkerSurfaceIds,
+        },
       );
       return placement.kind === "surface"
         ? this.client.newSurface({
@@ -330,6 +423,7 @@ export class AgentEngine {
             workspace,
           })
         : this.client.newSplit(placement.direction, {
+            ...(placement.pane ? { pane: placement.pane } : {}),
             workspace,
             type: "terminal",
           });
@@ -427,6 +521,80 @@ export class AgentEngine {
     }
   }
 
+  private async maybeMarkTaskDone(
+    agent: AgentRecord,
+  ): Promise<{ agent: AgentRecord; screenText?: string }> {
+    if (TERMINAL_STATES.has(agent.state)) return { agent };
+    if (agent.cli !== "codex" || inferRecordRole(agent) !== "worker") {
+      return { agent };
+    }
+    if (agent.boot_prompt_pending) return { agent };
+
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      if (!this.hasTrailingTaskDoneSignal(screen.text)) {
+        if (agent.task_done_candidate_at) {
+          const updated = this.stateMgr.updateRecord(agent.agent_id, {
+            task_done_candidate_at: null,
+          });
+          this.registry.set(agent.agent_id, updated);
+          return { agent: updated, screenText: screen.text };
+        }
+        return { agent, screenText: screen.text };
+      }
+
+      const candidateAt = Date.parse(agent.task_done_candidate_at ?? "");
+      if (!agent.task_done_candidate_at || Number.isNaN(candidateAt)) {
+        const updated = this.stateMgr.updateRecord(agent.agent_id, {
+          task_done_candidate_at: new Date().toISOString(),
+        });
+        this.registry.set(agent.agent_id, updated);
+        return { agent: updated, screenText: screen.text };
+      }
+      if (Date.now() - candidateAt < TASK_DONE_CONFIRMATION_MS) {
+        return { agent, screenText: screen.text };
+      }
+
+      const marked = this.stateMgr.updateRecord(agent.agent_id, {
+        task_done_candidate_at: null,
+        task_done_detected_at: new Date().toISOString(),
+      });
+      this.registry.set(agent.agent_id, marked);
+      const updated = this.stateMgr.transition(agent.agent_id, "done");
+      this.registry.set(agent.agent_id, updated);
+      return { agent: updated, screenText: screen.text };
+    } catch {
+      return { agent };
+    }
+  }
+
+  private async maybeArchiveDoneAgent(agent: AgentRecord): Promise<boolean> {
+    if (agent.state !== "done") return false;
+    if (agent.cli !== "codex" || inferRecordRole(agent) !== "worker") {
+      return false;
+    }
+    if (agent.auto_archive_on_done !== true || !autoArchiveEnabledByEnv()) {
+      return false;
+    }
+    if (!agent.task_done_detected_at) return false;
+
+    const detectedAt = Date.parse(agent.task_done_detected_at);
+    if (Number.isNaN(detectedAt)) return false;
+    if (Date.now() - detectedAt < taskDoneAutoArchiveMs()) return false;
+
+    try {
+      await this.client.closeSurface(agent.surface_id, {
+        workspace: agent.workspace_id ?? undefined,
+      });
+      return true;
+    } catch {
+      // Best-effort archive; the next sweep will retry if the surface remains.
+      return false;
+    }
+  }
+
   private isRecoverableCrash(agent: AgentRecord): boolean {
     return isCrashRecoveryEligible(agent);
   }
@@ -502,7 +670,12 @@ export class AgentEngine {
         });
         this.registry.set(agent.agent_id, attempted);
 
-        const surface = await this.createAgentSurface(agent.workspace_id ?? undefined);
+        const surface = await this.createAgentSurface(agent.workspace_id ?? undefined, {
+          role: inferRecordRole(agent),
+          parentAgent: agent.parent_agent_id
+            ? this.registry.get(agent.parent_agent_id)
+            : null,
+        });
         const creating = this.stateMgr.transition(agent.agent_id, "creating", {
           error: null,
           pid: null,
@@ -587,7 +760,9 @@ export class AgentEngine {
 
     for (const originalAgent of agents) {
       const capturedAgent = await this.maybeCaptureBootSessionId(originalAgent);
-      const agent = await this.maybeMarkBootReady(capturedAgent);
+      const readyAgent = await this.maybeMarkBootReady(capturedAgent);
+      const taskDoneResult = await this.maybeMarkTaskDone(readyAgent);
+      const agent = taskDoneResult.agent;
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;
@@ -607,6 +782,21 @@ export class AgentEngine {
         await this.emitLifecycleEvent(agent, "errored");
       }
 
+      const archived = await this.maybeArchiveDoneAgent(agent);
+      if (archived) {
+        try {
+          await this.client.clearStatus(agentId, {
+            workspace: agent.workspace_id ?? undefined,
+          });
+        } catch {
+          // Best-effort sidebar cleanup; the surface has already been closed.
+        }
+        this.registry.remove(agentId);
+        this.stateMgr.removeState(agentId);
+        this.sidebarSnapshot.delete(agentId);
+        continue;
+      }
+
       // Status diff — only push if changed
       const prev = this.sidebarSnapshot.get(agentId);
       if (prev !== statusValue) {
@@ -624,8 +814,10 @@ export class AgentEngine {
       // Replaces legacy parseContextPercent which only matched "X% context" text patterns.
       if (!TERMINAL_STATES.has(state)) {
         try {
-          const screen = await this.client.readScreen(surface_id, { lines: 5 });
-          const parsed = parseScreen(screen.text);
+          const screenText =
+            taskDoneResult.screenText ??
+            (await this.client.readScreen(surface_id, { lines: 5 })).text;
+          const parsed = parseScreen(tailScreenLines(screenText, 5));
           const contextPct = parsed.context_pct;
           if (
             contextPct !== null &&
@@ -747,6 +939,12 @@ export class AgentEngine {
     // Resolve parent hierarchy
     let spawnDepth = 0;
     let parentAgentId: string | null = null;
+    let parentAgent: AgentRecord | null = null;
+    const role = inferAgentRole({
+      role: params.role,
+      cli: params.cli,
+      launcherName: launcherNameForCli(params.repo, params.cli),
+    });
 
     if (params.parent_agent_id) {
       const parent = this.registry.get(params.parent_agent_id);
@@ -762,12 +960,16 @@ export class AgentEngine {
       }
       spawnDepth = parent.spawn_depth + 1;
       parentAgentId = params.parent_agent_id;
+      parentAgent = parent;
     }
 
     await this.spawnPreflight(params);
 
     // 1. Create cmux surface using the deterministic worker layout policy.
-    const surface = await this.createAgentSurface(params.workspace);
+    const surface = await this.createAgentSurface(params.workspace, {
+      role,
+      parentAgent,
+    });
 
     // 2. Write initial state (creating → booting)
     const now = new Date().toISOString();
@@ -788,6 +990,8 @@ export class AgentEngine {
       error: null,
       parent_agent_id: parentAgentId,
       spawn_depth: spawnDepth,
+      role,
+      auto_archive_on_done: params.auto_archive_on_done,
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: params.max_cost_per_agent ?? null,

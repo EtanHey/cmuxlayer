@@ -212,6 +212,13 @@ export class StateManager {
       error: null,
       parent_agent_id: null,
       spawn_depth: 0,
+      role:
+        discovered.cli === "claude"
+          ? "orchestrator"
+          : discovered.cli === "unknown"
+            ? "orchestrator"
+            : "worker",
+      auto_archive_on_done: false,
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: null,

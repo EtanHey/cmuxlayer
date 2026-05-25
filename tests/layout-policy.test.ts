@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
+  inferAgentRole,
+  launcherNameForCli,
 } from "../src/layout-policy.js";
 import type { CmuxPane, CmuxPaneSurfaces, CmuxSurface } from "../src/types.js";
 
@@ -43,6 +45,150 @@ function makePaneSurfaces(
 }
 
 describe("layout policy", () => {
+  it("infers default role from repoGolem launcher names", () => {
+    expect(inferAgentRole({ launcherName: "orcClaude" })).toBe(
+      "orchestrator",
+    );
+    expect(inferAgentRole({ launcherName: "cmuxlayerCodex" })).toBe("worker");
+    expect(inferAgentRole({ launcherName: "brainlayerCursor" })).toBe(
+      "worker",
+    );
+  });
+
+  it("lets an explicit role override launcher inference", () => {
+    expect(
+      inferAgentRole({ launcherName: "skillcreatorClaude", role: "ic" }),
+    ).toBe("ic");
+  });
+
+  it("does not let repo names that end with launcher suffixes affect non-launcher CLIs", () => {
+    expect(
+      inferAgentRole({
+        launcherName: launcherNameForCli("apiClaude", "gemini"),
+        cli: "gemini",
+      }),
+    ).toBe("worker");
+  });
+
+  it("places orchestrators as tabs in the left orchestrator pane", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orc"]),
+      makePane("pane:right", 1, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orc"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orc"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      { role: "orchestrator" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
+  });
+
+  it("places the first IC in the right column above existing workers", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orc"]),
+      makePane("pane:right", 1, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orc"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orc"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      { role: "ic" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "up",
+      pane: "pane:right",
+    });
+  });
+
+  it("places the first worker under its parent IC", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orc"]),
+      makePane("pane:ic", 1, ["surface:ic"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orc"]),
+      makePaneSurfaces("pane:ic", ["surface:ic"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orc"]),
+        ic: new Set(["surface:ic"]),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "ic",
+        parentSurfaceId: "surface:ic",
+        childWorkerSurfaceIds: new Set(),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "down",
+      pane: "pane:ic",
+    });
+  });
+
+  it("reuses an existing worker pane under the parent IC for sibling workers", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orc"]),
+      makePane("pane:ic", 1, ["surface:ic"]),
+      makePane("pane:children", 2, ["surface:child-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orc"]),
+      makePaneSurfaces("pane:ic", ["surface:ic"]),
+      makePaneSurfaces("pane:children", ["surface:child-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orc"]),
+        ic: new Set(["surface:ic"]),
+        worker: new Set(["surface:child-1"]),
+      },
+      {
+        role: "worker",
+        parentRole: "ic",
+        parentSurfaceId: "surface:ic",
+        childWorkerSurfaceIds: new Set(["surface:child-1"]),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "surface",
+      pane: "pane:children",
+    });
+  });
+
   it("creates a fresh right split when the only existing worker shares a pane with interactive surfaces", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),

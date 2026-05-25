@@ -15,6 +15,7 @@ export type AgentState =
 export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
+export type AgentRole = "orchestrator" | "ic" | "worker";
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
@@ -38,6 +39,10 @@ export interface AgentRecord {
   // Hierarchy fields (Task 18)
   parent_agent_id: string | null;
   spawn_depth: number;
+  role?: AgentRole;
+  auto_archive_on_done?: boolean;
+  task_done_candidate_at?: string | null;
+  task_done_detected_at?: string | null;
   deletion_intent: boolean;
   // Quality fields (Task 19)
   quality: AgentQuality;

@@ -1590,6 +1590,790 @@ describe("tool handler integration", () => {
     expect(parsed.surface).toBe("surface:2");
   });
 
+  it("new_split with role=worker reuses the existing worker pane", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:worker-1",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "existing worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-05-25T12:00:00.000Z",
+      updated_at: "2026-05-25T12:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "worker",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:orc"],
+              },
+              {
+                ref: "pane:right",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker-1"],
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces:
+              pane === "pane:right"
+                ? [{ ref: "surface:worker-1", title: "", type: "terminal", index: 0, selected: true }]
+                : [{ ref: "surface:orc", title: "", type: "terminal", index: 0, selected: true }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:right"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.role).toBe("worker");
+    expect(parsed.placement).toBe("surface");
+    expect(parsed.direction).toBeNull();
+  });
+
+  it("new_split ignores disk-only role state when no live lifecycle registry is available", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-stale-role-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "stale-worker",
+      surface_id: "surface:recycled",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "old-repo",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "stale worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-05-25T12:00:00.000Z",
+      updated_at: "2026-05-25T12:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "worker",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            panes: [
+              {
+                ref: "pane:only",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:recycled"],
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:only",
+            surfaces: [
+              {
+                ref: "surface:recycled",
+                title: "manual shell",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:new-worker",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:new-worker");
+    expect(parsed.placement).toBe("split");
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:only"]),
+    );
+  });
+
+  it("new_split remembers role-created surfaces for subsequent placement", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-memory-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    let workerSurface: string | null = null;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            panes: workerSurface
+              ? [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: false,
+                    surface_count: 1,
+                    surface_refs: ["surface:orc"],
+                  },
+                  {
+                    ref: "pane:right",
+                    index: 1,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: [workerSurface],
+                  },
+                ]
+              : [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:orc"],
+                  },
+                ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces:
+              pane === "pane:right" && workerSurface
+                ? [
+                    {
+                      ref: workerSurface,
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : [
+                    {
+                      ref: "surface:orc",
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        workerSurface = "surface:worker-created";
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: workerSurface,
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:worker-tab",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const first = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+    const firstParsed =
+      first.structuredContent ?? JSON.parse(first.content[0].text);
+    expect(firstParsed.surface).toBe("surface:worker-created");
+    expect(firstParsed.placement).toBe("split");
+
+    const second = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+    const secondParsed =
+      second.structuredContent ?? JSON.parse(second.content[0].text);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:right"]),
+    );
+    expect(secondParsed.surface).toBe("surface:worker-tab");
+    expect(secondParsed.placement).toBe("surface");
+    expect(secondParsed.direction).toBeNull();
+  });
+
+  it("new_split does not prune role overrides from other workspaces", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-workspace-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    let workerSurfaceWorkspace1: string | null = null;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      const workspace = args.includes("--workspace")
+        ? String(args[args.indexOf("--workspace") + 1])
+        : "workspace:1";
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: workspace,
+            panes:
+              workspace === "workspace:1" && workerSurfaceWorkspace1
+                ? [
+                    {
+                      ref: "pane:w1-left",
+                      index: 0,
+                      focused: false,
+                      surface_count: 1,
+                      surface_refs: ["surface:w1-orc"],
+                    },
+                    {
+                      ref: "pane:w1-right",
+                      index: 1,
+                      focused: true,
+                      surface_count: 1,
+                      surface_refs: [workerSurfaceWorkspace1],
+                    },
+                  ]
+                : [
+                    {
+                      ref: `${workspace}:pane:only`,
+                      index: 0,
+                      focused: true,
+                      surface_count: 1,
+                      surface_refs: [`${workspace}:surface:manual`],
+                    },
+                  ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        const surfaces =
+          pane === "pane:w1-right" && workerSurfaceWorkspace1
+            ? [
+                {
+                  ref: workerSurfaceWorkspace1,
+                  title: "",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [
+                {
+                  ref: pane.includes("workspace:2")
+                    ? "workspace:2:surface:manual"
+                    : "surface:w1-orc",
+                  title: "",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ];
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: workspace,
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        const surface =
+          workspace === "workspace:1" && !workerSurfaceWorkspace1
+            ? "surface:w1-worker"
+            : "surface:w2-worker";
+        if (workspace === "workspace:1") {
+          workerSurfaceWorkspace1 = surface;
+        }
+        return {
+          stdout: JSON.stringify({
+            workspace,
+            surface,
+            pane: workspace === "workspace:1" ? "pane:w1-right" : "pane:w2-right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:w1-worker-tab",
+            pane: "pane:w1-right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+    await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:2" },
+      {} as any,
+    );
+    const third = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    const parsed = third.structuredContent ?? JSON.parse(third.content[0].text);
+    expect(parsed.surface).toBe("surface:w1-worker-tab");
+    expect(parsed.placement).toBe("surface");
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:w1-right"]),
+    );
+  });
+
+  it("new_split does not remember browser surfaces as role panes", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-browser-role-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            panes: [
+              {
+                ref: "pane:browser",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:browser-codex"],
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:browser",
+            surfaces: [
+              {
+                ref: "surface:browser-codex",
+                title: "researchCodex",
+                type: "browser",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split") && args.includes("browser")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:browser-codex",
+            pane: "pane:browser",
+            title: "researchCodex",
+            type: "browser",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:worker-split",
+            pane: "pane:worker",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:unexpected-tab",
+            pane: "pane:browser",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      {
+        direction: "right",
+        type: "browser",
+        role: "worker",
+        url: "https://example.com",
+        workspace: "workspace:1",
+      },
+      {} as any,
+    );
+    const workerResult = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+    const parsed =
+      workerResult.structuredContent ?? JSON.parse(workerResult.content[0].text);
+
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface"]),
+    );
+    expect(parsed.surface).toBe("surface:worker-split");
+    expect(parsed.placement).toBe("split");
+    expect(parsed.direction).toBe("right");
+  });
+
+  it("new_split with role rejects explicit pane targets", async () => {
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        role: "worker",
+        pane: "pane:manual",
+        workspace: "workspace:1",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/pane\/surface cannot be combined/);
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("new_split with launcher-style title honors explicit pane when role is omitted", async () => {
+    mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        workspace: "workspace:1",
+        surface: "surface:manual-title",
+        pane: "pane:manual",
+        title: "brainlayerCodex",
+        type: "terminal",
+      }),
+      stderr: "",
+    });
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        title: "brainlayerCodex",
+        pane: "pane:manual",
+        workspace: "workspace:1",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.role).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split", "right", "--panel", "pane:manual"]),
+    );
+  });
+
+  it("new_split with role=worker rejects focus=false when placement becomes a tab", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-focus-state");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:worker-1",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "existing worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-05-25T12:00:00.000Z",
+      updated_at: "2026-05-25T12:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "worker",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            panes: [
+              {
+                ref: "pane:right",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker-1"],
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:right",
+            surfaces: [
+              {
+                ref: "surface:worker-1",
+                title: "",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        role: "worker",
+        workspace: "workspace:1",
+        focus: false,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("focus=false");
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface"]),
+    );
+  });
+
   it("new_split rejects missing boot_prompt_path before creating a pane", async () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
