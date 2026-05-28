@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 26 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 29 MCP tools that give AI agents programmatic control over terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,8 +8,8 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-26%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-406%20passing-brightgreen.svg)](#testing)
+[![MCP Tools](https://img.shields.io/badge/MCP-29%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-335%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -54,9 +54,9 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 26 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer exposes 29 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
-## MCP Tools (26)
+## MCP Tools (29)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
@@ -67,7 +67,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 **Workspace** — `list_surfaces` `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
 <details>
-<summary>Full tool reference (26 tools)</summary>
+<summary>Full tool reference (29 tools)</summary>
 
 ### Read-only (6)
 
@@ -156,7 +156,7 @@ cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/
 ## Testing
 
 ```bash
-bun run test        # 406 tests via vitest
+bun run test        # 335 tests via vitest
 npm run typecheck   # Type checking
 ```
 
