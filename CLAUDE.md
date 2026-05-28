@@ -13,7 +13,7 @@
 bun install
 bun run dev          # Run with tsx (hot reload)
 bun run build        # Compile TypeScript to dist/
-bun run test         # 506 tests via vitest
+bun run test         # 335 tests via vitest
 bun run typecheck    # Type checking only
 ```
 
