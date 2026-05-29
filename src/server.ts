@@ -2398,6 +2398,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         route = reresolved;
       }
+      // Identity guard: a live surface ref may have been RECYCLED — a crashed
+      // agent's pane reused by a different agent. If the live surface now hosts
+      // a known CLI that differs from this agent's recorded CLI, refuse rather
+      // than delivering to the new occupant. Fails OPEN when the live CLI is
+      // unknown/unreadable so a parse miss never blocks a healthy relay.
+      const expectedCli = engine.getAgentState(args.agent_id)?.cli;
+      if (expectedCli) {
+        const occupant = (await discovery.scan(false)).find(
+          (entry) => entry.surface_id === route.surface_id,
+        );
+        if (
+          occupant &&
+          occupant.has_agent &&
+          !occupant.read_error &&
+          occupant.cli !== "unknown" &&
+          occupant.cli !== expectedCli
+        ) {
+          throw new Error(
+            `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
+              `surface ${route.surface_id} — it now hosts a ${occupant.cli} ` +
+              `agent (surface recycled). Run resync_agents and retry.`,
+          );
+        }
+      }
       if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
         throw new Error(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
