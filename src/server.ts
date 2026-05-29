@@ -2355,7 +2355,49 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
     }) => {
-      const route = engine.resolveAgentRoute(args.agent_id);
+      let route = engine.resolveAgentRoute(args.agent_id);
+      // Guard against stale surface refs before sending. Registry refs drift
+      // after a crash/respawn (a pane closes or is recycled), so a cached
+      // surface_id can point at a dead surface. Check the resolved ref against
+      // the live surface list and, if it is positively gone, resync once and
+      // re-resolve; if it still cannot be confirmed live, refuse the relay
+      // rather than misdelivering keystrokes. Fail OPEN when the surface list
+      // is unavailable (empty) so a transient listing failure never blocks a
+      // healthy relay.
+      const liveSurfaceRefs = async (): Promise<Set<string> | null> => {
+        const surfaces = await surfaceProvider();
+        return surfaces.length > 0
+          ? new Set(surfaces.map((surface) => surface.ref))
+          : null;
+      };
+      const isPositivelyStale = (
+        refs: Set<string> | null,
+        surfaceId: string,
+      ): boolean => refs !== null && !refs.has(surfaceId);
+      if (isPositivelyStale(await liveSurfaceRefs(), route.surface_id)) {
+        discovery.invalidate();
+        await registry.listMerged(discovery, { force: true });
+        // Re-resolve after the resync. The agent may have been evicted (its
+        // surface vanished) or still point at a dead surface — either way,
+        // refuse with a clear stale-ref error instead of misdelivering.
+        let reresolved: ReturnType<typeof engine.resolveAgentRoute> | null;
+        try {
+          reresolved = engine.resolveAgentRoute(args.agent_id);
+        } catch {
+          reresolved = null;
+        }
+        if (
+          !reresolved ||
+          isPositivelyStale(await liveSurfaceRefs(), reresolved.surface_id)
+        ) {
+          throw new Error(
+            `Agent "${args.agent_id}" no longer maps to a live surface ` +
+              `(stale surface ref); its pane likely closed or was recycled. ` +
+              `Run resync_agents and retry.`,
+          );
+        }
+        route = reresolved;
+      }
       if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
         throw new Error(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
