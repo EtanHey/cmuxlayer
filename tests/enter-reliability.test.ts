@@ -281,7 +281,7 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
-  it("does not verify short send_to submissions that settle back to idle", async () => {
+  it("verifies short send_to submissions once the input clears", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.completionMode = "idle";
@@ -299,7 +299,9 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBe(null);
+    // A short relay is now verified: the input cleared from the prompt, so the
+    // submit landed even though Claude settled straight back to idle.
+    expect(events[0]?.submit_verified).toBe(true);
     expect(events[0]?.retry_count).toBe(0);
   });
 

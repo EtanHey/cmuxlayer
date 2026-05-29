@@ -827,7 +827,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: true, retry_count: retryCount };
       }
 
-      if (!retried && screenShowsPendingInput(snapshot.text, opts.text)) {
+      if (!screenShowsPendingInput(snapshot.text, opts.text)) {
+        // The submitted text is no longer echoed in the input box: the terminal
+        // accepted it and cleared the prompt, even if the agent has already
+        // settled back to idle. Treat that as a verified landing.
+        return { submit_verified: true, retry_count: retryCount };
+      }
+
+      // The submitted text is still pending in the input box. Retry Enter once,
+      // then keep polling; if it never clears (a frozen terminal) we fall
+      // through to the timeout below and report the relay as unverified.
+      if (!retried) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         await sendKeyWithRetry(opts.surface, "return", opts.workspace);
         retryCount += 1;
@@ -2369,10 +2379,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: args.press_enter,
           source_event: args.source_event,
           source_agent: args.agent_id,
+          // Verify every relay to an interactive agent — not just long ones.
+          // A short relay (the common agent-to-agent case) to a frozen
+          // terminal must be caught, never reported as ok. allow_busy sends to
+          // a non-interactive (working) agent stay unverified to avoid
+          // false-failing a legitimate interjection.
           verify_submit:
-            args.press_enter &&
-            INTERACTIVE_AGENT_STATES.has(route.state) &&
-            sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
+            args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
         }),
       );
     };
