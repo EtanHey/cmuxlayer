@@ -108,6 +108,95 @@ class RecycledSurfaceClient {
   async renameTab() {}
 }
 
+/**
+ * The discovery cache (scan(false)) momentarily shows a FOREIGN cli for the
+ * agent's surface (e.g. a transient parse, or a just-resolved pre-move read),
+ * but a fresh scan confirms the agent's OWN cli. The guard must confirm before
+ * refusing, so this healthy relay proceeds rather than being false-refused.
+ */
+class FlappingSurfaceClient {
+  readonly workspace = "workspace:1";
+  readonly pane = "pane:1";
+  readonly surface = "surface:1";
+  readonly sendTargets: string[] = [];
+  readonly sendKeyTargets: string[] = [];
+  private reads = 0;
+
+  async listWorkspaces() {
+    return {
+      workspaces: [
+        {
+          ref: this.workspace,
+          title: "Main",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    };
+  }
+
+  async listPanes() {
+    return {
+      workspace_ref: this.workspace,
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: this.pane,
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: [this.surface],
+          selected_surface_ref: this.surface,
+        },
+      ],
+    };
+  }
+
+  async listPaneSurfaces() {
+    return {
+      workspace_ref: this.workspace,
+      window_ref: "window:1",
+      pane_ref: this.pane,
+      surfaces: [
+        {
+          ref: this.surface,
+          title: "brainlayerClaude",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+    };
+  }
+
+  async send(surface: string, _text: string) {
+    this.sendTargets.push(surface);
+  }
+
+  async sendKey(surface: string, _key: string) {
+    this.sendKeyTargets.push(surface);
+  }
+
+  async readScreen(surface: string, opts?: { lines?: number }) {
+    // First read (the cached scan) looks like a Codex; every read after the
+    // cache invalidation shows the real Claude occupant.
+    this.reads += 1;
+    const text =
+      this.reads === 1
+        ? "gpt-5.3-codex \u00b7 80% left\n\ncodex>\n"
+        : "Claude Code\n> \nCLAUDE_COUNTER:1\n";
+    return {
+      surface,
+      text,
+      lines: opts?.lines ?? 30,
+      scrollback_used: false,
+    };
+  }
+
+  async renameTab() {}
+}
+
 function createRelayServer(client: any) {
   return createServer({
     client,
@@ -190,5 +279,23 @@ describe("recycled surface identity", () => {
     // Nothing was sent to the recycled surface.
     expect(client.sendTargets).not.toContain(client.surface);
     expect(client.sendKeyTargets).not.toContain(client.surface);
+  });
+
+  it("does not false-refuse when a fresh scan confirms the agent's own CLI", async () => {
+    const client = new FlappingSurfaceClient();
+    server = createRelayServer(client);
+    registerClaudeAgentOnSurface1(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "hi",
+      press_enter: false,
+    });
+    const parsed = parseResult(result);
+
+    // The cached scan looked foreign, but the fresh scan confirms Claude — the
+    // healthy relay must proceed (no false refusal) and deliver.
+    expect(parsed.ok).toBe(true);
+    expect(client.sendTargets).toContain("surface:1");
   });
 });

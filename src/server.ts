@@ -2405,21 +2405,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // unknown/unreadable so a parse miss never blocks a healthy relay.
       const expectedCli = engine.getAgentState(args.agent_id)?.cli;
       if (expectedCli) {
-        const occupant = (await discovery.scan(false)).find(
+        const cachedOccupant = (await discovery.scan(false)).find(
           (entry) => entry.surface_id === route.surface_id,
         );
-        if (
-          occupant &&
-          occupant.has_agent &&
-          !occupant.read_error &&
-          occupant.cli !== "unknown" &&
-          occupant.cli !== expectedCli
-        ) {
-          throw new Error(
-            `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
-              `surface ${route.surface_id} — it now hosts a ${occupant.cli} ` +
-              `agent (surface recycled). Run resync_agents and retry.`,
+        const isForeign = (occ: typeof cachedOccupant): boolean =>
+          Boolean(
+            occ &&
+              occ.has_agent &&
+              !occ.read_error &&
+              occ.cli !== "unknown" &&
+              occ.cli !== expectedCli,
           );
+        if (isForeign(cachedOccupant)) {
+          // Confirm against a FRESH scan before refusing. discovery.scan(false)
+          // serves a 2s cache that can predate the current occupant; refusing
+          // on it alone would false-refuse a healthy relay (adversarial-review
+          // finding). Only a mismatch confirmed live is a recycled surface.
+          discovery.invalidate();
+          const freshOccupant = (await discovery.scan(true)).find(
+            (entry) => entry.surface_id === route.surface_id,
+          );
+          if (isForeign(freshOccupant)) {
+            throw new Error(
+              `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
+                `surface ${route.surface_id} — it now hosts a ${freshOccupant?.cli} ` +
+                `agent (surface recycled). Run resync_agents and retry.`,
+            );
+          }
         }
       }
       if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
