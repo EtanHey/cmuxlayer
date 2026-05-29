@@ -2398,6 +2398,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         route = reresolved;
       }
+      // Identity guard: a live surface ref may have been RECYCLED — a crashed
+      // agent's pane reused by a different agent. If the live surface now hosts
+      // a known CLI that differs from this agent's recorded CLI, refuse rather
+      // than delivering to the new occupant. Fails OPEN when the live CLI is
+      // unknown/unreadable so a parse miss never blocks a healthy relay.
+      const expectedCli = engine.getAgentState(args.agent_id)?.cli;
+      if (expectedCli) {
+        const cachedOccupant = (await discovery.scan(false)).find(
+          (entry) => entry.surface_id === route.surface_id,
+        );
+        const isForeign = (occ: typeof cachedOccupant): boolean =>
+          Boolean(
+            occ &&
+              occ.has_agent &&
+              !occ.read_error &&
+              occ.cli !== "unknown" &&
+              occ.cli !== expectedCli,
+          );
+        if (isForeign(cachedOccupant)) {
+          // Confirm against a FRESH scan before refusing. discovery.scan(false)
+          // serves a 2s cache that can predate the current occupant; refusing
+          // on it alone would false-refuse a healthy relay (adversarial-review
+          // finding). Only a mismatch confirmed live is a recycled surface.
+          discovery.invalidate();
+          const freshOccupant = (await discovery.scan(true)).find(
+            (entry) => entry.surface_id === route.surface_id,
+          );
+          if (isForeign(freshOccupant)) {
+            throw new Error(
+              `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
+                `surface ${route.surface_id} — it now hosts a ${freshOccupant?.cli} ` +
+                `agent (surface recycled). Run resync_agents and retry.`,
+            );
+          }
+        }
+      }
       if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
         throw new Error(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
