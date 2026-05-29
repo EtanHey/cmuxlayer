@@ -225,6 +225,59 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
+  it("docks a worker into a worker-majority right pane that also holds a stray non-role tab", () => {
+    // Live scenario: the workers pane is dominated by workers but also holds a
+    // non-agent tab (e.g. a setup shell / dashboard). The worker must dock into
+    // it, NOT spawn a stray third pane.
+    const panes = [
+      makePane("pane:left", 0, ["surface:orchestrator"]),
+      makePane("pane:right", 1, [
+        "surface:dashboard",
+        "surface:worker-1",
+        "surface:worker-2",
+      ]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", [
+        "surface:dashboard",
+        "surface:worker-1",
+        "surface:worker-2",
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      // surface:dashboard is unclassified (non-role); workers are the majority.
+      new Set(["surface:worker-1", "surface:worker-2"]),
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("still splits fresh when a lone worker shares a pane with one non-role surface", () => {
+    // Guard the worker-majority rule against over-reach: a single worker tied
+    // with a non-role surface is NOT a worker pane — split fresh (unchanged).
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", [
+        "surface:interactive",
+        "surface:worker-1",
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+    );
+
+    expect(placement).toEqual({ kind: "split", direction: "right" });
+  });
+
   it("marks a dedicated single-worker pane as collapsible when its last tab closes", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive"]),

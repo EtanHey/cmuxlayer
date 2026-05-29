@@ -127,6 +127,24 @@ function isDedicatedWorkerPane(layout: PaneLayout): boolean {
   );
 }
 
+/**
+ * A pane workers own for docking. Stricter than "has a worker": it must hold no
+ * orchestrators/ICs and workers must be the strict majority of its surfaces, so
+ * a real workers pane that also carries a stray non-role tab (a setup shell, a
+ * dashboard) still docks new workers as tabs instead of spawning a third pane.
+ * A pure dedicated worker pane (nonRoleCount === 0) trivially satisfies this.
+ * A lone worker tied with a non-role surface does NOT (1 is not > 1), so an
+ * accidental worker in someone's shell pane still splits out to a clean pane.
+ */
+function isWorkerDockPane(layout: PaneLayout): boolean {
+  return (
+    layout.orchestratorCount === 0 &&
+    layout.icCount === 0 &&
+    layout.workerCount > 0 &&
+    layout.workerCount > layout.nonRoleCount
+  );
+}
+
 function paneContainingSurface(
   layouts: PaneLayout[],
   surfaceId?: string | null,
@@ -218,9 +236,12 @@ export function collectRoleSurfaceIds(
 /**
  * Deterministic worker placement:
  * - first worker creates the right split
- * - subsequent workers become tabs in the rightmost dedicated worker pane
- * - mixed interactive/worker panes are treated as invalid and repaired with
- *   a fresh right split to preserve the left-interactive/right-worker invariant
+ * - subsequent workers become tabs in the rightmost worker-owned pane — a
+ *   worker-majority pane, which tolerates a stray non-role tab (a setup shell
+ *   or dashboard) so a populated workers pane never sprouts a redundant pane
+ * - a lone worker sharing a pane with an interactive/non-role surface is still
+ *   treated as invalid and repaired with a fresh right split, preserving the
+ *   left-interactive/right-worker invariant
  */
 export function chooseAgentSpawnPlacement(
   panes: CmuxPane[],
@@ -286,7 +307,10 @@ export function chooseAgentSpawnPlacement(
     }
   }
 
-  const rightmostWorkerPane = rightmost(workerPanes);
+  // Dock into the rightmost pane workers already own — including one that
+  // carries a stray non-role tab — so a populated workers pane never gets a
+  // redundant third pane split off beside it.
+  const rightmostWorkerPane = rightmost(layouts.filter(isWorkerDockPane));
   if (rightmostWorkerPane) {
     return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
   }
