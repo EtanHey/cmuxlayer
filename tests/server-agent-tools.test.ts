@@ -1,5 +1,5 @@
 /**
- * Integration tests for the 7 agent lifecycle MCP tools registered in server.ts.
+ * Integration tests for the agent lifecycle MCP tools registered in server.ts.
  * Tests tool registration and handler dispatch with mocked cmux client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -13,6 +13,7 @@ const TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 
 const AGENT_TOOLS = [
   "spawn_agent",
+  "spawn_in_workspace",
   "resync_agents",
   "send_to",
   "wait_for",
@@ -126,7 +127,7 @@ function createLifecycleServer(exec: ExecFn) {
 }
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 11 agent lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 12 agent lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -154,11 +155,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 29 (16 low-level + 11 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 31 (17 low-level + 12 agent lifecycle + 2 v2)", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(29);
+    expect(Object.keys(registeredTools)).toHaveLength(31);
   });
 });
 

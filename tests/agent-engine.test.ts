@@ -1,9 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+const execFileMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({
+  execFile: execFileMock,
+}));
+
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AgentEngine,
+  assertLauncherAvailable,
   buildLaunchCommand,
   buildResumeCommand,
   extractSessionId,
@@ -49,6 +56,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+    selectWorkspace: vi.fn().mockResolvedValue(undefined),
     clearStatus: vi.fn().mockResolvedValue(undefined),
     setProgress: vi.fn().mockResolvedValue(undefined),
     clearProgress: vi.fn().mockResolvedValue(undefined),
@@ -99,6 +107,10 @@ describe("AgentEngine", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
+    execFileMock.mockReset();
+    execFileMock.mockImplementation((_cmd, _args, callback) => {
+      callback(new Error("missing launcher"), "", "");
+    });
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
@@ -216,6 +228,47 @@ describe("AgentEngine", () => {
         type: "terminal",
       });
       expect(mockClient.newSurface).not.toHaveBeenCalled();
+    });
+
+    it("selects the target workspace before creating an agent surface", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:red-team",
+        window_ref: "window:1",
+        pane_ref: "pane:left",
+        surfaces: [makeSurface("surface:interactive")],
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "workspace:red-team",
+      });
+
+      expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:red-team");
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "workspace:red-team",
+        type: "terminal",
+      });
+      expect(
+        (mockClient.selectWorkspace as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        (mockClient.newSplit as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[0],
+      );
     });
 
     it("creates the first worker as a right split even when user panes already exist", async () => {
@@ -1653,6 +1706,48 @@ describe("buildLaunchCommand", () => {
     const cmd = buildLaunchCommand("claude", "brainlayer");
     expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
     expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
+  });
+});
+
+describe("assertLauncherAvailable", () => {
+  beforeEach(() => {
+    execFileMock.mockReset();
+    vi.stubEnv("SHELL", "/bin/zsh");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("passes when the interactive shell probe returns 0", async () => {
+    execFileMock.mockImplementation((_cmd, _args, callback) => {
+      callback(null, "", "");
+    });
+
+    await expect(
+      assertLauncherAvailable("brainlayer", "Cursor"),
+    ).resolves.toBeUndefined();
+
+    expect(execFileMock).toHaveBeenCalledWith(
+      "/bin/zsh",
+      [
+        "-ilc",
+        "type brainlayerCursor >/dev/null 2>&1 || command -v brainlayerCursor >/dev/null 2>&1",
+      ],
+      expect.any(Function),
+    );
+  });
+
+  it("throws a clear launcher registration message when the probe fails", async () => {
+    execFileMock.mockImplementation((_cmd, _args, callback) => {
+      callback(new Error("missing launcher"), "", "");
+    });
+
+    await expect(
+      assertLauncherAvailable("skill-creator", "Cursor"),
+    ).rejects.toThrow(
+      /Launcher "skill-creatorCursor" not found.*skillcreatorCursor.*cli="gemini"\/"kiro"/s,
+    );
   });
 });
 

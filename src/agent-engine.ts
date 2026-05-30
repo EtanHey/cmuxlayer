@@ -182,6 +182,7 @@ interface AgentEngineClient {
     title?: string;
     url?: string;
   }): Promise<CmuxNewSurfaceResult>;
+  selectWorkspace(workspace: string): Promise<void>;
   listPanes(opts?: { workspace?: string }): Promise<{
     workspace_ref?: string;
     panes: CmuxPane[];
@@ -225,7 +226,7 @@ const LIFECYCLE_LOGS = {
  * which handle cd, model, iTerm profile, MCP config, and contexts.
  * No `cd` prefix needed — the launcher does it.
  *
- * For other CLIs: uses `cd ~/Gits/<repo> && <cli>` since they
+ * For gemini/kiro: uses `cd ~/Gits/<repo> && <cli>` since they
  * don't have launcher functions yet.
  */
 // Env vars for headless/spawned agent sessions:
@@ -256,6 +257,7 @@ export function buildLaunchCommand(cli: CliType, repo: string): string {
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli`;
     case "cursor":
+      // repoGolem launcher - requires registration via golem-powers.
       return `${safeRepo}Cursor -s`;
   }
 }
@@ -293,21 +295,23 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-async function assertLauncherAvailable(
+export async function assertLauncherAvailable(
   repo: string,
   suffix: "Claude" | "Codex" | "Cursor",
 ): Promise<void> {
   const launcher = `${sanitizeRepoName(repo)}${suffix}`;
-  const shell = process.env.SHELL || "/bin/sh";
+  const shell = process.env.SHELL || "/bin/zsh";
   const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
 
   try {
-    await execFileAsync(shell, ["-lc", probe]);
+    await execFileAsync(shell, ["-ilc", probe]);
   } catch {
     throw new Error(
-      `Launcher "${launcher}" not found. For repo "${repo}" with hyphens, ` +
-        `the launcher name strips the hyphen (e.g. "skill-creator" → "skillcreatorClaude"). ` +
-        `Use the direct shell spawn path, or fix the repoGolem config.`,
+      `Launcher "${launcher}" not found. ` +
+        `For repo "${repo}" with hyphens the launcher strips hyphens ` +
+        `(e.g. "skill-creator" -> "skillcreatorCursor"). ` +
+        `Register the launcher in golem-powers or use cli="gemini"/"kiro" ` +
+        `which use direct cd+exec paths.`,
     );
   }
 }
@@ -371,6 +375,15 @@ export class AgentEngine {
       parentAgent?: AgentRecord | null;
     },
   ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
+    if (workspace) {
+      try {
+        await this.client.selectWorkspace(workspace);
+      } catch {
+        // Best-effort: the workspace may already be focused, or the client may
+        // be an older test/fallback implementation.
+      }
+    }
+
     try {
       const panes = await this.client.listPanes({ workspace });
       const paneSurfaces = await Promise.all(

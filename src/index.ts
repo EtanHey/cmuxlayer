@@ -3,12 +3,12 @@
 /**
  * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * 29 MCP tools across two categories:
- *   Core (16): list_surfaces, select_workspace, new_split, new_surface,
- *              move_surface, reorder_surface, send_input, send_command,
- *              send_key, read_screen, rename_tab, notify, set_status,
- *              set_progress, close_surface, browser_surface
- *   Agent lifecycle (13): spawn_agent, resync_agents,
+ * 31 MCP tools across two categories:
+ *   Core (17): list_surfaces, select_workspace, create_workspace, new_split,
+ *              new_surface, move_surface, reorder_surface, send_input,
+ *              send_command, send_key, read_screen, rename_tab, notify,
+ *              set_status, set_progress, close_surface, browser_surface
+ *   Agent lifecycle (14): spawn_agent, spawn_in_workspace, resync_agents,
  *                         send_to (canonical), send_to_agent (deprecated alias),
  *                         read_agent_output, get_agent_state, list_agents,
  *                         my_agents, wait_for, wait_for_all, stop_agent,
