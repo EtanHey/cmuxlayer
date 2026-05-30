@@ -149,6 +149,27 @@ export class CmuxSocketClient {
     }
   }
 
+  async createWorkspace(
+    title: string,
+  ): Promise<{ workspace: string; title: string }> {
+    try {
+      const result = await this.call<Record<string, unknown>>(
+        "workspace.create",
+        { title },
+      );
+      return {
+        workspace:
+          (result.workspace_ref as string) ?? (result.workspace as string) ?? "",
+        title: (result.title as string) ?? title,
+      };
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallback.createWorkspace(title);
+      }
+      throw e;
+    }
+  }
+
   async listPaneSurfaces(opts?: {
     workspace?: string;
     pane?: string;

@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers 16 core tools + 13 agent lifecycle tools.
+ * cmux MCP server — registers core tools + agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1291,6 +1291,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    "create_workspace",
+    "Create a new workspace tab. Returns the new workspace ref and title.",
+    {
+      title: z.string().describe("Workspace title"),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const result = await client.createWorkspace(args.title);
+        const data = {
+          workspace: result.workspace,
+          title: result.title,
+        };
+        return okFormatted(formatOk("create_workspace", data), data);
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
   // 2. new_split
   server.tool(
     "new_split",
@@ -2336,6 +2357,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         newSplit: (direction, splitOpts) =>
           client.newSplit(direction, splitOpts),
         newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+        selectWorkspace: (workspace) => client.selectWorkspace(workspace),
         listPanes: (paneOpts) => client.listPanes(paneOpts),
         listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
         closeSurface: (surface, closeOpts) =>
@@ -2655,6 +2677,114 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 inferAgentRole({ role: args.role, cli: args.cli }),
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
+            },
+          );
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    server.tool(
+      "spawn_in_workspace",
+      "Create a workspace and spawn a set of agents into it as a clean 2-pane grid (commanders LEFT, workers RIGHT). Handles workspace creation, selection, and role-based pane placement atomically. Use this instead of repeated spawn_agent calls when standing up a multi-agent team.",
+      {
+        workspace_title: z
+          .string()
+          .describe("Title for the new workspace (e.g. 'red-team')"),
+        agents: z
+          .array(
+            z.object({
+              repo: z.string(),
+              model: z.string(),
+              cli: z.enum(["claude", "codex", "cursor", "gemini", "kiro"]),
+              role: z.enum(["orchestrator", "worker", "ic"]).optional(),
+              prompt: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .describe("Agents to spawn, in order"),
+        reuse_workspace: z
+          .string()
+          .optional()
+          .describe("Ref of an existing workspace to use instead of creating a new one"),
+      },
+      ANNOTATIONS.mutating,
+      async (args) => {
+        try {
+          const workspaceResult = args.reuse_workspace
+            ? { workspace: args.reuse_workspace, title: args.workspace_title }
+            : await client.createWorkspace(args.workspace_title);
+          const workspace = workspaceResult.workspace;
+          if (!workspace) {
+            throw new Error("create_workspace returned an empty workspace ref");
+          }
+
+          await client.selectWorkspace(workspace);
+
+          const spawnedAgents: Array<{
+            agent_id: string;
+            surface_id: string;
+            repo: string;
+            cli: CliType;
+          }> = [];
+
+          for (const agent of args.agents) {
+            const hasPrompt = hasInlinePrompt(agent.prompt);
+            const result = await engine.spawnAgent({
+              repo: agent.repo,
+              model: agent.model,
+              cli: agent.cli,
+              prompt: agent.prompt ?? "",
+              boot_prompt_pending: hasPrompt,
+              workspace,
+              role: agent.role,
+              auto_archive_on_done: true,
+            });
+
+            if (hasPrompt) {
+              const bootPromptDelivery = await deliverBootPrompt({
+                surface: result.surface_id,
+                workspace,
+                cli: agent.cli,
+                prompt: agent.prompt,
+                timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
+              });
+
+              const updated = stateMgr.updateRecord(result.agent_id, {
+                task_summary:
+                  bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
+                boot_prompt_pending: false,
+              });
+              registry.set(result.agent_id, updated);
+
+              const current = engine.getAgentState(result.agent_id);
+              if (current?.state === "booting") {
+                const ready = stateMgr.transition(result.agent_id, "ready");
+                registry.set(result.agent_id, ready);
+                result.state = "ready";
+              } else if (current?.state === "ready") {
+                result.state = "ready";
+              }
+            }
+
+            spawnedAgents.push({
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+              repo: agent.repo,
+              cli: agent.cli,
+            });
+          }
+
+          return okFormatted(
+            formatOk("spawn_in_workspace", {
+              workspace,
+              agents: spawnedAgents.length,
+            }),
+            {
+              workspace,
+              title: workspaceResult.title,
+              agents: spawnedAgents,
             },
           );
         } catch (e) {

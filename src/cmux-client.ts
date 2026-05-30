@@ -371,6 +371,18 @@ export class CmuxClient {
     await this.run(args);
   }
 
+  async createWorkspace(
+    title: string,
+  ): Promise<{ workspace: string; title: string }> {
+    const raw = await this.run(["new-workspace", "--title", title]);
+    const parsed = this.parse<Record<string, unknown>>(raw, "new-workspace");
+    return {
+      workspace:
+        (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
+      title: (parsed.title as string) ?? title,
+    };
+  }
+
   async readScreen(
     surface: string,
     opts?: {

@@ -43,6 +43,7 @@ describe("B1: ToolAnnotations on all tools", () => {
 
   const MUTATING_TOOLS = [
     "select_workspace",
+    "create_workspace",
     "new_split",
     "new_surface",
     "move_surface",
@@ -56,6 +57,7 @@ describe("B1: ToolAnnotations on all tools", () => {
     "set_progress",
     "browser_surface",
     "spawn_agent",
+    "spawn_in_workspace",
     "resync_agents",
     "send_to",
     "send_to_agent",
@@ -79,9 +81,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 29 tools have annotations", () => {
+  it("all 31 tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(29);
+    expect(toolNames.length).toBe(31);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

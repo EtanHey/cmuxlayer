@@ -128,6 +128,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       setProgress: async () => {},
       newSplit: (direction, splitOpts) => this.client.newSplit(direction, splitOpts),
       newSurface: (surfaceOpts) => this.client.newSurface(surfaceOpts),
+      selectWorkspace: (workspace) => this.client.selectWorkspace(workspace),
       listPanes: (paneOpts) => this.client.listPanes(paneOpts),
       listPaneSurfaces: (surfaceOpts) => this.client.listPaneSurfaces(surfaceOpts),
       closeSurface: (surface, closeOpts) =>

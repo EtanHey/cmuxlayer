@@ -12,6 +12,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 const EXPECTED_TOOLS = [
   "list_surfaces",
   "select_workspace",
+  "create_workspace",
   "new_split",
   "new_surface",
   "move_surface",
@@ -72,7 +73,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 16 core tools", () => {
+  it("registers all 17 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -250,6 +251,122 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace).toBe("workspace:3");
+  });
+
+  it("create_workspace handler calls client.createWorkspace", async () => {
+    const mockClient = {
+      createWorkspace: vi.fn().mockResolvedValue({
+        workspace: "workspace:7",
+        title: "red-team",
+      }),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["create_workspace"];
+
+    const result = await tool.handler({ title: "red-team" }, {} as any);
+
+    expect(mockClient.createWorkspace).toHaveBeenCalledWith("red-team");
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject({
+      ok: true,
+      workspace: "workspace:7",
+      title: "red-team",
+    });
+  });
+
+  it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
+    const calls: string[] = [];
+    let surfaceIndex = 0;
+    const mockClient = {
+      createWorkspace: vi.fn().mockImplementation(async (title: string) => {
+        calls.push(`create:${title}`);
+        return { workspace: "workspace:grid", title };
+      }),
+      selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+        calls.push(`select:${workspace}`);
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:grid", title: "grid" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:grid",
+        window_ref: "window:1",
+        panes: [],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:grid",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [],
+      }),
+      newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
+        surfaceIndex += 1;
+        calls.push(`spawn:${opts.workspace}:surface:${surfaceIndex}`);
+        return {
+          workspace: opts.workspace,
+          surface: `surface:${surfaceIndex}`,
+          pane: `pane:${surfaceIndex}`,
+          title: "",
+          type: "terminal",
+        };
+      }),
+      newSurface: vi.fn(),
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: "$ ",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      log: vi.fn().mockResolvedValue(undefined),
+      setStatus: vi.fn().mockResolvedValue(undefined),
+      clearStatus: vi.fn().mockResolvedValue(undefined),
+      setProgress: vi.fn().mockResolvedValue(undefined),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+      identify: vi.fn().mockResolvedValue({}),
+      browser: vi.fn().mockResolvedValue({}),
+    };
+    const stateDir = join(CHANNEL_TEST_DIR, "spawn-in-workspace-sequence");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "red-team",
+        agents: [
+          { repo: "brainlayer", model: "sonnet", cli: "claude", role: "orchestrator" },
+          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+        ],
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace).toBe("workspace:grid");
+    expect(parsed.agents).toHaveLength(2);
+    expect(calls.slice(0, 4)).toEqual([
+      "create:red-team",
+      "select:workspace:grid",
+      "select:workspace:grid",
+      "spawn:workspace:grid:surface:1",
+    ]);
+    expect(calls).toContain("spawn:workspace:grid:surface:2");
+
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("list_surfaces dedupes overlapping pane results and returns the condensed default schema", async () => {
