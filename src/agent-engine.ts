@@ -374,12 +374,13 @@ export class AgentEngine {
     try {
       const panes = await this.client.listPanes({ workspace });
       const paneSurfaces = await Promise.all(
-        panes.panes.map((pane) =>
-          this.client.listPaneSurfaces({
+        panes.panes.map(async (pane) => {
+          const ps = await this.client.listPaneSurfaces({
             workspace,
             pane: pane.ref,
-          }),
-        ),
+          });
+          return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+        }),
       );
       const parentAgent = context?.parentAgent ?? null;
       const liveSurfaceIds = new Set(

@@ -156,7 +156,16 @@ export class CmuxSocketClient {
     const params: Record<string, unknown> = {};
     if (opts?.workspace) params.workspace_id = opts.workspace;
     if (opts?.pane) params.pane_id = opts.pane;
-    return this.call("surface.list", params);
+    const result = (await this.call(
+      "surface.list",
+      params,
+    )) as CmuxPaneSurfaces;
+    // The cmux socket omits pane_ref from the response; inject it from the
+    // known input so describePaneLayouts can match panes to their surfaces.
+    if (opts?.pane && !result.pane_ref) {
+      result.pane_ref = opts.pane;
+    }
+    return result;
   }
 
   async listPanes(opts?: { workspace?: string }): Promise<{

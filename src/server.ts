@@ -1368,12 +1368,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           const panes = await client.listPanes({ workspace: args.workspace });
           const paneSurfaces = await Promise.all(
-            panes.panes.map((pane) =>
-              client.listPaneSurfaces({
+            panes.panes.map(async (pane) => {
+              const ps = await client.listPaneSurfaces({
                 workspace: args.workspace,
                 pane: pane.ref,
-              }),
-            ),
+              });
+              // cmux socket omits pane_ref; inject it so describePaneLayouts
+              // can match panes to their surfaces for role-based placement.
+              return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+            }),
           );
           const liveSurfaceIds = new Set(
             paneSurfaces.flatMap((group) =>
@@ -2125,9 +2128,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (workspace) {
             const panes = await client.listPanes({ workspace });
             const paneSurfaces = await Promise.all(
-              panes.panes.map((pane) =>
-                client.listPaneSurfaces({ workspace, pane: pane.ref }),
-              ),
+              panes.panes.map(async (pane) => {
+                const ps = await client.listPaneSurfaces({ workspace, pane: pane.ref });
+                return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+              }),
             );
             const workerSurfaceIds = new Set(
               stateMgr.listStates().map((record) => record.surface_id),
