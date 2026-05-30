@@ -235,10 +235,7 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["select_workspace"];
 
-    const result = await tool.handler(
-      { workspace: "workspace:3" },
-      {} as any,
-    );
+    const result = await tool.handler({ workspace: "workspace:3" }, {} as any);
 
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
@@ -412,9 +409,9 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.surfaces).toHaveLength(2);
-    expect(parsed.surfaces.map((surface: { ref: string }) => surface.ref)).toEqual(
-      ["surface:1", "surface:2"],
-    );
+    expect(
+      parsed.surfaces.map((surface: { ref: string }) => surface.ref),
+    ).toEqual(["surface:1", "surface:2"]);
     expect(parsed.workspaces).toEqual([
       {
         ref: "workspace:1",
@@ -905,9 +902,15 @@ describe("tool handler integration", () => {
       }),
     } as any;
 
+    // Use an isolated stateDir so enrichParsedScreen doesn't pick up live
+    // agent state from the default state directory and overwrite model/cost.
+    const isolatedStateDir = join(tmpdir(), "cmux-read-screen-isolation-test");
+    rmSync(isolatedStateDir, { recursive: true, force: true });
+    mkdirSync(isolatedStateDir, { recursive: true });
     const server = createServer({
       client: mockClient,
       skipAgentLifecycle: true,
+      stateDir: isolatedStateDir,
     });
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["read_screen"];
@@ -916,6 +919,7 @@ describe("tool handler integration", () => {
       { surface: "surface:1", parsed_only: true, lines: 40 },
       {} as any,
     );
+    rmSync(isolatedStateDir, { recursive: true, force: true });
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -1068,18 +1072,19 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:1",
-      "brainlayerCodex -s",
-    ]));
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:1",
-      "boot prompt",
-    ]));
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:1",
+        "brainlayerCodex -s",
+      ]),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
+    );
   });
 
   it("send_command reports timeout with last screen lines and leaves launcher surface alive", async () => {
@@ -1119,12 +1124,15 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Timed out");
     expect(parsed.last_10_lines).toContain("$ waiting");
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:1",
-      "brainlayerCodex -s",
-    ]));
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:1",
+        "brainlayerCodex -s",
+      ]),
+    );
   });
 
   it("send_command does not treat another CLI prompt as launcher readiness", async () => {
@@ -1161,12 +1169,10 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(false);
-    expect(mockExec).not.toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:1",
-      "boot prompt",
-    ]));
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
+    );
   });
 
   it("send_command requires consecutive low-confidence ready matches", async () => {
@@ -1205,12 +1211,10 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(reads).toBe(2);
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:1",
-      "boot prompt",
-    ]));
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
+    );
   });
 
   it("send_input chunks long text transparently before sending", async () => {
@@ -1389,14 +1393,16 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const otherSurfaceParsed =
-      otherSurface.structuredContent ?? JSON.parse(otherSurface.content[0].text);
+      otherSurface.structuredContent ??
+      JSON.parse(otherSurface.content[0].text);
     expect(otherSurfaceParsed.ok).toBe(true);
     expect(otherSurfaceParsed.surface).toBe("surface:2");
   });
 
   it("send_input rejects concurrent foreground sends on the same surface", async () => {
-    let releaseSend: ((value: { stdout: string; stderr: string }) => void) | null =
-      null;
+    let releaseSend:
+      | ((value: { stdout: string; stderr: string }) => void)
+      | null = null;
     mockExec = vi.fn().mockImplementation((_cmd, args) => {
       if (args.includes("send") && !releaseSend) {
         return new Promise((resolve) => {
@@ -1474,7 +1480,8 @@ describe("tool handler integration", () => {
     );
     expect(renameResult.isError).toBe(true);
     const renameParsed =
-      renameResult.structuredContent ?? JSON.parse(renameResult.content[0].text);
+      renameResult.structuredContent ??
+      JSON.parse(renameResult.content[0].text);
     expect(renameParsed.error).toMatch(/delivery.*in progress/i);
   });
 
@@ -1507,7 +1514,9 @@ describe("tool handler integration", () => {
       if (args.includes("send")) {
         sendAttempts += 1;
         if (sendAttempts === 1) {
-          return Promise.reject(new Error("socket closed before receiving response"));
+          return Promise.reject(
+            new Error("socket closed before receiving response"),
+          );
         }
       }
       return Promise.resolve({ stdout: "{}", stderr: "" });
@@ -1669,8 +1678,24 @@ describe("tool handler integration", () => {
             pane_ref: pane,
             surfaces:
               pane === "pane:right"
-                ? [{ ref: "surface:worker-1", title: "", type: "terminal", index: 0, selected: true }]
-                : [{ ref: "surface:orc", title: "", type: "terminal", index: 0, selected: true }],
+                ? [
+                    {
+                      ref: "surface:worker-1",
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : [
+                    {
+                      ref: "surface:orc",
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ],
           }),
           stderr: "",
         };
@@ -2037,7 +2062,8 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             workspace,
             surface,
-            pane: workspace === "workspace:1" ? "pane:w1-right" : "pane:w2-right",
+            pane:
+              workspace === "workspace:1" ? "pane:w1-right" : "pane:w2-right",
             title: "",
             type: "terminal",
           }),
@@ -2189,7 +2215,8 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const parsed =
-      workerResult.structuredContent ?? JSON.parse(workerResult.content[0].text);
+      workerResult.structuredContent ??
+      JSON.parse(workerResult.content[0].text);
 
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
@@ -2535,10 +2562,7 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["new_surface"];
 
-    await tool.handler(
-      { pane: "pane:1", title: "Build Logs" },
-      {} as any,
-    );
+    await tool.handler({ pane: "pane:1", title: "Build Logs" }, {} as any);
 
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
@@ -2902,7 +2926,10 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["close_surface"];
 
-    const result = await tool.handler({ surface: "surface:worker-1" }, {} as any);
+    const result = await tool.handler(
+      { surface: "surface:worker-1" },
+      {} as any,
+    );
 
     expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:worker-1", {
       workspace: undefined,
