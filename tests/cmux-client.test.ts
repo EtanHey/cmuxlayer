@@ -342,6 +342,35 @@ describe("CmuxClient.send", () => {
   });
 });
 
+describe("CmuxClient.pasteText", () => {
+  it("sets and pastes a workspace-scoped buffer without interpreting newlines", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.pasteText("surface:1", "line one\nline two", {
+      workspace: "workspace:2",
+    });
+
+    expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
+      "--json",
+      "set-buffer",
+      "--name",
+      "cmuxlayer-workspace-2-surface-1",
+      "--",
+      "line one\nline two",
+    ]);
+    expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
+      "--json",
+      "paste-buffer",
+      "--name",
+      "cmuxlayer-workspace-2-surface-1",
+      "--surface",
+      "surface:1",
+      "--workspace",
+      "workspace:2",
+    ]);
+  });
+});
+
 describe("CmuxClient.sendKey", () => {
   it("calls cmux send-key with surface and key", async () => {
     const { client, exec } = mockClient({});

@@ -329,6 +329,20 @@ export class CmuxSocketClient {
     await this.call("surface.send_text", params);
   }
 
+  async pasteText(
+    surface: string,
+    text: string,
+    opts?: { workspace?: string },
+  ): Promise<void> {
+    if (!this.cliFallback) {
+      throw new CmuxSocketError(
+        "paste-text is only available through the CLI fallback",
+        "method_not_found",
+      );
+    }
+    await this.cliFallback.pasteText(surface, text, opts);
+  }
+
   async sendKey(
     surface: string,
     key: string,
