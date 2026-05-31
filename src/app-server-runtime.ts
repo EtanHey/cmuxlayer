@@ -109,7 +109,13 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
             ),
           ),
         );
-        return surfaceGroups.flatMap((group) => group.surfaces);
+        return surfaceGroups.flatMap((group) =>
+          group.surfaces.map((surface) => ({
+            ...surface,
+            workspace_ref: group.workspace_ref,
+            pane_ref: group.pane_ref,
+          })),
+        );
       } catch {
         return [];
       }
@@ -118,6 +124,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
     this.engine = new AgentEngine(this.stateMgr, this.registry, {
       log: async () => {},
+      listWorkspaces: () => this.client.listWorkspaces(),
       setStatus: async () => {},
       clearStatus: async () => {},
       readScreen: (surface, readOpts) => this.client.readScreen(surface, readOpts),
@@ -136,6 +143,9 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           this.client.closeSurface(surface, closeOpts),
         ),
       notifyLifecycleEvent: async () => {},
+    }, {
+      launchCommandSender: ({ surface, workspace, command }) =>
+        this.sendCommand(surface, command, workspace),
     });
   }
 
@@ -189,18 +199,26 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     text: string;
   }): Promise<void> {
     const route = this.engine.resolveAgentRoute(input.threadId);
-    const sanitizedText = sanitizeTerminalInput(input.text);
+    await this.sendCommand(route.surface_id, input.text);
+  }
+
+  private async sendCommand(
+    surface: string,
+    text: string,
+    workspace?: string,
+  ): Promise<void> {
+    const sanitizedText = sanitizeTerminalInput(text);
     const chunks = chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD);
 
-    await this.withSurfaceWrite(route.surface_id, async () => {
+    await this.withSurfaceWrite(surface, async () => {
       for (const [index, chunk] of chunks.entries()) {
-        await this.client.send(route.surface_id, chunk, {});
+        await this.client.send(surface, chunk, { workspace });
         if (index < chunks.length - 1) {
           await delay(SEND_INPUT_CHUNK_DELAY_MS);
         }
       }
       await delay(50);
-      await this.client.sendKey(route.surface_id, "return", {});
+      await this.client.sendKey(surface, "return", { workspace });
     });
   }
 

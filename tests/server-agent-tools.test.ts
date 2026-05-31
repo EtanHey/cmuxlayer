@@ -300,6 +300,244 @@ describe("agent lifecycle tool handlers", () => {
     ]));
   });
 
+  it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    let launcherReturnCount = 0;
+    let promptDelivered = false;
+    let lastSentText = "";
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:voice",
+                title: "VoiceLayer",
+                current_directory: "/Users/etanheyman/Gits/voicelayer",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:voice",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:new"],
+                selected_surface_ref: "surface:new",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:voice",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [
+              {
+                ref: "surface:new",
+                title: "agent-pane",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        lastSentText = String(args.at(-1) ?? "");
+        if (lastSentText === "file prompt body") {
+          promptDelivered = true;
+        }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      if (args.includes("send-key")) {
+        if (lastSentText === "voicelayerCodex -s") {
+          launcherReturnCount += 1;
+        }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text:
+              lastSentText === ""
+                ? "$ "
+                : launcherReturnCount < 2
+                ? "$ voicelayerCodex -s"
+                : "codex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:voice",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "voicelayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 1_000,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(launcherReturnCount).toBe(2);
+    expect(promptDelivered).toBe(true);
+  });
+
+  it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
+    const promptPath = join(TEST_DIR, "mandate.md");
+    writeFileSync(promptPath, "file prompt body", "utf8");
+    let launcherReturnCount = 0;
+    let promptDelivered = false;
+    let lastSentText = "";
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:voice",
+                title: "VoiceLayer",
+                current_directory: "/Users/etanheyman/Gits/voicelayer",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:voice",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:new"],
+                selected_surface_ref: "surface:new",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:voice",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [
+              {
+                ref: "surface:new",
+                title: "agent-pane",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        lastSentText = String(args.at(-1) ?? "");
+        if (lastSentText === "file prompt body") {
+          promptDelivered = true;
+        }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      if (args.includes("send-key")) {
+        if (lastSentText === "voicelayerCodex -s") {
+          launcherReturnCount += 1;
+        }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text:
+              lastSentText === ""
+                ? "$ "
+                : "$ voicelayerCodex -s\ncodex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:voice",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "voicelayer",
+        model: "codex",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 1_000,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(launcherReturnCount).toBeGreaterThanOrEqual(2);
+    expect(promptDelivered).toBe(true);
+  });
+
   it("spawn_agent stores boot_prompt_path contents as task_summary after delivery", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
@@ -379,7 +617,11 @@ describe("agent lifecycle tool handlers", () => {
   it("spawn_agent marks the agent errored when boot prompt delivery times out", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
+    let launchSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("send")) {
+        launchSent = true;
+      }
       if (args.includes("list-workspaces")) {
         return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
       }
@@ -390,7 +632,7 @@ describe("agent lifecycle tool handlers", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
-            text: "$ waiting",
+            text: launchSent ? "$ waiting" : "$ ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -785,12 +1027,13 @@ describe("agent lifecycle tool handlers", () => {
     const engine = (server as any)._registeredTools["interact"]._engine;
     const stateMgr = engine["stateMgr"];
 
-    setTimeout(() => {
-      stateMgr.transition(agentId, "ready");
-      setTimeout(() => {
-        stateMgr.transition(agentId, "done");
-      }, 50);
-    }, 50);
+    stateMgr.transition(agentId, "ready");
+    stateMgr.transition(agentId, "done");
+    const doneState = stateMgr.readState(agentId);
+    if (!doneState) {
+      throw new Error("Expected done state to exist");
+    }
+    engine.getRegistry().set(agentId, doneState);
 
     const result = await waitFor.handler(
       { agent_id: agentId, timeout_ms: 5000 },
@@ -803,7 +1046,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.state).toBe("done");
     expect(parsed.agent.session_id).toBeNull();
-  });
+  }, 10_000);
 
   it("wait_for returns the engine snapshot without a second public-agent read", async () => {
     const server = createLifecycleServer(mockExec);

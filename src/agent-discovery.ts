@@ -9,6 +9,7 @@ import type {
 export interface DiscoveredAgent {
   surface_id: string;
   surface_title: string;
+  workspace_id?: string | null;
   cli: CliType | "unknown";
   parsed_status: ParsedScreenStatus | null;
   model: string | null;
@@ -86,6 +87,8 @@ export class AgentDiscovery {
     );
     const result = await Promise.all(
       surfaces.map(async (surface): Promise<DiscoveredAgent> => {
+        const workspaceId =
+          typeof surface.workspace_ref === "string" ? surface.workspace_ref : null;
         try {
           const screen = await this.deps.readScreen(surface.ref, { lines: 30 });
           const parsed = parseScreen(screen.text);
@@ -97,6 +100,7 @@ export class AgentDiscovery {
           return {
             surface_id: surface.ref,
             surface_title: surface.title,
+            workspace_id: workspaceId,
             cli,
             parsed_status: parsed.status,
             model: parsed.model,
@@ -113,6 +117,7 @@ export class AgentDiscovery {
           return {
             surface_id: surface.ref,
             surface_title: surface.title,
+            workspace_id: workspaceId,
             cli: "unknown",
             parsed_status: null,
             model: null,

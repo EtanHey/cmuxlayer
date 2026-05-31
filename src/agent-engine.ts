@@ -19,6 +19,7 @@ import type {
   CmuxNewSurfaceResult,
   CmuxReadScreenResult,
   CmuxSendOptions,
+  CmuxWorkspace,
 } from "./types.js";
 import {
   generateAgentId,
@@ -71,6 +72,11 @@ export interface AgentEngineOptions {
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
   ) => RoleSurfaceIds;
+  launchCommandSender?: (input: {
+    surface: string;
+    workspace?: string;
+    command: string;
+  }) => Promise<void>;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored";
@@ -94,6 +100,28 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
 const execFileAsync = promisify(execFile);
+
+function pathBaseName(path: string): string {
+  const normalized = path.trim().replace(/\/+$/, "");
+  const index = normalized.lastIndexOf("/");
+  return index >= 0 ? normalized.slice(index + 1) : normalized;
+}
+
+function repoNameMatchesWorkspaceDirectory(repo: string, cwd: string): boolean {
+  const normalizedRepo = repo.toLowerCase();
+  const normalizedRepoNoHyphen = normalizedRepo.replace(/-/g, "");
+  const directory = pathBaseName(cwd).toLowerCase();
+  return (
+    directory === normalizedRepo ||
+    directory.replace(/-/g, "") === normalizedRepoNoHyphen
+  );
+}
+
+interface SidebarStatusSnapshot {
+  statusValue: string;
+  surfaceId: string | null;
+  workspaceId: string | null;
+}
 
 function autoArchiveEnabledByEnv(): boolean {
   return !["0", "false", "off", "no"].includes(
@@ -125,6 +153,7 @@ function taskDoneAutoArchiveMs(): number {
 }
 
 interface AgentEngineClient {
+  listWorkspaces(): Promise<{ workspaces: CmuxWorkspace[] }>;
   log(
     message: string,
     opts?: {
@@ -325,9 +354,11 @@ export class AgentEngine {
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
   ) => RoleSurfaceIds;
+  private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
-  /** agentId → last-pushed status string */
-  private sidebarSnapshot = new Map<string, string>();
+  /** agentId → last-pushed status target/value */
+  private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
+  private progressSnapshot: string | null = null;
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
   private loggedEvents = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
@@ -343,6 +374,7 @@ export class AgentEngine {
     this.registry = registry;
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
+    this.launchCommandSender = opts?.launchCommandSender;
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params) => {
@@ -373,8 +405,10 @@ export class AgentEngine {
     context?: {
       role?: AgentRole;
       parentAgent?: AgentRecord | null;
+      repo?: string;
     },
   ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
+    workspace = await this.resolveWorkspaceForRepo(workspace, context?.repo);
     if (workspace) {
       try {
         await this.client.selectWorkspace(workspace);
@@ -447,6 +481,38 @@ export class AgentEngine {
         type: "terminal",
       });
     }
+  }
+
+  private async resolveWorkspaceForRepo(
+    workspace: string | undefined,
+    repo: string | undefined,
+  ): Promise<string | undefined> {
+    if (workspace || !repo) return workspace;
+
+    try {
+      const { workspaces } = await this.client.listWorkspaces();
+      return workspaces.find(
+        (candidate) =>
+          typeof candidate.current_directory === "string" &&
+          repoNameMatchesWorkspaceDirectory(repo, candidate.current_directory),
+      )?.ref;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async sendLaunchCommand(
+    surface: string,
+    workspace: string | undefined,
+    command: string,
+  ): Promise<void> {
+    if (this.launchCommandSender) {
+      await this.launchCommandSender({ surface, workspace, command });
+      return;
+    }
+
+    await this.client.send(surface, command, { workspace });
+    await this.client.sendKey(surface, "return", { workspace });
   }
 
   private isBootCaptureWindowOpen(agent: AgentRecord): boolean {
@@ -689,6 +755,7 @@ export class AgentEngine {
           parentAgent: agent.parent_agent_id
             ? this.registry.get(agent.parent_agent_id)
             : null,
+          repo: agent.repo,
         });
         const creating = this.stateMgr.transition(agent.agent_id, "creating", {
           error: null,
@@ -721,12 +788,11 @@ export class AgentEngine {
           agent.repo,
           agent.cli_session_id!,
         );
-        await this.client.send(surface.surface, resumeCmd, {
-          workspace: surface.workspace,
-        });
-        await this.client.sendKey(surface.surface, "return", {
-          workspace: surface.workspace,
-        });
+        await this.sendLaunchCommand(
+          surface.surface,
+          surface.workspace,
+          resumeCmd,
+        );
         await this.client.log(
           `crash-recovery: respawned ${agent.agent_id} on ${surface.surface}`,
           { level: "warning", source: "cmux-mcp" },
@@ -780,6 +846,11 @@ export class AgentEngine {
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;
+      const statusSnapshot: SidebarStatusSnapshot = {
+        statusValue,
+        surfaceId: surface_id,
+        workspaceId: agent.workspace_id ?? null,
+      };
 
       // Lifecycle log: spawned (first encounter)
       if (!this.sidebarSnapshot.has(agentId)) {
@@ -813,14 +884,32 @@ export class AgentEngine {
 
       // Status diff — only push if changed
       const prev = this.sidebarSnapshot.get(agentId);
-      if (prev !== statusValue) {
+      const statusChanged =
+        !prev ||
+        prev.statusValue !== statusSnapshot.statusValue ||
+        prev.surfaceId !== statusSnapshot.surfaceId ||
+        prev.workspaceId !== statusSnapshot.workspaceId;
+      if (statusChanged) {
+        if (
+          prev?.workspaceId &&
+          prev.workspaceId !== statusSnapshot.workspaceId
+        ) {
+          try {
+            await this.client.clearStatus(agentId, {
+              workspace: prev.workspaceId,
+            });
+          } catch {
+            // Best-effort cleanup of stale workspace-scoped status.
+          }
+        }
         const sidebar = STATE_SIDEBAR[state];
         await this.client.setStatus(agentId, statusValue, {
           icon: sidebar.icon,
           color: sidebar.color,
           surface: surface_id,
+          workspace: agent.workspace_id ?? undefined,
         });
-        this.sidebarSnapshot.set(agentId, statusValue);
+        this.sidebarSnapshot.set(agentId, statusSnapshot);
       }
 
       // Quality tracking: check context usage for non-terminal agents
@@ -868,10 +957,12 @@ export class AgentEngine {
 
     // Clean up sidebar entries for agents that were purged from the registry
     const currentAgentIds = new Set(agents.map((a) => a.agent_id));
-    for (const [agentId] of this.sidebarSnapshot) {
+    for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
         try {
-          await this.client.clearStatus(agentId);
+          await this.client.clearStatus(agentId, {
+            workspace: snapshot.workspaceId ?? undefined,
+          });
         } catch {
           // Best-effort sidebar cleanup
         }
@@ -881,9 +972,13 @@ export class AgentEngine {
 
     // Progress bar
     if (total > 0) {
-      await this.client.setProgress(done / total, {
-        label: `agents ${done}/${total}`,
-      });
+      const progressSnapshot = `${done}/${total}`;
+      if (this.progressSnapshot !== progressSnapshot) {
+        await this.client.setProgress(done / total, {
+          label: `agents ${done}/${total}`,
+        });
+        this.progressSnapshot = progressSnapshot;
+      }
     }
   }
 
@@ -913,7 +1008,11 @@ export class AgentEngine {
       const purgedIds = this.registry.purgeAllTerminal();
       // Seed sidebar snapshot so syncSidebar clears their cmux entries
       for (const id of purgedIds) {
-        this.sidebarSnapshot.set(id, "__purged__");
+        this.sidebarSnapshot.set(id, {
+          statusValue: "__purged__",
+          surfaceId: null,
+          workspaceId: null,
+        });
       }
     }
 
@@ -983,6 +1082,7 @@ export class AgentEngine {
     const surface = await this.createAgentSurface(params.workspace, {
       role,
       parentAgent,
+      repo: params.repo,
     });
 
     // 2. Write initial state (creating → booting)
@@ -1019,12 +1119,20 @@ export class AgentEngine {
 
     // 3. Send launch command
     const launchCmd = buildLaunchCommand(params.cli, params.repo);
-    await this.client.send(surface.surface, launchCmd, {
-      workspace: surface.workspace,
-    });
-    await this.client.sendKey(surface.surface, "return", {
-      workspace: surface.workspace,
-    });
+    try {
+      await this.sendLaunchCommand(surface.surface, surface.workspace, launchCmd);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        const failed = this.stateMgr.transition(agentId, "error", {
+          error: `Launch failed: ${message}`,
+        });
+        this.registry.set(agentId, failed);
+      } catch {
+        // Preserve the original launch error for the caller.
+      }
+      throw error;
+    }
 
     return {
       agent_id: agentId,

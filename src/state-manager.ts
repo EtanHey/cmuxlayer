@@ -198,7 +198,7 @@ export class StateManager {
     const record: AgentRecord = {
       agent_id: agentId,
       surface_id: discovered.surface_id,
-      workspace_id: null,
+      workspace_id: discovered.workspace_id ?? null,
       state: discoveredStatusToAgentState(discovered.parsed_status),
       repo: inferRepoFromTitle(discovered.surface_title),
       model: discovered.model ?? "unknown",

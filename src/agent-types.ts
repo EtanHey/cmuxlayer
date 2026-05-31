@@ -122,6 +122,7 @@ export interface StateTransition {
 }
 
 export type DeliveryEventType =
+  | "spawn_agent"
   | "send_command"
   | "send_to"
   | "send_to_agent"

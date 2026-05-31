@@ -25,7 +25,8 @@ export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
     consecutive: 1,
   },
   codex: {
-    pattern: /codex>/,
+    pattern:
+      /codex>|^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[\s\S]*~\/Gits\//,
     confidence: "high",
     consecutive: 1,
   },
