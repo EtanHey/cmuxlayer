@@ -4,6 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type {
   CmuxPane,
@@ -192,7 +193,7 @@ export class CmuxClient {
   private pasteBufferName(surface: string, workspace?: string): string {
     const raw = `cmuxlayer-${workspace ?? "global"}-${surface}`;
     const safe = raw.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 120);
-    return safe || "cmuxlayer-buffer";
+    return `${safe || "cmuxlayer-buffer"}-${randomUUID()}`;
   }
 
   private async resolveWorkspaceFromSurface(surface: string): Promise<string> {

@@ -1450,7 +1450,7 @@ describe("tool handler integration", () => {
     expect(submittedMessages).toEqual([longText]);
   });
 
-  it("send_input falls back to send when paste delivery is unsupported", async () => {
+  it("send_input fails instead of falling back to send when paste delivery is unsupported", async () => {
     const unsupportedPaste = Object.assign(new Error("method unavailable"), {
       code: "method_not_found",
     });
@@ -1472,9 +1472,35 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("paste delivery is required");
     expect(mockClient.pasteText).toHaveBeenCalled();
-    expect(mockClient.send).toHaveBeenCalled();
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("send_input fails instead of falling back to send when pasteText is absent", async () => {
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const longText = "fallback ".repeat(90);
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: longText, chunk_size: 120 },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("client does not support pasteText");
+    expect(mockClient.send).not.toHaveBeenCalled();
   });
 
   it("send_input can deliver long text in the background and expose status via read_screen", async () => {

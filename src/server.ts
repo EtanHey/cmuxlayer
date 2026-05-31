@@ -326,6 +326,12 @@ function isMethodNotFoundError(error: unknown): boolean {
   );
 }
 
+function pasteRequiredError(reason: string): Error {
+  return new Error(
+    `paste delivery is required for chunked or multiline input: ${reason}`,
+  );
+}
+
 function getBootPromptPath(value: string | null | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -730,17 +736,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
-        const shouldPaste =
-          shouldPasteInputChunk(chunk, totalChunks) &&
-          typeof client.pasteText === "function";
+        const shouldPaste = shouldPasteInputChunk(chunk, totalChunks);
         if (shouldPaste) {
+          if (typeof client.pasteText !== "function") {
+            throw pasteRequiredError("client does not support pasteText");
+          }
           try {
             await client.pasteText(surface, chunk, opts);
           } catch (error) {
-            if (!isMethodNotFoundError(error)) {
-              throw error;
+            if (isMethodNotFoundError(error)) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              throw pasteRequiredError(`pasteText is unavailable (${message})`);
             }
-            await client.send(surface, chunk, opts);
+            throw error;
           }
         } else {
           await client.send(surface, chunk, opts);

@@ -116,6 +116,10 @@ class FakeClaudeSurfaceClient {
     this.pendingText += text;
   }
 
+  async pasteText(surface: string, text: string) {
+    await this.send(surface, text);
+  }
+
   async sendKey(surface: string, key: string) {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);

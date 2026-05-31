@@ -354,20 +354,38 @@ describe("CmuxClient.pasteText", () => {
       "--json",
       "set-buffer",
       "--name",
-      "cmuxlayer-workspace-2-surface-1",
+      expect.stringMatching(/^cmuxlayer-workspace-2-surface-1-[a-f0-9-]+$/),
       "--",
       "line one\nline two",
     ]);
+    const bufferName = exec.mock.calls[0][1][3];
     expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
       "--json",
       "paste-buffer",
       "--name",
-      "cmuxlayer-workspace-2-surface-1",
+      bufferName,
       "--surface",
       "surface:1",
       "--workspace",
       "workspace:2",
     ]);
+  });
+
+  it("uses a unique buffer name for each paste call", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.pasteText("surface:1", "first", {
+      workspace: "workspace:2",
+    });
+    await client.pasteText("surface:1", "second", {
+      workspace: "workspace:2",
+    });
+
+    const setBufferNames = exec.mock.calls
+      .filter(([, args]) => args.includes("set-buffer"))
+      .map(([, args]) => args[3]);
+    expect(setBufferNames).toHaveLength(2);
+    expect(setBufferNames[0]).not.toBe(setBufferNames[1]);
   });
 });
 
