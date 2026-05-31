@@ -59,6 +59,7 @@ describe("agent route table", () => {
     expect(table.get("agent-1")).toEqual({
       agent_id: "agent-1",
       surface_id: "surface:1",
+      workspace_id: "ws:1",
       state: "ready",
       session_id: "session-1",
     });

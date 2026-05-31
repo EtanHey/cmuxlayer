@@ -23,7 +23,7 @@ export interface DiscoveryDeps {
   listSurfaces: () => Promise<CmuxSurface[]>;
   readScreen: (
     surface: string,
-    opts: { lines: number },
+    opts: { lines: number; workspace?: string },
   ) => Promise<CmuxReadScreenResult>;
 }
 
@@ -90,7 +90,10 @@ export class AgentDiscovery {
         const workspaceId =
           typeof surface.workspace_ref === "string" ? surface.workspace_ref : null;
         try {
-          const screen = await this.deps.readScreen(surface.ref, { lines: 30 });
+          const screen = await this.deps.readScreen(surface.ref, {
+            lines: 30,
+            workspace: workspaceId ?? undefined,
+          });
           const parsed = parseScreen(screen.text);
           const cli =
             parsed.agent_type === "unknown"

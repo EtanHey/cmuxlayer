@@ -124,6 +124,19 @@ gpt-5.5 xhigh · ~/Gits/brainlayer
     expect(result.matched).toBe(true);
   });
 
+  it("matches modern Codex idle prompt outside ~/Gits", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Explain this codebase
+
+gpt-5.5 xhigh · /workspaces/cmuxlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
   it("does not match modern Codex while it is working on a queued prompt", () => {
     const result = matchReadyPattern(
       "codex",

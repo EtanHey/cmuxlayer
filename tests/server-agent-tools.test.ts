@@ -892,6 +892,9 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(deliveredText).toBe("interject while working");
+    expect(sendCalls[0]?.[1]).toEqual(
+      expect.arrayContaining(["--workspace", "ws:1"]),
+    );
   });
 
   it("send_to without allow_busy still rejects working agents (backwards compat)", async () => {

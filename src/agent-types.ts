@@ -71,6 +71,7 @@ export interface PublicAgent {
 export interface AgentRoute {
   agent_id: string;
   surface_id: string;
+  workspace_id?: string | null;
   state: AgentState;
   session_id: string | null;
 }

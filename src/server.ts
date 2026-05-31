@@ -54,7 +54,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
-import { repoNameMatchesWorkspaceDirectory } from "./repo-workspace.js";
+import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -110,6 +110,7 @@ const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
+const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 const READY_PATTERN_CLIS: CliType[] = ["claude", "codex", "gemini", "kiro", "cursor"];
 const SendToArgsSchema = z.object({
@@ -614,17 +615,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const resolveWorkspaceForRepo = async (
     repo: string | null | undefined,
   ): Promise<string | undefined> => {
-    if (!repo) return undefined;
-    try {
-      const { workspaces } = await client.listWorkspaces();
-      return workspaces.find(
-        (workspace) =>
-          typeof workspace.current_directory === "string" &&
-          repoNameMatchesWorkspaceDirectory(repo, workspace.current_directory),
-      )?.ref;
-    } catch {
-      return undefined;
-    }
+    return resolveWorkspaceRefForRepo(repo, () => client.listWorkspaces());
   };
 
   const getSurfaceDelivery = (surface: string) => {
@@ -1065,6 +1056,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     throw new BootPromptTimeoutError(
       `Timed out after ${timeoutMs}ms waiting for shell readiness on ${opts.surface}`,
+      tailLines(lastText, 10),
+    );
+  };
+
+  const waitForAgentLaunchReady = async (opts: {
+    surface: string;
+    workspace?: string;
+    timeout_ms?: number;
+  }): Promise<void> => {
+    const timeoutMs = opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS;
+    const start = Date.now();
+    let lastText = "";
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const screen = await client.readScreen(opts.surface, {
+          workspace: opts.workspace,
+          lines: 80,
+          scrollback: false,
+        });
+        lastText = screen.text;
+        if (
+          READY_PATTERN_CLIS.some((cli) =>
+            matchReadyPattern(cli, screen.text).matched,
+          )
+        ) {
+          return;
+        }
+      } catch (error) {
+        lastText = error instanceof Error ? error.message : String(error);
+      }
+
+      const remaining = timeoutMs - (Date.now() - start);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
+    }
+
+    throw new BootPromptTimeoutError(
+      `Timed out after ${timeoutMs}ms waiting for agent launch readiness on ${opts.surface}`,
       tailLines(lastText, 10),
     );
   };
@@ -2479,7 +2511,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               // The command can remain visible in shell history while the
               // launcher is already booting. Verification still retried Enter;
-              // readiness detection below is the authoritative launch check.
+              // agent readiness detection is the authoritative launch check.
+              await waitForAgentLaunchReady({ surface, workspace });
             }
           });
         },
@@ -2589,6 +2622,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return withSurfaceWrite(route.surface_id, async () =>
         deliverInputChunks({
           surface: route.surface_id,
+          workspace: route.workspace_id ?? undefined,
           chunks,
           chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
           chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,

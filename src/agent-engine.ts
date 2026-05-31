@@ -45,7 +45,7 @@ import {
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import { matchReadyPattern } from "./pattern-registry.js";
-import { repoNameMatchesWorkspaceDirectory } from "./repo-workspace.js";
+import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -475,16 +475,7 @@ export class AgentEngine {
   ): Promise<string | undefined> {
     if (workspace || !repo) return workspace;
 
-    try {
-      const { workspaces } = await this.client.listWorkspaces();
-      return workspaces.find(
-        (candidate) =>
-          typeof candidate.current_directory === "string" &&
-          repoNameMatchesWorkspaceDirectory(repo, candidate.current_directory),
-      )?.ref;
-    } catch {
-      return undefined;
-    }
+    return resolveWorkspaceRefForRepo(repo, () => this.client.listWorkspaces());
   }
 
   private async sendLaunchCommand(
@@ -1336,7 +1327,9 @@ export class AgentEngine {
       }
     } else {
       // Graceful: send Ctrl+C
-      await this.client.sendKey(agent.surface_id, "c-c", {});
+      await this.client.sendKey(agent.surface_id, "c-c", {
+        workspace: agent.workspace_id ?? undefined,
+      });
     }
 
     const current = this.registry.get(agentId) ?? agent;
@@ -1386,9 +1379,12 @@ export class AgentEngine {
     }
 
     const route = this.resolveAgentRoute(agentId);
-    await this.client.send(route.surface_id, sanitizeTerminalInput(text), {});
+    const workspace = route.workspace_id ?? undefined;
+    await this.client.send(route.surface_id, sanitizeTerminalInput(text), {
+      workspace,
+    });
     if (pressEnter) {
-      await this.client.sendKey(route.surface_id, "return", {});
+      await this.client.sendKey(route.surface_id, "return", { workspace });
     }
   }
 }
