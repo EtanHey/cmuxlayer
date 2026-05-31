@@ -107,6 +107,7 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        workspace_id: "workspace:coach",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
@@ -120,6 +121,42 @@ describe("Sidebar Sync", () => {
       expect.objectContaining({
         icon: "bolt.fill",
         color: "#3B82F6",
+        workspace: "workspace:coach",
+        surface: "surface:42",
+      }),
+    );
+  });
+
+  it("refreshes sidebar status when an unchanged agent moves workspace", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:brainlayer",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const moved = stateMgr.updateRecord("a1", {
+      surface_id: "surface:99",
+      workspace_id: "workspace:coach",
+    });
+    engine.getRegistry().set("a1", moved);
+    liveSurfaces = [makeSurface("surface:99")];
+
+    await engine.runSweep();
+
+    expect(mockClient.setStatus).toHaveBeenCalledTimes(2);
+    expect(mockClient.setStatus).toHaveBeenLastCalledWith(
+      "a1",
+      "brainlayer: working",
+      expect.objectContaining({
+        workspace: "workspace:coach",
+        surface: "surface:99",
       }),
     );
   });

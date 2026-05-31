@@ -269,6 +269,7 @@ export class AgentRegistry {
     const agentId = record.agent_id;
     const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
     const model = discoveredEntry.model ?? record.model;
+    const workspaceId = discoveredEntry.workspace_id ?? null;
     const desiredState = discoveredStatusToAgentState(
       discoveredEntry.parsed_status,
     );
@@ -276,6 +277,9 @@ export class AgentRegistry {
     const patch: Partial<AgentRecord> = {};
     if (repo !== record.repo) patch.repo = repo;
     if (model !== record.model) patch.model = model;
+    if ((record.workspace_id ?? null) !== workspaceId) {
+      patch.workspace_id = workspaceId;
+    }
     if (record.error !== null && desiredState !== "error") patch.error = null;
     if (record.error === null && desiredState === "error") {
       patch.error = "Auto-discovered agent reported a frozen state";

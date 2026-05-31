@@ -54,6 +54,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -107,6 +108,9 @@ const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
+const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
+const LAUNCH_SHELL_READY_POLL_MS = 100;
+const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 const READY_PATTERN_CLIS: CliType[] = ["claude", "codex", "gemini", "kiro", "cursor"];
 const SendToArgsSchema = z.object({
@@ -363,6 +367,17 @@ function inferLauncherCli(command: string): CliType | null {
   return match[1].toLowerCase() as CliType;
 }
 
+function inferRepoFromLauncherTitle(title?: string): string | null {
+  if (!title) return null;
+  const match = title.trim().match(/^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
+  const repo = match?.[1]?.trim();
+  return repo && repo !== "." && repo !== ".." ? repo : null;
+}
+
+function matchesShellPrompt(text: string): boolean {
+  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
+}
+
 function readyPatternCandidates(cli?: CliType): CliType[] {
   return cli ? [cli] : READY_PATTERN_CLIS;
 }
@@ -597,6 +612,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return ids;
   };
 
+  const resolveWorkspaceForRepo = async (
+    repo: string | null | undefined,
+  ): Promise<string | undefined> => {
+    return resolveWorkspaceRefForRepo(repo, () => client.listWorkspaces());
+  };
+
   const getSurfaceDelivery = (surface: string) => {
     const deliveryId = latestDeliveryBySurface.get(surface);
     if (!deliveryId) {
@@ -819,7 +840,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: null, retry_count: retryCount };
       }
 
-      if (snapshot.parsed.agent_type === "unknown" || !snapshot.text.trim()) {
+      if (!snapshot.text.trim()) {
         return { submit_verified: null, retry_count: retryCount };
       }
 
@@ -995,6 +1016,87 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     throw new BootPromptTimeoutError(
       `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${opts.surface}`,
+      tailLines(lastText, 10),
+    );
+  };
+
+  const waitForLaunchShellReady = async (opts: {
+    surface: string;
+    workspace?: string;
+    timeout_ms?: number;
+  }): Promise<void> => {
+    const timeoutMs = opts.timeout_ms ?? LAUNCH_SHELL_READY_TIMEOUT_MS;
+    const start = Date.now();
+    let lastText = "";
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const screen = await client.readScreen(opts.surface, {
+          workspace: opts.workspace,
+          lines: 30,
+          scrollback: false,
+        });
+        lastText = screen.text;
+        if (
+          matchesShellPrompt(screen.text) ||
+          READY_PATTERN_CLIS.some((cli) => matchReadyPattern(cli, screen.text).matched)
+        ) {
+          return;
+        }
+      } catch (error) {
+        lastText = error instanceof Error ? error.message : String(error);
+      }
+
+      const remaining = timeoutMs - (Date.now() - start);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
+    }
+
+    throw new BootPromptTimeoutError(
+      `Timed out after ${timeoutMs}ms waiting for shell readiness on ${opts.surface}`,
+      tailLines(lastText, 10),
+    );
+  };
+
+  const waitForAgentLaunchReady = async (opts: {
+    surface: string;
+    workspace?: string;
+    timeout_ms?: number;
+  }): Promise<void> => {
+    const timeoutMs = opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS;
+    const start = Date.now();
+    let lastText = "";
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const screen = await client.readScreen(opts.surface, {
+          workspace: opts.workspace,
+          lines: 80,
+          scrollback: false,
+        });
+        lastText = screen.text;
+        if (
+          READY_PATTERN_CLIS.some((cli) =>
+            matchReadyPattern(cli, screen.text).matched,
+          )
+        ) {
+          return;
+        }
+      } catch (error) {
+        lastText = error instanceof Error ? error.message : String(error);
+      }
+
+      const remaining = timeoutMs - (Date.now() - start);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
+    }
+
+    throw new BootPromptTimeoutError(
+      `Timed out after ${timeoutMs}ms waiting for agent launch readiness on ${opts.surface}`,
       tailLines(lastText, 10),
     );
   };
@@ -1361,6 +1463,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       let result: CmuxNewSplitResult | undefined;
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
+        const targetWorkspace =
+          args.workspace ??
+          (await resolveWorkspaceForRepo(inferRepoFromLauncherTitle(args.title)));
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
             throw new Error("boot_prompt_path is only supported for terminal surfaces");
@@ -1387,11 +1492,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
             );
           }
-          const panes = await client.listPanes({ workspace: args.workspace });
+          const panes = await client.listPanes({ workspace: targetWorkspace });
           const paneSurfaces = await Promise.all(
             panes.panes.map(async (pane) => {
               const ps = await client.listPaneSurfaces({
-                workspace: args.workspace,
+                workspace: targetWorkspace,
                 pane: pane.ref,
               });
               // cmux socket omits pane_ref; inject it so describePaneLayouts
@@ -1407,7 +1512,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const placement = chooseAgentSpawnPlacement(
             panes.panes,
             paneSurfaces,
-            collectServerRoleSurfaceIds(liveSurfaceIds, args.workspace),
+            collectServerRoleSurfaceIds(liveSurfaceIds, targetWorkspace),
             { role: inferredRole },
           );
           actualPlacement = placement.kind;
@@ -1422,11 +1527,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             placement.kind === "surface"
               ? await client.newSurface({
                   pane: placement.pane,
-                  workspace: args.workspace,
+                  workspace: targetWorkspace,
                   type: "terminal",
                 })
               : await client.newSplit(placement.direction, {
-                  workspace: args.workspace,
+                  workspace: targetWorkspace,
                   ...(placement.pane ? { pane: placement.pane } : {}),
                   surface: args.surface,
                   type: args.type,
@@ -1436,7 +1541,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
         } else {
           result = await client.newSplit(args.direction, {
-            workspace: args.workspace,
+            workspace: targetWorkspace,
             surface: args.surface,
             pane: args.pane,
             type: args.type,
@@ -1447,14 +1552,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
-            workspace: result.workspace || args.workspace,
+            workspace: result.workspace || targetWorkspace,
           });
           result.title = args.title;
         }
         if (inferredRole && (args.type ?? "terminal") === "terminal") {
           roleSurfaceOverrides.set(result.surface, {
             role: inferredRole,
-            workspace: result.workspace ?? args.workspace ?? null,
+            workspace: result.workspace ?? targetWorkspace ?? null,
           });
         }
         let bootPromptDelivery:
@@ -1463,7 +1568,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (bootPromptPath) {
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
-            workspace: result.workspace || args.workspace,
+            workspace: result.workspace || targetWorkspace,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
           });
@@ -2309,7 +2414,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ),
           ),
         );
-        return surfaceGroups.flatMap((g) => g.surfaces);
+        return surfaceGroups.flatMap((group) =>
+          group.surfaces.map((surface) => ({
+            ...surface,
+            workspace_ref: group.workspace_ref,
+            pane_ref: group.pane_ref,
+          })),
+        );
       } catch {
         return [];
       }
@@ -2342,6 +2453,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       registry,
       {
         log: (message, eventOpts) => client.log(message, eventOpts),
+        listWorkspaces: () => client.listWorkspaces(),
         setStatus: (key, value, statusOpts) =>
           client.setStatus(key, value, statusOpts),
         clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
@@ -2371,6 +2483,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts?.spawnPreflight ??
           (opts?.disableSpawnPreflight ? async () => {} : undefined),
         roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
+        launchCommandSender: async ({ surface, workspace, command }) => {
+          const sanitizedCommand = sanitizeTerminalInput(command);
+          const chunks =
+            sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
+              ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
+              : [sanitizedCommand];
+
+          await waitForLaunchShellReady({ surface, workspace });
+          await withSurfaceWrite(surface, async () => {
+            try {
+              await deliverInputChunks({
+                surface,
+                workspace,
+                chunks,
+                chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+                chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+                press_enter: true,
+                source_event: "spawn_agent",
+                verify_submit: true,
+              });
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              if (!/Enter submit could not be verified/.test(message)) {
+                throw error;
+              }
+              // The command can remain visible in shell history while the
+              // launcher is already booting. Verification still retried Enter;
+              // agent readiness detection is the authoritative launch check.
+              await waitForAgentLaunchReady({ surface, workspace });
+            }
+          });
+        },
       },
     );
 
@@ -2477,6 +2622,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return withSurfaceWrite(route.surface_id, async () =>
         deliverInputChunks({
           surface: route.surface_id,
+          workspace: route.workspace_id ?? undefined,
           chunks,
           chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
           chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
@@ -2599,9 +2745,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
+              const deliveryWorkspace = result.workspace_id ?? args.workspace;
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
-                workspace: args.workspace,
+                workspace: deliveryWorkspace,
                 cli: args.cli,
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,

@@ -271,6 +271,61 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("inherits the workspace whose current directory matches the target repo", async () => {
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:brainlayer",
+            title: "BrainLayer",
+            current_directory: "/Users/etanheyman/Gits/brainlayer",
+          },
+          {
+            ref: "workspace:voice",
+            title: "VoiceLayer",
+            current_directory: "/Users/etanheyman/Gits/voicelayer",
+          },
+        ],
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:voice",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:voice"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:voice",
+        window_ref: "window:1",
+        pane_ref: "pane:voice",
+        surfaces: [makeSurface("surface:voice")],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      });
+
+      const result = await engine.spawnAgent({
+        repo: "voicelayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix prompt delivery",
+      });
+
+      expect(result.workspace_id).toBe("workspace:voice");
+      expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:voice");
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "workspace:voice",
+        type: "terminal",
+      });
+    });
+
     it("creates the first worker as a right split even when user panes already exist", async () => {
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [

@@ -228,6 +228,25 @@ describe("StateManager", () => {
       expect(record.auto_archive_on_done).toBe(false);
     });
 
+    it("preserves the discovered workspace for auto-discovered agents", () => {
+      const mgr = new StateManager(TEST_DIR);
+
+      const record = mgr.ensureAutoRecord("auto-coach", {
+        surface_id: "surface:auto-coach",
+        surface_title: "coachClaude",
+        workspace_id: "workspace:coach",
+        cli: "claude",
+        parsed_status: "idle",
+        model: "sonnet",
+        token_count: null,
+        context_pct: null,
+        has_agent: true,
+        read_error: false,
+      } as any);
+
+      expect(record.workspace_id).toBe("workspace:coach");
+    });
+
     it("assigns orchestrator role when the discovered cli is unknown", () => {
       const mgr = new StateManager(TEST_DIR);
 

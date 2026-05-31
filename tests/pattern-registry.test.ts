@@ -59,6 +59,98 @@ describe("matchReadyPattern", () => {
     expect(result.matched).toBe(true);
   });
 
+  it("matches modern Codex empty prompt with model footer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+›
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches modern Codex placeholder prompt with model footer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Implement {feature}
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches modern Codex skills hint prompt with model footer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Use /skills to list available
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches modern Codex explain-codebase prompt with model footer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Explain this codebase
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches modern Codex arbitrary idle suggestion prompt with model footer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Find and fix a bug in @filename
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches modern Codex idle prompt outside ~/Gits", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+
+› Explain this codebase
+
+gpt-5.5 xhigh · /workspaces/cmuxlayer
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("does not match modern Codex while it is working on a queued prompt", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+• Working (10m 57s • esc to interrupt)
+
+› Find and fix a bug in @filename
+
+gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(false);
+  });
+
   it("does not match unrelated output", () => {
     const result = matchReadyPattern("claude", "Installing dependencies...");
     expect(result.matched).toBe(false);

@@ -15,6 +15,7 @@ export interface CmuxWorkspace {
   index: number;
   selected: boolean;
   pinned: boolean;
+  current_directory?: string | null;
 }
 
 export interface CmuxSurface {
@@ -23,6 +24,8 @@ export interface CmuxSurface {
   type: "terminal" | "browser";
   index: number;
   selected: boolean;
+  workspace_ref?: string;
+  pane_ref?: string;
 }
 
 export interface CmuxPane {

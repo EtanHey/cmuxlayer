@@ -189,6 +189,71 @@ describe("layout policy", () => {
     });
   });
 
+  it("splits the first child worker to the right of its parent orchestrator pane", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:notes", 1, ["surface:notes"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:notes", ["surface:notes"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        childWorkerSurfaceIds: new Set(),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:lead",
+    });
+  });
+
+  it("reuses an existing worker pane beside the parent orchestrator for sibling workers", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:children", 1, ["surface:child-1", "surface:child-2"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:children", ["surface:child-1", "surface:child-2"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:child-1", "surface:child-2"]),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        childWorkerSurfaceIds: new Set(["surface:child-1", "surface:child-2"]),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "surface",
+      pane: "pane:children",
+    });
+  });
+
   it("creates a fresh right split when the only existing worker shares a pane with interactive surfaces", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),

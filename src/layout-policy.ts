@@ -307,6 +307,25 @@ export function chooseAgentSpawnPlacement(
     }
   }
 
+  if (context.parentRole === "orchestrator") {
+    const childPane = paneContainingAnySurface(
+      layouts,
+      context.childWorkerSurfaceIds ?? new Set(),
+    );
+    if (childPane && isWorkerDockPane(childPane)) {
+      return { kind: "surface", pane: childPane.pane.ref };
+    }
+
+    const parentPane = paneContainingSurface(layouts, context.parentSurfaceId);
+    if (parentPane) {
+      return {
+        kind: "split",
+        direction: "right",
+        pane: parentPane.pane.ref,
+      };
+    }
+  }
+
   // Dock into the rightmost pane workers already own — including one that
   // carries a stray non-role tab — so a populated workers pane never gets a
   // redundant third pane split off beside it.

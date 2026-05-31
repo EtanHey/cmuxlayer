@@ -8,6 +8,7 @@ import { AgentRegistry } from "./agent-registry.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
+import { matchReadyPattern } from "./pattern-registry.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -18,6 +19,8 @@ const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const THREAD_READY_TIMEOUT_MS = 30_000;
 const THREAD_READY_POLL_MS = 250;
+const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
+const LAUNCH_SHELL_READY_POLL_MS = 100;
 
 type CmuxLikeClient = CmuxClient | CmuxSocketClient;
 
@@ -45,6 +48,10 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function matchesShellPrompt(text: string): boolean {
+  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
 }
 
 function deriveRepoFromCwd(cwd: string): string {
@@ -109,7 +116,13 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
             ),
           ),
         );
-        return surfaceGroups.flatMap((group) => group.surfaces);
+        return surfaceGroups.flatMap((group) =>
+          group.surfaces.map((surface) => ({
+            ...surface,
+            workspace_ref: group.workspace_ref,
+            pane_ref: group.pane_ref,
+          })),
+        );
       } catch {
         return [];
       }
@@ -118,6 +131,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
     this.engine = new AgentEngine(this.stateMgr, this.registry, {
       log: async () => {},
+      listWorkspaces: () => this.client.listWorkspaces(),
       setStatus: async () => {},
       clearStatus: async () => {},
       readScreen: (surface, readOpts) => this.client.readScreen(surface, readOpts),
@@ -136,6 +150,11 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           this.client.closeSurface(surface, closeOpts),
         ),
       notifyLifecycleEvent: async () => {},
+    }, {
+      launchCommandSender: async ({ surface, workspace, command }) => {
+        await this.waitForShellReady(surface, workspace);
+        await this.sendCommand(surface, command, workspace);
+      },
     });
   }
 
@@ -189,31 +208,46 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     text: string;
   }): Promise<void> {
     const route = this.engine.resolveAgentRoute(input.threadId);
-    const sanitizedText = sanitizeTerminalInput(input.text);
+    await this.sendCommand(
+      route.surface_id,
+      input.text,
+      route.workspace_id ?? undefined,
+    );
+  }
+
+  private async sendCommand(
+    surface: string,
+    text: string,
+    workspace?: string,
+  ): Promise<void> {
+    const sanitizedText = sanitizeTerminalInput(text);
     const chunks = chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD);
 
-    await this.withSurfaceWrite(route.surface_id, async () => {
+    await this.withSurfaceWrite(surface, async () => {
       for (const [index, chunk] of chunks.entries()) {
-        await this.client.send(route.surface_id, chunk, {});
+        await this.client.send(surface, chunk, { workspace });
         if (index < chunks.length - 1) {
           await delay(SEND_INPUT_CHUNK_DELAY_MS);
         }
       }
       await delay(50);
-      await this.client.sendKey(route.surface_id, "return", {});
+      await this.client.sendKey(surface, "return", { workspace });
     });
   }
 
   async interruptTurn(threadId: string): Promise<void> {
     const route = this.engine.resolveAgentRoute(threadId);
     await this.withSurfaceWrite(route.surface_id, () =>
-      this.client.sendKey(route.surface_id, "c-c", {}),
+      this.client.sendKey(route.surface_id, "c-c", {
+        workspace: route.workspace_id ?? undefined,
+      }),
     );
   }
 
   async readScreen(threadId: string): Promise<BridgeScreenSnapshot> {
     const route = this.engine.resolveAgentRoute(threadId);
     const screen = await this.client.readScreen(route.surface_id, {
+      workspace: route.workspace_id ?? undefined,
       lines: 40,
       scrollback: true,
     });
@@ -242,6 +276,41 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     }
 
     throw new Error(`Timed out waiting for Codex prompt on thread ${threadId}`);
+  }
+
+  private async waitForShellReady(
+    surface: string,
+    workspace?: string,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    let lastText = "";
+
+    while (Date.now() - startedAt < LAUNCH_SHELL_READY_TIMEOUT_MS) {
+      try {
+        const screen = await this.client.readScreen(surface, {
+          workspace,
+          lines: 30,
+          scrollback: false,
+        });
+        const text = typeof screen === "string" ? screen : (screen.text ?? "");
+        lastText = text;
+        if (matchesShellPrompt(text) || matchReadyPattern("codex", text).matched) {
+          return;
+        }
+      } catch (error) {
+        lastText = error instanceof Error ? error.message : String(error);
+      }
+
+      const remaining = LAUNCH_SHELL_READY_TIMEOUT_MS - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
+    }
+
+    throw new Error(
+      `Timed out waiting for shell readiness on ${surface}: ${lastText}`,
+    );
   }
 
   private async withSurfaceWrite<T>(
