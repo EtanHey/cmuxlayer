@@ -516,6 +516,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       closeSurface: async (surface: string, opts?: unknown) => {
         cliCalls.push({ method: "closeSurface", args: [surface, opts] });
       },
+      pasteText: async (surface: string, text: string, opts?: unknown) => {
+        cliCalls.push({ method: "pasteText", args: [surface, text, opts] });
+      },
     } as unknown as CmuxClient;
   }
 
@@ -587,6 +590,27 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       workspace: "workspace:1",
     });
     expect(result.surface).toBe("surface:cli-tab");
+  });
+
+  it("pasteText uses CLI fallback", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+
+    await client.pasteText("surface:1", "line one\nline two", {
+      workspace: "workspace:1",
+    });
+
+    expect(cliCalls).toHaveLength(1);
+    expect(cliCalls[0]).toEqual({
+      method: "pasteText",
+      args: [
+        "surface:1",
+        "line one\nline two",
+        { workspace: "workspace:1" },
+      ],
+    });
   });
 
   it("moveSurface uses CLI fallback", async () => {

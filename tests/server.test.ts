@@ -1353,14 +1353,24 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(5);
-    for (const [index, call] of mockExec.mock.calls.entries()) {
+    const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("set-buffer"),
+    );
+    const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("paste-buffer"),
+    );
+    expect(setBufferCalls).toHaveLength(5);
+    expect(pasteBufferCalls).toHaveLength(5);
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+    ).toHaveLength(0);
+    for (const [index, call] of setBufferCalls.entries()) {
       expect(call[0]).toBe("cmux");
-      expect(call[1]).toEqual(expect.arrayContaining(["send"]));
+      expect(call[1]).toEqual(expect.arrayContaining(["set-buffer"]));
       const chunk = call[1][call[1].length - 1];
       expect(typeof chunk).toBe("string");
       expect((chunk as string).length).toBeLessThanOrEqual(121);
-      if (index < mockExec.mock.calls.length - 1) {
+      if (index < setBufferCalls.length - 1) {
         expect((chunk as string).endsWith("\n")).toBe(true);
       }
     }
@@ -1368,6 +1378,129 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+  });
+
+  it("send_input submits chunked multiline text as one receiver message", async () => {
+    const buffers = new Map<string, string>();
+    let composer = "";
+    const submittedMessages: string[] = [];
+    const submitComposer = () => {
+      submittedMessages.push(composer);
+      composer = "";
+    };
+    const typeCmuxSendText = (text: string) => {
+      for (const char of text) {
+        if (char === "\n" || char === "\r") {
+          submitComposer();
+        } else {
+          composer += char;
+        }
+      }
+    };
+    mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+      if (args.includes("set-buffer")) {
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        buffers.set(name, args[args.length - 1]);
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("paste-buffer")) {
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        composer += buffers.get(name) ?? "";
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("send-key")) {
+        const key = args[args.length - 1];
+        if (key === "return" || key === "enter") {
+          submitComposer();
+        }
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("send")) {
+        typeCmuxSendText(args[args.length - 1]);
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const longText = [
+      "section-one ".repeat(12),
+      "section-two ".repeat(12),
+      "section-three ".repeat(12),
+      "section-four ".repeat(12),
+      "section-five ".repeat(12),
+    ].join("\n");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 120,
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(submittedMessages).toEqual([longText]);
+  });
+
+  it("send_input fails instead of falling back to send when paste delivery is unsupported", async () => {
+    const unsupportedPaste = Object.assign(new Error("method unavailable"), {
+      code: "method_not_found",
+    });
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockRejectedValue(unsupportedPaste),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const longText = "fallback ".repeat(90);
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: longText, chunk_size: 120 },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("paste delivery is required");
+    expect(mockClient.pasteText).toHaveBeenCalled();
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("send_input fails instead of falling back to send when pasteText is absent", async () => {
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const longText = "fallback ".repeat(90);
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: longText, chunk_size: 120 },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("client does not support pasteText");
+    expect(mockClient.send).not.toHaveBeenCalled();
   });
 
   it("send_input can deliver long text in the background and expose status via read_screen", async () => {
@@ -1420,7 +1553,7 @@ describe("tool handler integration", () => {
     expect(parsed.status).toBe("delivering");
     expect(parsed.delivery_id).toEqual(expect.any(String));
     expect(
-      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+      mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer")),
     ).toHaveLength(0);
 
     const readWhileDelivering = await readTool.handler(
@@ -1440,7 +1573,7 @@ describe("tool handler integration", () => {
     for (let i = 0; i < 50; i++) {
       await advanceTimers(5);
       if (
-        mockExec.mock.calls.filter(([, args]) => args.includes("send"))
+        mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer"))
           .length === 5
       ) {
         break;
@@ -1448,7 +1581,7 @@ describe("tool handler integration", () => {
     }
 
     expect(
-      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+      mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer")),
     ).toHaveLength(5);
 
     await Promise.resolve();

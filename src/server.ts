@@ -313,6 +313,25 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
   return chunks;
 }
 
+function shouldPasteInputChunk(text: string, totalChunks: number): boolean {
+  return totalChunks > 1 || /[\n\r\t]|\\[nrt]/.test(text);
+}
+
+function isMethodNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    String((error as { code?: unknown }).code) === "method_not_found"
+  );
+}
+
+function pasteRequiredError(reason: string): Error {
+  return new Error(
+    `paste delivery is required for chunked or multiline input: ${reason}`,
+  );
+}
+
 function getBootPromptPath(value: string | null | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -717,7 +736,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
-        await client.send(surface, chunk, opts);
+        const shouldPaste = shouldPasteInputChunk(chunk, totalChunks);
+        if (shouldPaste) {
+          if (typeof client.pasteText !== "function") {
+            throw pasteRequiredError("client does not support pasteText");
+          }
+          try {
+            await client.pasteText(surface, chunk, opts);
+          } catch (error) {
+            if (isMethodNotFoundError(error)) {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              throw pasteRequiredError(`pasteText is unavailable (${message})`);
+            }
+            throw error;
+          }
+        } else {
+          await client.send(surface, chunk, opts);
+        }
         return;
       } catch (error) {
         lastError = error;
@@ -1788,7 +1824,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
+    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
@@ -1812,7 +1848,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe(
-          "Press enter after sending text. For reliability with interactive programs, send text first, then use a separate send_key 'return' call.",
+          "Press return once after all chunks have landed.",
         ),
       rename_to_task: z
         .string()

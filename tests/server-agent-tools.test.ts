@@ -1002,21 +1002,117 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    const sendCalls = mockExec.mock.calls.filter(
-      ([, args]) => Array.isArray(args) && args.includes("send"),
+    const setBufferCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("set-buffer"),
+    );
+    const pasteBufferCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("paste-buffer"),
     );
     const sendKeyCalls = mockExec.mock.calls.filter(
       ([, args]) => Array.isArray(args) && args.includes("send-key"),
     );
-    const deliveredText = sendCalls.map(([, args]) => args.at(-1)).join("");
+    const deliveredText = setBufferCalls.map(([, args]) => args.at(-1)).join("");
 
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
-    expect(sendCalls).toHaveLength(2);
+    expect(setBufferCalls).toHaveLength(2);
+    expect(pasteBufferCalls).toHaveLength(2);
     expect(sendKeyCalls).toHaveLength(1);
     expect(deliveredText).toBe(sanitizedText);
     expect(deliveredText).not.toContain("\x1b");
     expect(deliveredText).not.toContain("\x07");
+  });
+
+  it("send_to submits chunked multiline text as one receiver message", async () => {
+    const baseExec = makeLifecycleExec();
+    const buffers = new Map<string, string>();
+    let composer = "";
+    let collectReceiverInput = false;
+    const submittedMessages: string[] = [];
+    const submitComposer = () => {
+      submittedMessages.push(composer);
+      composer = "";
+    };
+    const typeCmuxSendText = (text: string) => {
+      for (const char of text) {
+        if (char === "\n" || char === "\r") {
+          submitComposer();
+        } else {
+          composer += char;
+        }
+      }
+    };
+    mockExec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (!collectReceiverInput) {
+        return baseExec(cmd, args);
+      }
+      if (args.includes("set-buffer")) {
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        buffers.set(name, args[args.length - 1]);
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("paste-buffer")) {
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        composer += buffers.get(name) ?? "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key")) {
+        const key = args[args.length - 1];
+        if (key === "return" || key === "enter") {
+          submitComposer();
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        typeCmuxSendText(args[args.length - 1]);
+        return { stdout: "{}", stderr: "" };
+      }
+      return baseExec(cmd, args);
+    });
+
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "test",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const agent = registry.get(agentId);
+    registry.set(agentId, { ...agent, state: "ready" });
+    collectReceiverInput = true;
+    mockExec.mockClear();
+
+    const longText = [
+      "alpha ".repeat(24),
+      "bravo ".repeat(24),
+      "charlie ".repeat(24),
+      "delta ".repeat(24),
+      "echo ".repeat(24),
+    ].join("\n");
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: longText, press_enter: true },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(submittedMessages).toEqual([longText]);
   });
 
   it("send_to returns an error for an unknown agent_id", async () => {
