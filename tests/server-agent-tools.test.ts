@@ -416,8 +416,30 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.workspace_id).toBe("workspace:voice");
     expect(launcherReturnCount).toBe(2);
     expect(promptDelivered).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "read-screen",
+        "--workspace",
+        "workspace:voice",
+        "--surface",
+        "surface:new",
+      ]),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--workspace",
+        "workspace:voice",
+        "--surface",
+        "surface:new",
+        "file prompt body",
+      ]),
+    );
   });
 
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {

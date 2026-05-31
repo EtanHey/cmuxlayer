@@ -54,6 +54,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { repoNameMatchesWorkspaceDirectory } from "./repo-workspace.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -370,22 +371,6 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
   const match = title.trim().match(/^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
   const repo = match?.[1]?.trim();
   return repo && repo !== "." && repo !== ".." ? repo : null;
-}
-
-function pathBaseName(path: string): string {
-  const normalized = path.trim().replace(/\/+$/, "");
-  const index = normalized.lastIndexOf("/");
-  return index >= 0 ? normalized.slice(index + 1) : normalized;
-}
-
-function repoNameMatchesWorkspaceDirectory(repo: string, cwd: string): boolean {
-  const normalizedRepo = repo.toLowerCase();
-  const normalizedRepoNoHyphen = normalizedRepo.replace(/-/g, "");
-  const directory = pathBaseName(cwd).toLowerCase();
-  return (
-    directory === normalizedRepo ||
-    directory.replace(/-/g, "") === normalizedRepoNoHyphen
-  );
 }
 
 function matchesShellPrompt(text: string): boolean {
@@ -2726,9 +2711,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
+              const deliveryWorkspace = result.workspace_id ?? args.workspace;
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
-                workspace: args.workspace,
+                workspace: deliveryWorkspace,
                 cli: args.cli,
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,

@@ -303,14 +303,22 @@ describe("AgentEngine", () => {
         pane_ref: "pane:voice",
         surfaces: [makeSurface("surface:voice")],
       });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      });
 
-      await engine.spawnAgent({
+      const result = await engine.spawnAgent({
         repo: "voicelayer",
         model: "gpt-5.4",
         cli: "codex",
         prompt: "Fix prompt delivery",
       });
 
+      expect(result.workspace_id).toBe("workspace:voice");
       expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:voice");
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
         workspace: "workspace:voice",

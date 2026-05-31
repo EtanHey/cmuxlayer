@@ -45,6 +45,7 @@ import {
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { repoNameMatchesWorkspaceDirectory } from "./repo-workspace.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -63,6 +64,7 @@ export interface SpawnAgentParams {
 export interface SpawnAgentResult {
   agent_id: string;
   surface_id: string;
+  workspace_id?: string;
   state: AgentState;
 }
 
@@ -100,22 +102,6 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
 const execFileAsync = promisify(execFile);
-
-function pathBaseName(path: string): string {
-  const normalized = path.trim().replace(/\/+$/, "");
-  const index = normalized.lastIndexOf("/");
-  return index >= 0 ? normalized.slice(index + 1) : normalized;
-}
-
-function repoNameMatchesWorkspaceDirectory(repo: string, cwd: string): boolean {
-  const normalizedRepo = repo.toLowerCase();
-  const normalizedRepoNoHyphen = normalizedRepo.replace(/-/g, "");
-  const directory = pathBaseName(cwd).toLowerCase();
-  return (
-    directory === normalizedRepo ||
-    directory.replace(/-/g, "") === normalizedRepoNoHyphen
-  );
-}
 
 interface SidebarStatusSnapshot {
   statusValue: string;
@@ -1137,6 +1123,7 @@ export class AgentEngine {
     return {
       agent_id: agentId,
       surface_id: surface.surface,
+      workspace_id: surface.workspace,
       state: "booting",
     };
   }
