@@ -280,7 +280,11 @@ describe("layout policy", () => {
       new Set(["surface:worker-1"]),
     );
 
-    expect(placement).toEqual({ kind: "split", direction: "right" });
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:left",
+    });
   });
 
   it("reuses the rightmost dedicated worker pane for subsequent workers", () => {
@@ -352,7 +356,84 @@ describe("layout policy", () => {
       new Set(["surface:worker-1"]),
     );
 
-    expect(placement).toEqual({ kind: "split", direction: "right" });
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:left",
+    });
+  });
+
+  it("docks a parentless worker into the rightmost non-lead pane when roles are sparse", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:right", 1, ["surface:shell", "surface:notes"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:shell", "surface:notes"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+    expect(placement).not.toEqual({ kind: "split", direction: "right" });
+  });
+
+  it("anchors the parentless worker fallback to the rightmost pane", () => {
+    const panes = [makePane("pane:lead", 0, ["surface:orchestrator"])];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:lead",
+    });
+  });
+
+  it("does not dock a sparse parentless worker into the leftmost pane", () => {
+    const panes = [makePane("pane:left", 0, ["surface:unclassified-lead"])];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:unclassified-lead"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:left",
+    });
   });
 
   it("marks a dedicated single-worker pane as collapsible when its last tab closes", () => {

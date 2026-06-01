@@ -224,6 +224,7 @@ describe("AgentEngine", () => {
       });
 
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:left",
         workspace: "ws:1",
         type: "terminal",
       });
@@ -259,6 +260,7 @@ describe("AgentEngine", () => {
 
       expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:red-team");
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:left",
         workspace: "workspace:red-team",
         type: "terminal",
       });
@@ -321,12 +323,13 @@ describe("AgentEngine", () => {
       expect(result.workspace_id).toBe("workspace:voice");
       expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:voice");
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:voice",
         workspace: "workspace:voice",
         type: "terminal",
       });
     });
 
-    it("creates the first worker as a right split even when user panes already exist", async () => {
+    it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
           {
@@ -365,11 +368,12 @@ describe("AgentEngine", () => {
         workspace: "ws:1",
       });
 
-      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
-        workspace: "ws:1",
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
         type: "terminal",
+        workspace: "ws:1",
       });
-      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
     it("reuses the rightmost pane as worker tabs when a worker pane already exists", async () => {

@@ -149,6 +149,14 @@ function isWorkerDockPane(layout: PaneLayout): boolean {
   );
 }
 
+function isSparseWorkerZoneSeedPane(layout: PaneLayout): boolean {
+  return (
+    layout.orchestratorCount === 0 &&
+    layout.icCount === 0 &&
+    layout.workerCount === 0
+  );
+}
+
 function paneContainingSurface(
   layouts: PaneLayout[],
   surfaceId?: string | null,
@@ -329,6 +337,8 @@ export function collectRoleSurfaceIds(
  * - subsequent workers become tabs in the rightmost worker-owned pane — a
  *   worker-majority pane, which tolerates a stray non-role tab (a setup shell
  *   or dashboard) so a populated workers pane never sprouts a redundant pane
+ * - under sparse roles, the rightmost non-lead pane seeds the worker zone so
+ *   reconnect/manual panes do not fall back to focus-relative center splits
  * - a lone worker sharing a pane with an interactive/non-role surface is still
  *   treated as invalid and repaired with a fresh right split, preserving the
  *   left-interactive/right-worker invariant
@@ -433,7 +443,23 @@ export function chooseAgentSpawnPlacement(
     };
   }
 
-  return { kind: "split", direction: "right" };
+  if (roleSurfaceIds.worker.size === 0) {
+    const sparseWorkerZonePane = rightmost(
+      layouts.filter(
+        (layout) =>
+          layout.pane.ref !== leftPane?.pane.ref &&
+          isSparseWorkerZoneSeedPane(layout),
+      ),
+    );
+    if (sparseWorkerZonePane) {
+      return { kind: "surface", pane: sparseWorkerZonePane.pane.ref };
+    }
+  }
+
+  const rightmostPane = rightmost(layouts);
+  return rightmostPane
+    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
+    : { kind: "split", direction: "right" };
 }
 
 /**
