@@ -525,6 +525,46 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
+    it("does not abort placement when an existing parent or sibling has an unclassifiable role", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const parent = makeRecord({
+        agent_id: "parent-unknown",
+        surface_id: "surface:parent",
+        repo: "manual-shell",
+        cli: "unknown" as any,
+        spawn_depth: 0,
+      });
+      const sibling = makeRecord({
+        agent_id: "sibling-unknown",
+        surface_id: "surface:sibling",
+        repo: "manual-shell",
+        cli: "unknown" as any,
+        parent_agent_id: "parent-unknown",
+        spawn_depth: 1,
+      });
+      engine.getRegistry().set(parent.agent_id, parent);
+      engine.getRegistry().set(sibling.agent_id, sibling);
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          parent_agent_id: "parent-unknown",
+        }),
+      ).resolves.toMatchObject({
+        surface_id: "surface:new",
+        state: "booting",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ type: "terminal" }),
+      );
+      warnSpy.mockRestore();
+    });
+
     it("splits a child worker under its parent IC pane", async () => {
       stateMgr.writeState(
         makeRecord({

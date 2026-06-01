@@ -41,6 +41,8 @@ import {
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
+  inferRecordRoleOrNull,
+  isAgentRoleInferenceError,
   launcherNameForCli,
   type RoleSurfaceIds,
 } from "./layout-policy.js";
@@ -435,17 +437,18 @@ export class AgentEngine {
         parentAgent
           ? this.registry
               .getChildren(parentAgent.agent_id)
-              .filter((agent) => inferRecordRole(agent) === "worker")
+              .filter((agent) => inferRecordRoleOrNull(agent) === "worker")
               .map((agent) => agent.surface_id)
           : [],
       );
+      const parentRole = parentAgent ? inferRecordRoleOrNull(parentAgent) : null;
       const placement = chooseAgentSpawnPlacement(
         panes.panes,
         paneSurfaces,
         roleSurfaceIds,
         {
           role: context?.role ?? "worker",
-          parentRole: parentAgent ? inferRecordRole(parentAgent) : null,
+          parentRole,
           parentSurfaceId: parentAgent?.surface_id ?? null,
           childWorkerSurfaceIds,
         },
@@ -461,7 +464,10 @@ export class AgentEngine {
             workspace,
             type: "terminal",
           });
-    } catch {
+    } catch (error) {
+      if (isAgentRoleInferenceError(error)) {
+        throw error;
+      }
       return this.client.newSplit("right", {
         workspace,
         type: "terminal",

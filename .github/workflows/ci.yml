@@ -12,13 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - uses: oven-sh/setup-bun@v2
 
-      - run: npm install --no-package-lock
-      - run: npm run typecheck
-      - run: npm test
+      # package-lock.json is macOS-resolved; remove so bun resolves platform-correct optional deps (e.g. rollup linux binary)
+      - run: rm -f package-lock.json
+      - run: bun install
+      - run: bun run typecheck
+      - run: bun run test
 
   build-site:
     runs-on: ubuntu-latest

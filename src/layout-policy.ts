@@ -1,5 +1,6 @@
 import type { CmuxPane, CmuxPaneSurfaces } from "./types.js";
 import type { AgentRecord, AgentRole, CliType } from "./agent-types.js";
+import { extractPrefix } from "./naming.js";
 
 export type AgentSpawnPlacement =
   | { kind: "split"; direction: "left" | "right" | "up" | "down"; pane?: string }
@@ -25,6 +26,7 @@ export interface RoleSurfaceIds {
   orchestrator: Set<string>;
   ic: Set<string>;
   worker: Set<string>;
+  unknown?: Set<string>;
 }
 
 export interface AgentPlacementContext {
@@ -39,6 +41,7 @@ function emptyRoleSurfaceIds(): RoleSurfaceIds {
     orchestrator: new Set(),
     ic: new Set(),
     worker: new Set(),
+    unknown: new Set(),
   };
 }
 
@@ -50,9 +53,10 @@ function normalizeRoleSurfaceIds(
       orchestrator: new Set(),
       ic: new Set(),
       worker: new Set(input),
+      unknown: new Set(),
     };
   }
-  return input;
+  return { ...input, unknown: input.unknown ?? new Set() };
 }
 
 function describePaneLayouts(
@@ -165,19 +169,46 @@ function paneContainingAnySurface(
   );
 }
 
-export function inferAgentRole(input: {
-  role?: AgentRole;
-  launcherName?: string;
-  title?: string;
-  cli?: string;
-}): AgentRole {
-  if (input.role) return input.role;
+export class AgentRoleInferenceError extends Error {
+  constructor(input: {
+    role?: AgentRole;
+    launcherName?: string;
+    title?: string;
+    cli?: string;
+  }) {
+    const details = [
+      input.role ? `role=${input.role}` : null,
+      input.launcherName ? `launcherName=${input.launcherName}` : null,
+      input.title ? `title=${input.title}` : null,
+      input.cli ? `cli=${input.cli}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    super(
+      `Unable to infer agent role${
+        details ? ` from ${details}` : ""
+      }; pass an explicit role or a repoGolem launcher ending in Claude, Codex, or Cursor`,
+    );
+    this.name = "AgentRoleInferenceError";
+  }
+}
 
-  const launcherName = input.launcherName ?? input.title ?? "";
-  if (/Claude$/i.test(launcherName)) return "orchestrator";
-  if (/(Codex|Cursor)$/i.test(launcherName)) return "worker";
+export function isAgentRoleInferenceError(
+  error: unknown,
+): error is AgentRoleInferenceError {
+  return error instanceof AgentRoleInferenceError;
+}
 
-  switch (input.cli) {
+function roleFromLauncherLabel(label: string | undefined): AgentRole | null {
+  if (!label) return null;
+  const launcher = extractPrefix(label);
+  if (/Claude$/i.test(launcher)) return "orchestrator";
+  if (/(Codex|Cursor)$/i.test(launcher)) return "worker";
+  return null;
+}
+
+function roleFromCli(cli: string | undefined): AgentRole | null {
+  switch (cli) {
     case "claude":
       return "orchestrator";
     case "codex":
@@ -186,8 +217,41 @@ export function inferAgentRole(input: {
     case "kiro":
       return "worker";
     default:
-      return "worker";
+      return null;
   }
+}
+
+export function canInferAgentRole(input: {
+  role?: AgentRole;
+  launcherName?: string;
+  title?: string;
+  cli?: string;
+}): boolean {
+  return Boolean(
+    input.role ||
+      roleFromLauncherLabel(input.launcherName) ||
+      roleFromLauncherLabel(input.title) ||
+      roleFromCli(input.cli),
+  );
+}
+
+export function inferAgentRole(input: {
+  role?: AgentRole;
+  launcherName?: string;
+  title?: string;
+  cli?: string;
+}): AgentRole {
+  if (input.role) return input.role;
+
+  const launcherRole =
+    roleFromLauncherLabel(input.launcherName) ??
+    roleFromLauncherLabel(input.title);
+  if (launcherRole) return launcherRole;
+
+  const cliRole = roleFromCli(input.cli);
+  if (cliRole) return cliRole;
+
+  throw new AgentRoleInferenceError(input);
 }
 
 export function launcherNameForCli(repo: string, cli: CliType): string {
@@ -219,6 +283,19 @@ export function inferRecordRole(
   );
 }
 
+export function inferRecordRoleOrNull(
+  agent: Pick<AgentRecord, "role" | "cli" | "repo">,
+): AgentRole | null {
+  try {
+    return inferRecordRole(agent);
+  } catch (error) {
+    if (isAgentRoleInferenceError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function collectRoleSurfaceIds(
   agents: Iterable<Pick<AgentRecord, "role" | "cli" | "repo" | "surface_id">>,
 ): RoleSurfaceIds {
@@ -226,9 +303,22 @@ export function collectRoleSurfaceIds(
     orchestrator: new Set(),
     ic: new Set(),
     worker: new Set(),
+    unknown: new Set(),
   };
   for (const agent of agents) {
-    ids[inferRecordRole(agent)].add(agent.surface_id);
+    try {
+      ids[inferRecordRole(agent)].add(agent.surface_id);
+    } catch (error) {
+      if (isAgentRoleInferenceError(error)) {
+        ids.unknown?.add(agent.surface_id);
+        console.warn(
+          `[cmux-mcp] Unable to classify agent role for ${agent.surface_id}; not counting it as a worker`,
+          error.message,
+        );
+        continue;
+      }
+      throw error;
+    }
   }
   return ids;
 }
