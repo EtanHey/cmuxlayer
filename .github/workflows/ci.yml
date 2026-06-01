@@ -14,6 +14,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      # package-lock.json is macOS-resolved; remove so bun resolves platform-correct optional deps (e.g. rollup linux binary)
+      - run: rm -f package-lock.json
       - run: bun install
       - run: bun run typecheck
       - run: bun run test
