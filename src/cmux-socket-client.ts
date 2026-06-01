@@ -199,6 +199,18 @@ export class CmuxSocketClient {
     return this.call("pane.list", params);
   }
 
+  private async resolvePaneAnchorSurface(opts: {
+    workspace?: string;
+    pane: string;
+  }): Promise<string | undefined> {
+    const paneSurfaces = await this.listPaneSurfaces({
+      workspace: opts.workspace,
+      pane: opts.pane,
+    });
+    const surfaces = paneSurfaces.surfaces ?? [];
+    return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
+  }
+
   async newSplit(
     direction: string,
     opts?: {
@@ -251,8 +263,18 @@ export class CmuxSocketClient {
 
     const params: Record<string, unknown> = { direction };
     if (opts?.workspace) params.workspace_id = opts.workspace;
-    if (opts?.surface) params.surface_id = opts.surface;
-    if (opts?.pane) params.pane_id = opts.pane;
+    const anchorSurface =
+      opts?.surface ??
+      (opts?.pane
+        ? await this.resolvePaneAnchorSurface({
+            workspace: opts.workspace,
+            pane: opts.pane,
+          })
+        : undefined);
+    // AIDEV-NOTE(2026-06-01): keep socket terminal splits aligned with the CLI
+    // workaround for the cmux app `new-split --panel <pane>` regression. Raw CLI
+    // reproduces "Surface not found"; `new-surface --pane` is unaffected.
+    if (anchorSurface) params.surface_id = anchorSurface;
 
     try {
       const result = await this.call<Record<string, unknown>>(

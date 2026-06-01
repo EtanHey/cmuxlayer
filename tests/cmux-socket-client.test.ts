@@ -308,6 +308,53 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result.type).toBe("terminal");
   });
 
+  it("newSplit resolves pane targets to surface_id for terminal splits", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.newSplit("right", {
+      workspace: "workspace:1",
+      pane: "pane:1",
+    });
+
+    expect(lastV2Request).toEqual({
+      method: "pane.split",
+      params: {
+        direction: "right",
+        workspace_id: "workspace:1",
+        surface_id: "surface:1",
+      },
+    });
+    expect(lastV2Request?.params).not.toHaveProperty("pane_id");
+  });
+
+  it("newSplit omits the pane anchor when the pane has no surfaces", async () => {
+    const saved = MOCK_RESPONSES["surface.list"];
+    MOCK_RESPONSES["surface.list"] = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      pane_ref: "pane:empty",
+      surfaces: [],
+    };
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.newSplit("right", {
+        workspace: "workspace:1",
+        pane: "pane:empty",
+      });
+
+      expect(lastV2Request).toEqual({
+        method: "pane.split",
+        params: {
+          direction: "right",
+          workspace_id: "workspace:1",
+        },
+      });
+    } finally {
+      MOCK_RESPONSES["surface.list"] = saved;
+    }
+  });
+
   it("handles unknown methods gracefully", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     await expect(client.browser(["nonexistent"])).rejects.toThrow();

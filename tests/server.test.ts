@@ -2671,16 +2671,39 @@ describe("tool handler integration", () => {
   });
 
   it("new_split with launcher-style title honors explicit pane when role is omitted", async () => {
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        workspace: "workspace:1",
-        surface: "surface:manual-title",
-        pane: "pane:manual",
-        title: "brainlayerCodex",
-        type: "terminal",
-      }),
-      stderr: "",
-    });
+    mockExec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:manual",
+          surfaces: [
+            {
+              ref: "surface:manual-anchor",
+              title: "existing",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          surface: "surface:manual-title",
+          pane: "pane:manual",
+          title: "brainlayerCodex",
+          type: "terminal",
+        }),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ ok: true }),
+        stderr: "",
+      });
     const server = createServer({
       exec: mockExec,
       skipAgentLifecycle: true,
@@ -2703,7 +2726,12 @@ describe("tool handler integration", () => {
     expect(parsed.role).toBeUndefined();
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["new-split", "right", "--panel", "pane:manual"]),
+      expect.arrayContaining([
+        "new-split",
+        "right",
+        "--surface",
+        "surface:manual-anchor",
+      ]),
     );
   });
 

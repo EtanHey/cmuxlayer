@@ -122,29 +122,106 @@ describe("CmuxClient.newSplit", () => {
     ]);
   });
 
-  it("uses --panel when targeting a panel", async () => {
-    const data = {
+  it("resolves a pane target to the selected surface instead of using --panel", async () => {
+    const paneSurfaces = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      pane_ref: "pane:2",
+      surfaces: [
+        {
+          ref: "surface:old",
+          title: "Old tab",
+          type: "terminal",
+          index: 0,
+          selected: false,
+        },
+        {
+          ref: "surface:selected",
+          title: "Selected tab",
+          type: "terminal",
+          index: 1,
+          selected: true,
+        },
+      ],
+    };
+    const split = {
       workspace: "workspace:1",
       surface: "surface:3",
       pane: "pane:2",
       title: "Split",
       type: "terminal",
     };
-    const { client, exec } = mockClient(data);
+    const exec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify(paneSurfaces),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: JSON.stringify(split), stderr: "" });
+    const client = new CmuxClient({ exec });
 
     await client.newSplit("left", {
       workspace: "workspace:1",
       pane: "pane:2",
     });
 
-    expect(exec).toHaveBeenCalledWith("cmux", [
+    expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
+      "--json",
+      "list-pane-surfaces",
+      "--workspace",
+      "workspace:1",
+      "--pane",
+      "pane:2",
+    ]);
+    expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
       "--json",
       "new-split",
       "left",
       "--workspace",
       "workspace:1",
-      "--panel",
-      "pane:2",
+      "--surface",
+      "surface:selected",
+    ]);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["--panel"]),
+    );
+  });
+
+  it("omits the pane anchor when no surface can be resolved for the pane", async () => {
+    const paneSurfaces = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      pane_ref: "pane:empty",
+      surfaces: [],
+    };
+    const split = {
+      workspace: "workspace:1",
+      surface: "surface:3",
+      pane: "pane:2",
+      title: "Split",
+      type: "terminal",
+    };
+    const exec = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify(paneSurfaces),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ stdout: JSON.stringify(split), stderr: "" });
+    const client = new CmuxClient({ exec });
+
+    await client.newSplit("left", {
+      workspace: "workspace:1",
+      pane: "pane:empty",
+    });
+
+    expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
+      "--json",
+      "new-split",
+      "left",
+      "--workspace",
+      "workspace:1",
     ]);
   });
 
