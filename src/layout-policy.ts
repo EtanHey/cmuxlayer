@@ -283,6 +283,19 @@ export function inferRecordRole(
   );
 }
 
+export function inferRecordRoleOrNull(
+  agent: Pick<AgentRecord, "role" | "cli" | "repo">,
+): AgentRole | null {
+  try {
+    return inferRecordRole(agent);
+  } catch (error) {
+    if (isAgentRoleInferenceError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function collectRoleSurfaceIds(
   agents: Iterable<Pick<AgentRecord, "role" | "cli" | "repo" | "surface_id">>,
 ): RoleSurfaceIds {

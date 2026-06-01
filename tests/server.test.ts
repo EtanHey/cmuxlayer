@@ -1900,7 +1900,13 @@ describe("tool handler integration", () => {
         title: "",
         type: "terminal",
       }),
-      newSurface: vi.fn(),
+      newSurface: vi.fn().mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:voice-orchestrator",
+        pane: "pane:voice",
+        title: "",
+        type: "terminal",
+      }),
       renameTab: vi.fn().mockResolvedValue(undefined),
     };
     const server = createServer({
@@ -1927,6 +1933,89 @@ describe("tool handler integration", () => {
         title: "voicelayerCodex",
       }),
     );
+  });
+
+  it("new_split inherits workspace from a task-suffixed launcher title repo", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:brainlayer",
+            title: "BrainLayer",
+            current_directory: "/Users/etanheyman/Gits/brainlayer",
+          },
+          {
+            ref: "workspace:voice",
+            title: "VoiceLayer",
+            current_directory: "/Users/etanheyman/Gits/voicelayer",
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:voice",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:voice",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:shell"],
+            selected_surface_ref: "surface:shell",
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:voice",
+        window_ref: "window:1",
+        pane_ref: "pane:voice",
+        surfaces: [
+          {
+            ref: "surface:shell",
+            title: "shell",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:voice-worker",
+        pane: "pane:worker",
+        title: "",
+        type: "terminal",
+      }),
+      newSurface: vi.fn().mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:voice-orchestrator",
+        pane: "pane:voice",
+        title: "",
+        type: "terminal",
+      }),
+      renameTab: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        title: "voicelayerClaude: audit",
+        role: "orchestrator",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.listPanes).toHaveBeenCalledWith({
+      workspace: "workspace:voice",
+    });
   });
 
   it("new_split with role=worker reuses the existing worker pane", async () => {

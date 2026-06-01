@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { parseReservedModeKey } from "./mode-policy.js";
-import { replaceTaskSuffix } from "./naming.js";
+import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -390,7 +390,10 @@ function inferLauncherCli(command: string): CliType | null {
 
 function inferRepoFromLauncherTitle(title?: string): string | null {
   if (!title) return null;
-  const match = title.trim().match(/^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
+  const launcherTitle = extractPrefix(title);
+  const match = launcherTitle.match(
+    /^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i,
+  );
   const repo = match?.[1]?.trim();
   return repo && repo !== "." && repo !== ".." ? repo : null;
 }

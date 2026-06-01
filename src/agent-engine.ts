@@ -41,6 +41,7 @@ import {
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
+  inferRecordRoleOrNull,
   isAgentRoleInferenceError,
   launcherNameForCli,
   type RoleSurfaceIds,
@@ -436,17 +437,18 @@ export class AgentEngine {
         parentAgent
           ? this.registry
               .getChildren(parentAgent.agent_id)
-              .filter((agent) => inferRecordRole(agent) === "worker")
+              .filter((agent) => inferRecordRoleOrNull(agent) === "worker")
               .map((agent) => agent.surface_id)
           : [],
       );
+      const parentRole = parentAgent ? inferRecordRoleOrNull(parentAgent) : null;
       const placement = chooseAgentSpawnPlacement(
         panes.panes,
         paneSurfaces,
         roleSurfaceIds,
         {
           role: context?.role ?? "worker",
-          parentRole: parentAgent ? inferRecordRole(parentAgent) : null,
+          parentRole,
           parentSurfaceId: parentAgent?.surface_id ?? null,
           childWorkerSurfaceIds,
         },
