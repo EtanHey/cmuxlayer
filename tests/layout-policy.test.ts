@@ -472,6 +472,34 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
+  it("preserves the IC fallback when no sparse worker seed pane exists", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:ic", 1, ["surface:ic"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:ic", ["surface:ic"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(["surface:ic"]),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "down",
+      pane: "pane:ic",
+    });
+  });
+
   it("treats worker role ids missing from the live layout as sparse", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),

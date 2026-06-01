@@ -461,7 +461,6 @@ export function chooseAgentSpawnPlacement(
     if (sparseWorkerZonePane) {
       return { kind: "surface", pane: sparseWorkerZonePane.pane.ref };
     }
-    return splitRightOfRightmost(layouts);
   }
 
   const mixedWorkerPane = rightmost(
