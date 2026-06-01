@@ -389,6 +389,38 @@ describe("layout policy", () => {
     });
   });
 
+  it("repairs a mixed unknown-agent pane instead of treating the layout as sparse", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive", "surface:unknown-worker"]),
+      makePane("pane:right", 1, ["surface:notes"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", [
+        "surface:interactive",
+        "surface:unknown-worker",
+      ]),
+      makePaneSurfaces("pane:right", ["surface:notes"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(),
+        worker: new Set(),
+        unknown: new Set(["surface:unknown-worker"]),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:left",
+    });
+  });
+
   it("docks a parentless worker into the rightmost non-lead pane when roles are sparse", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),

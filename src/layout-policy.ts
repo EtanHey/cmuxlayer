@@ -18,6 +18,7 @@ interface PaneLayout {
   orchestratorCount: number;
   icCount: number;
   workerCount: number;
+  unknownCount: number;
   roleCount: number;
   nonRoleCount: number;
 }
@@ -79,6 +80,9 @@ function describePaneLayouts(
     const workerCount = surfaces.filter((surface) =>
       roleSurfaceIds.worker.has(surface.ref),
     ).length;
+    const unknownCount = surfaces.filter((surface) =>
+      roleSurfaceIds.unknown?.has(surface.ref),
+    ).length;
     const roleCount = orchestratorCount + icCount + workerCount;
     return {
       pane,
@@ -86,6 +90,7 @@ function describePaneLayouts(
       orchestratorCount,
       icCount,
       workerCount,
+      unknownCount,
       roleCount,
       nonRoleCount: surfaces.length - roleCount,
     };
@@ -160,7 +165,8 @@ function isSparseWorkerZoneSeedPane(layout: PaneLayout): boolean {
   return (
     layout.orchestratorCount === 0 &&
     layout.icCount === 0 &&
-    layout.workerCount === 0
+    layout.workerCount === 0 &&
+    layout.unknownCount === 0
   );
 }
 
@@ -441,8 +447,10 @@ export function chooseAgentSpawnPlacement(
     return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
   }
 
-  const hasLiveWorkerSurface = layouts.some((layout) => layout.workerCount > 0);
-  if (!hasLiveWorkerSurface) {
+  const hasLiveWorkerOrUnknownSurface = layouts.some(
+    (layout) => layout.workerCount > 0 || layout.unknownCount > 0,
+  );
+  if (!hasLiveWorkerOrUnknownSurface) {
     const sparseWorkerZonePane = rightmost(
       layouts.filter(
         (layout) =>
@@ -458,7 +466,9 @@ export function chooseAgentSpawnPlacement(
 
   const mixedWorkerPane = rightmost(
     layouts.filter(
-      (layout) => layout.workerCount > 0 && !isWorkerDockPane(layout),
+      (layout) =>
+        (layout.workerCount > 0 || layout.unknownCount > 0) &&
+        !isWorkerDockPane(layout),
     ),
   );
   if (mixedWorkerPane) {
