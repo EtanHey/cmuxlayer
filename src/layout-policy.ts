@@ -18,6 +18,7 @@ interface PaneLayout {
   orchestratorCount: number;
   icCount: number;
   workerCount: number;
+  unknownCount: number;
   roleCount: number;
   nonRoleCount: number;
 }
@@ -79,6 +80,9 @@ function describePaneLayouts(
     const workerCount = surfaces.filter((surface) =>
       roleSurfaceIds.worker.has(surface.ref),
     ).length;
+    const unknownCount = surfaces.filter((surface) =>
+      roleSurfaceIds.unknown?.has(surface.ref),
+    ).length;
     const roleCount = orchestratorCount + icCount + workerCount;
     return {
       pane,
@@ -86,6 +90,7 @@ function describePaneLayouts(
       orchestratorCount,
       icCount,
       workerCount,
+      unknownCount,
       roleCount,
       nonRoleCount: surfaces.length - roleCount,
     };
@@ -102,6 +107,13 @@ function leftmost(layouts: PaneLayout[]): PaneLayout | undefined {
 
 function rightmost(layouts: PaneLayout[]): PaneLayout | undefined {
   return [...layouts].sort(byPaneIndex).at(-1);
+}
+
+function splitRightOfRightmost(layouts: PaneLayout[]): AgentSpawnPlacement {
+  const rightmostPane = rightmost(layouts);
+  return rightmostPane
+    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
+    : { kind: "split", direction: "right" };
 }
 
 function isDedicatedOrchestratorPane(layout: PaneLayout): boolean {
@@ -146,6 +158,15 @@ function isWorkerDockPane(layout: PaneLayout): boolean {
     layout.icCount === 0 &&
     layout.workerCount > 0 &&
     layout.workerCount > layout.nonRoleCount
+  );
+}
+
+function isSparseWorkerZoneSeedPane(layout: PaneLayout): boolean {
+  return (
+    layout.orchestratorCount === 0 &&
+    layout.icCount === 0 &&
+    layout.workerCount === 0 &&
+    layout.unknownCount === 0
   );
 }
 
@@ -329,6 +350,8 @@ export function collectRoleSurfaceIds(
  * - subsequent workers become tabs in the rightmost worker-owned pane — a
  *   worker-majority pane, which tolerates a stray non-role tab (a setup shell
  *   or dashboard) so a populated workers pane never sprouts a redundant pane
+ * - under sparse roles, the rightmost non-lead pane seeds the worker zone so
+ *   reconnect/manual panes do not fall back to focus-relative center splits
  * - a lone worker sharing a pane with an interactive/non-role surface is still
  *   treated as invalid and repaired with a fresh right split, preserving the
  *   left-interactive/right-worker invariant
@@ -424,6 +447,37 @@ export function chooseAgentSpawnPlacement(
     return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
   }
 
+  const hasLiveWorkerOrUnknownSurface = layouts.some(
+    (layout) => layout.workerCount > 0 || layout.unknownCount > 0,
+  );
+  if (!hasLiveWorkerOrUnknownSurface) {
+    const sparseWorkerZonePane = rightmost(
+      layouts.filter(
+        (layout) =>
+          layout.pane.ref !== leftPane?.pane.ref &&
+          isSparseWorkerZoneSeedPane(layout),
+      ),
+    );
+    if (sparseWorkerZonePane) {
+      return { kind: "surface", pane: sparseWorkerZonePane.pane.ref };
+    }
+  }
+
+  const mixedWorkerPane = rightmost(
+    layouts.filter(
+      (layout) =>
+        (layout.workerCount > 0 || layout.unknownCount > 0) &&
+        !isWorkerDockPane(layout),
+    ),
+  );
+  if (mixedWorkerPane) {
+    return {
+      kind: "split",
+      direction: "right",
+      pane: mixedWorkerPane.pane.ref,
+    };
+  }
+
   const rightmostIcPane = rightmost(icPanes);
   if (rightmostIcPane) {
     return {
@@ -433,7 +487,7 @@ export function chooseAgentSpawnPlacement(
     };
   }
 
-  return { kind: "split", direction: "right" };
+  return splitRightOfRightmost(layouts);
 }
 
 /**
