@@ -233,6 +233,18 @@ export class CmuxClient {
     return this.parse(raw, "list-panes");
   }
 
+  private async resolvePaneAnchorSurface(opts: {
+    workspace?: string;
+    pane: string;
+  }): Promise<string | undefined> {
+    const paneSurfaces = await this.listPaneSurfaces({
+      workspace: opts.workspace,
+      pane: opts.pane,
+    });
+    const surfaces = paneSurfaces.surfaces ?? [];
+    return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
+  }
+
   async newSplit(
     direction: string,
     opts?: {
@@ -271,8 +283,19 @@ export class CmuxClient {
 
     const args = ["new-split", direction];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
-    if (opts?.surface) args.push("--surface", opts.surface);
-    if (opts?.pane) args.push("--panel", opts.pane);
+    const anchorSurface =
+      opts?.surface ??
+      (opts?.pane
+        ? await this.resolvePaneAnchorSurface({
+            workspace: opts.workspace,
+            pane: opts.pane,
+          })
+        : undefined);
+    // AIDEV-NOTE(2026-06-01): raw cmux CLI reproduces
+    // `new-split --panel <pane>` failing with "Surface not found" after a cmux
+    // app update. Anchor terminal splits through a surface in the target pane;
+    // `new-surface --pane` is unaffected and intentionally stays as-is below.
+    if (anchorSurface) args.push("--surface", anchorSurface);
     const raw = await this.run(args);
     const parsed = this.parse<Record<string, unknown>>(raw, "new-split");
     return this.mapSplitResult(parsed, "terminal");
