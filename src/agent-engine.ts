@@ -41,6 +41,7 @@ import {
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
+  isAgentRoleInferenceError,
   launcherNameForCli,
   type RoleSurfaceIds,
 } from "./layout-policy.js";
@@ -461,7 +462,10 @@ export class AgentEngine {
             workspace,
             type: "terminal",
           });
-    } catch {
+    } catch (error) {
+      if (isAgentRoleInferenceError(error)) {
+        throw error;
+      }
       return this.client.newSplit("right", {
         workspace,
         type: "terminal",

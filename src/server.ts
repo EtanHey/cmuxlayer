@@ -41,10 +41,12 @@ import {
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import {
+  canInferAgentRole,
   collectRoleSurfaceIds,
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
   inferAgentRole,
+  launcherNameForCli,
 } from "./layout-policy.js";
 import type {
   CmuxNewSplitResult,
@@ -1511,12 +1513,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         const shouldInferRole =
           Boolean(args.role) ||
-          Boolean(
-            args.title &&
-              /(Claude|Codex|Cursor)$/i.test(args.title) &&
-              !args.pane &&
-              !args.surface,
-          );
+          (!args.pane &&
+            !args.surface &&
+            canInferAgentRole({ title: args.title }));
         const inferredRole = shouldInferRole
           ? inferAgentRole({ role: args.role, title: args.title })
           : null;
@@ -2850,14 +2849,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface: result.surface_id,
               role:
                 engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({ role: args.role, cli: args.cli }),
+                inferAgentRole({
+                  role: args.role,
+                  cli: args.cli,
+                  launcherName: launcherNameForCli(args.repo, args.cli),
+                }),
               boot_prompt_delivered: Boolean(bootPromptDelivery),
             }),
             {
               ...result,
               role:
                 engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({ role: args.role, cli: args.cli }),
+                inferAgentRole({
+                  role: args.role,
+                  cli: args.cli,
+                  launcherName: launcherNameForCli(args.repo, args.cli),
+                }),
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },

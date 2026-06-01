@@ -70,6 +70,18 @@ describe("layout policy", () => {
     ).toBe("worker");
   });
 
+  it("inferAgentRole never silently guesses worker", () => {
+    expect(
+      inferAgentRole({
+        title: "skillcreatorClaude: publish 24h dashboard",
+      }),
+    ).toBe("orchestrator");
+
+    expect(() => inferAgentRole({ title: "publish 24h dashboard" })).toThrow(
+      /Unable to infer agent role/,
+    );
+  });
+
   it("places orchestrators as tabs in the left orchestrator pane", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),

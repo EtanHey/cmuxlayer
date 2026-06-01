@@ -12,13 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - uses: oven-sh/setup-bun@v2
 
-      - run: npm install --no-package-lock
-      - run: npm run typecheck
-      - run: npm test
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
 
   build-site:
     runs-on: ubuntu-latest
