@@ -104,6 +104,13 @@ function rightmost(layouts: PaneLayout[]): PaneLayout | undefined {
   return [...layouts].sort(byPaneIndex).at(-1);
 }
 
+function splitRightOfRightmost(layouts: PaneLayout[]): AgentSpawnPlacement {
+  const rightmostPane = rightmost(layouts);
+  return rightmostPane
+    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
+    : { kind: "split", direction: "right" };
+}
+
 function isDedicatedOrchestratorPane(layout: PaneLayout): boolean {
   return (
     layout.orchestratorCount > 0 &&
@@ -434,16 +441,8 @@ export function chooseAgentSpawnPlacement(
     return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
   }
 
-  const rightmostIcPane = rightmost(icPanes);
-  if (rightmostIcPane) {
-    return {
-      kind: "split",
-      direction: "down",
-      pane: rightmostIcPane.pane.ref,
-    };
-  }
-
-  if (roleSurfaceIds.worker.size === 0) {
+  const hasLiveWorkerSurface = layouts.some((layout) => layout.workerCount > 0);
+  if (!hasLiveWorkerSurface) {
     const sparseWorkerZonePane = rightmost(
       layouts.filter(
         (layout) =>
@@ -454,12 +453,32 @@ export function chooseAgentSpawnPlacement(
     if (sparseWorkerZonePane) {
       return { kind: "surface", pane: sparseWorkerZonePane.pane.ref };
     }
+    return splitRightOfRightmost(layouts);
   }
 
-  const rightmostPane = rightmost(layouts);
-  return rightmostPane
-    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
-    : { kind: "split", direction: "right" };
+  const mixedWorkerPane = rightmost(
+    layouts.filter(
+      (layout) => layout.workerCount > 0 && !isWorkerDockPane(layout),
+    ),
+  );
+  if (mixedWorkerPane) {
+    return {
+      kind: "split",
+      direction: "right",
+      pane: mixedWorkerPane.pane.ref,
+    };
+  }
+
+  const rightmostIcPane = rightmost(icPanes);
+  if (rightmostIcPane) {
+    return {
+      kind: "split",
+      direction: "down",
+      pane: rightmostIcPane.pane.ref,
+    };
+  }
+
+  return splitRightOfRightmost(layouts);
 }
 
 /**

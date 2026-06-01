@@ -363,6 +363,32 @@ describe("layout policy", () => {
     });
   });
 
+  it("repairs a mixed worker pane by splitting from the mixed pane even when another pane exists", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
+      makePane("pane:right", 1, ["surface:notes"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", [
+        "surface:interactive",
+        "surface:worker-1",
+      ]),
+      makePaneSurfaces("pane:right", ["surface:notes"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      new Set(["surface:worker-1"]),
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:left",
+    });
+  });
+
   it("docks a parentless worker into the rightmost non-lead pane when roles are sparse", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),
@@ -386,6 +412,56 @@ describe("layout policy", () => {
 
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
     expect(placement).not.toEqual({ kind: "split", direction: "right" });
+  });
+
+  it("prefers sparse worker docking over the IC fallback for parentless workers", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:ic", 1, ["surface:ic"]),
+      makePane("pane:right", 2, ["surface:shell"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:ic", ["surface:ic"]),
+      makePaneSurfaces("pane:right", ["surface:shell"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(["surface:ic"]),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("treats worker role ids missing from the live layout as sparse", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:right", 1, ["surface:shell"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:shell"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:stale-worker"]),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
   it("anchors the parentless worker fallback to the rightmost pane", () => {
