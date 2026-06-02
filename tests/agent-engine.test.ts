@@ -22,6 +22,10 @@ import {
   MAX_RESPAWN_ATTEMPTS,
   type AgentRecord,
 } from "../src/agent-types.js";
+import {
+  SpawnGuard,
+  SpawnRateLimitedError,
+} from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -127,6 +131,47 @@ describe("AgentEngine", () => {
   });
 
   describe("spawnAgent", () => {
+    it("rate-limits spawn storms before creating extra surfaces", async () => {
+      let nowMs = 0;
+      const guardedEngine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          spawnGuard: new SpawnGuard(
+            {
+              maxPerWindow: 8,
+              maxPerWorkspacePerWindow: 8,
+              windowMs: 6000,
+            },
+            () => nowMs,
+          ),
+        },
+      );
+
+      let rejected = 0;
+      for (let i = 0; i < 44; i++) {
+        try {
+          await guardedEngine.spawnAgent({
+            repo: "brainlayer",
+            model: "codex",
+            cli: "codex",
+            prompt: "Fix gap F",
+            workspace: "workspace:brainlayer",
+          });
+        } catch (error) {
+          expect(error).toBeInstanceOf(SpawnRateLimitedError);
+          rejected++;
+        }
+      }
+
+      expect(rejected).toBe(36);
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(8);
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      guardedEngine.dispose();
+    });
+
     it("creates a cmux surface and returns agent handle", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
