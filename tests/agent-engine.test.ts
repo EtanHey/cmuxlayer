@@ -197,7 +197,7 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).toHaveBeenCalled();
     });
 
-    it("launches Claude via repoGolem launcher", async () => {
+    it("launches Claude via repoGolem launcher with requested model tier", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "sonnet",
@@ -210,7 +210,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("brainlayerClaude -s");
+      expect(launchCmd).toBe("brainlayerClaude -s -m sonnet");
     });
 
     it("writes initial state file", async () => {
@@ -1785,9 +1785,51 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("adds safe model flags for recognized launcher model aliases", () => {
+    expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
+      "brainlayerClaude -s -m sonnet",
+    );
+    expect(
+      buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
+    ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
+    expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
+      "brainlayerCodex -s",
+    );
+    expect(buildLaunchCommand("cursor", "cmuxlayer", "sonnet")).toBe(
+      "cmuxlayerCursor -s -m sonnet-4",
+    );
+  });
+
+  it("preserves launcher defaults when model is omitted", () => {
+    expect(buildLaunchCommand("claude", "brainlayer", undefined)).toBe(
+      "brainlayerClaude -s",
+    );
+  });
+
+  it("omits unsafe or unrecognized model values instead of passing them raw", () => {
+    expect(
+      buildLaunchCommand("claude", "brainlayer", "Opus 4.8 (1M context)"),
+    ).toBe("brainlayerClaude -s");
+    expect(buildLaunchCommand("codex", "brainlayer", "gpt-5.5 xhigh")).toBe(
+      "brainlayerCodex -s",
+    );
+    expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
+      "brainlayerCodex -s",
+    );
+  });
+
   it("uses cd + env vars + raw command for gemini", () => {
     expect(buildLaunchCommand("gemini", "voicelayer")).toBe(
       "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
+    );
+  });
+
+  it("adds safe --model flags for recognized raw CLI model aliases", () => {
+    expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
+      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --model gemini-2.5-pro",
+    );
+    expect(buildLaunchCommand("kiro", "golems", "sonnet")).toBe(
+      "cd ~/Gits/golems && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli --model sonnet",
     );
   });
 

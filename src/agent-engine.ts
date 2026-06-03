@@ -6,7 +6,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
-import { sanitizeTerminalInput } from "./sanitize.js";
+import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import {
   resolveAgentRoute as resolvePublicAgentRoute,
@@ -263,21 +263,81 @@ function sanitizeRepoName(repo: string): string {
   return safeRepo;
 }
 
-export function buildLaunchCommand(cli: CliType, repo: string): string {
+const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
+  claude: {
+    opus: "opus",
+    sonnet: "sonnet",
+    haiku: "haiku",
+  },
+  codex: {
+    "gpt-5": "gpt-5",
+    "gpt-5-codex": "gpt-5-codex",
+    "gpt-5.3": "gpt-5.3",
+    "gpt-5.3-codex": "gpt-5.3-codex",
+    "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.5-mini": "gpt-5.5-mini",
+  },
+  cursor: {
+    codex: "gpt-5",
+    "gpt-5": "gpt-5",
+    "gpt-5.2-codex-high": "gpt-5.2-codex-high",
+    "gpt-5.2-codex-xhigh": "gpt-5.2-codex-xhigh",
+    sonnet: "sonnet-4",
+    "sonnet-4": "sonnet-4",
+    "sonnet-4-thinking": "sonnet-4-thinking",
+  },
+  gemini: {
+    "gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+    "gemini-3.1-pro": "gemini-3.1-pro",
+  },
+  kiro: {
+    opus: "opus",
+    sonnet: "sonnet",
+    haiku: "haiku",
+  },
+};
+
+function resolveModelFlag(cli: CliType, model?: string): string | null {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized || !isSafeShellToken(normalized)) {
+    return null;
+  }
+
+  const mapped = MODEL_FLAG_ALIASES[cli][normalized];
+  if (!mapped || !isSafeShellToken(mapped)) {
+    return null;
+  }
+
+  return mapped;
+}
+
+export function buildLaunchCommand(
+  cli: CliType,
+  repo: string,
+  model?: string,
+): string {
   const safeRepo = sanitizeRepoName(repo);
+  const modelFlag = resolveModelFlag(cli, model);
+  const launcherModelArgs = modelFlag ? ` -m ${modelFlag}` : "";
+  const rawModelArgs = modelFlag ? ` --model ${modelFlag}` : "";
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${safeRepo}Claude -s`;
+      return `${safeRepo}Claude -s${launcherModelArgs}`;
     case "codex":
-      return `${safeRepo}Codex -s`;
+      return `${safeRepo}Codex -s${launcherModelArgs}`;
     case "gemini":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini${rawModelArgs}`;
     case "kiro":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli`;
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${safeRepo}Cursor -s`;
+      return `${safeRepo}Cursor -s${launcherModelArgs}`;
   }
 }
 
@@ -1107,7 +1167,7 @@ export class AgentEngine {
     this.registry.set(agentId, record);
 
     // 3. Send launch command
-    const launchCmd = buildLaunchCommand(params.cli, params.repo);
+    const launchCmd = buildLaunchCommand(params.cli, params.repo, params.model);
     try {
       await this.sendLaunchCommand(surface.surface, surface.workspace, launchCmd);
     } catch (error) {
