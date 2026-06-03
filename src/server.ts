@@ -1826,7 +1826,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Send text input to a terminal surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
+    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxLayer resolves the current backing surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
@@ -1917,7 +1917,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 7. send_command
   server.tool(
     "send_command",
-    "Atomically send a command and press return on the same surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
+    "Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command. For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
     {
       surface: z.string().describe("Target surface ref"),
       command: z
@@ -2041,7 +2041,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 9. read_screen
   server.tool(
     "read_screen",
-    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content).",
+    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content). Do not treat read_screen alone as visual confirmation of the highlighted row in interactive terminal menus.",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -2692,7 +2692,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn an AI agent in a new terminal surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
+      "Spawn a managed AI agent in a new terminal surface and return an agent_id for future routing. Use send_to and wait_for with that agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
       {
         repo: z
           .string()
@@ -3095,7 +3095,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 15. list_agents
     server.tool(
       "list_agents",
-      "List all agents with optional filters by state, repo, or model.",
+      "List public agent handles with optional filters by state, repo, or model. Use these agent_id values with send_to and wait_for; use get_agent_state only when you need internal route/session details.",
       {
         state: z
           .enum([
@@ -3197,7 +3197,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Send text input to an agent by `agent_id`. Resolves the backing surface internally so clients do not need pane or surface references.",
+      "Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available.",
       {
         ...SendToArgsSchema.shape,
         press_enter: SendToArgsSchema.shape.press_enter.describe(
@@ -3240,7 +3240,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 18. send_to_agent
     server.tool(
       "send_to_agent",
-      "Deprecated for client integrations: use `send_to` instead. Internal/advanced path for sending text input to an agent in `ready` or `idle` state.",
+      "Deprecated for client integrations: use send_to instead. Internal/advanced path for sending text input to an agent in ready or idle state.",
       {
         ...SendToArgsSchema.shape,
         press_enter: SendToArgsSchema.shape.press_enter.describe(
