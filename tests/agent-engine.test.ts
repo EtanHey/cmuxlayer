@@ -1793,7 +1793,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
     ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
-      "brainlayerCodex -s -m gpt-5.3-codex-spark",
+      "brainlayerCodex -s",
     );
     expect(buildLaunchCommand("cursor", "cmuxlayer", "sonnet")).toBe(
       "cmuxlayerCursor -s -m sonnet-4",

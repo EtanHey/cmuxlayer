@@ -270,7 +270,6 @@ const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
     haiku: "haiku",
   },
   codex: {
-    codex: "gpt-5.3-codex-spark",
     "gpt-5": "gpt-5",
     "gpt-5-codex": "gpt-5-codex",
     "gpt-5.3": "gpt-5.3",

@@ -367,7 +367,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s -m gpt-5.3-codex-spark") {
+        if (lastSentText === "voicelayerCodex -s") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -380,7 +380,7 @@ describe("agent lifecycle tool handlers", () => {
               lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                ? "$ voicelayerCodex -s -m gpt-5.3-codex-spark"
+                ? "$ voicelayerCodex -s"
                 : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -509,7 +509,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === "voicelayerCodex -s -m gpt-5.3-codex-spark") {
+        if (lastSentText === "voicelayerCodex -s") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -521,7 +521,7 @@ describe("agent lifecycle tool handlers", () => {
             text:
               lastSentText === ""
                 ? "$ "
-                : "$ voicelayerCodex -s -m gpt-5.3-codex-spark\ncodex> ",
+                : "$ voicelayerCodex -s\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),
