@@ -16,3 +16,7 @@ export function sanitizeTerminalInput(text: string): string {
   result = result.replace(/[\x80-\x9f]/g, "");
   return result;
 }
+
+export function isSafeShellToken(text: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(text);
+}
