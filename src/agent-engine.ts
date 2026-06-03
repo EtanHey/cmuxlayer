@@ -48,6 +48,7 @@ import {
 } from "./layout-policy.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import { SpawnGuard } from "./spawn-guard.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -72,6 +73,7 @@ export interface SpawnAgentResult {
 
 export interface AgentEngineOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  spawnGuard?: SpawnGuard;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -338,6 +340,7 @@ export class AgentEngine {
   private registry: AgentRegistry;
   private client: AgentEngineClient;
   private spawnPreflight: (params: SpawnAgentParams) => Promise<void>;
+  private spawnGuard: SpawnGuard;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -363,6 +366,7 @@ export class AgentEngine {
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
+    this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params) => {
@@ -1058,6 +1062,8 @@ export class AgentEngine {
       parentAgentId = params.parent_agent_id;
       parentAgent = parent;
     }
+
+    this.spawnGuard.check(params.workspace);
 
     await this.spawnPreflight(params);
 
