@@ -19,6 +19,7 @@ export interface CmuxWorkspace {
 }
 
 export interface CmuxSurface {
+  id?: string;
   ref: string;
   title: string;
   type: "terminal" | "browser";
@@ -26,14 +27,17 @@ export interface CmuxSurface {
   selected: boolean;
   workspace_ref?: string;
   pane_ref?: string;
+  pane_id?: string;
 }
 
 export interface CmuxPane {
+  id?: string;
   ref: string;
   index: number;
   focused: boolean;
   surface_count: number;
   surface_refs: string[];
+  surface_ids?: string[];
   selected_surface_ref?: string;
   pixel_frame?: {
     x: number;
