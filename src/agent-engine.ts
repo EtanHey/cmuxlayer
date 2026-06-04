@@ -49,6 +49,7 @@ import {
 import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { SpawnGuard } from "./spawn-guard.js";
+import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -204,6 +205,7 @@ interface AgentEngineClient {
   selectWorkspace(workspace: string): Promise<void>;
   listPanes(opts?: { workspace?: string }): Promise<{
     workspace_ref?: string;
+    window_ref?: string;
     panes: CmuxPane[];
   }>;
   listPaneSurfaces(opts?: {
@@ -472,7 +474,7 @@ export class AgentEngine {
 
     try {
       const panes = await this.client.listPanes({ workspace });
-      const paneSurfaces = await Promise.all(
+      const rawPaneSurfaces = await Promise.all(
         panes.panes.map(async (pane) => {
           const ps = await this.client.listPaneSurfaces({
             workspace,
@@ -480,6 +482,14 @@ export class AgentEngine {
           });
           return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
         }),
+      );
+      const paneSurfaces = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawPaneSurfaces,
+        {
+          workspace_ref: panes.workspace_ref ?? workspace,
+          window_ref: panes.window_ref,
+        },
       );
       const parentAgent = context?.parentAgent ?? null;
       const liveSurfaceIds = new Set(

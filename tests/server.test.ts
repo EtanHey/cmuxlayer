@@ -718,18 +718,22 @@ describe("tool handler integration", () => {
             panes: [
               {
                 ref: "pane:left",
+                id: "pane-left-id",
                 index: 0,
                 focused: false,
                 surface_count: 1,
                 surface_refs: ["surface:left"],
+                surface_ids: ["surface-left-id"],
                 pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
               },
               {
                 ref: "pane:right",
+                id: "pane-right-id",
                 index: 1,
                 focused: true,
                 surface_count: 1,
                 surface_refs: ["surface:right"],
+                surface_ids: ["surface-right-id"],
                 pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
               },
             ],
@@ -745,11 +749,22 @@ describe("tool handler integration", () => {
             window_ref: "window:1",
             surfaces: [
               {
-                ref: pane === "pane:left" ? "surface:left" : "surface:right",
-                title: pane,
+                id: "surface-left-id",
+                pane_id: "pane-left-id",
+                ref: "surface:left",
+                title: "left",
                 type: "terminal",
                 index: 0,
                 selected: true,
+              },
+              {
+                id: "surface-right-id",
+                pane_id: "pane-right-id",
+                ref: "surface:right",
+                title: "right",
+                type: "terminal",
+                index: 1,
+                selected: false,
               },
             ],
           }),
@@ -2379,6 +2394,150 @@ describe("tool handler integration", () => {
     expect(parsed.role).toBe("worker");
     expect(parsed.placement).toBe("surface");
     expect(parsed.direction).toBeNull();
+  });
+
+  it("new_split with role=worker partitions unfiltered surface lists by pane membership", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-unfiltered-surfaces");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:worker-1",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "existing worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-05-25T12:00:00.000Z",
+      updated_at: "2026-05-25T12:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "worker",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                id: "pane-left-id",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:orc"],
+                surface_ids: ["surface-orc-id"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right",
+                id: "pane-right-id",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker-1"],
+                surface_ids: ["surface-worker-id"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            surfaces: [
+              {
+                id: "surface-orc-id",
+                pane_id: "pane-left-id",
+                ref: "surface:orc",
+                title: "orc",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+              {
+                id: "surface-worker-id",
+                pane_id: "pane-right-id",
+                ref: "surface:worker-1",
+                title: "worker",
+                type: "terminal",
+                index: 1,
+                selected: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:unexpected-split",
+            pane: "pane:third",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:right"]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.placement).toBe("surface");
   });
 
   it("new_split ignores disk-only role state when no live lifecycle registry is available", async () => {

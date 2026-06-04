@@ -9,6 +9,7 @@ import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -109,13 +110,20 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
             panes: await this.client.listPanes({ workspace: ws.ref }),
           })),
         );
-        const surfaceGroups = await Promise.all(
-          panesByWorkspace.flatMap(({ ref, panes }) =>
-            panes.panes.map((pane) =>
-              this.client.listPaneSurfaces({ workspace: ref, pane: pane.ref }),
-            ),
-          ),
+        const surfaceGroupsByWorkspace = await Promise.all(
+          panesByWorkspace.map(async ({ ref, panes }) => {
+            const rawGroups = await Promise.all(
+              panes.panes.map((pane) =>
+                this.client.listPaneSurfaces({ workspace: ref, pane: pane.ref }),
+              ),
+            );
+            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+              workspace_ref: panes.workspace_ref ?? ref,
+              window_ref: panes.window_ref,
+            });
+          }),
         );
+        const surfaceGroups = surfaceGroupsByWorkspace.flat();
         return surfaceGroups.flatMap((group) =>
           group.surfaces.map((surface) => ({
             ...surface,

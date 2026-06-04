@@ -58,6 +58,7 @@ import type {
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -1336,21 +1337,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             new Set(columnIndex.values()).size,
           );
         }
-        const surfaceGroups = await Promise.all(
-          panesByWorkspace.flatMap(({ workspaceRef, panes }) =>
-            panes.panes.map(async (pane) => {
-              const group = await client.listPaneSurfaces({
-                workspace: workspaceRef,
-                pane: pane.ref,
-              });
-              return {
-                ...group,
-                workspace_ref: group.workspace_ref ?? workspaceRef,
-                pane_ref: group.pane_ref ?? pane.ref,
-              };
-            }),
-          ),
+        const surfaceGroupsByWorkspace = await Promise.all(
+          panesByWorkspace.map(async ({ workspaceRef, panes }) => {
+            const rawGroups = await Promise.all(
+              panes.panes.map(async (pane) => {
+                const group = await client.listPaneSurfaces({
+                  workspace: workspaceRef,
+                  pane: pane.ref,
+                });
+                return {
+                  ...group,
+                  workspace_ref: group.workspace_ref ?? workspaceRef,
+                  pane_ref: group.pane_ref ?? pane.ref,
+                };
+              }),
+            );
+            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+              workspace_ref: panes.workspace_ref ?? workspaceRef,
+              window_ref: panes.window_ref,
+            });
+          }),
         );
+        const surfaceGroups = surfaceGroupsByWorkspace.flat();
         const uniqueSurfaceEntries: Array<{
           group: {
             workspace_ref: string;
@@ -1566,7 +1574,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           const panes = await client.listPanes({ workspace: targetWorkspace });
-          const paneSurfaces = await Promise.all(
+          const rawPaneSurfaces = await Promise.all(
             panes.panes.map(async (pane) => {
               const ps = await client.listPaneSurfaces({
                 workspace: targetWorkspace,
@@ -1576,6 +1584,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // can match panes to their surfaces for role-based placement.
               return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
             }),
+          );
+          const paneSurfaces = partitionPaneSurfacesByMembership(
+            panes.panes,
+            rawPaneSurfaces,
+            {
+              workspace_ref: panes.workspace_ref ?? targetWorkspace,
+              window_ref: panes.window_ref,
+            },
           );
           const liveSurfaceIds = new Set(
             paneSurfaces.flatMap((group) =>
@@ -2326,11 +2342,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             identified?.focused?.workspace_ref;
           if (workspace) {
             const panes = await client.listPanes({ workspace });
-            const paneSurfaces = await Promise.all(
+            const rawPaneSurfaces = await Promise.all(
               panes.panes.map(async (pane) => {
                 const ps = await client.listPaneSurfaces({ workspace, pane: pane.ref });
                 return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
               }),
+            );
+            const paneSurfaces = partitionPaneSurfacesByMembership(
+              panes.panes,
+              rawPaneSurfaces,
+              {
+                workspace_ref: panes.workspace_ref ?? workspace,
+                window_ref: panes.window_ref,
+              },
             );
             const workerSurfaceIds = new Set(
               stateMgr.listStates().map((record) => record.surface_id),
@@ -2480,13 +2504,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes: await client.listPanes({ workspace: ws.ref }),
           })),
         );
-        const surfaceGroups = await Promise.all(
-          panesByWorkspace.flatMap(({ ref, panes }) =>
-            panes.panes.map((p) =>
-              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
-            ),
-          ),
+        const surfaceGroupsByWorkspace = await Promise.all(
+          panesByWorkspace.map(async ({ ref, panes }) => {
+            const rawGroups = await Promise.all(
+              panes.panes.map((p) =>
+                client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
+              ),
+            );
+            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+              workspace_ref: panes.workspace_ref ?? ref,
+              window_ref: panes.window_ref,
+            });
+          }),
         );
+        const surfaceGroups = surfaceGroupsByWorkspace.flat();
         return surfaceGroups.flatMap((group) =>
           group.surfaces.map((surface) => ({
             ...surface,

@@ -574,6 +574,85 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
+    it("partitions unfiltered surface lists by pane membership when placing spawned agents", async () => {
+      engine.dispose();
+      const surfaceProvider = async () => liveSurfaces;
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        roleSurfaceIdsProvider: () => ({
+          orchestrator: new Set(["surface:orc"]),
+          ic: new Set(),
+          worker: new Set(["surface:worker-shell"]),
+        }),
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            id: "pane-left-id",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:orc"],
+            surface_ids: ["surface-orc-id"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            id: "pane-right-id",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:worker-shell"],
+            surface_ids: ["surface-worker-id"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        surfaces: [
+          {
+            id: "surface-orc-id",
+            pane_id: "pane-left-id",
+            ref: "surface:orc",
+            title: "orc",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+          {
+            id: "surface-worker-id",
+            pane_id: "pane-right-id",
+            ref: "surface:worker-shell",
+            title: "worker",
+            type: "terminal",
+            index: 1,
+            selected: false,
+          },
+        ],
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
     it("does not abort placement when an existing parent or sibling has an unclassifiable role", async () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const parent = makeRecord({
