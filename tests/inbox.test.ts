@@ -10,8 +10,10 @@ import {
   monitorAlive,
   pendingDispatches,
   readInbox,
+  recommendedCodexWatch,
   recommendedMonitorCommand,
   replayUndelivered,
+  surfacedLogPath,
   writeHeartbeat,
 } from "../src/inbox.js";
 
@@ -115,5 +117,20 @@ describe("inbox write-channel", () => {
   it("recommendedMonitorCommand tails the agent's inbox (events only, no chatter)", () => {
     const cmd = recommendedMonitorCommand("a9", opts);
     expect(cmd).toBe(`tail -n0 -F ${inboxPath("a9", opts)}`);
+  });
+
+  it("Codex watch: bg-tails the inbox into a surfaced log (capture; poll-on-turn to consume)", () => {
+    const cmd = recommendedCodexWatch("a10", opts);
+    expect(cmd).toBe(
+      `tail -n0 -F ${inboxPath("a10", opts)} >> ${surfacedLogPath("a10", opts)}`,
+    );
+  });
+
+  it("Codex consume path reuses the universal lib (replayUndelivered + ack, no harness code)", () => {
+    dispatch("a11", { from: "orc", task: "codex task", id: "c1" }, opts);
+    // poll-on-turn: read what's undelivered, act, ack — same primitives as Claude
+    expect(replayUndelivered("a11", opts).map((m) => m.id)).toEqual(["c1"]);
+    ack("a11", "c1", "done", opts);
+    expect(replayUndelivered("a11", opts)).toHaveLength(0);
   });
 });
