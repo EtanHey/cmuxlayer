@@ -40,6 +40,12 @@ import {
   formatResync,
 } from "./format.js";
 import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import {
+  applyHarnessState,
+  harnessJsonlEnabled,
+  loadHarnessSession,
+  type Harness,
+} from "./harness-session.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import {
   canInferAgentRole,
@@ -489,6 +495,34 @@ function pickLatestSurfaceModel(
   });
 
   return matches[0]?.model ?? null;
+}
+
+const JSONL_HARNESSES = new Set<Harness>(["claude", "codex", "cursor"]);
+
+// AIDEV-NOTE: P2 — real agent state from the harness JSONL (the sterile read channel).
+// Flag-gated (CMUXLAYER_HARNESS_JSONL=1); screen-parser is the fallback. Resolves the
+// surface's cli + cli_session_id from the in-memory state cache, then loads the
+// transcript by sessionId (no cwd needed — the id is unique). Returns null whenever the
+// flag is off, the harness is unsupported, or no session file is found → screen values stand.
+function resolveHarnessStateForSurface(
+  stateMgr: StateManager,
+  surfaceRef: string,
+): ReturnType<typeof loadHarnessSession> {
+  if (!harnessJsonlEnabled()) return null;
+  const matches = stateMgr
+    .listStates()
+    .filter((record) => record.surface_id === surfaceRef)
+    .sort((a, b) => {
+      if (b.version !== a.version) return b.version - a.version;
+      return (
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+    });
+  const record = matches[0];
+  const cli = record?.cli as Harness | undefined;
+  const sessionId = record?.cli_session_id ?? null;
+  if (!cli || !sessionId || !JSONL_HARNESSES.has(cli)) return null;
+  return loadHarnessSession(cli, sessionId);
 }
 
 export interface TargetIdentity {
@@ -946,10 +980,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lines: 30,
       });
       const text = typeof screen === "string" ? screen : (screen.text ?? "");
-      const parsed = enrichParsedScreen(
-        parseScreen(text),
-        text,
-        pickLatestSurfaceModel(stateMgr, surface),
+      const parsed = applyHarnessState(
+        enrichParsedScreen(
+          parseScreen(text),
+          text,
+          pickLatestSurfaceModel(stateMgr, surface),
+        ),
+        resolveHarnessStateForSurface(stateMgr, surface),
       );
       return { text, parsed };
     } catch {
@@ -2322,10 +2359,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           scrollback: args.scrollback,
         });
         const surface = await findSurfaceByRef(result.surface, args.workspace);
-        const parsed = enrichParsedScreen(
-          parseScreen(result.text),
-          result.text,
-          pickLatestSurfaceModel(stateMgr, result.surface),
+        const parsed = applyHarnessState(
+          enrichParsedScreen(
+            parseScreen(result.text),
+            result.text,
+            pickLatestSurfaceModel(stateMgr, result.surface),
+          ),
+          resolveHarnessStateForSurface(stateMgr, result.surface),
         );
         // F7: surface column + workspace column_count so sprawl is visible on
         // every read. Best-effort — omitted (null) if geometry is unavailable.
@@ -3941,10 +3981,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ),
                   ),
                 ]);
-                screenData = enrichParsedScreen(
-                  parseScreen(screen.text),
-                  screen.text,
-                  pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                screenData = applyHarnessState(
+                  enrichParsedScreen(
+                    parseScreen(screen.text),
+                    screen.text,
+                    pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                  ),
+                  resolveHarnessStateForSurface(stateMgr, agent.surface_id),
                 );
               } catch {
                 // Surface may be closed, unavailable, or timed out

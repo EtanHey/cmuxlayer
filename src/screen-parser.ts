@@ -4,22 +4,33 @@ import type {
   ParsedScreenStatus,
 } from "./types.js";
 
-// AIDEV-NOTE: DEFAULT context window sizes per model family. All Claude models default to 200K.
-// The 1M tier is detected via "(1M" suffix in the status line or inferred from token_count > 200K.
+// AIDEV-NOTE: DEFAULT context window sizes per model family. Verified numbers (researcher,
+// BrainLayer brainbar-8a3da79c-159, 2026-06-04) — do NOT guess/round. This is the SCREEN-PARSER
+// FALLBACK only: when the harness JSONL is available it carries the real per-session window
+// (esp. Codex's model_context_window) and supersedes this table — see harness-session.ts +
+// docs/harness-jsonl-field-map.md. All Claude models default to 200K; the 1M tier is detected
+// via "(1M" suffix or token_count > 200K (Claude-only — it's the Claude Max/standard tier).
 // ORDER MATTERS: resolveModelMax uses substring matching — longer keys must come first.
 export const MODEL_MAX_TOKENS: Record<string, number> = {
-  // Claude models — ALL default to 200K (1M is the Max-plan tier, detected separately)
+  // Claude models — ALL default to 200K (1M is the Max-plan/standard tier, detected separately)
   opus: 200_000,
   sonnet: 200_000,
   haiku: 200_000,
-  // GPT / Codex models
-  "gpt-5": 1_000_000,
+  // OpenAI GPT-5 / Codex family — 400K TOTAL window (272K input + 128K output). NOT 1M.
+  "gpt-5": 400_000,
+  // OpenAI GPT-4 family (gpt-4o, gpt-4-turbo)
   "gpt-4": 128_000,
-  // Gemini models
-  "gemini-3": 1_000_000,
-  "gemini-2": 1_000_000,
-  "gemini-1": 1_000_000,
+  // Google Gemini 2.x / 3.x — 1,048,576 (not a round 1M, not 2M)
+  "gemini-3": 1_048_576,
+  "gemini-2": 1_048_576,
+  "gemini-1": 1_048_576,
 };
+
+/** True for Claude model strings — the only family with the 200K→1M tier transition. */
+function isClaudeModel(model: string | null): boolean {
+  if (!model) return false;
+  return /opus|sonnet|haiku|claude/i.test(model);
+}
 
 // Pre-sorted by key length descending for deterministic longest-match-first.
 const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
@@ -45,17 +56,22 @@ export function resolveModelMax(model: string | null): number | null {
 
 /**
  * Smart context window inference. Uses three signals:
- * 1. Explicit "(1M" in screen text → 1M (Max plan confirmed)
- * 2. token_count > default window → must be 1M (can't exceed 200K on 200K tier)
- * 3. Fall back to resolveModelMax() default
+ * 1. Explicit "(1M" in screen text → 1M (Claude Max/standard tier confirmed)
+ * 2. CLAUDE-ONLY: token_count > 200K default → 1M (Claude's only larger tier). Non-Claude
+ *    models have FIXED windows (gpt-5=400K, gemini=1.048M, gpt-4=128K) and must NOT be bumped.
+ * 3. Fall back to resolveModelMax() default.
+ * NOTE: this is the FALLBACK path; harness-session.ts (JSONL) carries the real per-session
+ * window when available and should be preferred by callers.
  */
 export function inferContextWindow(
   model: string | null,
   tokenCount: number | null,
   rawText: string,
 ): number | null {
-  // Signal 1: explicit "(1M" in the status line should win even if model parsing fails.
-  if (/\(1M\b/i.test(rawText)) return 1_000_000;
+  // Signal 1: explicit "(1M" in the status line (Claude's "(1M context)" marker) wins even
+  // if model parsing fails. CASE-SENSITIVE uppercase M on purpose: Codex's working timer
+  // "(1m 12s • esc to interrupt)" uses lowercase m and must NOT be read as a 1M window.
+  if (/\(1M\b/.test(rawText)) return 1_000_000;
 
   const defaultMax = resolveModelMax(model);
   const looksLikeClaudePane =
@@ -67,8 +83,15 @@ export function inferContextWindow(
     return null;
   }
 
-  // Signal 2: token count exceeds default → must be a larger tier
-  if (tokenCount !== null && tokenCount > defaultMax) return 1_000_000;
+  // Signal 2: Claude-only 200K→1M upgrade. A Claude pane can't exceed 200K on the base tier,
+  // so more tokens means the Max/standard 1M tier. Non-Claude windows are fixed — no bump.
+  if (
+    (isClaudeModel(model) || looksLikeClaudePane) &&
+    tokenCount !== null &&
+    tokenCount > defaultMax
+  ) {
+    return 1_000_000;
+  }
 
   return defaultMax;
 }
@@ -380,7 +403,8 @@ function parseCursorScaledTokenCount(raw: string, suffix?: string): number {
 }
 
 function parseCursorTokenCount(text: string): number | null {
-  const m = text.match(CURSOR_TOKEN_LINE_RE) ?? text.match(CURSOR_ACTIVITY_TOKEN_RE);
+  const m =
+    text.match(CURSOR_TOKEN_LINE_RE) ?? text.match(CURSOR_ACTIVITY_TOKEN_RE);
   if (!m) return null;
   const value = parseCursorScaledTokenCount(m[1], m[2]);
   return Number.isFinite(value) ? value : null;
@@ -478,7 +502,8 @@ function inferStatus(
 
   if (
     agentType === "gemini" &&
-    (/Gemini CLI/i.test(text) && /Thinking/i.test(text))
+    /Gemini CLI/i.test(text) &&
+    /Thinking/i.test(text)
   ) {
     return "working";
   }

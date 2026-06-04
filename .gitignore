@@ -6,3 +6,7 @@ docs.local/
 # Local MCP config — may contain secrets (cyberMaster H4 2026-04-23)
 .mcp.json
 .mcp.json.local
+
+# Local agent scratch + settings
+claude.scratchpad.md
+.claude/
