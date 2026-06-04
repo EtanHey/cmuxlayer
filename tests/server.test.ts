@@ -1484,6 +1484,21 @@ describe("tool handler integration", () => {
     expect(parsed.surface).toBe("surface:6");
   });
 
+  it("send_input background reads 'delivering' (not FAILED) while in flight (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:7", text: "hi", background: true },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.status).toBe("delivering");
+    expect(typeof data.delivery_id).toBe("string");
+    expect(result.content[0].text).toContain("delivering to surface:7");
+    expect(result.content[0].text).not.toContain("FAILED");
+  });
+
   it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
     const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input");
     rmSync(stateDir, { recursive: true, force: true });

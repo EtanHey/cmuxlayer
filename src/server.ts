@@ -2117,8 +2117,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             status: record.status,
           };
           return okFormatted(
-            formatDelivery("send_input", { ...identity, delivered: false }) +
-              ` (background ${record.delivery_id})`,
+            formatDelivery("send_input", {
+              ...identity,
+              delivered: false,
+              pending: true,
+            }) + ` (background ${record.delivery_id})`,
             data,
           );
         }

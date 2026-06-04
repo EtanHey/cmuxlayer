@@ -223,6 +223,10 @@ export function formatDelivery(
     model?: string | null;
     agent_type?: string | null;
     delivered: boolean;
+    // true => still in flight (e.g. background send); renders "delivering to"
+    // instead of the delivered/failed binary, so the line never contradicts a
+    // pending status.
+    pending?: boolean;
     submit_verified?: boolean | null;
   },
 ): string {
@@ -236,9 +240,14 @@ export function formatDelivery(
     (v): v is string => typeof v === "string" && v.length > 0,
   );
   const parens = meta.length > 0 ? ` (${meta.join(" \u00b7 ")})` : "";
-  const head = info.delivered
-    ? `delivered to ${label}${parens}`
-    : `delivery FAILED to ${label}${parens}`;
+  let head: string;
+  if (info.pending) {
+    head = `delivering to ${label}${parens}`;
+  } else if (info.delivered) {
+    head = `delivered to ${label}${parens}`;
+  } else {
+    head = `delivery FAILED to ${label}${parens}`;
+  }
   let submit = "";
   if (info.submit_verified === true) submit = " \u2713 submit_verified";
   else if (info.submit_verified === false)
