@@ -582,3 +582,44 @@ export function parseScreen(text: string): ParsedScreenResult {
 
   return result;
 }
+
+// AIDEV-NOTE: read_screen leanness — strip the terminal chrome that bloats output without
+// adding signal: box-drawing rule/separator lines and per-harness status-bar art. Returns
+// the last `maxLines` of meaningful content. The structured fields (status/tokens/ctx/response)
+// already carry the real signal; this is only for a compact human-readable screen preview.
+const RULE_LINE_RE = /^[\s─-╿▀-▟\-=_~·•—–]+$/;
+const CHROME_LINE_RES: RegExp[] = [
+  /🤖|💰|⏱/, // model/cost/timer status line
+  /esc to interrupt/i,
+  /bypass permissions on/i,
+  /\d+%\s+left\b/i, // Codex context footer
+  /(?:^|\s)(?:Auto|Agent)\s*·\s*\d/i, // Cursor status strip
+  /→\s*Add a follow-up/i,
+  /ctrl\+c to stop/i,
+  /ctrl\+r to review edits/i,
+  /\/ commands · @ files/i,
+  /^[⬡⬢✻✢✳✶●⏺]\s/, // spinner/status glyphs at line start
+];
+
+/**
+ * Compact, de-chromed screen preview: drops box-drawing rule lines and status-bar art,
+ * collapses blank runs, and returns the last `maxLines` meaningful lines. Used by read_screen
+ * for a lean default view (full raw text is available via raw=true).
+ */
+export function cleanScreenText(text: string, maxLines = 8): string {
+  const out: string[] = [];
+  for (const rawLine of normalizeText(text).split("\n")) {
+    const line = rawLine.replace(/\s+$/, "");
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+    if (RULE_LINE_RE.test(trimmed)) continue;
+    if (CHROME_LINE_RES.some((re) => re.test(trimmed))) continue;
+    out.push(line);
+  }
+  while (out.length > 0 && out[0] === "") out.shift();
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.slice(-maxLines).join("\n");
+}
