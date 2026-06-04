@@ -62,6 +62,9 @@ export class SocketJsonRpcTransport implements Transport {
     if (this.started) {
       throw new Error("SocketJsonRpcTransport already started");
     }
+    if (this.closed) {
+      throw new Error("SocketJsonRpcTransport is closed");
+    }
     this.started = true;
     this.socket.on("data", this.onData);
     this.socket.on("error", this.onError);
@@ -226,12 +229,14 @@ function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(path);
     let settled = false;
+    const ignoreLateError = () => {};
     const settle = (value: "live" | "missing" | "stale") => {
       if (settled) {
         return;
       }
       settled = true;
       socket.removeAllListeners();
+      socket.on("error", ignoreLateError);
       socket.destroy();
       resolve(value);
     };

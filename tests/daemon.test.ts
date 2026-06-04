@@ -279,6 +279,16 @@ describe("CmuxLayerDaemon", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("rejects start after the socket transport has been closed", async () => {
+    const socket = new net.Socket();
+    const transport = new SocketJsonRpcTransport(socket);
+
+    await transport.close();
+
+    await expect(transport.start()).rejects.toThrow(/closed/i);
+    socket.destroy();
+  });
+
   it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const context = createServerContext({
@@ -627,7 +637,11 @@ describe("CmuxLayerDaemon", () => {
   it("does not unlink a live daemon socket when another daemon is running", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("live-socket");
+    const acceptedSockets = new Set<net.Socket>();
     const liveServer = net.createServer((socket) => {
+      acceptedSockets.add(socket);
+      socket.on("error", () => {});
+      socket.on("close", () => acceptedSockets.delete(socket));
       socket.end("live\n");
     });
     const daemon = new CmuxLayerDaemon({
@@ -643,6 +657,9 @@ describe("CmuxLayerDaemon", () => {
       await expect(readOnce(path)).resolves.toBe("live\n");
     } finally {
       await daemon.shutdown().catch(() => {});
+      for (const socket of acceptedSockets) {
+        socket.destroy();
+      }
       await new Promise<void>((resolve) => liveServer.close(() => resolve()));
     }
   });
