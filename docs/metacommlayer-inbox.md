@@ -44,6 +44,14 @@ The file watch is sub-second; end-to-end latency = (time until the agent's curre
 cadence — fine for coordination, not for sub-second control.
 
 ## Per-harness status
-- **Claude:** native Monitor ✅ (this build).
-- **Codex:** no native Monitor → background-bash `tail -f`/poll surfaces the line into the session (NEXT).
-- **Cursor:** TBD (bg-bash or TUI).
+- **Claude:** native Monitor ✅ — true async wake-up. `recommendedMonitorCommand()`, `persistent:true`.
+- **Codex:** **no native Monitor → no async wake-up.** Honest finding: the inbox FILE is already the
+  durable queue, so the load-bearing requirement is a **poll cadence**, NOT a bg-tail. Codex pattern =
+  **poll-on-turn**: at the start of each turn (e.g. each loop tick) call `replayUndelivered(self)`,
+  act, `ack()`. This reuses the universal lib with zero Codex-specific code. `recommendedCodexWatch()`
+  (bg-tail → `inbox.surfaced.log`) is OPTIONAL continuous capture only — it does NOT wake an idle
+  Codex. **Residual:** a truly-idle, non-looping Codex still needs a turn trigger; that one case is
+  where `send_input` (the kept fallback) remains required. Deterministic dispatch for a *looping*
+  Codex is fully covered (latency = next tick).
+- **Cursor:** same as Codex — no native async Monitor; poll-on-turn via `replayUndelivered`. TBD which
+  Cursor surface/loop drives the cadence.

@@ -237,3 +237,24 @@ export function recommendedMonitorCommand(
 ): string {
   return `tail -n0 -F ${inboxPath(agentId, opts)}`;
 }
+
+/** Continuous-capture log for harnesses without a native Monitor (Codex/Cursor). */
+export function surfacedLogPath(agentId: string, opts?: InboxOpts): string {
+  return join(agentDir(agentId, opts), "inbox.surfaced.log");
+}
+
+/**
+ * Codex/Cursor watch command (no native Monitor → no async wake-up). Background-tails the inbox
+ * into a surfaced log the agent re-reads each turn. IMPORTANT (honest limitation): this gives
+ * continuous CAPTURE, not async wake-up — Codex/Cursor only ACT when they take a turn. The durable
+ * queue is the inbox file itself, so the surfaced log is OPTIONAL; the load-bearing requirement is
+ * a POLL cadence: call replayUndelivered() at the start of each turn (e.g. each loop tick) and
+ * ack() what you handle. A truly-idle, non-looping Codex still needs something to trigger a turn —
+ * that residual is the one case where send_input (the kept fallback) is still required.
+ */
+export function recommendedCodexWatch(
+  agentId: string,
+  opts?: InboxOpts,
+): string {
+  return `tail -n0 -F ${inboxPath(agentId, opts)} >> ${surfacedLogPath(agentId, opts)}`;
+}
