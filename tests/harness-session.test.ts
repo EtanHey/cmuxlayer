@@ -10,10 +10,31 @@ import {
   findHarnessSessionPath,
   loadHarnessSession,
   applyHarnessState,
+  harnessJsonlEnabled,
 } from "../src/harness-session.js";
 
 const FIX = join(__dirname, "fixtures", "harness");
 const read = (name: string) => readFileSync(join(FIX, name), "utf8");
+
+describe("harnessJsonlEnabled (default-ON, opt-out with =0)", () => {
+  const prev = process.env.CMUXLAYER_HARNESS_JSONL;
+  afterAll(() => {
+    if (prev === undefined) delete process.env.CMUXLAYER_HARNESS_JSONL;
+    else process.env.CMUXLAYER_HARNESS_JSONL = prev;
+  });
+  it("defaults ON when unset", () => {
+    delete process.env.CMUXLAYER_HARNESS_JSONL;
+    expect(harnessJsonlEnabled()).toBe(true);
+  });
+  it("stays ON for =1", () => {
+    process.env.CMUXLAYER_HARNESS_JSONL = "1";
+    expect(harnessJsonlEnabled()).toBe(true);
+  });
+  it("opts OUT only for =0", () => {
+    process.env.CMUXLAYER_HARNESS_JSONL = "0";
+    expect(harnessJsonlEnabled()).toBe(false);
+  });
+});
 
 describe("parseHarnessSession", () => {
   it("Claude: tokens from last usage tail, window from model table (NOT in JSONL)", () => {

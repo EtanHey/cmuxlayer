@@ -404,9 +404,13 @@ export function loadHarnessSession(
   return readHarnessSessionFromFile(harness, path);
 }
 
-/** True when JSONL-derived agent state is enabled (flag-gated; screen-parser is the fallback). */
+/**
+ * True when JSONL-derived agent state is enabled. DEFAULT-ON (validated 2026-06-04: 647
+ * tests + 4 live Codex sessions correct; strictly additive — overlay only fires when a
+ * session JSONL resolves, else screen-parser stands). Opt OUT with CMUXLAYER_HARNESS_JSONL=0.
+ */
 export function harnessJsonlEnabled(): boolean {
-  return process.env.CMUXLAYER_HARNESS_JSONL === "1";
+  return process.env.CMUXLAYER_HARNESS_JSONL !== "0";
 }
 
 /** Context/usage fields an overlay can fill. ParsedScreenResult satisfies this. */
