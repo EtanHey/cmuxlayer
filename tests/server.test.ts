@@ -346,7 +346,12 @@ describe("tool handler integration", () => {
       {
         workspace_title: "red-team",
         agents: [
-          { repo: "brainlayer", model: "sonnet", cli: "claude", role: "orchestrator" },
+          {
+            repo: "brainlayer",
+            model: "sonnet",
+            cli: "claude",
+            role: "orchestrator",
+          },
           { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
         ],
       },
@@ -670,7 +675,8 @@ describe("tool handler integration", () => {
 
     const verboseResult = await tool.handler({ verbose: true }, {} as any);
     const verbose =
-      verboseResult.structuredContent ?? JSON.parse(verboseResult.content[0].text);
+      verboseResult.structuredContent ??
+      JSON.parse(verboseResult.content[0].text);
 
     expect(verbose.column_count).toBe(2);
     expect(verbose.surfaces).toEqual([
@@ -777,7 +783,8 @@ describe("tool handler integration", () => {
     const tool = (server as any)._registeredTools["list_surfaces"];
 
     const result = await tool.handler({}, {} as any);
-    const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.surfaces).toEqual([
       expect.objectContaining({
@@ -1291,6 +1298,116 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("read_screen reports the surface column + workspace column_count inline (F7)", async () => {
+    // Simulates the real cmux bug: surface.list is unfiltered (every per-pane
+    // query returns the WHOLE workspace list). The column must still be correct
+    // via pane_id membership, NOT first-seen attribution.
+    const fullList = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      surfaces: [
+        {
+          id: "surface-left-id",
+          pane_id: "pane-left-id",
+          ref: "surface:left",
+          title: "left",
+          type: "terminal",
+          index: 0,
+          selected: false,
+        },
+        {
+          id: "surface-right-id",
+          pane_id: "pane-right-id",
+          ref: "surface:right",
+          title: "rightAgent",
+          type: "terminal",
+          index: 1,
+          selected: true,
+        },
+      ],
+    };
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:right",
+        text: "right pane content\n",
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            id: "pane-left-id",
+            index: 0,
+            surface_refs: ["surface:left"],
+            surface_ids: ["surface-left-id"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            id: "pane-right-id",
+            index: 1,
+            surface_refs: ["surface:right"],
+            surface_ids: ["surface-right-id"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue(fullList),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["read_screen"];
+    const result = await tool.handler(
+      { surface: "surface:right", workspace: "workspace:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.column).toBe(1);
+    expect(data.column_count).toBe(2);
+    expect(result.content[0].text).toContain("col 2/2");
+  });
+
+  it("read_screen omits column when pane geometry is unavailable but still returns the screen (F7)", async () => {
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: "screen content\n",
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      // geometry unavailable: listPanes fails — column resolution must degrade.
+      listPanes: vi.fn().mockRejectedValue(new Error("no panes")),
+      listPaneSurfaces: vi.fn().mockRejectedValue(new Error("no surfaces")),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["read_screen"];
+    const result = await tool.handler(
+      { surface: "surface:1", workspace: "workspace:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.column).toBeNull();
+    expect(data.column_count).toBeNull();
+    expect(data.content).toBe("screen content\n");
+    expect(result.content[0].text).not.toContain("col ");
+  });
+
   it("send_input handler calls cmux send", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
@@ -1365,6 +1482,151 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.surface).toBe("surface:6");
+  });
+
+  it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "bl-lead-1",
+      surface_id: "surface:95",
+      state: "idle",
+      repo: "brainlayer",
+      model: "Opus 4.8",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "BL-LEAD",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:95", text: "hi" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:95");
+    expect(data.title).toBe("BL-LEAD");
+    expect(data.model).toBe("Opus 4.8");
+    expect(data.agent_type).toBe("claude");
+    expect(result.content[0].text).toContain("delivered to BL-LEAD");
+    expect(result.content[0].text).toContain("Opus 4.8");
+    expect(result.content[0].text).toContain("claude");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("send_input degrades gracefully when no identity is cached (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:unknown", text: "hi" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:unknown");
+    expect(data.title).toBeUndefined();
+    expect(data.model).toBeUndefined();
+    expect(data.agent_type).toBeUndefined();
+    expect(result.content[0].text).toContain("delivered to surface:unknown");
+  });
+
+  it("send_command returns delivered + identity + submit_verified (F8)", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-command");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "codex-1",
+      surface_id: "surface:6",
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "GPT-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "cmuxlayerCodex",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_command"];
+    const result = await tool.handler(
+      { surface: "surface:6", command: "codex resume 123" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:6");
+    expect(data.title).toBe("cmuxlayerCodex");
+    expect(data.model).toBe("GPT-5.5");
+    expect(data.agent_type).toBe("codex");
+    expect("submit_verified" in data).toBe(true);
+    expect(result.content[0].text).toContain("delivered to cmuxlayerCodex");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("move_surface returns a slim, phone-readable confirmation (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        ok: true,
+        workspace: "workspace:1",
+        surface: "surface:102",
+        pane: "pane:1",
+        // verbose passthrough that should NOT leak into the slim response:
+        window_ref: "window:1",
+        surfaces: [{ ref: "surface:102" }],
+      }),
+      stderr: "",
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["move_surface"];
+    const result = await tool.handler(
+      { surface: "surface:102", pane: "pane:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(Object.keys(data).sort()).toEqual([
+      "ok",
+      "pane",
+      "surface",
+      "workspace",
+    ]);
+    expect(data.surface).toBe("surface:102");
+    expect(data.pane).toBe("pane:1");
+    expect(result.content[0].text).toContain("moved surface:102 → pane:1");
   });
 
   it("send_command rejects boot_prompt_path for non-launcher commands before sending", async () => {
