@@ -27,6 +27,8 @@ const EXPECTED_TOOLS = [
   "set_progress",
   "close_surface",
   "browser_surface",
+  "dispatch_to_agent",
+  "inbox_check",
 ] as const;
 
 const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
@@ -73,7 +75,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 17 core tools", () => {
+  it("registers all 19 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;

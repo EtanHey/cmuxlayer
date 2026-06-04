@@ -45,6 +45,13 @@ import {
   parseScreen,
 } from "./screen-parser.js";
 import {
+  dispatch,
+  inboxPath,
+  monitorAlive,
+  pendingDispatches,
+  replayUndelivered,
+} from "./inbox.js";
+import {
   applyHarnessState,
   harnessJsonlEnabled,
   loadHarnessSession,
@@ -2787,6 +2794,91 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // browser_surface actions map to cmux browser-surface subcommands
         const data = { action: args.action, surface: args.surface, result };
         return okFormatted(formatOk("browser_surface", data), data);
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 12. dispatch_to_agent — metacommlayer WRITE channel (sterile dispatch; send_input fallback)
+  server.tool(
+    "dispatch_to_agent",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. Use this as the primary dispatch path; send_input remains the fallback. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    {
+      agent_id: z
+        .string()
+        .describe(
+          "Recipient agent id (its inbox is ~/.cmux/agents/<id>/inbox.jsonl)",
+        ),
+      task: z.string().describe("The dispatch payload / instruction"),
+      from: z.string().optional().default("orc").describe("Sender id"),
+      tag: z
+        .string()
+        .optional()
+        .default("dispatch")
+        .describe("Routing/semantics tag"),
+      persist: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Opt-in: mark this message as a candidate for BrainLayer ingestion",
+        ),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const msg = dispatch(args.agent_id, {
+          from: args.from,
+          to: args.agent_id,
+          tag: args.tag,
+          task: args.task,
+          persist: args.persist,
+        });
+        return ok({ dispatched: msg, inbox: inboxPath(args.agent_id) });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 13. inbox_check — orc-side liveness/delivery view of an agent's write channel
+  server.tool(
+    "inbox_check",
+    "Inspect an agent's inbox channel: undelivered (un-acked) messages, monitor liveness (heartbeat freshness), and stale dispatches past the ACK-timeout. A non-empty 'pending' for a live-looking agent means its monitor is wedged → fall back to send_input. Read-only.",
+    {
+      agent_id: z.string().describe("Agent id to inspect"),
+      ack_timeout_ms: z
+        .number()
+        .int()
+        .min(1000)
+        .optional()
+        .default(120000)
+        .describe("Treat un-acked dispatches older than this as stale/wedged"),
+      heartbeat_max_age_ms: z
+        .number()
+        .int()
+        .min(1000)
+        .optional()
+        .default(60000)
+        .describe(
+          "Monitor is considered alive if it heartbeated within this window",
+        ),
+    },
+    ANNOTATIONS.readOnly,
+    async (args) => {
+      try {
+        const undelivered = replayUndelivered(args.agent_id);
+        const pending = pendingDispatches(args.agent_id, args.ack_timeout_ms);
+        const alive = monitorAlive(args.agent_id, args.heartbeat_max_age_ms);
+        return ok({
+          agent_id: args.agent_id,
+          monitor_alive: alive,
+          undelivered_count: undelivered.length,
+          undelivered,
+          stale_count: pending.length,
+          stale: pending,
+        });
       } catch (e) {
         return err(e);
       }
