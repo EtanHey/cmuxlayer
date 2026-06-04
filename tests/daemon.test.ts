@@ -7,10 +7,7 @@ import { join } from "node:path";
 import net from "node:net";
 import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
-import {
-  CmuxLayerDaemon,
-  SocketJsonRpcTransport,
-} from "../src/daemon.js";
+import { CmuxLayerDaemon, SocketJsonRpcTransport } from "../src/daemon.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
@@ -203,7 +200,10 @@ async function listen(server: net.Server, path: string): Promise<void> {
   });
 }
 
-async function rawToolsList(path: string, timeoutMs = 500): Promise<{
+async function rawToolsList(
+  path: string,
+  timeoutMs = 500,
+): Promise<{
   server?: string;
   toolCount?: number;
 }> {
@@ -212,7 +212,9 @@ async function rawToolsList(path: string, timeoutMs = 500): Promise<{
     let buffer = "";
     const timeout = setTimeout(() => {
       socket.destroy();
-      reject(new Error(`timed out waiting for tools/list after ${timeoutMs}ms`));
+      reject(
+        new Error(`timed out waiting for tools/list after ${timeoutMs}ms`),
+      );
     }, timeoutMs);
     const send = (message: Record<string, unknown>) => {
       socket.write(`${JSON.stringify(message)}\n`);
@@ -351,7 +353,7 @@ describe("CmuxLayerDaemon", () => {
     await daemon.start();
 
     await expect(rawToolsList(path, 100)).resolves.toMatchObject({
-      toolCount: 17,
+      toolCount: 19,
     });
 
     await daemon.shutdown();
@@ -388,8 +390,9 @@ describe("CmuxLayerDaemon", () => {
     const observed = deferred<Record<string, unknown>>();
     const server = net.createServer(async (socket) => {
       const transport = new SocketJsonRpcTransport(socket);
-      (transport as any).onRequestObserved = (message: Record<string, unknown>) =>
-        observed.resolve(message);
+      (transport as any).onRequestObserved = (
+        message: Record<string, unknown>,
+      ) => observed.resolve(message);
       transport.onmessage = () => {};
       await transport.start();
       transport.onmessage = () => {};
@@ -742,8 +745,14 @@ describe("CmuxLayerDaemon", () => {
       drainTimeoutMs: 500,
       serverFactory: (connectionListener) =>
         net.createServer((socket) => {
-          const originalWrite = socket.write.bind(socket) as typeof socket.write;
-          socket.write = ((chunk: any, encodingOrCallback?: any, callback?: any) => {
+          const originalWrite = socket.write.bind(
+            socket,
+          ) as typeof socket.write;
+          socket.write = ((
+            chunk: any,
+            encodingOrCallback?: any,
+            callback?: any,
+          ) => {
             const payload = Buffer.isBuffer(chunk)
               ? chunk.toString("utf8")
               : String(chunk);

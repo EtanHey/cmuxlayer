@@ -155,11 +155,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 31 (17 low-level + 12 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 33 (19 low-level + 12 agent lifecycle + 2 v2)", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(31);
+    expect(Object.keys(registeredTools)).toHaveLength(33);
   });
 });
 
@@ -254,23 +254,28 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:new",
-    ]));
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:new",
-      "fix prompt delivery",
-    ]));
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send-key",
-      "--surface",
-      "surface:new",
-      "return",
-    ]));
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:new"]),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        "fix prompt delivery",
+      ]),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send-key",
+        "--surface",
+        "surface:new",
+        "return",
+      ]),
+    );
   });
 
   it("spawn_agent sends boot_prompt_path contents after readiness", async () => {
@@ -292,12 +297,15 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith("cmux", expect.arrayContaining([
-      "send",
-      "--surface",
-      "surface:new",
-      "file prompt body",
-    ]));
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        "file prompt body",
+      ]),
+    );
   });
 
   it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
@@ -380,8 +388,8 @@ describe("agent lifecycle tool handlers", () => {
               lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                ? "$ voicelayerCodex -s"
-                : "codex> ",
+                  ? "$ voicelayerCodex -s"
+                  : "codex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -518,10 +526,7 @@ describe("agent lifecycle tool handlers", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
-            text:
-              lastSentText === ""
-                ? "$ "
-                : "$ voicelayerCodex -s\ncodex> ",
+            text: lastSentText === "" ? "$ " : "$ voicelayerCodex -s\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -1011,7 +1016,9 @@ describe("agent lifecycle tool handlers", () => {
     const sendKeyCalls = mockExec.mock.calls.filter(
       ([, args]) => Array.isArray(args) && args.includes("send-key"),
     );
-    const deliveredText = setBufferCalls.map(([, args]) => args.at(-1)).join("");
+    const deliveredText = setBufferCalls
+      .map(([, args]) => args.at(-1))
+      .join("");
 
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);

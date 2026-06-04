@@ -19,13 +19,15 @@ bun run typecheck    # Type checking only
 
 ## Architecture
 
-### MCP Tools (29 total)
-- **29 registered tools**: terminal control, browser surface control, workspace state, and agent lifecycle orchestration.
+### MCP Tools (33 total)
+- **33 registered tools**: terminal control, browser surface control, workspace state, agent lifecycle orchestration, and the metacommlayer write channel (dispatch_to_agent, inbox_check).
 
 ### Key Source Files
 | File | Role |
 |------|------|
-| `server.ts` | MCP tool registration and handlers (all 29 tools) |
+| `server.ts` | MCP tool registration and handlers (all 33 tools) |
+| `harness-session.ts` | metacommlayer READ channel — real agent state (tokens/context/model) from harness transcript JSONL (see docs/harness-jsonl-field-map.md) |
+| `inbox.ts` | metacommlayer WRITE channel — per-agent inbox file dispatch + replay/ack/heartbeat (Monitor-driven, send_input fallback) |
 | `cmux-socket-client.ts` | Persistent Unix socket to cmux |
 | `cmux-client.ts` | CLI wrapper fallback |
 | `agent-engine.ts` | Agent lifecycle — spawn, monitor, quality tracking |
