@@ -4,6 +4,12 @@
 > Both readers MUST agree on where each number lives per harness. Change this doc in lockstep with either reader.
 > Every path below was verified against on-disk JSONL on 2026-06-04 — do **not** add a field without verifying it exists.
 
+## Enablement
+**DEFAULT-ON** as of 2026-06-04 (validated: 647 tests + 4 live Codex sessions correct).
+Strictly additive — the JSONL overlay only fires when a session transcript resolves; otherwise
+the screen-parser stands. Opt out with `CMUXLAYER_HARNESS_JSONL=0`. The resolver honors
+`CODEX_HOME` and (for tests) `CMUXLAYER_HARNESS_HOME`.
+
 ## Why this exists
 cmuxlayer reads the harness transcript JSONL (not the rendered terminal) to report real agent
 state: tokens used, context window, model, last response, last tool, done. Phoenix ingest reads

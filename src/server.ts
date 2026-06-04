@@ -522,7 +522,14 @@ function resolveHarnessStateForSurface(
   const cli = record?.cli as Harness | undefined;
   const sessionId = record?.cli_session_id ?? null;
   if (!cli || !sessionId || !JSONL_HARNESSES.has(cli)) return null;
-  return loadHarnessSession(cli, sessionId);
+  // Honor CODEX_HOME (already used by app-server-bridge) and a test-only home override.
+  const opts = {
+    ...(process.env.CMUXLAYER_HARNESS_HOME
+      ? { home: process.env.CMUXLAYER_HARNESS_HOME }
+      : {}),
+    ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {}),
+  };
+  return loadHarnessSession(cli, sessionId, opts);
 }
 
 export interface TargetIdentity {
