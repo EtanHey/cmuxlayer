@@ -97,23 +97,34 @@ function describePaneLayouts(
   });
 }
 
-function byPaneIndex(a: PaneLayout, b: PaneLayout): number {
-  return a.pane.index - b.pane.index;
-}
+export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
+  const useGeometry = panes.every((pane) => pane.pixel_frame);
+  const sortedGroups = [
+    ...new Map(
+      [...panes]
+        .sort((a, b) => {
+          const aPosition = useGeometry ? a.pixel_frame!.x : a.index;
+          const bPosition = useGeometry ? b.pixel_frame!.x : b.index;
+          return aPosition - bPosition || a.index - b.index;
+        })
+        .map((pane) => [
+          useGeometry ? `x:${pane.pixel_frame!.x}` : `index:${pane.index}`,
+          pane,
+        ]),
+    ).keys(),
+  ];
+  const columnByGroup = new Map(
+    sortedGroups.map((group, index) => [group, index]),
+  );
 
-function leftmost(layouts: PaneLayout[]): PaneLayout | undefined {
-  return [...layouts].sort(byPaneIndex).at(0);
-}
-
-function rightmost(layouts: PaneLayout[]): PaneLayout | undefined {
-  return [...layouts].sort(byPaneIndex).at(-1);
-}
-
-function splitRightOfRightmost(layouts: PaneLayout[]): AgentSpawnPlacement {
-  const rightmostPane = rightmost(layouts);
-  return rightmostPane
-    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
-    : { kind: "split", direction: "right" };
+  return new Map(
+    panes.map((pane) => {
+      const group = useGeometry
+        ? `x:${pane.pixel_frame!.x}`
+        : `index:${pane.index}`;
+      return [pane.ref, columnByGroup.get(group) ?? 0];
+    }),
+  );
 }
 
 function isDedicatedOrchestratorPane(layout: PaneLayout): boolean {
@@ -158,6 +169,26 @@ function isWorkerDockPane(layout: PaneLayout): boolean {
     layout.icCount === 0 &&
     layout.workerCount > 0 &&
     layout.workerCount > layout.nonRoleCount
+  );
+}
+
+function isNonLeadWorkerZonePane(
+  layout: PaneLayout,
+  leftPane: PaneLayout | undefined,
+): boolean {
+  const workerZoneCount = layout.workerCount + layout.unknownCount;
+  const nonWorkerZoneCount =
+    layout.surfaces.length -
+    layout.orchestratorCount -
+    layout.icCount -
+    workerZoneCount;
+
+  return (
+    layout.pane.ref !== leftPane?.pane.ref &&
+    layout.orchestratorCount === 0 &&
+    layout.icCount === 0 &&
+    workerZoneCount > 0 &&
+    workerZoneCount > nonWorkerZoneCount
   );
 }
 
@@ -365,7 +396,17 @@ export function chooseAgentSpawnPlacement(
   const roleSurfaceIds = normalizeRoleSurfaceIds(roleSurfaceIdsInput);
   const role = context.role ?? "worker";
   const layouts = describePaneLayouts(panes, paneSurfaces, roleSurfaceIds);
-  const leftPane = leftmost(layouts);
+  const columnByPane = deriveColumnIndex(panes);
+  const byColumnThenIndex = (a: PaneLayout, b: PaneLayout): number => {
+    const aColumn = columnByPane.get(a.pane.ref) ?? a.pane.index;
+    const bColumn = columnByPane.get(b.pane.ref) ?? b.pane.index;
+    return aColumn - bColumn || a.pane.index - b.pane.index;
+  };
+  const leftmostByColumn = (candidates: PaneLayout[]) =>
+    [...candidates].sort(byColumnThenIndex).at(0);
+  const rightmostByColumn = (candidates: PaneLayout[]) =>
+    [...candidates].sort(byColumnThenIndex).at(-1);
+  const leftPane = leftmostByColumn(layouts);
 
   if (layouts.length === 0) {
     return { kind: "split", direction: "right" };
@@ -373,7 +414,7 @@ export function chooseAgentSpawnPlacement(
 
   if (role === "orchestrator") {
     const orchestratorPane =
-      leftmost(layouts.filter(isDedicatedOrchestratorPane)) ??
+      leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane)) ??
       (leftPane && leftPane.icCount === 0 && leftPane.workerCount === 0
         ? leftPane
         : undefined);
@@ -386,11 +427,11 @@ export function chooseAgentSpawnPlacement(
   const icPanes = layouts.filter(isDedicatedIcPane);
 
   if (role === "ic") {
-    const icPane = rightmost(icPanes);
+    const icPane = rightmostByColumn(icPanes);
     if (icPane) {
       return { kind: "surface", pane: icPane.pane.ref };
     }
-    const workerPane = rightmost(workerPanes);
+    const workerPane = rightmostByColumn(workerPanes);
     if (workerPane) {
       return {
         kind: "split",
@@ -442,7 +483,9 @@ export function chooseAgentSpawnPlacement(
   // Dock into the rightmost pane workers already own — including one that
   // carries a stray non-role tab — so a populated workers pane never gets a
   // redundant third pane split off beside it.
-  const rightmostWorkerPane = rightmost(layouts.filter(isWorkerDockPane));
+  const rightmostWorkerPane = rightmostByColumn(
+    layouts.filter(isWorkerDockPane),
+  );
   if (rightmostWorkerPane) {
     return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
   }
@@ -451,7 +494,7 @@ export function chooseAgentSpawnPlacement(
     (layout) => layout.workerCount > 0 || layout.unknownCount > 0,
   );
   if (!hasLiveWorkerOrUnknownSurface) {
-    const sparseWorkerZonePane = rightmost(
+    const sparseWorkerZonePane = rightmostByColumn(
       layouts.filter(
         (layout) =>
           layout.pane.ref !== leftPane?.pane.ref &&
@@ -463,7 +506,7 @@ export function chooseAgentSpawnPlacement(
     }
   }
 
-  const mixedWorkerPane = rightmost(
+  const mixedWorkerPane = rightmostByColumn(
     layouts.filter(
       (layout) =>
         (layout.workerCount > 0 || layout.unknownCount > 0) &&
@@ -471,6 +514,10 @@ export function chooseAgentSpawnPlacement(
     ),
   );
   if (mixedWorkerPane) {
+    if (isNonLeadWorkerZonePane(mixedWorkerPane, leftPane)) {
+      return { kind: "surface", pane: mixedWorkerPane.pane.ref };
+    }
+
     return {
       kind: "split",
       direction: "right",
@@ -478,7 +525,7 @@ export function chooseAgentSpawnPlacement(
     };
   }
 
-  const rightmostIcPane = rightmost(icPanes);
+  const rightmostIcPane = rightmostByColumn(icPanes);
   if (rightmostIcPane) {
     return {
       kind: "split",
@@ -487,7 +534,10 @@ export function chooseAgentSpawnPlacement(
     };
   }
 
-  return splitRightOfRightmost(layouts);
+  const rightmostPane = rightmostByColumn(layouts);
+  return rightmostPane
+    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
+    : { kind: "split", direction: "right" };
 }
 
 /**

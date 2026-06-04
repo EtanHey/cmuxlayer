@@ -35,6 +35,12 @@ export interface CmuxPane {
   surface_count: number;
   surface_refs: string[];
   selected_surface_ref?: string;
+  pixel_frame?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 export interface CmuxPaneSurfaces {
