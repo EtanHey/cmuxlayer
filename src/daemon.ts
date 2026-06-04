@@ -79,25 +79,41 @@ export class SocketJsonRpcTransport implements Transport {
     if (this.closed) {
       throw new Error("SocketJsonRpcTransport is closed");
     }
-    this.onSend?.(message);
     const payload = serializeMessage(message);
     await new Promise<void>((resolve, reject) => {
+      let settled = false;
       const onError = (error: Error) => {
-        this.socket.off("drain", onDrain);
-        reject(error);
+        settle(error);
       };
-      const onDrain = () => {
+      const onClose = () => {
+        settle(new Error("SocketJsonRpcTransport closed before write completed"));
+      };
+      const cleanup = () => {
         this.socket.off("error", onError);
+        this.socket.off("close", onClose);
+      };
+      const settle = (error?: Error | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        if (error) {
+          reject(error);
+          return;
+        }
         resolve();
       };
+
       this.socket.once("error", onError);
-      if (this.socket.write(payload)) {
-        this.socket.off("error", onError);
-        resolve();
-      } else {
-        this.socket.once("drain", onDrain);
+      this.socket.once("close", onClose);
+      try {
+        this.socket.write(payload, settle);
+      } catch (error) {
+        settle(error instanceof Error ? error : new Error(String(error)));
       }
     });
+    this.onSend?.(message);
   }
 
   async close(): Promise<void> {

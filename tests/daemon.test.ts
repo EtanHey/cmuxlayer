@@ -417,6 +417,42 @@ describe("CmuxLayerDaemon", () => {
     }
   });
 
+  it("observes sent responses only after socket writes complete", async () => {
+    const writeCallbacks: Array<() => void> = [];
+    const fakeSocket = new EventEmitter() as net.Socket & {
+      destroyed: boolean;
+      write: ReturnType<typeof vi.fn>;
+    };
+    fakeSocket.destroyed = false;
+    fakeSocket.write = vi.fn((_payload, callback?: () => void) => {
+      if (callback) {
+        writeCallbacks.push(callback);
+      }
+      return true;
+    });
+
+    const transport = new SocketJsonRpcTransport(fakeSocket);
+    const sent: unknown[] = [];
+    transport.onSend = (message) => sent.push(message);
+    let sendSettled = false;
+    const send = transport
+      .send({ jsonrpc: "2.0", id: 1, result: {} })
+      .then(() => {
+        sendSettled = true;
+      });
+
+    await Promise.resolve();
+    expect(sent).toHaveLength(0);
+    expect(sendSettled).toBe(false);
+    expect(writeCallbacks).toHaveLength(1);
+
+    writeCallbacks[0]();
+    await send;
+
+    expect(sendSettled).toBe(true);
+    expect(sent).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+  });
+
   it("shares one world-model across concurrent MCP connections", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("shared");
@@ -674,6 +710,110 @@ describe("CmuxLayerDaemon", () => {
       expect(listWorkspacesCalls).toBe(1);
     } finally {
       socket?.destroy();
+      await daemon.shutdown().catch(() => {});
+    }
+  });
+
+  it("keeps drain pending until response bytes finish writing", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("drain-waits-for-write");
+    const gate = deferred<{ stdout: string; stderr: string }>();
+    const started = deferred<void>();
+    const responseWriteStarted = deferred<void>();
+    const responseWriteFlushed = deferred<void>();
+    let responseWriteCallback: (() => void) | null = null;
+    let delayNextResponseWrite = false;
+    const releaseResponseWrite = () => {
+      const callback = responseWriteCallback;
+      responseWriteCallback = null;
+      callback?.();
+    };
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        started.resolve();
+        return gate.promise;
+      }
+      return createListSurfacesExec()(_cmd, args);
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec,
+      skipAgentLifecycle: true,
+      drainTimeoutMs: 500,
+      serverFactory: (connectionListener) =>
+        net.createServer((socket) => {
+          const originalWrite = socket.write.bind(socket) as typeof socket.write;
+          socket.write = ((chunk: any, encodingOrCallback?: any, callback?: any) => {
+            const payload = Buffer.isBuffer(chunk)
+              ? chunk.toString("utf8")
+              : String(chunk);
+            const encoding =
+              typeof encodingOrCallback === "function"
+                ? undefined
+                : encodingOrCallback;
+            const writeCallback =
+              typeof encodingOrCallback === "function"
+                ? encodingOrCallback
+                : callback;
+            if (delayNextResponseWrite && payload.includes('"id"')) {
+              delayNextResponseWrite = false;
+              responseWriteStarted.resolve();
+              const deferredCallback = (error?: Error | null) => {
+                responseWriteCallback = () => writeCallback?.(error);
+                responseWriteFlushed.resolve();
+              };
+              if (encoding === undefined) {
+                return originalWrite(chunk, deferredCallback);
+              }
+              return originalWrite(chunk, encoding, deferredCallback);
+            }
+            return originalWrite(chunk, encodingOrCallback, callback);
+          }) as typeof socket.write;
+          connectionListener(socket);
+        }),
+    });
+
+    await daemon.start();
+    let client: Client | null = null;
+    try {
+      client = await connectClient(path);
+      const pending = client.callTool({
+        name: "list_surfaces",
+        arguments: { verbose: false },
+      });
+
+      await started.promise;
+      const shutdown = daemon.shutdown("SIGTERM");
+      let shutdownSettled = false;
+      const observedShutdown = shutdown.then((result) => {
+        shutdownSettled = true;
+        return result;
+      });
+      delayNextResponseWrite = true;
+      gate.resolve({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+      await responseWriteStarted.promise;
+      await responseWriteFlushed.promise;
+      await delay(30);
+
+      expect(daemon.inFlightRequestCount()).toBe(1);
+      expect(shutdownSettled).toBe(false);
+
+      releaseResponseWrite();
+
+      await expect(pending).resolves.toMatchObject({
+        structuredContent: expect.objectContaining({ ok: true }),
+      });
+      await expect(observedShutdown).resolves.toMatchObject({ forced: false });
+    } finally {
+      gate.resolve({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+      releaseResponseWrite();
+      await client?.close().catch(() => {});
       await daemon.shutdown().catch(() => {});
     }
   });
