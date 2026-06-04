@@ -65,6 +65,7 @@ export class SocketJsonRpcTransport implements Transport {
     this.socket.on("data", this.onData);
     this.socket.on("error", this.onError);
     this.socket.on("close", this.onClose);
+    this.socket.resume();
   }
 
   async send(
@@ -230,6 +231,8 @@ export class CmuxLayerDaemon {
       throw new Error("cmuxlayer daemon already started");
     }
 
+    await this.getContext();
+
     this.server = (this.opts.serverFactory ?? net.createServer)(
       (socket) => void this.acceptConnection(socket),
     );
@@ -305,6 +308,7 @@ export class CmuxLayerDaemon {
       socket.destroy();
       return;
     }
+    socket.pause();
 
     let context: CmuxServerContext;
     try {

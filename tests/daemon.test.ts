@@ -187,6 +187,69 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function rawToolsList(path: string, timeoutMs = 500): Promise<{
+  server?: string;
+  toolCount?: number;
+}> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let buffer = "";
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`timed out waiting for tools/list after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const send = (message: Record<string, unknown>) => {
+      socket.write(`${JSON.stringify(message)}\n`);
+    };
+
+    socket.on("connect", () => {
+      send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "raw-daemon-test", version: "0.1.0" },
+        },
+      });
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line.trim()) {
+          continue;
+        }
+        const message = JSON.parse(line);
+        if (message.id === 1) {
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+          continue;
+        }
+        if (message.id === 2) {
+          clearTimeout(timeout);
+          socket.end();
+          resolve({
+            server: message.result?.serverInfo?.name,
+            toolCount: message.result?.tools?.length,
+          });
+        }
+      }
+    });
+    socket.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 describe("CmuxLayerDaemon", () => {
   afterEach(() => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
@@ -216,6 +279,27 @@ describe("CmuxLayerDaemon", () => {
     expect(result.structuredContent?.surfaces).toHaveLength(1);
 
     await client.close();
+    await daemon.shutdown();
+  });
+
+  it("serves the first cold connection after lazy context creation", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("cold-first");
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      createClient: async () => {
+        await delay(200);
+        return {} as any;
+      },
+      skipAgentLifecycle: true,
+    });
+
+    await daemon.start();
+
+    await expect(rawToolsList(path, 100)).resolves.toMatchObject({
+      toolCount: 17,
+    });
+
     await daemon.shutdown();
   });
 
