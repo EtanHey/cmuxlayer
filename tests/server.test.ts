@@ -1050,7 +1050,10 @@ describe("tool handler integration", () => {
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.content).toContain("hello");
+    // LEAN DEFAULT: response returned once (parsed.response); NOT duplicated in a raw
+    // content dump, and no screen_preview when there's a response.
+    expect(parsed.content).toBeUndefined();
+    expect(parsed.screen_preview).toBeUndefined();
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
       status: "done",
@@ -1060,6 +1063,15 @@ describe("tool handler integration", () => {
       model: "Sonnet 4.6",
       cost: 1.25,
     });
+
+    // raw=true returns the full untrimmed terminal content.
+    const rawResult = await tool.handler(
+      { surface: "surface:1", raw: true },
+      {} as any,
+    );
+    const rawParsed =
+      rawResult.structuredContent ?? JSON.parse(rawResult.content[0].text);
+    expect(rawParsed.content).toContain("hello");
   });
 
   it("read_screen parsed_only includes the tab title and recovers model context from agent state", async () => {
@@ -1404,7 +1416,9 @@ describe("tool handler integration", () => {
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(data.column).toBeNull();
     expect(data.column_count).toBeNull();
-    expect(data.content).toBe("screen content\n");
+    // Lean default: no parsed.response → cleaned screen_preview carries the content.
+    expect(data.content).toBeUndefined();
+    expect(data.screen_preview).toBe("screen content");
     expect(result.content[0].text).not.toContain("col ");
   });
 

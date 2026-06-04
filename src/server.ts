@@ -39,7 +39,11 @@ import {
   formatDelivery,
   formatResync,
 } from "./format.js";
-import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import {
+  cleanScreenText,
+  inferContextWindow,
+  parseScreen,
+} from "./screen-parser.js";
 import {
   applyHarnessState,
   harnessJsonlEnabled,
@@ -2332,7 +2336,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 9. read_screen
   server.tool(
     "read_screen",
-    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content).",
+    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata. LEAN BY DEFAULT: the response is returned once (parsed.response); the raw terminal dump is NOT included — instead a compact, de-chromed screen_preview (box-drawing rules + status-bar art stripped) is included only when there is no parsed.response. Pass raw=true for the full untrimmed terminal content, or parsed_only=true for parsed fields alone (best for monitoring).",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -2354,7 +2358,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe(
-          "If true, return only parsed fields (omit raw content). Best for agent monitoring.",
+          "If true, return only parsed fields (omit screen content). Best for agent monitoring.",
+        ),
+      raw: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "If true, include the full untrimmed terminal content (separators, status-bar art, all lines). Default false returns a compact de-chromed screen_preview instead.",
         ),
     },
     ANNOTATIONS.readOnly,
@@ -2403,24 +2414,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return okFormatted(formatted, data);
         }
 
+        if (args.raw) {
+          // Full untrimmed terminal content on explicit request.
+          const data = {
+            surface: result.surface,
+            title: surface?.title ?? null,
+            column,
+            column_count,
+            lines: result.lines,
+            content: result.text,
+            scrollback_used: result.scrollback_used,
+            parsed,
+            delivery: getSurfaceDelivery(result.surface),
+          };
+          const formatted = formatReadScreen(
+            result.surface,
+            surface?.title ?? null,
+            result.text,
+            parsed,
+            result.scrollback_used,
+            result.lines,
+            column,
+            column_count,
+          );
+          return okFormatted(formatted, data);
+        }
+
+        // LEAN DEFAULT: response returned once (parsed.response); no raw dump. Show a
+        // compact de-chromed preview ONLY when there's no response, so non-agent panes
+        // (shell prompts, menus) still surface something without duplicating the response.
+        const screenPreview = parsed.response
+          ? null
+          : cleanScreenText(result.text, 12) || null;
         const data = {
           surface: result.surface,
           title: surface?.title ?? null,
           column,
           column_count,
-          lines: result.lines,
-          content: result.text,
-          scrollback_used: result.scrollback_used,
           parsed,
+          ...(screenPreview ? { screen_preview: screenPreview } : {}),
           delivery: getSurfaceDelivery(result.surface),
         };
         const formatted = formatReadScreen(
           result.surface,
           surface?.title ?? null,
-          result.text,
+          screenPreview,
           parsed,
-          result.scrollback_used,
-          result.lines,
+          false,
+          screenPreview ? screenPreview.split("\n").length : 0,
           column,
           column_count,
         );
