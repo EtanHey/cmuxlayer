@@ -101,7 +101,9 @@ function isJsonRpcNotification(
   );
 }
 
-function isJsonRpcResponse(message: JSONRPCMessage): message is JsonRpcResponse {
+function isJsonRpcResponse(
+  message: JSONRPCMessage,
+): message is JsonRpcResponse {
   return (
     typeof message === "object" &&
     message !== null &&
@@ -119,14 +121,19 @@ function cloneMessage<T extends JSONRPCMessage>(message: T): T {
 }
 
 function writeMessage(
-  stream: Pick<Writable, "write" | "once" | "off">,
+  stream: Pick<Writable, "write" | "once" | "off"> &
+    Partial<Pick<Writable, "destroyed" | "writableEnded">>,
   message: JSONRPCMessage,
 ): Promise<void> {
+  if (stream.destroyed || stream.writableEnded) {
+    return Promise.reject(new Error("stream is closed"));
+  }
   const payload = serializeMessage(message);
   return new Promise((resolve, reject) => {
     let settled = false;
     const onError = (error: Error) => settle(error);
-    const onClose = () => settle(new Error("stream closed before write completed"));
+    const onClose = () =>
+      settle(new Error("stream closed before write completed"));
     const cleanup = () => {
       stream.off("error", onError);
       stream.off("close", onClose);
@@ -165,7 +172,10 @@ export class CmuxLayerProxy {
   private readonly random: () => number;
   private readonly requestTimeoutMs: number;
   private readonly maxBufferedRequests: number;
-  private readonly onReconnectDelay?: (delayMs: number, attempt: number) => void;
+  private readonly onReconnectDelay?: (
+    delayMs: number,
+    attempt: number,
+  ) => void;
   private readonly logger: Pick<Console, "error">;
 
   private readonly agentReadBuffer = new ReadBuffer();
@@ -204,14 +214,12 @@ export class CmuxLayerProxy {
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));
-    this.initialBackoffMs =
-      opts.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
+    this.initialBackoffMs = opts.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS;
     this.maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.reconnectJitterRatio =
       opts.reconnectJitterRatio ?? DEFAULT_RECONNECT_JITTER_RATIO;
     this.random = opts.random ?? Math.random;
-    this.requestTimeoutMs =
-      opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.maxBufferedRequests =
       opts.maxBufferedRequests ?? DEFAULT_MAX_BUFFERED_REQUESTS;
     this.onReconnectDelay = opts.onReconnectDelay;
@@ -286,11 +294,24 @@ export class CmuxLayerProxy {
       message: cloneMessage(message),
       sequence: this.nextSequence++,
     });
+    this.kickConnectionIfIdle();
     void this.flushQueue();
   }
 
   private enqueueRequest(message: JsonRpcRequest): void {
-    if (!this.daemonReady && this.bufferedRequestCount() >= this.maxBufferedRequests) {
+    const key = requestKey(message.id);
+    if (this.pendingRequests.has(key)) {
+      void this.sendAgentError(
+        message.id,
+        "duplicate JSON-RPC request id is already pending",
+      );
+      return;
+    }
+
+    if (
+      !this.daemonReady &&
+      this.bufferedRequestCount() >= this.maxBufferedRequests
+    ) {
       void this.sendAgentError(
         message.id,
         "cmuxlayer daemon request buffer is full while reconnecting",
@@ -298,7 +319,6 @@ export class CmuxLayerProxy {
       return;
     }
 
-    const key = requestKey(message.id);
     this.expiredRequestKeys.delete(key);
     const pending: PendingRequest = {
       id: message.id,
@@ -315,6 +335,7 @@ export class CmuxLayerProxy {
     };
     this.pendingRequests.set(key, pending);
     this.queue.push(pending);
+    this.kickConnectionIfIdle();
     void this.flushQueue();
   }
 
@@ -328,6 +349,22 @@ export class CmuxLayerProxy {
     }
     this.connecting = true;
     void this.reconnectLoop();
+  }
+
+  // Resume connecting after we went quiescent (e.g. the daemon rejected the
+  // replayed initialize). No-ops while connected, connecting, or a reconnect
+  // is already scheduled, so it only fires when the proxy is fully idle.
+  private kickConnectionIfIdle(): void {
+    if (
+      !this.running ||
+      this.daemonSocket ||
+      this.connecting ||
+      this.reconnectTimer
+    ) {
+      return;
+    }
+    this.reconnectAttempt = 0;
+    this.ensureConnecting();
   }
 
   private async reconnectLoop(): Promise<void> {
@@ -387,20 +424,21 @@ export class CmuxLayerProxy {
     }
     this.daemonSocket = socket;
     this.daemonReadBuffer = new ReadBuffer();
-    this.reconnectAttempt = 0;
     socket.on("data", this.onDaemonData);
     socket.on("error", this.onDaemonError);
     socket.on("close", this.onDaemonClose);
+    socket.resume();
 
     if (
-      this.initializeResultDelivered &&
-      this.initializeRequest
+      this.initializeRequest &&
+      !this.pendingRequests.has(requestKey(this.initializeRequest.id))
     ) {
       this.replayInitialize();
       return;
     }
 
     this.daemonReady = true;
+    this.reconnectAttempt = 0;
     void this.flushQueue();
   }
 
@@ -409,9 +447,13 @@ export class CmuxLayerProxy {
       return;
     }
     this.daemonReadBuffer.append(chunk);
-    while (this.running) {
+    // handleDaemonMessage may disconnect the daemon mid-loop (e.g. on a rejected
+    // initialize replay), which nulls daemonReadBuffer — re-check it each pass so
+    // we don't dereference null and spin forever logging TypeErrors.
+    while (this.running && this.daemonReadBuffer) {
+      const buffer = this.daemonReadBuffer;
       try {
-        const message = this.daemonReadBuffer.readMessage();
+        const message = buffer.readMessage();
         if (message === null) {
           break;
         }
@@ -421,11 +463,14 @@ export class CmuxLayerProxy {
           "[cmuxlayer-proxy] failed to parse daemon frame",
           error,
         );
+        break;
       }
     }
   };
 
-  private readonly onDaemonError = () => {};
+  private readonly onDaemonError = () => {
+    // Swallow socket errors; the following "close" event drives reconnection.
+  };
 
   private readonly onDaemonClose = () => {
     this.handleDaemonDrop();
@@ -434,6 +479,18 @@ export class CmuxLayerProxy {
   private handleDaemonMessage(message: JSONRPCMessage): void {
     if (this.replayingInitialize && this.isInitializeResponse(message)) {
       this.replayingInitialize = false;
+      if ("error" in message) {
+        this.failAllPendingRequests(
+          "cmuxlayer daemon initialize replay failed while reconnecting",
+        );
+        // A replayed initialize that the daemon *answers with an error* is a
+        // protocol rejection (e.g. handshake/version mismatch), not a transport
+        // drop. Reconnecting-and-replaying immediately would hammer the daemon
+        // in a tight loop (a connection storm), so go quiescent here and only
+        // reconnect when fresh agent traffic arrives — see kickConnectionIfIdle.
+        this.disconnectDaemon();
+        return;
+      }
       void this.sendInitializedThenFlush();
       return;
     }
@@ -451,7 +508,10 @@ export class CmuxLayerProxy {
       clearTimeout(pending.timeout);
       this.pendingRequests.delete(key);
       this.expiredRequestKeys.delete(key);
-      if (this.initializeRequest && key === requestKey(this.initializeRequest.id)) {
+      if (
+        this.initializeRequest &&
+        key === requestKey(this.initializeRequest.id)
+      ) {
         this.initializeResultDelivered = true;
       }
       void this.writeAgent(message);
@@ -496,6 +556,7 @@ export class CmuxLayerProxy {
       }
     }
     this.daemonReady = true;
+    this.reconnectAttempt = 0;
     await this.flushQueue();
   }
 
@@ -512,7 +573,12 @@ export class CmuxLayerProxy {
   }
 
   private async flushQueue(): Promise<void> {
-    if (this.flushing || !this.running || !this.daemonReady || !this.daemonSocket) {
+    if (
+      this.flushing ||
+      !this.running ||
+      !this.daemonReady ||
+      !this.daemonSocket
+    ) {
       return;
     }
     this.flushing = true;
@@ -554,7 +620,7 @@ export class CmuxLayerProxy {
 
   private handleDaemonDrop(): void {
     if (!this.daemonSocket && !this.daemonReadBuffer) {
-      this.ensureConnecting();
+      this.reconnectAfterDelay();
       return;
     }
     this.disconnectDaemon();
@@ -562,7 +628,28 @@ export class CmuxLayerProxy {
     this.replayingInitialize = false;
     this.requeueSentRequests();
     this.enforceBufferCap();
-    this.ensureConnecting();
+    this.reconnectAfterDelay();
+  }
+
+  private reconnectAfterDelay(): void {
+    if (!this.running || this.connecting || this.daemonSocket) {
+      return;
+    }
+    const attempt = this.reconnectAttempt++;
+    const delayMs = computeReconnectDelay(attempt, {
+      initialBackoffMs: this.initialBackoffMs,
+      maxBackoffMs: this.maxBackoffMs,
+      jitterRatio: this.reconnectJitterRatio,
+      random: this.random,
+    });
+    this.onReconnectDelay?.(delayMs, attempt);
+    this.connecting = true;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnectTimerResolve = null;
+      this.connecting = false;
+      this.ensureConnecting();
+    }, delayMs);
   }
 
   private disconnectDaemon(): void {
@@ -622,6 +709,12 @@ export class CmuxLayerProxy {
     }
   }
 
+  private failAllPendingRequests(message: string): void {
+    for (const key of [...this.pendingRequests.keys()]) {
+      this.failPendingRequest(key, message);
+    }
+  }
+
   private sendAgentError(id: RequestId, message: string): Promise<void> {
     return this.writeAgent({
       jsonrpc: "2.0",
@@ -671,8 +764,7 @@ export async function runProxy(
 }
 
 const isMain =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
   runProxy().catch((error) => {

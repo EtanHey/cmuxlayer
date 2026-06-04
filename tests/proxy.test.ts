@@ -13,10 +13,7 @@ import type {
   JSONRPCMessage,
   JSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import {
-  CmuxLayerProxy,
-  computeReconnectDelay,
-} from "../src/proxy.js";
+import { CmuxLayerProxy, computeReconnectDelay } from "../src/proxy.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-proxy-test");
 
@@ -28,10 +25,7 @@ function writeFrame(stream: NodeJS.WritableStream, message: JSONRPCMessage) {
   stream.write(serializeMessage(message));
 }
 
-function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 1_000,
-): Promise<void> {
+function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const tick = () => {
@@ -122,10 +116,18 @@ class FakeDaemon {
   private server: net.Server | null = null;
   private readonly events = new EventEmitter();
   private readonly sockets = new Set<net.Socket>();
+  private readonly held: Array<{
+    socket: net.Socket;
+    message: JSONRPCMessage;
+  }> = [];
 
   constructor(
     private readonly path: string,
-    private readonly opts: { holdMethods?: Set<string> } = {},
+    private readonly opts: {
+      holdMethods?: Set<string>;
+      initializeError?: boolean;
+      closeAfterInitializeError?: boolean;
+    } = {},
   ) {}
 
   async start(): Promise<void> {
@@ -155,12 +157,28 @@ class FakeDaemon {
     rmSync(this.path, { force: true });
   }
 
+  releaseHeld(method: string): void {
+    for (let index = this.held.length - 1; index >= 0; index -= 1) {
+      const held = this.held[index];
+      if (
+        typeof held.message === "object" &&
+        held.message !== null &&
+        "method" in held.message &&
+        held.message.method === method
+      ) {
+        this.held.splice(index, 1);
+        this.respond(held.socket, held.message, { ignoreHold: true });
+      }
+    }
+  }
+
   waitForMessage(
     connectionIndex: number,
     predicate: (message: JSONRPCMessage) => boolean,
     timeoutMs = 1_000,
   ): Promise<JSONRPCMessage> {
-    const existing = this.connections[connectionIndex]?.messages.find(predicate);
+    const existing =
+      this.connections[connectionIndex]?.messages.find(predicate);
     if (existing) {
       return Promise.resolve(existing);
     }
@@ -189,7 +207,9 @@ class FakeDaemon {
     const connectionIndex = this.connections.push(connection) - 1;
     const readBuffer = new ReadBuffer();
     this.sockets.add(socket);
-    socket.on("close", () => this.sockets.delete(socket));
+    socket.on("close", () => {
+      this.sockets.delete(socket);
+    });
     socket.on("error", () => {});
     socket.on("data", (chunk) => {
       readBuffer.append(chunk);
@@ -205,7 +225,11 @@ class FakeDaemon {
     });
   }
 
-  private respond(socket: net.Socket, message: JSONRPCMessage) {
+  private respond(
+    socket: net.Socket,
+    message: JSONRPCMessage,
+    opts: { ignoreHold?: boolean } = {},
+  ) {
     if (
       typeof message !== "object" ||
       message === null ||
@@ -214,10 +238,27 @@ class FakeDaemon {
     ) {
       return;
     }
-    if (this.opts.holdMethods?.has(message.method)) {
+    if (!opts.ignoreHold && this.opts.holdMethods?.has(message.method)) {
+      this.held.push({ socket, message });
       return;
     }
     if (message.method === "initialize") {
+      if (this.opts.initializeError) {
+        const payload = serializeMessage({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32000,
+            message: "initialize rejected by fake daemon",
+          },
+        });
+        if (this.opts.closeAfterInitializeError) {
+          socket.end(payload);
+          return;
+        }
+        socket.write(payload);
+        return;
+      }
       writeFrame(socket, {
         jsonrpc: "2.0",
         id: message.id,
@@ -257,7 +298,10 @@ describe("CmuxLayerProxy", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
-  function createProxy(path: string, opts: Partial<ConstructorParameters<typeof CmuxLayerProxy>[0]> = {}) {
+  function createProxy(
+    path: string,
+    opts: Partial<ConstructorParameters<typeof CmuxLayerProxy>[0]> = {},
+  ) {
     const input = new PassThrough();
     const output = new PassThrough();
     const collector = createCollector(output);
@@ -289,15 +333,22 @@ describe("CmuxLayerProxy", () => {
     writeFrame(input, notification("notifications/initialized"));
     writeFrame(input, request(2, "tools/list"));
 
-    await expect(collector.waitForMessage(isResponseFor(1))).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(1)),
+    ).resolves.toMatchObject({
       id: 1,
       result: { serverInfo: { name: "fake-daemon" } },
     });
-    await expect(collector.waitForMessage(isResponseFor(2))).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(2)),
+    ).resolves.toMatchObject({
       id: 2,
       result: { tools: [expect.objectContaining({ name: "list_surfaces" })] },
     });
-    await daemon.waitForMessage(0, (message) => "method" in message && message.method === "tools/list");
+    await daemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
   });
 
   it("replays initialize on daemon restart and completes buffered in-flight requests", async () => {
@@ -314,7 +365,10 @@ describe("CmuxLayerProxy", () => {
     await collector.waitForMessage(isResponseFor(1));
     writeFrame(input, notification("notifications/initialized"));
     writeFrame(input, request(2, "tools/list"));
-    await firstDaemon.waitForMessage(0, (message) => "method" in message && message.method === "tools/list");
+    await firstDaemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
     await firstDaemon.stop();
     daemons.splice(daemons.indexOf(firstDaemon), 1);
 
@@ -322,7 +376,9 @@ describe("CmuxLayerProxy", () => {
     daemons.push(secondDaemon);
     await secondDaemon.start();
 
-    await expect(collector.waitForMessage(isResponseFor(2))).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(2)),
+    ).resolves.toMatchObject({
       id: 2,
       result: { tools: expect.any(Array) },
     });
@@ -332,7 +388,61 @@ describe("CmuxLayerProxy", () => {
         .filter((message) => "method" in message)
         .map((message) => message.method),
     ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
-    expect(collector.messages.filter((message) => "id" in message && message.id === 1)).toHaveLength(1);
+    expect(
+      collector.messages.filter(
+        (message) => "id" in message && message.id === 1,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("rejects duplicate request ids without replacing the original pending request", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("duplicate-id");
+    const daemon = new FakeDaemon(path, {
+      holdMethods: new Set(["tools/list"]),
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    const { input, collector } = createProxy(path, { requestTimeoutMs: 1_000 });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await collector.waitForMessage(isResponseFor(1));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+    await daemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
+
+    writeFrame(input, request(2, "read_screen"));
+
+    await expect(
+      collector.waitForMessage(
+        (message) =>
+          isResponseFor(2)(message) &&
+          "error" in message &&
+          /duplicate/i.test(message.error.message),
+      ),
+    ).resolves.toMatchObject({
+      id: 2,
+      error: expect.objectContaining({
+        code: -32001,
+      }),
+    });
+
+    daemon.releaseHeld("tools/list");
+
+    await expect(
+      collector.waitForMessage(
+        (message) =>
+          isResponseFor(2)(message) &&
+          "result" in message &&
+          Array.isArray(message.result.tools),
+      ),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
   });
 
   it("replays initialize if the daemon restarts before initialized notification is cached", async () => {
@@ -358,7 +468,9 @@ describe("CmuxLayerProxy", () => {
     writeFrame(input, notification("notifications/initialized"));
     writeFrame(input, request(2, "tools/list"));
 
-    await expect(collector.waitForMessage(isResponseFor(2))).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(2)),
+    ).resolves.toMatchObject({
       id: 2,
       result: { tools: expect.any(Array) },
     });
@@ -367,7 +479,110 @@ describe("CmuxLayerProxy", () => {
         .filter((message) => "method" in message)
         .map((message) => message.method),
     ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
-    expect(collector.messages.filter((message) => "id" in message && message.id === 1)).toHaveLength(1);
+    expect(
+      collector.messages.filter(
+        (message) => "id" in message && message.id === 1,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not flush queued RPCs when replayed initialize returns an error", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("replay-init-error");
+    const firstDaemon = new FakeDaemon(path, {
+      holdMethods: new Set(["tools/list"]),
+    });
+    daemons.push(firstDaemon);
+    await firstDaemon.start();
+    const { input, collector } = createProxy(path, {
+      requestTimeoutMs: 500,
+      initialBackoffMs: 5,
+      maxBackoffMs: 10,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await collector.waitForMessage(isResponseFor(1));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+    await firstDaemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
+    await firstDaemon.stop();
+    daemons.splice(daemons.indexOf(firstDaemon), 1);
+
+    const secondDaemon = new FakeDaemon(path, {
+      initializeError: true,
+      closeAfterInitializeError: true,
+    });
+    daemons.push(secondDaemon);
+    await secondDaemon.start();
+    await secondDaemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "initialize",
+    );
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 500),
+    ).resolves.toMatchObject({
+      id: 2,
+      error: expect.objectContaining({
+        code: -32001,
+        message: expect.stringMatching(/initialize replay/i),
+      }),
+    });
+
+    expect(
+      secondDaemon.connections.flatMap((connection) =>
+        connection.messages
+          .filter((message) => "method" in message)
+          .map((message) => message.method),
+      ),
+    ).not.toContain("tools/list");
+  });
+
+  it("replays initialize before queued RPCs after the original initialize timed out", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("init-timeout-replay");
+    const { input, collector } = createProxy(path, {
+      requestTimeoutMs: 50,
+      initialBackoffMs: 5,
+      maxBackoffMs: 10,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    writeFrame(input, notification("notifications/initialized"));
+
+    // No daemon is listening, so the original initialize times out and the agent
+    // gets a keyed error (it is not re-sent — see the outage-timeout test).
+    await expect(
+      collector.waitForMessage(isResponseFor(1), 500),
+    ).resolves.toMatchObject({
+      id: 1,
+      error: expect.objectContaining({
+        code: -32001,
+      }),
+    });
+
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    // The agent retries once the daemon is back. The proxy must replay the
+    // cached initialize (and initialized) before forwarding this request, even
+    // though the original initialize already "completed" with a timeout error.
+    writeFrame(input, request(2, "tools/list"));
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
+    expect(
+      daemon.connections[0].messages
+        .filter((message) => "method" in message)
+        .map((message) => message.method),
+    ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
   });
 
   it("computes exponential reconnect backoff with jitter", () => {
@@ -381,7 +596,9 @@ describe("CmuxLayerProxy", () => {
     );
 
     expect(delays).toEqual([125, 250, 500, 800]);
-    expect(delays.every((delay, index) => index === 0 || delay > delays[index - 1])).toBe(true);
+    expect(
+      delays.every((delay, index) => index === 0 || delay > delays[index - 1]),
+    ).toBe(true);
   });
 
   it("returns a JSON-RPC error when buffered requests exceed the cap", async () => {
@@ -405,7 +622,9 @@ describe("CmuxLayerProxy", () => {
     writeFrame(input, request(2, "tools/list"));
     writeFrame(input, request(3, "tools/list"));
 
-    await expect(collector.waitForMessage(isResponseFor(3))).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(3)),
+    ).resolves.toMatchObject({
       id: 3,
       error: expect.objectContaining({
         code: -32001,
@@ -430,7 +649,9 @@ describe("CmuxLayerProxy", () => {
 
     writeFrame(input, request(2, "tools/list"));
 
-    await expect(collector.waitForMessage(isResponseFor(2), 500)).resolves.toMatchObject({
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 500),
+    ).resolves.toMatchObject({
       id: 2,
       error: expect.objectContaining({
         code: -32001,
