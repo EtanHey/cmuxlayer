@@ -559,6 +559,125 @@ describe("CmuxLayerDaemon", () => {
     await client.close();
   });
 
+  it("does not start new requests on existing connections after drain begins", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("drain-blocks-new-work");
+    const gate = deferred<{ stdout: string; stderr: string }>();
+    const started = deferred<void>();
+    let listWorkspacesCalls = 0;
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        listWorkspacesCalls += 1;
+        if (listWorkspacesCalls === 1) {
+          started.resolve();
+          return gate.promise;
+        }
+        return {
+          stdout: JSON.stringify({ workspaces: [] }),
+          stderr: "",
+        };
+      }
+      return createListSurfacesExec()(_cmd, args);
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec,
+      skipAgentLifecycle: true,
+      drainTimeoutMs: 500,
+    });
+
+    await daemon.start();
+    let socket: net.Socket | null = null;
+    try {
+      socket = net.createConnection(path);
+      socket.on("error", () => {});
+      const messages: Record<string, any>[] = [];
+      const messageEvents = new EventEmitter();
+      let buffer = "";
+      const send = (message: Record<string, unknown>) => {
+        socket?.write(`${JSON.stringify(message)}\n`);
+      };
+      const waitForResponse = (id: number) => {
+        const existing = messages.find((message) => message.id === id);
+        if (existing) {
+          return Promise.resolve(existing);
+        }
+        return new Promise<Record<string, any>>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            messageEvents.off("message", onMessage);
+            reject(new Error(`timed out waiting for response ${id}`));
+          }, 500);
+          const onMessage = (message: Record<string, any>) => {
+            if (message.id !== id) {
+              return;
+            }
+            clearTimeout(timeout);
+            messageEvents.off("message", onMessage);
+            resolve(message);
+          };
+          messageEvents.on("message", onMessage);
+        });
+      };
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line.trim()) {
+            continue;
+          }
+          const message = JSON.parse(line);
+          messages.push(message);
+          messageEvents.emit("message", message);
+        }
+      });
+
+      await once(socket, "connect");
+      send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "raw-drain-test", version: "0.1.0" },
+        },
+      });
+      await waitForResponse(1);
+      send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "list_surfaces", arguments: { verbose: false } },
+      });
+
+      await started.promise;
+      const shutdown = daemon.shutdown("SIGTERM");
+      await delay(10);
+      send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "list_surfaces", arguments: { verbose: false } },
+      });
+      await delay(30);
+
+      expect(listWorkspacesCalls).toBe(1);
+      gate.resolve({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+      await expect(waitForResponse(2)).resolves.toMatchObject({ id: 2 });
+      await expect(shutdown).resolves.toMatchObject({ forced: false });
+      expect(listWorkspacesCalls).toBe(1);
+    } finally {
+      socket?.destroy();
+      await daemon.shutdown().catch(() => {});
+    }
+  });
+
   it("forces shutdown after the drain timeout when a request hangs", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("drain-timeout");

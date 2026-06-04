@@ -106,7 +106,14 @@ export class SocketJsonRpcTransport implements Transport {
     }
     this.finishClose();
     if (!this.socket.destroyed) {
+      this.socket.resume();
       this.socket.end();
+    }
+  }
+
+  pauseInput(): void {
+    if (!this.closed) {
+      this.socket.pause();
     }
   }
 
@@ -426,6 +433,7 @@ export class CmuxLayerDaemon {
 
   private async doShutdown(): Promise<DaemonShutdownResult> {
     this.draining = true;
+    this.pauseActiveTransports();
     const listenerClosed = this.closeListener();
 
     const forced = !(await this.waitForDrain());
@@ -447,6 +455,12 @@ export class CmuxLayerDaemon {
       activeConnections: this.activeTransports.size,
       inFlightRequests: this.inFlightRequests,
     };
+  }
+
+  private pauseActiveTransports(): void {
+    for (const transport of this.activeTransports) {
+      transport.pauseInput();
+    }
   }
 
   private listen(options: string | { fd: number }): Promise<void> {
