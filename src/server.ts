@@ -2618,76 +2618,86 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
-    const engine = new AgentEngine(
-      stateMgr,
-      registry,
-      {
-        log: (message, eventOpts) => client.log(message, eventOpts),
-        listWorkspaces: () => client.listWorkspaces(),
-        setStatus: (key, value, statusOpts) =>
-          client.setStatus(key, value, statusOpts),
-        clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
-        readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
-        send: (surface, text, sendOpts) =>
-          withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
-        sendKey: (surface, key, keyOpts) =>
-          withSurfaceWrite(surface, () =>
-            client.sendKey(surface, key, keyOpts),
-          ),
-        setProgress: (value, progressOpts) =>
-          client.setProgress(value, progressOpts),
-        newSplit: (direction, splitOpts) =>
-          client.newSplit(direction, splitOpts),
-        newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
-        selectWorkspace: (workspace) => client.selectWorkspace(workspace),
-        listPanes: (paneOpts) => client.listPanes(paneOpts),
-        listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
-        closeSurface: (surface, closeOpts) =>
-          withSurfaceWrite(surface, () =>
-            client.closeSurface(surface, closeOpts),
-          ),
-        notifyLifecycleEvent,
-      },
-      {
-        spawnPreflight:
-          spawnPreflight ??
-          (disableSpawnPreflight ? async () => {} : undefined),
-        roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
-        launchCommandSender: async ({ surface, workspace, command }) => {
-          const sanitizedCommand = sanitizeTerminalInput(command);
-          const chunks =
-            sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
-              ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
-              : [sanitizedCommand];
-
-          await waitForLaunchShellReady({ surface, workspace });
-          await withSurfaceWrite(surface, async () => {
-            try {
-              await deliverInputChunks({
-                surface,
-                workspace,
-                chunks,
-                chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-                chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-                press_enter: true,
-                source_event: "spawn_agent",
-                verify_submit: true,
-              });
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : String(error);
-              if (!/Enter submit could not be verified/.test(message)) {
-                throw error;
-              }
-              // The command can remain visible in shell history while the
-              // launcher is already booting. Verification still retried Enter;
-              // agent readiness detection is the authoritative launch check.
-              await waitForAgentLaunchReady({ surface, workspace });
-            }
-          });
+    const engine =
+      context.lifecycleSweepEngine ??
+      new AgentEngine(
+        stateMgr,
+        registry,
+        {
+          log: (message, eventOpts) => client.log(message, eventOpts),
+          listWorkspaces: () => client.listWorkspaces(),
+          setStatus: (key, value, statusOpts) =>
+            client.setStatus(key, value, statusOpts),
+          clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
+          readScreen: (surface, readOpts) =>
+            client.readScreen(surface, readOpts),
+          send: (surface, text, sendOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.send(surface, text, sendOpts),
+            ),
+          sendKey: (surface, key, keyOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.sendKey(surface, key, keyOpts),
+            ),
+          setProgress: (value, progressOpts) =>
+            client.setProgress(value, progressOpts),
+          newSplit: (direction, splitOpts) =>
+            client.newSplit(direction, splitOpts),
+          newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+          selectWorkspace: (workspace) => client.selectWorkspace(workspace),
+          listPanes: (paneOpts) => client.listPanes(paneOpts),
+          listPaneSurfaces: (surfaceOpts) =>
+            client.listPaneSurfaces(surfaceOpts),
+          closeSurface: (surface, closeOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.closeSurface(surface, closeOpts),
+            ),
+          notifyLifecycleEvent,
         },
-      },
-    );
+        {
+          spawnPreflight:
+            spawnPreflight ??
+            (disableSpawnPreflight ? async () => {} : undefined),
+          roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
+          launchCommandSender: async ({ surface, workspace, command }) => {
+            const sanitizedCommand = sanitizeTerminalInput(command);
+            const chunks =
+              sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
+                ? chunkTerminalInput(
+                    sanitizedCommand,
+                    SEND_INPUT_CHUNK_THRESHOLD,
+                  )
+                : [sanitizedCommand];
+
+            await waitForLaunchShellReady({ surface, workspace });
+            await withSurfaceWrite(surface, async () => {
+              try {
+                await deliverInputChunks({
+                  surface,
+                  workspace,
+                  chunks,
+                  chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+                  chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+                  press_enter: true,
+                  source_event: "spawn_agent",
+                  verify_submit: true,
+                });
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                if (!/Enter submit could not be verified/.test(message)) {
+                  throw error;
+                }
+                // The command can remain visible in shell history while the
+                // launcher is already booting. Verification still retried Enter;
+                // agent readiness detection is the authoritative launch check.
+                await waitForAgentLaunchReady({ surface, workspace });
+              }
+            });
+          },
+        },
+      );
+    context.lifecycleSweepEngine = engine;
 
     const deliverAgentInput = async (args: {
       agent_id: string;
@@ -2815,7 +2825,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // agents from previous cmux sessions.
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
-      context.lifecycleSweepEngine = engine;
       context.lifecycleStartPromise = registry
         .reconstitute()
         .then(() => engine.enableStartupPurge())

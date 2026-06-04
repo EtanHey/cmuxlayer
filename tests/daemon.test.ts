@@ -1,15 +1,17 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
 import {
   CmuxLayerDaemon,
   SocketJsonRpcTransport,
 } from "../src/daemon.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-daemon-test");
@@ -191,6 +193,16 @@ async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function listen(server: net.Server, path: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
 async function rawToolsList(path: string, timeoutMs = 500): Promise<{
   server?: string;
   toolCount?: number;
@@ -250,9 +262,41 @@ async function rawToolsList(path: string, timeoutMs = 500): Promise<{
   });
 }
 
+async function readOnce(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let data = "";
+    socket.on("data", (chunk) => {
+      data += chunk.toString("utf8");
+    });
+    socket.on("end", () => resolve(data));
+    socket.on("error", reject);
+  });
+}
+
 describe("CmuxLayerDaemon", () => {
   afterEach(() => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("shared-engine"),
+      disableSpawnPreflight: true,
+    });
+
+    try {
+      const firstServer = createServer({ context });
+      const secondServer = createServer({ context });
+
+      expect((firstServer as any)._registeredTools.interact._engine).toBe(
+        (secondServer as any)._registeredTools.interact._engine,
+      );
+    } finally {
+      context.dispose();
+    }
   });
 
   it("serves initialize and list_surfaces over a unix socket", async () => {
@@ -301,6 +345,66 @@ describe("CmuxLayerDaemon", () => {
     });
 
     await daemon.shutdown();
+  });
+
+  it("closes the per-connection MCP server when a client disconnects", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("connection-close");
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+    const closeSpy = vi.spyOn(McpServer.prototype, "close");
+
+    try {
+      await daemon.start();
+      const client = await connectClient(path);
+      closeSpy.mockClear();
+
+      await client.close();
+      await delay(10);
+
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await daemon.shutdown().catch(() => {});
+      closeSpy.mockRestore();
+    }
+  });
+
+  it("observes incoming requests even when onmessage is replaced", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("request-observer");
+    const observed = deferred<Record<string, unknown>>();
+    const server = net.createServer(async (socket) => {
+      const transport = new SocketJsonRpcTransport(socket);
+      (transport as any).onRequestObserved = (message: Record<string, unknown>) =>
+        observed.resolve(message);
+      transport.onmessage = () => {};
+      await transport.start();
+      transport.onmessage = () => {};
+    });
+
+    await listen(server, path);
+    const socket = net.createConnection(path);
+    await once(socket, "connect");
+    socket.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 99, method: "ping" })}\n`,
+    );
+
+    try {
+      await expect(
+        Promise.race([
+          observed.promise,
+          delay(50).then(() => {
+            throw new Error("request observer was not called");
+          }),
+        ]),
+      ).resolves.toMatchObject({ id: 99, method: "ping" });
+    } finally {
+      socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("shares one world-model across concurrent MCP connections", async () => {
@@ -397,6 +501,94 @@ describe("CmuxLayerDaemon", () => {
     await client.close();
   });
 
+  it("keeps shutdown pending while a request is in-flight", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("drain-waits");
+    const gate = deferred<{ stdout: string; stderr: string }>();
+    const started = deferred<void>();
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        started.resolve();
+        return gate.promise;
+      }
+      return createListSurfacesExec()(_cmd, args);
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec,
+      skipAgentLifecycle: true,
+      drainTimeoutMs: 500,
+    });
+
+    await daemon.start();
+    const client = await connectClient(path);
+    const pending = client.callTool({
+      name: "list_surfaces",
+      arguments: { verbose: false },
+    });
+
+    await started.promise;
+    let shutdownSettled = false;
+    const shutdown = daemon.shutdown("SIGTERM").then((result) => {
+      shutdownSettled = true;
+      return result;
+    });
+    await delay(30);
+
+    expect(shutdownSettled).toBe(false);
+    expect(daemon.inFlightRequestCount()).toBe(1);
+
+    gate.resolve({
+      stdout: JSON.stringify({ workspaces: [] }),
+      stderr: "",
+    });
+    await expect(pending).resolves.toMatchObject({
+      structuredContent: expect.objectContaining({ ok: true }),
+    });
+    await expect(shutdown).resolves.toMatchObject({ forced: false });
+    await client.close();
+  });
+
+  it("forces shutdown after the drain timeout when a request hangs", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("drain-timeout");
+    const started = deferred<void>();
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        started.resolve();
+        return new Promise(() => {});
+      }
+      return createListSurfacesExec()(_cmd, args);
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec,
+      skipAgentLifecycle: true,
+      drainTimeoutMs: 30,
+    });
+
+    await daemon.start();
+    const client = await connectClient(path);
+    const pending = client
+      .callTool({
+        name: "list_surfaces",
+        arguments: { verbose: false },
+      })
+      .then(
+        () => null,
+        (error) => error,
+      );
+
+    await started.promise;
+    await expect(daemon.shutdown("SIGTERM")).resolves.toMatchObject({
+      forced: true,
+    });
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/Connection closed|closed/i);
+    await client.close().catch(() => {});
+  });
+
   it("uses listen({ fd }) for socket activation without unlinking the socket path", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("fd");
@@ -430,5 +622,28 @@ describe("CmuxLayerDaemon", () => {
     await expect(readFile(path, "utf8")).resolves.toBe("launchd-owned");
 
     await daemon.shutdown();
+  });
+
+  it("does not unlink a live daemon socket when another daemon is running", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("live-socket");
+    const liveServer = net.createServer((socket) => {
+      socket.end("live\n");
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+
+    await listen(liveServer, path);
+
+    try {
+      await expect(daemon.start()).rejects.toThrow(/already.*running|in use/i);
+      await expect(readOnce(path)).resolves.toBe("live\n");
+    } finally {
+      await daemon.shutdown().catch(() => {});
+      await new Promise<void>((resolve) => liveServer.close(() => resolve()));
+    }
   });
 });

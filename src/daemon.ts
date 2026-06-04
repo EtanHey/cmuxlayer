@@ -36,6 +36,7 @@ export class SocketJsonRpcTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: <T extends JSONRPCMessage>(message: T) => void;
+  onRequestObserved?: (message: JSONRPCMessage) => void;
   onSend?: (message: JSONRPCMessage) => void;
 
   private readBuffer = new ReadBuffer();
@@ -120,6 +121,9 @@ export class SocketJsonRpcTransport implements Transport {
         if (message === null) {
           break;
         }
+        if (isJsonRpcRequest(message)) {
+          this.onRequestObserved?.(message);
+        }
         this.onmessage?.(message);
       } catch (error) {
         this.onerror?.(
@@ -202,6 +206,52 @@ function isJsonRpcResponse(
   );
 }
 
+async function unlinkStaleSocket(path: string): Promise<void> {
+  const status = await probeSocket(path);
+  if (status === "live") {
+    throw new Error(`cmuxlayer daemon socket is already in use: ${path}`);
+  }
+  if (status === "missing") {
+    return;
+  }
+
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  });
+}
+
+function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let settled = false;
+    const settle = (value: "live" | "missing" | "stale") => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(value);
+    };
+
+    socket.setTimeout(250, () => settle("live"));
+    socket.once("connect", () => settle("live"));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        settle("missing");
+        return;
+      }
+      if (error.code === "ECONNREFUSED") {
+        settle("stale");
+        return;
+      }
+      reject(error);
+    });
+  });
+}
+
 export class CmuxLayerDaemon {
   private server: net.Server | null = null;
   private context: CmuxServerContext | null;
@@ -231,6 +281,10 @@ export class CmuxLayerDaemon {
       throw new Error("cmuxlayer daemon already started");
     }
 
+    if (this.listenFd === undefined) {
+      await unlinkStaleSocket(this.socketPath);
+    }
+
     await this.getContext();
 
     this.server = (this.opts.serverFactory ?? net.createServer)(
@@ -247,11 +301,6 @@ export class CmuxLayerDaemon {
       return;
     }
 
-    await unlink(this.socketPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    });
     await this.listen(this.socketPath);
   }
 
@@ -324,7 +373,7 @@ export class CmuxLayerDaemon {
     this.activeTransports.add(transport);
     this.activeServers.add(mcpServer);
 
-    transport.onmessage = (message) => {
+    transport.onRequestObserved = (message) => {
       if (!isJsonRpcRequest(message)) {
         return;
       }
@@ -348,6 +397,11 @@ export class CmuxLayerDaemon {
       this.activeTransports.delete(transport);
       this.activeServers.delete(mcpServer);
       this.resolveDrainWaiters();
+      void mcpServer.close().catch((error) => {
+        if (!this.draining) {
+          console.error("[cmuxlayer-daemon] MCP server close failed", error);
+        }
+      });
     };
     transport.onerror = (error) => {
       if (!this.draining) {
