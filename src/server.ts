@@ -126,7 +126,7 @@ const SendToArgsSchema = z.object({
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
-interface DeliveryRecord {
+export interface DeliveryRecord {
   delivery_id: string;
   surface: string;
   workspace?: string;
@@ -512,6 +512,8 @@ export interface CreateServerOptions {
   bin?: string;
   /** Pre-built client (socket or CLI). If omitted, creates a CLI client. */
   client?: CmuxClient | CmuxSocketClient;
+  /** Shared server-side world-model reused across many MCP connections. */
+  context?: CmuxServerContext;
   /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
@@ -522,6 +524,71 @@ export interface CreateServerOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
   disableSpawnPreflight?: boolean;
+}
+
+type CmuxLayerClient = CmuxClient | CmuxSocketClient;
+
+export interface CmuxServerContext {
+  client: CmuxLayerClient;
+  stateDir: string;
+  stateMgr: StateManager;
+  roleSurfaceOverrides: Map<
+    string,
+    { role: AgentRole; workspace: string | null }
+  >;
+  eventLog: ReturnType<StateManager["getEventLog"]>;
+  deliveries: Map<string, DeliveryRecord>;
+  latestDeliveryBySurface: Map<string, string>;
+  activeDeliveryBySurface: Map<string, string>;
+  activeSurfaceWrites: Map<string, string>;
+  enableClaudeChannels: boolean;
+  skipAgentLifecycle: boolean;
+  spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  disableSpawnPreflight?: boolean;
+  lifecycleRegistry: AgentRegistry | null;
+  lifecycleStarted: boolean;
+  lifecycleStartPromise: Promise<void> | null;
+  lifecycleSweepEngine: AgentEngine | null;
+  dispose(): void;
+}
+
+export function createServerContext(
+  opts?: Omit<CreateServerOptions, "context">,
+): CmuxServerContext {
+  const client =
+    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const stateDir =
+    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+  const stateMgr = new StateManager(stateDir);
+  const context: CmuxServerContext = {
+    client,
+    stateDir,
+    stateMgr,
+    roleSurfaceOverrides: new Map(),
+    eventLog: stateMgr.getEventLog(),
+    deliveries: new Map(),
+    latestDeliveryBySurface: new Map(),
+    activeDeliveryBySurface: new Map(),
+    activeSurfaceWrites: new Map(),
+    enableClaudeChannels:
+      opts?.enableClaudeChannels ??
+      process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1",
+    skipAgentLifecycle: opts?.skipAgentLifecycle ?? false,
+    spawnPreflight: opts?.spawnPreflight,
+    disableSpawnPreflight: opts?.disableSpawnPreflight,
+    lifecycleRegistry: null,
+    lifecycleStarted: false,
+    lifecycleStartPromise: null,
+    lifecycleSweepEngine: null,
+    dispose() {
+      context.lifecycleSweepEngine?.dispose();
+      context.lifecycleSweepEngine = null;
+      context.lifecycleStarted = false;
+      context.lifecycleStartPromise = null;
+    },
+  };
+
+  return context;
 }
 
 function formatLifecycleChannelContent(
@@ -567,24 +634,22 @@ function buildLifecycleChannelMeta(
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
-  const client =
-    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
-  const stateDir =
-    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
-  const stateMgr = new StateManager(stateDir);
-  const roleSurfaceOverrides = new Map<
-    string,
-    { role: AgentRole; workspace: string | null }
-  >();
-  let lifecycleRegistry: AgentRegistry | null = null;
-  const eventLog = stateMgr.getEventLog();
-  const deliveries = new Map<string, DeliveryRecord>();
-  const latestDeliveryBySurface = new Map<string, string>();
-  const activeDeliveryBySurface = new Map<string, string>();
-  const activeSurfaceWrites = new Map<string, string>();
+  const context = opts?.context ?? createServerContext(opts);
+  const client = context.client;
+  const stateMgr = context.stateMgr;
+  const roleSurfaceOverrides = context.roleSurfaceOverrides;
+  const eventLog = context.eventLog;
+  const deliveries = context.deliveries;
+  const latestDeliveryBySurface = context.latestDeliveryBySurface;
+  const activeDeliveryBySurface = context.activeDeliveryBySurface;
+  const activeSurfaceWrites = context.activeSurfaceWrites;
   const enableClaudeChannels =
-    opts?.enableClaudeChannels ??
-    process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1";
+    opts?.enableClaudeChannels ?? context.enableClaudeChannels;
+  const skipAgentLifecycle =
+    opts?.skipAgentLifecycle ?? context.skipAgentLifecycle;
+  const spawnPreflight = opts?.spawnPreflight ?? context.spawnPreflight;
+  const disableSpawnPreflight =
+    opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
 
   const server = new McpServer(
     {
@@ -621,7 +686,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
   ) => {
-    const roleRecords = lifecycleRegistry?.list() ?? [];
+    const roleRecords = context.lifecycleRegistry?.list() ?? [];
     const ids = collectRoleSurfaceIds(roleRecords);
     if (liveSurfaceIds) {
       for (const role of ["orchestrator", "ic", "worker"] as const) {
@@ -2494,7 +2559,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   // --- Agent Lifecycle Tools (Phase 5) ---
 
-  if (!opts?.skipAgentLifecycle) {
+  if (!skipAgentLifecycle) {
     const surfaceProvider = async () => {
       try {
         const workspaces = await client.listWorkspaces();
@@ -2529,8 +2594,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return [];
       }
     };
-    const registry = new AgentRegistry(stateMgr, surfaceProvider);
-    lifecycleRegistry = registry;
+    const registry =
+      context.lifecycleRegistry ?? new AgentRegistry(stateMgr, surfaceProvider);
+    context.lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
@@ -2584,8 +2650,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       {
         spawnPreflight:
-          opts?.spawnPreflight ??
-          (opts?.disableSpawnPreflight ? async () => {} : undefined),
+          spawnPreflight ??
+          (disableSpawnPreflight ? async () => {} : undefined),
         roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
         launchCommandSender: async ({ surface, workspace, command }) => {
           const sanitizedCommand = sanitizeTerminalInput(command);
@@ -2747,13 +2813,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
     // agents from previous cmux sessions.
-    registry
-      .reconstitute()
-      .then(() => engine.enableStartupPurge())
-      .catch((e) =>
-        console.error("[cmux-mcp] registry reconstitution failed:", e),
-      );
-    engine.startSweep(5000);
+    if (!context.lifecycleStarted) {
+      context.lifecycleStarted = true;
+      context.lifecycleSweepEngine = engine;
+      context.lifecycleStartPromise = registry
+        .reconstitute()
+        .then(() => engine.enableStartupPurge())
+        .catch((e) =>
+          console.error("[cmux-mcp] registry reconstitution failed:", e),
+        );
+      engine.startSweep(5000);
+    }
 
     // 11. spawn_agent
     server.tool(
