@@ -562,74 +562,86 @@ describe("tool handler integration", () => {
   });
 
   it("list_surfaces reports pane_ref, column, and column_count in condensed and verbose output", async () => {
-    const mockClient = {
-      listWorkspaces: vi.fn().mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:1",
-            title: "Main",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      }),
-      listPanes: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:1",
-        window_ref: "window:1",
-        panes: [
-          {
-            ref: "pane:left",
-            index: 0,
-            focused: false,
-            surface_count: 1,
-            surface_refs: ["surface:left"],
-            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-          },
-          {
-            ref: "pane:right-top",
-            index: 1,
-            focused: true,
-            surface_count: 1,
-            surface_refs: ["surface:right-top"],
-            pixel_frame: { x: 500, y: 0, width: 500, height: 450 },
-          },
-          {
-            ref: "pane:right-bottom",
-            index: 2,
-            focused: false,
-            surface_count: 1,
-            surface_refs: ["surface:right-bottom"],
-            pixel_frame: { x: 500, y: 450, width: 500, height: 450 },
-          },
-        ],
-      }),
-      listPaneSurfaces: vi
-        .fn()
-        .mockImplementation(async ({ pane }: { pane: string }) => ({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          pane_ref: pane,
-          surfaces: [
-            {
-              ref:
-                pane === "pane:left"
-                  ? "surface:left"
-                  : pane === "pane:right-top"
-                    ? "surface:right-top"
-                    : "surface:right-bottom",
-              title: pane,
-              type: "terminal",
-              index: 0,
-              selected: true,
-            },
-          ],
-        })),
-    };
-    const server = createServer({
-      client: mockClient as any,
-      skipAgentLifecycle: true,
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:left"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-top",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:right-top"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 450 },
+              },
+              {
+                ref: "pane:right-bottom",
+                index: 2,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:right-bottom"],
+                pixel_frame: { x: 500, y: 450, width: 500, height: 450 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces: [
+              {
+                ref:
+                  pane === "pane:left"
+                    ? "surface:left"
+                    : pane === "pane:right-top"
+                      ? "surface:right-top"
+                      : "surface:right-bottom",
+                title: pane,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
     });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["list_surfaces"];
 
     const condensedResult = await tool.handler({}, {} as any);
@@ -681,60 +693,72 @@ describe("tool handler integration", () => {
   });
 
   it("list_surfaces backfills pane_ref before assigning columns when the client omits it", async () => {
-    const mockClient = {
-      listWorkspaces: vi.fn().mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:1",
-            title: "Main",
-            index: 0,
-            selected: true,
-            pinned: false,
-          },
-        ],
-      }),
-      listPanes: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:1",
-        window_ref: "window:1",
-        panes: [
-          {
-            ref: "pane:left",
-            index: 0,
-            focused: false,
-            surface_count: 1,
-            surface_refs: ["surface:left"],
-            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-          },
-          {
-            ref: "pane:right",
-            index: 1,
-            focused: true,
-            surface_count: 1,
-            surface_refs: ["surface:right"],
-            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
-          },
-        ],
-      }),
-      listPaneSurfaces: vi
-        .fn()
-        .mockImplementation(async ({ pane }: { pane: string }) => ({
-          workspace_ref: "workspace:1",
-          window_ref: "window:1",
-          surfaces: [
-            {
-              ref: pane === "pane:left" ? "surface:left" : "surface:right",
-              title: pane,
-              type: "terminal",
-              index: 0,
-              selected: true,
-            },
-          ],
-        })),
-    };
-    const server = createServer({
-      client: mockClient as any,
-      skipAgentLifecycle: true,
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:left"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:right"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            surfaces: [
+              {
+                ref: pane === "pane:left" ? "surface:left" : "surface:right",
+                title: pane,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
     });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["list_surfaces"];
 
     const result = await tool.handler({}, {} as any);

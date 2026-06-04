@@ -98,16 +98,17 @@ function describePaneLayouts(
 }
 
 export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
+  const useGeometry = panes.every((pane) => pane.pixel_frame);
   const sortedGroups = [
     ...new Map(
       [...panes]
         .sort((a, b) => {
-          const aPosition = a.pixel_frame?.x ?? a.index;
-          const bPosition = b.pixel_frame?.x ?? b.index;
+          const aPosition = useGeometry ? a.pixel_frame!.x : a.index;
+          const bPosition = useGeometry ? b.pixel_frame!.x : b.index;
           return aPosition - bPosition || a.index - b.index;
         })
         .map((pane) => [
-          pane.pixel_frame ? `x:${pane.pixel_frame.x}` : `index:${pane.index}`,
+          useGeometry ? `x:${pane.pixel_frame!.x}` : `index:${pane.index}`,
           pane,
         ]),
     ).keys(),
@@ -118,8 +119,8 @@ export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
 
   return new Map(
     panes.map((pane) => {
-      const group = pane.pixel_frame
-        ? `x:${pane.pixel_frame.x}`
+      const group = useGeometry
+        ? `x:${pane.pixel_frame!.x}`
         : `index:${pane.index}`;
       return [pane.ref, columnByGroup.get(group) ?? 0];
     }),
@@ -175,11 +176,19 @@ function isNonLeadWorkerZonePane(
   layout: PaneLayout,
   leftPane: PaneLayout | undefined,
 ): boolean {
+  const workerZoneCount = layout.workerCount + layout.unknownCount;
+  const nonWorkerZoneCount =
+    layout.surfaces.length -
+    layout.orchestratorCount -
+    layout.icCount -
+    workerZoneCount;
+
   return (
     layout.pane.ref !== leftPane?.pane.ref &&
     layout.orchestratorCount === 0 &&
     layout.icCount === 0 &&
-    (layout.workerCount > 0 || layout.unknownCount > 0)
+    workerZoneCount > 0 &&
+    workerZoneCount > nonWorkerZoneCount
   );
 }
 
@@ -442,13 +451,6 @@ export function chooseAgentSpawnPlacement(
       return { kind: "surface", pane: childPane.pane.ref };
     }
 
-    const workerZonePane = rightmostByColumn(
-      layouts.filter((layout) => isNonLeadWorkerZonePane(layout, leftPane)),
-    );
-    if (workerZonePane) {
-      return { kind: "surface", pane: workerZonePane.pane.ref };
-    }
-
     const parentPane = paneContainingSurface(layouts, context.parentSurfaceId);
     if (parentPane) {
       return {
@@ -466,13 +468,6 @@ export function chooseAgentSpawnPlacement(
     );
     if (childPane && isWorkerDockPane(childPane)) {
       return { kind: "surface", pane: childPane.pane.ref };
-    }
-
-    const workerZonePane = rightmostByColumn(
-      layouts.filter((layout) => isNonLeadWorkerZonePane(layout, leftPane)),
-    );
-    if (workerZonePane) {
-      return { kind: "surface", pane: workerZonePane.pane.ref };
     }
 
     const parentPane = paneContainingSurface(layouts, context.parentSurfaceId);
