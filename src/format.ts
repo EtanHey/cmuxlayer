@@ -86,12 +86,19 @@ export function formatReadScreen(
   parsed: ParsedScreenResult,
   scrollbackUsed: boolean,
   lines: number,
+  column?: number | null,
+  columnCount?: number | null,
 ): string {
   const result: string[] = [];
 
-  // Header with surface info
+  // Header with surface info + a column hint (e.g. "col 1/2") so fleet sprawl
+  // is visible on every read. Omitted when geometry is unavailable.
   const titleStr = title ? ` "${truncate(title, 30)}"` : "";
-  result.push(`\u250c\u2500 ${surfaceRef}${titleStr}`);
+  const colStr =
+    typeof column === "number" && typeof columnCount === "number"
+      ? ` \u00b7 col ${column + 1}/${columnCount}`
+      : "";
+  result.push(`\u250c\u2500 ${surfaceRef}${titleStr}${colStr}`);
 
   // Parsed agent status line
   const statusParts: string[] = [];
@@ -202,6 +209,52 @@ export function formatOk(
     }
   }
   return `\u2714 ${action}${parts.length > 0 ? " \u2500 " + parts.join("  ") : ""}`;
+}
+
+// Phone-readable, self-describing line for input delivery (send_input /
+// send_command). Tells WHAT happened to WHICH agent on one line, e.g.:
+//   \u2714 send_command \u2500 delivered to BL-LEAD (s:95 \u00b7 Opus 4.8 \u00b7 claude) \u2713 submit_verified
+// Identity fields are best-effort; whatever is unknown is simply omitted.
+export function formatDelivery(
+  action: string,
+  info: {
+    surface: string;
+    title?: string | null;
+    model?: string | null;
+    agent_type?: string | null;
+    delivered: boolean;
+    // true => still in flight (e.g. background send); renders "delivering to"
+    // instead of the delivered/failed binary, so the line never contradicts a
+    // pending status.
+    pending?: boolean;
+    submit_verified?: boolean | null;
+  },
+): string {
+  const hasTitle = typeof info.title === "string" && info.title.length > 0;
+  const label = hasTitle ? truncate(info.title as string, 30) : info.surface;
+  // When the label already IS the surface, don't repeat it inside the parens.
+  const metaSource = hasTitle
+    ? [info.surface, info.model, info.agent_type]
+    : [info.model, info.agent_type];
+  const meta = metaSource.filter(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
+  const parens = meta.length > 0 ? ` (${meta.join(" \u00b7 ")})` : "";
+  let head: string;
+  if (info.pending) {
+    head = `delivering to ${label}${parens}`;
+  } else if (info.delivered) {
+    head = `delivered to ${label}${parens}`;
+  } else {
+    head = `delivery FAILED to ${label}${parens}`;
+  }
+  let submit = "";
+  if (info.submit_verified === true) submit = " \u2713 submit_verified";
+  else if (info.submit_verified === false)
+    submit = " \u2717 submit not verified";
+  else if (info.submit_verified === null)
+    submit = " \u00b7 submit_verified=null (not attempted)";
+  return `\u2714 ${action} \u2500 ${head}${submit}`;
 }
 
 export function formatResync(diff: {
