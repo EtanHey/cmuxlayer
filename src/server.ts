@@ -45,6 +45,7 @@ import {
   collectRoleSurfaceIds,
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
+  deriveColumnIndex,
   inferAgentRole,
   launcherNameForCli,
 } from "./layout-policy.js";
@@ -283,6 +284,12 @@ function toMinimalSurface(
       typeof surface.workspace_ref === "string" ? surface.workspace_ref : "",
   };
 
+  if (typeof surface.pane_ref === "string") {
+    minimal.pane_ref = surface.pane_ref;
+  }
+  if (typeof surface.column === "number") {
+    minimal.column = surface.column;
+  }
   if (typeof surface.screen_preview === "string") {
     minimal.screen_preview = surface.screen_preview;
   }
@@ -868,6 +875,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     verify_submit: boolean;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
+      // null means submit verification was not attempted, usually because the
+      // command was at or below SEND_INPUT_CHUNK_THRESHOLD; it is not a failure.
       return { submit_verified: null, retry_count: 0 };
     }
 
@@ -1317,14 +1326,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes: await client.listPanes({ workspace: workspaceRef }),
           })),
         );
+        const columnIndexByWorkspace = new Map<string, Map<string, number>>();
+        const columnCountByWorkspace = new Map<string, number>();
+        for (const { workspaceRef, panes } of panesByWorkspace) {
+          const columnIndex = deriveColumnIndex(panes.panes);
+          columnIndexByWorkspace.set(workspaceRef, columnIndex);
+          columnCountByWorkspace.set(
+            workspaceRef,
+            new Set(columnIndex.values()).size,
+          );
+        }
         const surfaceGroups = await Promise.all(
           panesByWorkspace.flatMap(({ workspaceRef, panes }) =>
-            panes.panes.map((pane) =>
-              client.listPaneSurfaces({
+            panes.panes.map(async (pane) => {
+              const group = await client.listPaneSurfaces({
                 workspace: workspaceRef,
                 pane: pane.ref,
-              }),
-            ),
+              });
+              return {
+                ...group,
+                workspace_ref: group.workspace_ref ?? workspaceRef,
+                pane_ref: group.pane_ref ?? pane.ref,
+              };
+            }),
           ),
         );
         const uniqueSurfaceEntries: Array<{
@@ -1363,6 +1387,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               window_ref: group.window_ref,
               pane_ref: group.pane_ref,
             };
+            const column = columnIndexByWorkspace
+              .get(group.workspace_ref)
+              ?.get(group.pane_ref);
+            if (typeof column === "number") {
+              enrichedSurface.column = column;
+            }
 
             if (args.include_screen_preview && surface.type === "terminal") {
               try {
@@ -1394,6 +1424,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data: Record<string, unknown> = {
           workspaces: responseWorkspaces,
           surfaces: responseSurfaces,
+          column_count: targetWorkspaceRefs.reduce(
+            (max, workspaceRef) =>
+              Math.max(max, columnCountByWorkspace.get(workspaceRef) ?? 0),
+            0,
+          ),
         };
         if (args.workspace) {
           data.workspace_ref = args.workspace;

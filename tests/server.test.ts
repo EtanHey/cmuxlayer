@@ -546,15 +546,213 @@ describe("tool handler integration", () => {
     expect(parsed.surfaces[0]).toEqual({
       ref: "surface:1",
       workspace_ref: "workspace:1",
+      pane_ref: "pane:1",
+      column: 0,
       title: "One",
       type: "terminal",
     });
     expect(parsed.surfaces[1]).toEqual({
       ref: "surface:2",
       workspace_ref: "workspace:1",
+      pane_ref: "pane:2",
+      column: 1,
       title: "Two",
       type: "browser",
     });
+  });
+
+  it("list_surfaces reports pane_ref, column, and column_count in condensed and verbose output", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:left"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right-top",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:right-top"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 450 },
+          },
+          {
+            ref: "pane:right-bottom",
+            index: 2,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:right-bottom"],
+            pixel_frame: { x: 500, y: 450, width: 500, height: 450 },
+          },
+        ],
+      }),
+      listPaneSurfaces: vi
+        .fn()
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane,
+          surfaces: [
+            {
+              ref:
+                pane === "pane:left"
+                  ? "surface:left"
+                  : pane === "pane:right-top"
+                    ? "surface:right-top"
+                    : "surface:right-bottom",
+              title: pane,
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        })),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const condensedResult = await tool.handler({}, {} as any);
+    const condensed =
+      condensedResult.structuredContent ??
+      JSON.parse(condensedResult.content[0].text);
+
+    expect(condensed.column_count).toBe(2);
+    expect(condensed.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-top",
+        pane_ref: "pane:right-top",
+        column: 1,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-bottom",
+        pane_ref: "pane:right-bottom",
+        column: 1,
+      }),
+    ]);
+
+    const verboseResult = await tool.handler({ verbose: true }, {} as any);
+    const verbose =
+      verboseResult.structuredContent ?? JSON.parse(verboseResult.content[0].text);
+
+    expect(verbose.column_count).toBe(2);
+    expect(verbose.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-top",
+        pane_ref: "pane:right-top",
+        column: 1,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-bottom",
+        pane_ref: "pane:right-bottom",
+        column: 1,
+      }),
+    ]);
+  });
+
+  it("list_surfaces backfills pane_ref before assigning columns when the client omits it", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:left"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:right"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+          },
+        ],
+      }),
+      listPaneSurfaces: vi
+        .fn()
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          surfaces: [
+            {
+              ref: pane === "pane:left" ? "surface:left" : "surface:right",
+              title: pane,
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        })),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const result = await tool.handler({}, {} as any);
+    const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right",
+        pane_ref: "pane:right",
+        column: 1,
+      }),
+    ]);
+    expect(parsed.column_count).toBe(2);
   });
 
   it("list_surfaces keeps working when a screen preview fails", async () => {
