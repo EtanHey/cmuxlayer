@@ -1387,6 +1387,275 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       expect(result.agent?.session_id).toBeNull();
     });
 
+    it("does not resolve done for a Codex worker from registry state without TASK_DONE output", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-registry-done",
+            state: "done",
+            surface_id: "surface:worker-registry-done",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-registry-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-registry-done",
+          text: "gpt-5.4\nWorking (1m 02s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-registry-done", "done", 2_500);
+        await vi.advanceTimersByTimeAsync(3_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("done");
+        expect(mockClient.readScreen).toHaveBeenCalledWith(
+          "surface:worker-registry-done",
+          { lines: 80 },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve done from Codex resume text without an explicit done signal", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-codex-resume",
+            state: "done",
+            surface_id: "surface:worker-codex-resume",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-codex-resume")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-codex-resume",
+          text: [
+            "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer",
+            "To continue this session, run codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-codex-resume", "done", 2_500);
+        await vi.advanceTimersByTimeAsync(3_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("done");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves done for a Codex worker after TASK_DONE output evidence is confirmed", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-output-done",
+            state: "ready",
+            surface_id: "surface:worker-output-done",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-output-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-output-done",
+          text: "gpt-5.4\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-output-done", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(6_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("sweep");
+        expect(result.state).toBe("done");
+        expect(engine.getAgentState("worker-output-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: expect.any(String),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve done from a Claude completion banner without an explicit done signal", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-banner-only",
+            state: "ready",
+            surface_id: "surface:claude-banner-only",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-banner-only")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-banner-only",
+          text: [
+            "Claude Code",
+            "⏺ Completed successfully",
+            "Preparing a follow-up response now.",
+            "🤖 Sonnet 4.6 | 💰 $0.10",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-banner-only", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("claude-banner-only");
+        expect(agent?.state).toBe("ready");
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve done from boot prompt echo while prompt delivery is pending", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-pending-prompt",
+            state: "booting",
+            surface_id: "surface:worker-pending-prompt",
+            cli: "codex",
+            role: "worker",
+            boot_prompt_pending: true,
+            updated_at: new Date().toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-pending-prompt")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-pending-prompt",
+          text: "TASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-pending-prompt", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-pending-prompt");
+        expect(agent?.state).toBe("booting");
+        expect(agent?.boot_prompt_pending).toBe(true);
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve done from Cursor checkmark progress lines", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cursor-progress-line",
+            state: "ready",
+            surface_id: "surface:cursor-progress-line",
+            cli: "cursor",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:cursor-progress-line")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:cursor-progress-line",
+          text: [
+            "Auto · 45% · 0 files edited",
+            "✓ Done reading src/server.ts",
+            "",
+            "⬡ Idle  1.2k tokens",
+            "/ commands · @ files · ! shell · ctrl+r to review edits",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("cursor-progress-line", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("cursor-progress-line");
+        expect(agent?.state).toBe("ready");
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves done for a non-Codex worker after trailing done output evidence is confirmed", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-output-done",
+            state: "booting",
+            surface_id: "surface:claude-output-done",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-output-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-output-done",
+          text: "Implemented the requested fix.\nR2_WORKER_DONE 5",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-output-done", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("sweep");
+        expect(result.state).toBe("done");
+        expect(engine.getAgentState("claude-output-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: expect.any(String),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("returns error result when agent is in error state", async () => {
       stateMgr.writeState(
         makeRecord({

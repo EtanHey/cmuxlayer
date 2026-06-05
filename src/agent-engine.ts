@@ -446,12 +446,51 @@ export class AgentEngine {
     return this.registry;
   }
 
-  private hasTrailingTaskDoneSignal(text: string): boolean {
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    return lines.at(-1) === "TASK_DONE";
+  private hasOutputDoneEvidence(text: string): boolean {
+    const parsed = parseScreen(text);
+    return parsed.status === "done" && parsed.done_signal !== null;
+  }
+
+  private requiresOutputDoneEvidence(targetState: AgentState): boolean {
+    return targetState === "done";
+  }
+
+  private hasRecordedOutputDoneEvidence(agent: AgentRecord): boolean {
+    return !!agent.task_done_detected_at;
+  }
+
+  private async hasCurrentOutputDoneEvidence(
+    agent: AgentRecord,
+  ): Promise<boolean> {
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      return this.hasOutputDoneEvidence(screen.text);
+    } catch {
+      return false;
+    }
+  }
+
+  private async hasTargetStateEvidence(
+    agent: AgentRecord,
+    targetState: AgentState,
+  ): Promise<boolean> {
+    if (agent.state !== targetState) return false;
+    if (!this.requiresOutputDoneEvidence(targetState)) return true;
+    return (
+      this.hasRecordedOutputDoneEvidence(agent) ||
+      (await this.hasCurrentOutputDoneEvidence(agent))
+    );
+  }
+
+  private async refreshTargetStateEvidence(
+    agent: AgentRecord,
+    targetState: AgentState,
+  ): Promise<AgentRecord> {
+    if (!this.requiresOutputDoneEvidence(targetState)) return agent;
+    if (TERMINAL_STATES.has(agent.state)) return agent;
+    return (await this.maybeMarkTaskDone(agent)).agent;
   }
 
   private async createAgentSurface(
@@ -660,18 +699,18 @@ export class AgentEngine {
 
   private async maybeMarkTaskDone(
     agent: AgentRecord,
+    opts?: { allowBootPromptPending?: boolean },
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
-    if (agent.cli !== "codex" || inferRecordRole(agent) !== "worker") {
+    if (agent.boot_prompt_pending && opts?.allowBootPromptPending !== true) {
       return { agent };
     }
-    if (agent.boot_prompt_pending) return { agent };
 
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
-      if (!this.hasTrailingTaskDoneSignal(screen.text)) {
+      if (!this.hasOutputDoneEvidence(screen.text)) {
         if (agent.task_done_candidate_at) {
           const updated = this.stateMgr.updateRecord(agent.agent_id, {
             task_done_candidate_at: null,
@@ -1233,8 +1272,8 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    // Retroactive check — already in target state?
-    if (initial.state === targetState) {
+    // Retroactive check — already in target state with required output evidence?
+    if (await this.hasTargetStateEvidence(initial, targetState)) {
       return {
         matched: true,
         state: initial.state,
@@ -1288,7 +1327,7 @@ export class AgentEngine {
 
         // Re-read from disk (another process may have updated)
         await this.registry.reconcile();
-        const current = this.registry.get(agentId);
+        let current = this.registry.get(agentId);
         if (!current) {
           clearInterval(checkInterval);
           resolve({
@@ -1302,7 +1341,9 @@ export class AgentEngine {
           return;
         }
 
-        if (current.state === targetState) {
+        current = await this.refreshTargetStateEvidence(current, targetState);
+
+        if (await this.hasTargetStateEvidence(current, targetState)) {
           clearInterval(checkInterval);
           resolve({
             matched: true,

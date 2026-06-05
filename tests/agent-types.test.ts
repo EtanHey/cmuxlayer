@@ -12,8 +12,8 @@ describe("VALID_TRANSITIONS", () => {
     expect(VALID_TRANSITIONS.creating).toEqual(["booting", "error"]);
   });
 
-  it("booting can go to ready or error", () => {
-    expect(VALID_TRANSITIONS.booting).toEqual(["ready", "error"]);
+  it("booting can go to ready, done, or error", () => {
+    expect(VALID_TRANSITIONS.booting).toEqual(["ready", "done", "error"]);
   });
 
   it("ready can go to working, done, or error", () => {
@@ -41,6 +41,7 @@ describe("isValidTransition", () => {
   it("allows valid forward transitions", () => {
     expect(isValidTransition("creating", "booting")).toBe(true);
     expect(isValidTransition("booting", "ready")).toBe(true);
+    expect(isValidTransition("booting", "done")).toBe(true);
     expect(isValidTransition("ready", "working")).toBe(true);
     expect(isValidTransition("working", "done")).toBe(true);
     expect(isValidTransition("working", "idle")).toBe(true);

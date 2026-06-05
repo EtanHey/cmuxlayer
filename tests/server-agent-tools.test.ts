@@ -1155,9 +1155,13 @@ describe("agent lifecycle tool handlers", () => {
     const engine = (server as any)._registeredTools["interact"]._engine;
     const stateMgr = engine["stateMgr"];
 
-    stateMgr.transition(agentId, "ready");
+    if (stateMgr.readState(agentId)?.state !== "ready") {
+      stateMgr.transition(agentId, "ready");
+    }
     stateMgr.transition(agentId, "done");
-    const doneState = stateMgr.readState(agentId);
+    const doneState = stateMgr.updateRecord(agentId, {
+      task_done_detected_at: "2026-06-05T17:20:00.000Z",
+    });
     if (!doneState) {
       throw new Error("Expected done state to exist");
     }
