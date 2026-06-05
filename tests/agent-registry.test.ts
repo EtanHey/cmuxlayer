@@ -307,5 +307,37 @@ describe("AgentRegistry", () => {
       expect(purged).toBe(1);
       expect(registry.get("stale-recovery-error")).toBeNull();
     });
+
+    it("clears aliases that point at purged finalized agents", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-pending",
+          state: "done",
+          surface_id: "surface:gone",
+        }),
+      );
+
+      const surfaceProvider = async () => [] as CmuxSurface[];
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+      const renamed = stateMgr.renameState("agent-pending", "agent-final");
+      registry.rename("agent-pending", "agent-final", renamed);
+
+      const purged = await registry.purgeTerminal();
+      registry.set(
+        "agent-pending",
+        makeRecord({
+          agent_id: "agent-pending",
+          state: "working",
+          surface_id: "surface:new",
+        }),
+      );
+
+      expect(purged).toBe(1);
+      expect(registry.get("agent-pending")).toMatchObject({
+        agent_id: "agent-pending",
+        surface_id: "surface:new",
+      });
+    });
   });
 });

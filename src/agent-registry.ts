@@ -145,6 +145,32 @@ export class AgentRegistry {
     return current;
   }
 
+  private aliasesResolvingTo(agentId: string): string[] {
+    const aliases: string[] = [];
+    for (const [alias, target] of this.aliases) {
+      if (
+        alias === agentId ||
+        target === agentId ||
+        this.resolveAlias(alias) === agentId
+      ) {
+        aliases.push(alias);
+      }
+    }
+    return aliases;
+  }
+
+  private deleteAgentAndAliases(agentId: string): string {
+    const resolved = this.resolveAlias(agentId);
+    const aliases = this.aliasesResolvingTo(resolved);
+    this.agents.delete(resolved);
+    this.aliases.delete(agentId);
+    this.aliases.delete(resolved);
+    for (const alias of aliases) {
+      this.aliases.delete(alias);
+    }
+    return resolved;
+  }
+
   get(agentId: string): AgentRecord | null {
     return this.agents.get(this.resolveAlias(agentId)) ?? null;
   }
@@ -187,8 +213,8 @@ export class AgentRegistry {
         !discoveredEntry.read_error &&
         !discoveredEntry.has_agent
       ) {
-        this.agents.delete(record.agent_id);
-        this.stateMgr.removeState(record.agent_id);
+        const removedAgentId = this.deleteAgentAndAliases(record.agent_id);
+        this.stateMgr.removeState(removedAgentId);
         continue;
       }
 
@@ -362,14 +388,7 @@ export class AgentRegistry {
   }
 
   remove(agentId: string): void {
-    const resolved = this.resolveAlias(agentId);
-    this.agents.delete(resolved);
-    this.aliases.delete(agentId);
-    for (const [alias, target] of this.aliases) {
-      if (target === resolved) {
-        this.aliases.delete(alias);
-      }
-    }
+    this.deleteAgentAndAliases(agentId);
   }
 
   private evictMissingStateAgent(agentId: string): boolean {
@@ -377,8 +396,8 @@ export class AgentRegistry {
       return false;
     }
 
-    this.agents.delete(agentId);
-    this.stateMgr.removeState(agentId);
+    const removedAgentId = this.deleteAgentAndAliases(agentId);
+    this.stateMgr.removeState(removedAgentId);
     return true;
   }
 
@@ -426,8 +445,8 @@ export class AgentRegistry {
         // Best-effort transition before eviction.
       }
 
-      this.agents.delete(id);
-      this.stateMgr.removeState(id);
+      const removedAgentId = this.deleteAgentAndAliases(id);
+      this.stateMgr.removeState(removedAgentId);
     }
   }
 
@@ -452,9 +471,9 @@ export class AgentRegistry {
         continue;
       }
       if (TERMINAL_STATES.has(agent.state)) {
-        this.agents.delete(id);
-        this.stateMgr.removeState(id);
-        purgedIds.push(id);
+        const removedAgentId = this.deleteAgentAndAliases(id);
+        this.stateMgr.removeState(removedAgentId);
+        purgedIds.push(removedAgentId);
       }
     }
 
@@ -479,8 +498,8 @@ export class AgentRegistry {
         TERMINAL_STATES.has(agent.state) &&
         !liveSurfaceRefs.has(agent.surface_id)
       ) {
-        this.agents.delete(id);
-        this.stateMgr.removeState(id);
+        const removedAgentId = this.deleteAgentAndAliases(id);
+        this.stateMgr.removeState(removedAgentId);
         purged++;
       }
     }
@@ -504,6 +523,10 @@ export class AgentRegistry {
   getSubtree(rootId: string): AgentRecord[] {
     const result: AgentRecord[] = [];
     const visited = new Set<string>();
+    const root = this.get(rootId);
+    if (!root) {
+      return result;
+    }
     const collect = (id: string) => {
       if (visited.has(id)) return; // Prevent cycles from corrupted state
       visited.add(id);
@@ -514,7 +537,7 @@ export class AgentRegistry {
       const agent = this.agents.get(id);
       if (agent) result.push(agent);
     };
-    collect(rootId);
+    collect(root.agent_id);
     return result;
   }
 }

@@ -332,6 +332,36 @@ describe("Agent Hierarchy", () => {
       stopAgent.mockRestore();
     });
 
+    it("cascadeKill resolves aliases before collecting the subtree", async () => {
+      const stoppedOrder: string[] = [];
+      const stopAgent = vi
+        .spyOn(engine, "stopAgent")
+        .mockImplementation(async (agentId) => {
+          stoppedOrder.push(agentId);
+        });
+
+      stateMgr.writeState(
+        makeRecord({ agent_id: "root-pending", surface_id: "s:1" }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "child1",
+          surface_id: "s:2",
+          parent_agent_id: "root-pending",
+          spawn_depth: 1,
+        }),
+      );
+      liveSurfaces = [makeSurface("s:1"), makeSurface("s:2")];
+      await engine.getRegistry().reconstitute();
+      const renamed = stateMgr.renameState("root-pending", "root-final");
+      engine.getRegistry().rename("root-pending", "root-final", renamed);
+
+      await engine.cascadeKill("root-pending");
+
+      expect(stoppedOrder).toEqual(["child1", "root-final"]);
+      stopAgent.mockRestore();
+    });
+
     it("cascadeKill continues if one child stop fails", async () => {
       let callCount = 0;
       const stopAgent = vi
