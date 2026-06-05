@@ -108,7 +108,9 @@ export function shouldRetainCrashRecoveryError(
     "state" | "crash_recover" | "user_killed" | "cli_session_id" | "error"
   >,
 ): boolean {
-  return isCrashRecoveryEligible(agent) || isCrashRecoveryExhausted(agent.error);
+  return (
+    isCrashRecoveryEligible(agent) || isCrashRecoveryExhausted(agent.error)
+  );
 }
 
 export interface StateTransition {
@@ -128,7 +130,8 @@ export type DeliveryEventType =
   | "send_to"
   | "send_to_agent"
   | "interact"
-  | "press_enter";
+  | "press_enter"
+  | "dispatch_nudge";
 
 export interface DeliveryTelemetryEvent {
   ts: string;

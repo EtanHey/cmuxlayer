@@ -10,3 +10,4 @@ docs.local/
 # Local agent scratch + settings
 claude.scratchpad.md
 .claude/
+node_modules

@@ -133,6 +133,8 @@ const BOOT_PROMPT_READY_POLL_MS = 250;
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
+/** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
+const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = 60_000;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 const READY_PATTERN_CLIS: CliType[] = [
   "claude",
@@ -622,6 +624,8 @@ export interface CreateServerOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
   disableSpawnPreflight?: boolean;
+  /** Base directory for agent inbox channels. Defaults to ~/.cmux/agents (primarily for tests). */
+  inboxBaseDir?: string;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -748,6 +752,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const spawnPreflight = opts?.spawnPreflight ?? context.spawnPreflight;
   const disableSpawnPreflight =
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
+  const inboxOpts = opts?.inboxBaseDir
+    ? { baseDir: opts.inboxBaseDir }
+    : undefined;
+  // Wired up by the agent-lifecycle block below (when enabled). Lets the
+  // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
+  // resync + recycled-occupant identity checks — instead of raw keystrokes.
+  let lifecycleAgentInputDeliverer:
+    | ((args: {
+        agent_id: string;
+        text: string;
+        press_enter: boolean;
+        allow_busy?: boolean;
+        source_event: DeliveryEventType;
+      }) => Promise<unknown>)
+    | null = null;
 
   const server = new McpServer(
     {
@@ -2801,9 +2820,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   );
 
   // 12. dispatch_to_agent — metacommlayer WRITE channel (sterile dispatch; send_input fallback)
+  // AIDEV-NOTE: B5 (2026-06-05 incident) — the wake must NOT depend on agent
+  // lifecycle state. A poisoned (error) registry record used to silently kill
+  // the send_input fallback (INTERACTIVE_STATES gate in sendToAgent) and GO
+  // messages sat unread. The nudge below types a one-line inbox pointer
+  // directly into the agent's surface, regardless of registry state.
   server.tool(
     "dispatch_to_agent",
-    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. Use this as the primary dispatch path; send_input remains the fallback. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. If the recipient's monitor heartbeat is stale/absent, nudge='auto' (default) best-effort types a one-line inbox pointer into the agent's surface — independent of agent lifecycle state. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
     {
       agent_id: z
         .string()
@@ -2824,18 +2848,75 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .describe(
           "Opt-in: mark this message as a candidate for BrainLayer ingestion",
         ),
+      nudge: z
+        .enum(["auto", "never"])
+        .optional()
+        .default("auto")
+        .describe(
+          "auto: when the recipient's inbox-monitor heartbeat is stale/absent, best-effort type a one-line inbox pointer into its surface (bypasses agent-state gates — works even when registry state is poisoned). never: file append only.",
+        ),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
-        const msg = dispatch(args.agent_id, {
-          from: args.from,
-          to: args.agent_id,
-          tag: args.tag,
-          task: args.task,
-          persist: args.persist,
+        const msg = dispatch(
+          args.agent_id,
+          {
+            from: args.from,
+            to: args.agent_id,
+            tag: args.tag,
+            task: args.task,
+            persist: args.persist,
+          },
+          inboxOpts,
+        );
+        const monitor_alive = monitorAlive(
+          args.agent_id,
+          INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
+          inboxOpts,
+        );
+        const nudge = { attempted: false, sent: false, reason: "" };
+        if (args.nudge === "never") {
+          nudge.reason = "nudge disabled by caller";
+        } else if (monitor_alive) {
+          nudge.reason = "monitor heartbeat fresh — Monitor will deliver";
+        } else {
+          // State-independent surface lookup: ANY registry record (including
+          // error/done) still carries the surface ref. allow_busy bypasses the
+          // INTERACTIVE_STATES gate, but the guarded relay path keeps the
+          // stale-surface resync + recycled-occupant identity checks so the
+          // pointer can never land in a foreign agent's pane.
+          const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          if (!record || !lifecycleAgentInputDeliverer) {
+            nudge.reason = record
+              ? "agent lifecycle relay unavailable — message waits in the inbox file"
+              : "agent not in lifecycle registry; no surface to nudge — message waits in the inbox file";
+          } else {
+            nudge.attempted = true;
+            try {
+              const pointer = `[inbox] new message from ${msg.from} (id ${msg.id}) — read ${inboxPath(args.agent_id, inboxOpts)}, act, then ack`;
+              await lifecycleAgentInputDeliverer({
+                agent_id: args.agent_id,
+                text: pointer,
+                press_enter: true,
+                allow_busy: true,
+                source_event: "dispatch_nudge",
+              });
+              nudge.sent = true;
+              nudge.reason = `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
+            } catch (e) {
+              nudge.reason = `nudge failed (dispatch still durable in inbox file): ${
+                e instanceof Error ? e.message : String(e)
+              }`;
+            }
+          }
+        }
+        return ok({
+          dispatched: msg,
+          inbox: inboxPath(args.agent_id, inboxOpts),
+          monitor_alive,
+          nudge,
         });
-        return ok({ dispatched: msg, inbox: inboxPath(args.agent_id) });
       } catch (e) {
         return err(e);
       }
@@ -2868,9 +2949,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.readOnly,
     async (args) => {
       try {
-        const undelivered = replayUndelivered(args.agent_id);
-        const pending = pendingDispatches(args.agent_id, args.ack_timeout_ms);
-        const alive = monitorAlive(args.agent_id, args.heartbeat_max_age_ms);
+        const undelivered = replayUndelivered(args.agent_id, inboxOpts);
+        const pending = pendingDispatches(
+          args.agent_id,
+          args.ack_timeout_ms,
+          inboxOpts,
+        );
+        const alive = monitorAlive(
+          args.agent_id,
+          args.heartbeat_max_age_ms,
+          inboxOpts,
+        );
         return ok({
           agent_id: args.agent_id,
           monitor_alive: alive,
@@ -3147,6 +3236,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }),
       );
     };
+    // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
+    // outside this lifecycle block).
+    lifecycleAgentInputDeliverer = deliverAgentInput;
 
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
