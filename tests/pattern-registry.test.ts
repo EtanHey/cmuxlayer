@@ -259,6 +259,17 @@ ctrl+c to stop
     expect(result.matched).toBe(false);
   });
 
+  it("does not match Cursor spinner work without a token count as ready", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      `
+ ⠸ Generating...
+  Auto · 20.5% · 4 files edited                    Auto-run
+`,
+    );
+    expect(result.matched).toBe(false);
+  });
+
   it("does not match unrelated output", () => {
     const result = matchReadyPattern("claude", "Installing dependencies...");
     expect(result.matched).toBe(false);

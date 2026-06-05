@@ -24,7 +24,7 @@ const CLAUDE_ACTIVE_RE =
   /(?:^|\n)\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
 
 const CURSOR_ACTIVE_RE =
-  /(?:^|\n)\s*(?:[⠀-⣿]+|⬢|⬡|•)?\s*(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating|Thinking|Waiting)(?:\.\.\.|…)?\s+[0-9][0-9,]*(?:\.[0-9]+)?[km]?\s+tokens\b/i;
+  /(?:^|\n)[^\S\r\n]*(?:(?:[⠀-⣿]+|⬢|⬡|•)[^\S\r\n]*)?(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating|Thinking|Waiting)\b(?:\.\.\.|…)?(?:[^\S\r\n]+[0-9][0-9,]*(?:\.[0-9]+)?[km]?[^\S\r\n]+tokens\b|[^\S\r\n]*(?=\r?(?:\n|$)))/i;
 const CURSOR_READY_RE =
   /cursor>|⬡\s+Idle\b|→\s*Add a follow-up|\/ commands · @ files · ! shell|(?:^|\n)\s*(?:Auto|Agent)\s*·\s*\d+(?:\.\d+)?\s*%\s*·[^\n]*files? edited\b/i;
 
