@@ -54,6 +54,38 @@ describe("matchReadyPattern", () => {
     expect(result.matched).toBe(true);
   });
 
+  it("matches modern Claude idle prompt with status footer", () => {
+    const result = matchReadyPattern(
+      "claude",
+      [
+        "  Say \"go\" when you're ready and I'll start your timer.",
+        "",
+        "  CLAUDE_COUNTER: 186",
+        "",
+        "──────────────────────────────────────────────────────────────────────────",
+        "❯",
+        "──────────────────────────────────────────────────────────────────────────",
+        "  ⎇ master | +1273,-196 | 🔧 11                     418310 tokens",
+        "  🤖 …                              current: 2.1.81 · latest…",
+        "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+      ].join("\n"),
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches Claude Code prompt when the old welcome copy is absent", () => {
+    const result = matchReadyPattern(
+      "claude",
+      "Claude Code\n> \nCLAUDE_COUNTER:1\n",
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("does not match active Claude work as ready", () => {
+    const result = matchReadyPattern("claude", "Claude Code\n✻ Working\n");
+    expect(result.matched).toBe(false);
+  });
+
   it("matches Codex ready prompt", () => {
     const result = matchReadyPattern("codex", "codex> ");
     expect(result.matched).toBe(true);
@@ -146,6 +178,55 @@ gpt-5.5 xhigh · /workspaces/cmuxlayer
 › Find and fix a bug in @filename
 
 gpt-5.5 xhigh · ~/Gits/brainlayer
+`,
+    );
+    expect(result.matched).toBe(false);
+  });
+
+  it("matches Cursor idle status without the legacy cursor prompt", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      `
+Auto · 10% · 1 file edited
+Model: gpt-5.2 high
+
+⬡ Idle  12,450 tokens
+
+→ Add a follow-up
+
+/ commands · @ files · ! shell · ctrl+r to review edits
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches Cursor follow-up prompt without an Idle token line", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      `
+Auto · 22% · 3 files edited
+
+→ Add a follow-up
+ctrl+c to stop
+
+/ commands · @ files · ! shell · ctrl+r to review edits
+`,
+    );
+    expect(result.matched).toBe(true);
+  });
+
+  it("does not match active Cursor generation as ready", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      `
+Auto · 22.5% · 4 files edited
+
+⬡ Running...  3.3k tokens
+
+→ Add a follow-up
+ctrl+c to stop
+
+/ commands · @ files · ! shell · ctrl+r to review edits
 `,
     );
     expect(result.matched).toBe(false);
