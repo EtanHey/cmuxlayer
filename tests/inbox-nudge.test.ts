@@ -288,6 +288,108 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     ).toContain("GO");
   });
 
+  it("refuses to nudge a RECYCLED surface (foreign occupant) — pointer never lands in another agent's pane", async () => {
+    const agentId = await spawnTestAgent(server); // cli: claude
+    // Recycle the surface: it now hosts a Codex agent.
+    (exec as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_cmd: string, args: string[]) => {
+        if (args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "codex>\n gpt-5.5 xhigh · 100% context left",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-panes")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:1",
+              window_ref: "window:1",
+              panes: [
+                {
+                  ref: "pane:1",
+                  index: 0,
+                  focused: true,
+                  surface_count: 1,
+                  surface_refs: ["surface:new"],
+                  selected_surface_ref: "surface:new",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-pane-surfaces")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:1",
+              window_ref: "window:1",
+              pane_ref: "pane:1",
+              surfaces: [
+                {
+                  ref: "surface:new",
+                  title: "recycled",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-workspaces")) {
+          return {
+            stdout: JSON.stringify({
+              workspaces: [
+                {
+                  ref: "workspace:1",
+                  title: "Main",
+                  index: 0,
+                  selected: true,
+                  pinned: false,
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        return { stdout: "{}", stderr: "" };
+      },
+    );
+
+    const before = sendCalls(exec).length;
+    const dispatchTool = server._registeredTools["dispatch_to_agent"];
+    const result = await dispatchTool.handler(
+      {
+        agent_id: agentId,
+        task: "GO",
+        from: "orc",
+        tag: "dispatch",
+        persist: false,
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.nudge.attempted).toBe(true);
+    expect(parsed.nudge.sent).toBe(false);
+    expect(parsed.nudge.reason).toMatch(/recycled/i);
+    // No keystrokes reached the foreign occupant.
+    expect(sendCalls(exec).length).toBe(before);
+    // Message still durable in the inbox file.
+    expect(
+      readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
+    ).toContain("GO");
+  });
+
   it("inbox_check honors the injected inboxBaseDir", async () => {
     const dispatchTool = server._registeredTools["dispatch_to_agent"];
     await dispatchTool.handler(

@@ -755,6 +755,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const inboxOpts = opts?.inboxBaseDir
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
+  // Wired up by the agent-lifecycle block below (when enabled). Lets the
+  // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
+  // resync + recycled-occupant identity checks — instead of raw keystrokes.
+  let lifecycleAgentInputDeliverer:
+    | ((args: {
+        agent_id: string;
+        text: string;
+        press_enter: boolean;
+        allow_busy?: boolean;
+        source_event: DeliveryEventType;
+      }) => Promise<unknown>)
+    | null = null;
 
   const server = new McpServer(
     {
@@ -2870,21 +2882,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           nudge.reason = "monitor heartbeat fresh — Monitor will deliver";
         } else {
           // State-independent surface lookup: ANY registry record (including
-          // error/done) still carries the surface ref. No INTERACTIVE_STATES gate.
+          // error/done) still carries the surface ref. allow_busy bypasses the
+          // INTERACTIVE_STATES gate, but the guarded relay path keeps the
+          // stale-surface resync + recycled-occupant identity checks so the
+          // pointer can never land in a foreign agent's pane.
           const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
-          if (!record) {
-            nudge.reason =
-              "agent not in lifecycle registry; no surface to nudge — message waits in the inbox file";
+          if (!record || !lifecycleAgentInputDeliverer) {
+            nudge.reason = record
+              ? "agent lifecycle relay unavailable — message waits in the inbox file"
+              : "agent not in lifecycle registry; no surface to nudge — message waits in the inbox file";
           } else {
             nudge.attempted = true;
             try {
-              const workspace = record.workspace_id ?? undefined;
               const pointer = `[inbox] new message from ${msg.from} (id ${msg.id}) — read ${inboxPath(args.agent_id, inboxOpts)}, act, then ack`;
-              await withSurfaceWrite(record.surface_id, async () => {
-                await client.send(record.surface_id, pointer, { workspace });
-                await client.sendKey(record.surface_id, "return", {
-                  workspace,
-                });
+              await lifecycleAgentInputDeliverer({
+                agent_id: args.agent_id,
+                text: pointer,
+                press_enter: true,
+                allow_busy: true,
+                source_event: "dispatch_nudge",
               });
               nudge.sent = true;
               nudge.reason = `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
@@ -3220,6 +3236,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }),
       );
     };
+    // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
+    // outside this lifecycle block).
+    lifecycleAgentInputDeliverer = deliverAgentInput;
 
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
