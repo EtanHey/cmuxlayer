@@ -56,6 +56,12 @@ Tell your AI agent things like:
 
 Under the hood, cmuxLayer exposes 29 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
+## Agent Routing Workflow
+
+For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. Raw surface tools such as `send_input`, `send_command`, and `send_key` are still available for shells, launch/resume commands, stuck-pane recovery, and explicit terminal UI operations.
+
+See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
+
 ## MCP Tools (29)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
@@ -88,16 +94,16 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `new_surface` | Create a tab in an existing pane |
 | `move_surface` | Move a surface to another pane or position |
 | `reorder_surface` | Reorder tabs within a pane |
-| `send_input` | Send text to a surface |
-| `send_key` | Send key press (return, escape, ctrl-c, etc.) |
+| `send_input` | Send text to a raw surface; use `send_to` for tracked agents |
+| `send_key` | Send key press (return, escape, ctrl-c, etc.) to a raw surface |
 | `rename_tab` | Rename a surface tab |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set progress indicator (0.0-1.0) |
 | `browser_surface` | Interact with browser surfaces |
-| `spawn_agent` | Spawn a CLI agent in a new pane |
-| `send_to` | Send text to a tracked agent without knowing its surface |
-| `send_to_agent` | Send a prompt to a running agent |
+| `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
+| `send_to` | Preferred path for sending text to a tracked agent by `agent_id` |
+| `send_to_agent` | Legacy/internal agent send path; prefer `send_to` |
 | `wait_for` | Block until agent reaches a target state (defaults to `done`) |
 | `wait_for_all` | Block until multiple agents finish |
 | `interact` | Send interactive input (confirm, cancel, resume) |
