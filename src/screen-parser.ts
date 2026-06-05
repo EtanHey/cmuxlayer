@@ -179,7 +179,7 @@ function normalizeText(text: string): string {
 function isCursorAgentScreen(text: string): boolean {
   if (CURSOR_MODE_BAR_RE.test(text)) return true;
   if (CURSOR_FOLLOWUP_RE.test(text) && CURSOR_STOP_RE.test(text)) return true;
-  if (CURSOR_STATUS_PCT_RE.test(text) && /files edited/i.test(text)) {
+  if (CURSOR_STATUS_PCT_RE.test(text) && /files? edited/i.test(text)) {
     return true;
   }
   if (
@@ -608,6 +608,7 @@ function hasCursorChromeContext(lines: string[]): boolean {
     CURSOR_AGENT_BANNER_RE.test(text) ||
     CURSOR_MODE_BAR_RE.test(text) ||
     CURSOR_FOLLOWUP_RE.test(text) ||
+    (CURSOR_STATUS_PCT_RE.test(text) && /files? edited/i.test(text)) ||
     (CURSOR_COMPOSER_RULE_RE.test(text) && CURSOR_COMPOSER_LINE_RE.test(text))
   );
 }

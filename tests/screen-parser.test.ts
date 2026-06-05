@@ -466,6 +466,19 @@ Using claude-sonnet-4-20250514
     expect(parsed.context_pct).toBe(19);
   });
 
+  it("parses Cursor TASK_DONE before a legacy status footer without mode chrome", () => {
+    const parsed = parseScreen(`
+Auto · 10% · 2 files edited
+TASK_DONE
+Auto · 10% · 2 files edited
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("done");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+    expect(parsed.context_pct).toBe(10);
+  });
+
   it.each([
     ["Claude thinking indicator", "✶ thinking"],
     ["Claude high-effort thinking indicator", "thinking with high effort"],
