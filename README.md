@@ -9,7 +9,7 @@
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-33%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-335%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-669%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -173,7 +173,7 @@ cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/
 ## Testing
 
 ```bash
-bun run test        # 335 tests via vitest
+bun run test        # 669 tests via vitest
 npm run typecheck   # Type checking
 ```
 
