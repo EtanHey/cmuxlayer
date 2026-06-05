@@ -97,7 +97,8 @@ export function inferContextWindow(
 }
 
 const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
-const DONE_SIGNAL_RE = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)\b/;
+const DONE_SIGNAL_LINE_RE =
+  /^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)(?:\s+\S{1,16})?\s*$/;
 const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
 const RESPONSE_BLOCK_RE = /---RESPONSE_START---\s*(.*?)\s*---RESPONSE_END---/s;
 const TOKEN_USAGE_RE = /Token usage:\s*total=([0-9][0-9,]*)/i;
@@ -147,13 +148,14 @@ const CURSOR_STATUS_PCT_RE =
 const CURSOR_FOLLOWUP_RE = /→\s*Add a follow-up/i;
 const CURSOR_STOP_RE = /ctrl\+c to stop/i;
 const CURSOR_SESSION_COMPLETE_RE =
-  /\b(?:Task completed|Generation complete|All edits applied|Session complete)\b/i;
+  /^\s*(?:Task completed|Generation complete|All edits applied|Session complete)\s*$/i;
 const CURSOR_CHECKMARK_DONE_RE =
-  /(?:^|\n)\s*[✓✔]\s*(?:Done|Complete|Completed)\b/i;
+  /^\s*[✓✔]\s*(?:Done|Complete|Completed)\s*[.!]?\s*$/i;
 const CURSOR_MODEL_LINE_RE = /^\s*Model:\s*(.+)$/im;
 const CURSOR_USING_LINE_RE = /^\s*Using\s*:?\s*(.+)$/im;
 const CURSOR_MODEL_INLINE_RE =
   /\b(claude-[0-9][0-9a-z.-]*|gpt-[0-9][0-9a-z.-]*(?:\s+(?:high|low|mini))?|gemini-[0-9][0-9a-z.-]*)\b/i;
+const RULE_LINE_RE = /^[\s─-╿▀-▟\-=_~·•—–]+$/;
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
@@ -239,13 +241,31 @@ function parseTokenCount(text: string): number | null {
 }
 
 function parseDoneSignal(text: string): string | null {
-  const explicitDoneSignal = text.match(DONE_SIGNAL_RE)?.[1];
-  if (explicitDoneSignal) {
-    return explicitDoneSignal;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    const explicitDoneSignal = line.match(DONE_SIGNAL_LINE_RE)?.[1];
+    if (explicitDoneSignal) {
+      return explicitDoneSignal;
+    }
+
+    const claudeCounter = line.match(CLAUDE_COUNTER_RE)?.[1];
+    if (claudeCounter) {
+      return `CLAUDE_COUNTER:${claudeCounter}`;
+    }
+
+    if (isDoneSignalTailChromeLine(line)) {
+      continue;
+    }
+
+    break;
   }
 
-  const claudeCounter = text.match(CLAUDE_COUNTER_RE)?.[1];
-  return claudeCounter ? `CLAUDE_COUNTER:${claudeCounter}` : null;
+  return null;
 }
 
 function trimBlankEdges(lines: string[]): string[] {
@@ -429,9 +449,37 @@ function parseCursorModel(text: string): string | null {
 }
 
 function parseCursorDoneSignal(text: string): string | null {
-  if (CURSOR_SESSION_COMPLETE_RE.test(text)) return "CURSOR_SESSION_COMPLETE";
-  if (CURSOR_CHECKMARK_DONE_RE.test(text)) return "CURSOR_SESSION_COMPLETE";
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (CURSOR_SESSION_COMPLETE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
+    if (CURSOR_CHECKMARK_DONE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
+    if (isDoneSignalTailChromeLine(line)) continue;
+    break;
+  }
+
   return null;
+}
+
+function isDoneSignalTailChromeLine(line: string): boolean {
+  return (
+    RULE_LINE_RE.test(line) ||
+    TOKEN_USAGE_RE.test(line) ||
+    TOKENS_RE.test(line) ||
+    /^🤖\s/.test(line) ||
+    /^⎇\s/.test(line) ||
+    /^\s*(?:❯|>>>|\$|>)\s*$/.test(line) ||
+    /bypass permissions on/i.test(line) ||
+    CURSOR_MODE_BAR_RE.test(line) ||
+    CURSOR_FOLLOWUP_RE.test(line) ||
+    CURSOR_STOP_RE.test(line) ||
+    CURSOR_STATUS_PCT_RE.test(line) ||
+    CURSOR_HEX_IDLE_RE.test(line)
+  );
 }
 
 function inferStatus(
@@ -587,7 +635,6 @@ export function parseScreen(text: string): ParsedScreenResult {
 // adding signal: box-drawing rule/separator lines and per-harness status-bar art. Returns
 // the last `maxLines` of meaningful content. The structured fields (status/tokens/ctx/response)
 // already carry the real signal; this is only for a compact human-readable screen preview.
-const RULE_LINE_RE = /^[\s─-╿▀-▟\-=_~·•—–]+$/;
 const CHROME_LINE_RES: RegExp[] = [
   /🤖|💰|⏱/, // model/cost/timer status line
   /esc to interrupt/i,

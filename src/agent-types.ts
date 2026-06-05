@@ -160,7 +160,7 @@ export interface WaitResult {
  */
 export const VALID_TRANSITIONS: Record<AgentState, AgentState[]> = {
   creating: ["booting", "error"],
-  booting: ["ready", "error"],
+  booting: ["ready", "done", "error"],
   ready: ["working", "done", "error"],
   working: ["idle", "done", "error"],
   idle: ["working", "done", "error"],

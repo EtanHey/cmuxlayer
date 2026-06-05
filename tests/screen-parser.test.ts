@@ -178,6 +178,42 @@ Working (2m 06s • esc to interrupt)
     expect(parsed.context_pct).toBe(13);
   });
 
+  it("does not treat echoed done instructions as a done signal while the agent is working", () => {
+    const parsed = parseScreen(`
+When the task is complete, print R2_WORKER_DONE on its own line.
+
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+Working (1m 02s • esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).toBe("working");
+  });
+
+  it("accepts one short trailing argument on a standalone done signal", () => {
+    const parsed = parseScreen(`
+Judge complete.
+R2_WORKER_DONE 5
+`);
+
+    expect(parsed.done_signal).toBe("R2_WORKER_DONE");
+    expect(parsed.status).toBe("done");
+  });
+
+  it("does not treat echoed numbered done instructions as a done signal", () => {
+    const parsed = parseScreen(`
+When the task is complete, print R2_WORKER_DONE 5.
+
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+Working (1m 02s • esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).toBe("working");
+  });
+
   it("parses Gemini-style output from explicit Gemini CLI markers", () => {
     const parsed = parseScreen(`
 Gemini CLI
@@ -285,6 +321,34 @@ Task completed
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.done_signal).toBe("CURSOR_SESSION_COMPLETE");
     expect(parsed.status).toBe("done");
+  });
+
+  it("detects exact Cursor checkmark completion as done_signal and status done", () => {
+    const parsed = parseScreen(`
+Auto · 90% · 2 files edited
+✓ Done
+
+⬡ Idle  1.2k tokens
+/ commands · @ files · ! shell · ctrl+r to review edits
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.done_signal).toBe("CURSOR_SESSION_COMPLETE");
+    expect(parsed.status).toBe("done");
+  });
+
+  it("does not treat Cursor checkmark progress lines as session completion", () => {
+    const parsed = parseScreen(`
+Auto · 45% · 0 files edited
+✓ Done reading src/server.ts
+
+⬡ Idle  1.2k tokens
+/ commands · @ files · ! shell · ctrl+r to review edits
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).toBe("idle");
   });
 
   it("detects Cursor via follow-up prompt and ctrl+c without mode bar", () => {
