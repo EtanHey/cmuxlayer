@@ -186,6 +186,12 @@ function isWorkerMajorityPane(layout: PaneLayout): boolean {
   return layout.workerCount > 0 && layout.workerCount > nonWorkerCount;
 }
 
+function isLeadMajorityPane(layout: PaneLayout): boolean {
+  const leadCount = layout.orchestratorCount + layout.icCount;
+  const nonLeadCount = layout.surfaces.length - leadCount;
+  return leadCount > 0 && leadCount > nonLeadCount;
+}
+
 function isNonLeadWorkerZonePane(
   layout: PaneLayout,
   leftPane: PaneLayout | undefined,
@@ -395,15 +401,13 @@ export function collectRoleSurfaceIds(
 
 /**
  * Deterministic worker placement:
- * - first worker creates the right split
- * - subsequent workers become tabs in the rightmost worker-owned pane — a
- *   worker-majority pane, which tolerates a stray non-role tab (a setup shell
- *   or dashboard) so a populated workers pane never sprouts a redundant pane
- * - under sparse roles, the rightmost non-lead pane seeds the worker zone so
- *   reconnect/manual panes do not fall back to focus-relative center splits
- * - a lone worker sharing a pane with an interactive/non-role surface is still
- *   treated as invalid and repaired with a fresh right split, preserving the
- *   left-interactive/right-worker invariant
+ * - in a single-column layout, the first worker creates the right split
+ * - once at least two columns exist, workers become tabs in the rightmost
+ *   non-lead-owned pane; worker-dock and worker-zone predicates only order
+ *   which right-column pane wins
+ * - if every right-column pane is lead-owned, split within that column instead
+ *   of creating another column
+ * - single-column layouts may still split right to seed the worker column
  */
 export function chooseAgentSpawnPlacement(
   panes: CmuxPane[],
@@ -429,6 +433,13 @@ export function chooseAgentSpawnPlacement(
   if (layouts.length === 0) {
     return { kind: "split", direction: "right" };
   }
+
+  const columnValues = [...new Set(columnByPane.values())];
+  const columnCount = columnValues.length;
+  const rightmostColumn = Math.max(...columnValues);
+  const rightmostColumnPanes = layouts.filter(
+    (layout) => columnByPane.get(layout.pane.ref) === rightmostColumn,
+  );
 
   if (role === "orchestrator") {
     const leftLeadPane =
@@ -460,6 +471,36 @@ export function chooseAgentSpawnPlacement(
       };
     }
     return { kind: "split", direction: "right" };
+  }
+
+  if (columnCount >= 2) {
+    const nonLeadRightColumnPanes = rightmostColumnPanes.filter(
+      (layout) => !isLeadMajorityPane(layout),
+    );
+    const structuralWorkerPane =
+      rightmostByColumn(nonLeadRightColumnPanes.filter(isWorkerDockPane)) ??
+      rightmostByColumn(
+        nonLeadRightColumnPanes.filter((layout) =>
+          isNonLeadWorkerZonePane(layout, leftPane),
+        ),
+      ) ??
+      rightmostByColumn(
+        nonLeadRightColumnPanes.filter(isSparseWorkerZoneSeedPane),
+      ) ??
+      rightmostByColumn(nonLeadRightColumnPanes);
+
+    if (structuralWorkerPane) {
+      return { kind: "surface", pane: structuralWorkerPane.pane.ref };
+    }
+
+    const leadOwnedRightPane = rightmostByColumn(rightmostColumnPanes);
+    if (leadOwnedRightPane) {
+      return {
+        kind: "split",
+        direction: "down",
+        pane: leadOwnedRightPane.pane.ref,
+      };
+    }
   }
 
   if (context.parentRole === "ic") {

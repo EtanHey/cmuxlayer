@@ -573,7 +573,7 @@ describe("layout policy", () => {
     });
   });
 
-  it("keeps a parent IC's first child local even when an unrelated worker zone exists", () => {
+  it("docks a parent IC's first child into the rightmost worker column when one exists", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),
       makePane("pane:ic", 1, ["surface:ic"]),
@@ -602,9 +602,8 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "down",
-      pane: "pane:ic",
+      kind: "surface",
+      pane: "pane:other-workers",
     });
   });
 
@@ -642,7 +641,7 @@ describe("layout policy", () => {
     });
   });
 
-  it("splits the first child worker to the right of its parent orchestrator pane", () => {
+  it("docks the first child worker into an existing right-column non-lead pane", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),
       makePane("pane:notes", 1, ["surface:notes"]),
@@ -669,13 +668,12 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "right",
-      pane: "pane:lead",
+      kind: "surface",
+      pane: "pane:notes",
     });
   });
 
-  it("keeps a parent orchestrator's first child local even when an unrelated worker zone exists", () => {
+  it("docks a parent orchestrator's first child into the rightmost worker column when one exists", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),
       makePane("pane:other-workers", 1, ["surface:worker-1"]),
@@ -702,9 +700,8 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "right",
-      pane: "pane:lead",
+      kind: "surface",
+      pane: "pane:other-workers",
     });
   });
 
@@ -811,6 +808,88 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
+  it("docks a worker into the right column despite the live non-role-majority pane", () => {
+    const nonRoleSurfaces = Array.from({ length: 15 }, (_, index) => ({
+      ref: `surface:judge-${index + 1}`,
+      title:
+        index % 3 === 0
+          ? "Judge Worker"
+          : index % 3 === 1
+            ? "voicelayer"
+            : "Red Team Judge",
+    }));
+    const rightSurfaces = [
+      ...nonRoleSurfaces,
+      {
+        ref: "surface:worker",
+        title: "cmuxlayerCursor W-F3",
+      },
+    ];
+    const panes = [
+      makePane(
+        "pane:1",
+        0,
+        [
+          "surface:cmux-lead",
+          "surface:voicelayer-lead",
+          "surface:brainlayer-lead",
+          "surface:orchestrator-lead",
+        ],
+        {
+          x: 0,
+          y: 0,
+          width: 500,
+          height: 900,
+        },
+      ),
+      makePane(
+        "pane:5",
+        1,
+        rightSurfaces.map((surface) => surface.ref),
+        {
+          x: 500,
+          y: 0,
+          width: 500,
+          height: 900,
+        },
+      ),
+    ];
+    const paneSurfaces = [
+      makeTitledPaneSurfaces("pane:1", [
+        {
+          ref: "surface:cmux-lead",
+          title: "cmuxlayerClaude-LEAD",
+        },
+        {
+          ref: "surface:voicelayer-lead",
+          title: "voicelayerClaude-LEAD",
+        },
+        {
+          ref: "surface:brainlayer-lead",
+          title: "brainlayerClaude-LEAD",
+        },
+        {
+          ref: "surface:orchestrator-lead",
+          title: "orchestratorClaude-LEAD",
+        },
+      ]),
+      makeTitledPaneSurfaces("pane:5", rightSurfaces),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:5" });
+  });
+
   it("still splits fresh when a lone worker shares a pane with one non-role surface", () => {
     // Guard the worker-majority rule against over-reach: a single worker tied
     // with a non-role surface is NOT a worker pane — split fresh (unchanged).
@@ -837,7 +916,7 @@ describe("layout policy", () => {
     });
   });
 
-  it("repairs a mixed worker pane by splitting from the mixed pane even when another pane exists", () => {
+  it("docks into a clean right-column pane instead of repairing a mixed left worker pane", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
       makePane("pane:right", 1, ["surface:notes"]),
@@ -857,13 +936,12 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "right",
-      pane: "pane:left",
+      kind: "surface",
+      pane: "pane:right",
     });
   });
 
-  it("repairs a mixed unknown-agent pane instead of treating the layout as sparse", () => {
+  it("docks into a clean right-column pane when an unknown worker contaminates the left pane", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive", "surface:unknown-worker"]),
       makePane("pane:right", 1, ["surface:notes"]),
@@ -889,9 +967,8 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "right",
-      pane: "pane:left",
+      kind: "surface",
+      pane: "pane:right",
     });
   });
 
@@ -965,7 +1042,7 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
-  it("repairs a contaminated non-lead unknown worker zone instead of docking into it", () => {
+  it("docks into a contaminated right-column worker zone rather than creating a third column", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orchestrator"]),
       makePane("pane:right", 1, ["surface:unknown-worker", "surface:shell"]),
@@ -988,8 +1065,7 @@ describe("layout policy", () => {
     );
 
     expect(placement).toEqual({
-      kind: "split",
-      direction: "right",
+      kind: "surface",
       pane: "pane:right",
     });
   });
