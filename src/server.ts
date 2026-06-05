@@ -3390,7 +3390,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 boot_prompt_pending: false,
               });
               registry.set(result.agent_id, updated);
-              if (updated.state !== "done" && updated.state !== "error") {
+              if (
+                !(e instanceof BootPromptTimeoutError) &&
+                updated.state !== "done" &&
+                updated.state !== "error"
+              ) {
                 updated = stateMgr.transition(result.agent_id, "error", {
                   error: `Boot prompt failed: ${message}`,
                 });

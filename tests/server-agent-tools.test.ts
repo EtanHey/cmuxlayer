@@ -641,7 +641,7 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it("spawn_agent marks the agent errored when boot prompt delivery times out", async () => {
+  it("spawn_agent reports readiness timeout without poisoning agent state", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launchSent = false;
@@ -696,6 +696,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.agent_id).toBeDefined();
     expect(parsed.surface_id).toBe("surface:new");
+    expect(parsed.last_10_lines).toContain("$ waiting");
 
     const stateResult = await getState.handler(
       { agent_id: parsed.agent_id },
@@ -703,9 +704,18 @@ describe("agent lifecycle tool handlers", () => {
     );
     const state =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-    expect(state.state).toBe("error");
+    expect(state.state).toBe("booting");
     expect(state.boot_prompt_pending).toBe(false);
-    expect(state.error).toContain("Boot prompt failed");
+    expect(state.error).toBeNull();
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        "file prompt body",
+      ]),
+    );
   });
 
   it("spawn_agent persists crash_recover=true in agent state", async () => {

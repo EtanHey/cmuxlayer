@@ -18,9 +18,19 @@ export interface PatternMatch {
   consecutive: number;
 }
 
+const CLAUDE_READY_RE =
+  /What can I help you with\?|╭─|(?=[\s\S]*(?:Claude Code|CLAUDE_COUNTER|bypass permissions on|🤖))(?=[\s\S]*(?:^|\n)\s*(?:>|❯)\s*$)/m;
+const CLAUDE_ACTIVE_RE =
+  /(?:^|\n)\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
+
+const CURSOR_ACTIVE_RE =
+  /(?:^|\n)[^\S\r\n]*(?:(?:[⠀-⣿]+|⬢|⬡|•)[^\S\r\n]*)?(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating|Thinking|Waiting)\b(?:\.\.\.|…)?(?:[^\S\r\n]+[0-9][0-9,]*(?:\.[0-9]+)?[km]?[^\S\r\n]+tokens\b|[^\S\r\n]*(?=\r?(?:\n|$)))/i;
+const CURSOR_READY_RE =
+  /cursor>|⬡\s+Idle\b|→\s*Add a follow-up|\/ commands · @ files · ! shell|(?:^|\n)\s*(?:Auto|Agent)\s*·\s*\d+(?:\.\d+)?\s*%\s*·[^\n]*files? edited\b/i;
+
 export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
   claude: {
-    pattern: /What can I help you with\?|╭─/,
+    pattern: CLAUDE_READY_RE,
     confidence: "high",
     consecutive: 1,
   },
@@ -41,7 +51,7 @@ export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
     consecutive: 2,
   },
   cursor: {
-    pattern: /cursor>/,
+    pattern: CURSOR_READY_RE,
     confidence: "high",
     consecutive: 1,
   },
@@ -56,7 +66,10 @@ export function matchReadyPattern(
     return { matched: false, confidence: "low", consecutive: 1 };
   }
   return {
-    matched: entry.pattern.test(screenContent),
+    matched:
+      entry.pattern.test(screenContent) &&
+      (cli !== "claude" || !CLAUDE_ACTIVE_RE.test(screenContent)) &&
+      (cli !== "cursor" || !CURSOR_ACTIVE_RE.test(screenContent)),
     confidence: entry.confidence,
     consecutive: entry.consecutive,
   };
