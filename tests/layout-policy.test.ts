@@ -292,6 +292,199 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
   });
 
+  it("places orchestrators in pane:1 for the live lead-pane fixture with one IC record", () => {
+    const panes = [
+      makePane(
+        "pane:1",
+        0,
+        [
+          "surface:cmux-lead",
+          "surface:voicelayer-lead",
+          "surface:brainlayer-lead",
+          "surface:orchestrator-lead",
+        ],
+        {
+          x: 0,
+          y: 0,
+          width: 500,
+          height: 900,
+        },
+      ),
+      makePane("pane:5", 1, ["surface:worker-1", "surface:worker-2"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makeTitledPaneSurfaces("pane:1", [
+        {
+          ref: "surface:cmux-lead",
+          title: "cmuxlayerClaude-LEAD",
+        },
+        {
+          ref: "surface:voicelayer-lead",
+          title: "voicelayerClaude-LEAD",
+        },
+        {
+          ref: "surface:brainlayer-lead",
+          title: "brainlayerClaude-LEAD",
+        },
+        {
+          ref: "surface:orchestrator-lead",
+          title: "orchestratorClaude-LEAD",
+        },
+      ]),
+      makeTitledPaneSurfaces("pane:5", [
+        {
+          ref: "surface:worker-1",
+          title: "cmuxlayerCodex W-B1",
+        },
+        {
+          ref: "surface:worker-2",
+          title: "cmuxlayerCursor W-B2",
+        },
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(["surface:voicelayer-lead"]),
+        worker: new Set(),
+      },
+      { role: "orchestrator" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:1" });
+  });
+
+  it("places orchestrators in the left-column lead pane despite a stray worker record", () => {
+    const panes = [
+      makePane(
+        "pane:left",
+        0,
+        ["surface:cmux-lead", "surface:stale-worker", "surface:shell"],
+        {
+          x: 0,
+          y: 0,
+          width: 500,
+          height: 900,
+        },
+      ),
+      makePane("pane:right", 1, ["surface:actual-worker"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makeTitledPaneSurfaces("pane:left", [
+        {
+          ref: "surface:cmux-lead",
+          title: "cmuxlayerClaude-LEAD",
+        },
+        {
+          ref: "surface:stale-worker",
+          title: "voicelayerClaude-LEAD",
+        },
+        {
+          ref: "surface:shell",
+          title: "manual shell",
+        },
+      ]),
+      makeTitledPaneSurfaces("pane:right", [
+        {
+          ref: "surface:actual-worker",
+          title: "cmuxlayerCodex W-B1",
+        },
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(),
+        worker: new Set(["surface:stale-worker"]),
+      },
+      { role: "orchestrator" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
+  });
+
+  it("splits orchestrators left when the leftmost pane is worker-majority despite a stale IC record", () => {
+    const panes = [
+      makePane(
+        "pane:left-workers",
+        0,
+        [
+          "surface:worker-1",
+          "surface:worker-2",
+          "surface:worker-3",
+          "surface:stale-ic",
+        ],
+        {
+          x: 0,
+          y: 0,
+          width: 500,
+          height: 900,
+        },
+      ),
+      makePane("pane:right-workers", 1, ["surface:worker-4"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makeTitledPaneSurfaces("pane:left-workers", [
+        {
+          ref: "surface:worker-1",
+          title: "cmuxlayerCodex W-B1",
+        },
+        {
+          ref: "surface:worker-2",
+          title: "cmuxlayerCodex W-B2",
+        },
+        {
+          ref: "surface:worker-3",
+          title: "cmuxlayerCursor W-B3",
+        },
+        {
+          ref: "surface:stale-ic",
+          title: "cmuxlayerCodex W-B4",
+        },
+      ]),
+      makeTitledPaneSurfaces("pane:right-workers", [
+        {
+          ref: "surface:worker-4",
+          title: "cmuxlayerCodex W-B5",
+        },
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(["surface:stale-ic"]),
+        worker: new Set(),
+      },
+      { role: "orchestrator" },
+    );
+
+    expect(placement).toEqual({ kind: "split", direction: "left" });
+  });
+
   it("docks workers into launcher-title Codex panes without registry state", () => {
     const panes = [
       makePane("pane:worker", 0, ["surface:cmuxlayer-worker"]),
