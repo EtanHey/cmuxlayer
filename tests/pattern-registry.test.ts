@@ -86,6 +86,21 @@ describe("matchReadyPattern", () => {
     expect(result.matched).toBe(false);
   });
 
+  it("does not match active Claude work even when a stale prompt remains visible", () => {
+    const result = matchReadyPattern(
+      "claude",
+      [
+        "Claude Code",
+        "✻ Working",
+        "  Reading src/server.ts",
+        "",
+        ">",
+        "CLAUDE_COUNTER:1",
+      ].join("\n"),
+    );
+    expect(result.matched).toBe(false);
+  });
+
   it("matches Codex ready prompt", () => {
     const result = matchReadyPattern("codex", "codex> ");
     expect(result.matched).toBe(true);
@@ -227,6 +242,18 @@ Auto · 22.5% · 4 files edited
 ctrl+c to stop
 
 / commands · @ files · ! shell · ctrl+r to review edits
+`,
+    );
+    expect(result.matched).toBe(false);
+  });
+
+  it("does not match live Cursor thinking chrome with braille spinner and Auto footer", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      `
+ ⠠⠛ Thinking  5.71k tokens
+    Tip: Use /debug to instrument and debug complex problems.
+  Auto · 20.5% · 4 files edited                    Auto-run
 `,
     );
     expect(result.matched).toBe(false);
