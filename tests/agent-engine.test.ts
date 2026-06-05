@@ -122,6 +122,7 @@ describe("AgentEngine", () => {
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
     });
   });
 
@@ -180,7 +181,9 @@ describe("AgentEngine", () => {
         prompt: "Fix gap F",
       });
 
-      expect(result.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
+      expect(result.agent_id).toMatch(
+        /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
+      );
       expect(result.surface_id).toBe("surface:new");
       expect(result.state).toBe("booting");
     });
@@ -1368,6 +1371,87 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
         );
       },
     );
+
+    it("finalizes agent_id to golemName-session-prefix and aliases the provisional id", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      liveSurfaces = [makeSurface("surface:new")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:new",
+        text: `gpt-5.4
+Working (12s • esc to interrupt)
+To continue this session, run codex resume ${sessionId}`,
+        lines: 80,
+        scrollback_used: true,
+      });
+
+      engine.startSweep(1000);
+
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+      });
+
+      const finalAgentId = "brainlayerCodex-019d9aa5";
+      expect(result.agent_id).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: null,
+      });
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: null,
+      });
+      expect(stateMgr.readState(result.agent_id)).toBeNull();
+      expect(stateMgr.readState(finalAgentId)?.agent_id).toBe(finalAgentId);
+    });
+
+    it("captures the real session id from transcript metadata when the screen has no UUID", async () => {
+      const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+      const sessionPath =
+        "/Users/etanheyman/.codex/sessions/2026/06/05/rollout.jsonl";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: (agent) =>
+          agent.cli === "codex" && agent.repo === "brainlayer"
+            ? { session_id: sessionId, path: sessionPath }
+            : null,
+      });
+      liveSurfaces = [makeSurface("surface:new")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:new",
+        text: "codex> ",
+        lines: 80,
+        scrollback_used: true,
+      });
+
+      engine.startSweep(1000);
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(engine.getAgentState("brainlayerCodex-019e942c")).toMatchObject({
+        agent_id: "brainlayerCodex-019e942c",
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+      });
+      expect(engine.getAgentState(result.agent_id)?.agent_id).toBe(
+        "brainlayerCodex-019e942c",
+      );
+    });
   });
 
   describe("waitFor", () => {

@@ -185,6 +185,9 @@ export function formatAgentState(agent: AgentRecord): string {
   if (agent.cli_session_id) {
     lines.push(`\u2502 session: ${agent.cli_session_id}`);
   }
+  if (agent.cli_session_path) {
+    lines.push(`\u2502 transcript: ${agent.cli_session_path}`);
+  }
   if (agent.parent_agent_id) {
     lines.push(`\u2502 parent: ${agent.parent_agent_id}`);
   }

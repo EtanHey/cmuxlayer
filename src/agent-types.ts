@@ -30,6 +30,7 @@ export interface AgentRecord {
   model: string;
   cli: CliType;
   cli_session_id: string | null;
+  cli_session_path?: string | null;
   task_summary: string;
   pid: number | null;
   version: number;
@@ -204,9 +205,42 @@ export function parseContextPercent(text: string): number | null {
 /**
  * Generate a unique agent ID from components.
  */
-export function generateAgentId(model: string, repo: string): string {
+export const SESSION_ID_PREFIX_LENGTH = 8;
+
+const CLI_GOLEM_SUFFIX: Record<CliType, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  gemini: "Gemini",
+  kiro: "Kiro",
+  cursor: "Cursor",
+};
+
+function sanitizeAgentIdPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-");
+}
+
+export function golemNameForAgent(cli: CliType, repo: string): string {
+  const safeRepo = sanitizeAgentIdPart(repo).replace(/^-+|-+$/g, "");
+  return `${safeRepo || "agent"}${CLI_GOLEM_SUFFIX[cli]}`;
+}
+
+export function sessionIdPrefix(sessionId: string): string {
+  return sanitizeAgentIdPart(sessionId.trim().toLowerCase()).slice(
+    0,
+    SESSION_ID_PREFIX_LENGTH,
+  );
+}
+
+export function generateAgentId(
+  cli: CliType,
+  repo: string,
+  sessionId?: string | null,
+): string {
+  const golemName = golemNameForAgent(cli, repo);
+  if (sessionId) {
+    return `${golemName}-${sessionIdPrefix(sessionId)}`;
+  }
   const ts = Math.floor(Date.now() / 1000);
   const rand = Math.random().toString(36).slice(2, 6);
-  const slug = repo.replace(/[^a-zA-Z0-9-]/g, "-");
-  return `${model}-${slug}-${ts}-${rand}`;
+  return `${golemName}-pending-${ts}-${rand}`;
 }

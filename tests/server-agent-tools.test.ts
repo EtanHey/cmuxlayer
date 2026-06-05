@@ -123,6 +123,7 @@ function createLifecycleServer(exec: ExecFn) {
     exec,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
+    sessionIdentityResolver: () => null,
   });
 }
 
@@ -193,7 +194,9 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(/^sonnet-brainlayer-\d+-[a-z0-9]+$/);
+    expect(parsed.agent_id).toMatch(
+      /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
+    );
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
 
@@ -1155,7 +1158,7 @@ describe("agent lifecycle tool handlers", () => {
     const engine = (server as any)._registeredTools["interact"]._engine;
     const stateMgr = engine["stateMgr"];
 
-    if (stateMgr.readState(agentId)?.state !== "ready") {
+    if (stateMgr.readState(agentId)?.state === "booting") {
       stateMgr.transition(agentId, "ready");
     }
     stateMgr.transition(agentId, "done");
