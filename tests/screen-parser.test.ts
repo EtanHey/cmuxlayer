@@ -214,6 +214,58 @@ Working (1m 02s • esc to interrupt)
     expect(parsed.status).toBe("working");
   });
 
+  it("does not treat a standalone done token inside a Codex echoed prompt box as output", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+→ Implement the fix. When complete, print exactly:
+TASK_DONE
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).not.toBe("done");
+  });
+
+  it("accepts a real trailing done token after an echoed prompt box and output", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+→ Implement the fix. When complete, print exactly:
+TASK_DONE
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+Implemented the fix.
+TASK_DONE
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+    expect(parsed.status).toBe("done");
+  });
+
+  it("accepts a real trailing done token after ordinary output mentioning done signal", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+Updated the done signal parser edge case.
+TASK_DONE
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+    expect(parsed.status).toBe("done");
+  });
+
+  it("does not treat a done token as output while the current tail is still working", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+Working (1m 02s • esc to interrupt)
+TASK_DONE
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).toBe("working");
+  });
+
   it("parses Gemini-style output from explicit Gemini CLI markers", () => {
     const parsed = parseScreen(`
 Gemini CLI

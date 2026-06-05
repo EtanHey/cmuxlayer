@@ -806,6 +806,51 @@ describe("AgentEngine", () => {
       }
     });
 
+    it("marks TASK_DONE for any cli and role without using the auto-archive gate", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(doneAt);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-ic-done",
+            state: "ready",
+            surface_id: "surface:claude-ic-done",
+            cli: "claude",
+            role: "ic",
+            auto_archive_on_done: true,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-ic-done")];
+        await engine.getRegistry().reconstitute();
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-ic-done",
+          text: "Claude Code\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+
+        await engine.runSweep();
+        expect(engine.getAgentState("claude-ic-done")).toMatchObject({
+          state: "ready",
+          task_done_candidate_at: doneAt.toISOString(),
+        });
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 5_001));
+        await engine.runSweep();
+        expect(engine.getAgentState("claude-ic-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: expect.any(String),
+        });
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 5_001 + 31 * 60_000));
+        await engine.runSweep();
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("prefers TASK_DONE auto-archive milliseconds over minutes when both env vars are set", async () => {
       const previousMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
       const previousMinutes =
@@ -1570,12 +1615,95 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("sweep");
+        expect(result.source).toBe("evidence");
         expect(result.state).toBe("done");
         expect(engine.getAgentState("worker-output-done")).toMatchObject({
           state: "done",
           task_done_detected_at: expect.any(String),
         });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves a working agent with trailing TASK_DONE within two sweep ticks after confirmation", async () => {
+      vi.useFakeTimers();
+      try {
+        const candidateAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(candidateAt.getTime() + 5_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "incident-working-done",
+            state: "working",
+            surface_id: "surface:incident-working-done",
+            cli: "codex",
+            role: "worker",
+            task_done_candidate_at: candidateAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:incident-working-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:incident-working-done",
+          text: "gpt-5.4\nImplemented the fix.\nTASK_DONE",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "incident-working-done",
+          "done",
+          25 * 60_000,
+        );
+        await vi.advanceTimersByTimeAsync(1_100);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("evidence");
+        expect(result.state).toBe("done");
+        expect(result.elapsed).toBeLessThan(2_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve done when TASK_DONE appears only in an echoed instruction box with an active spinner", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "incident-echo-active",
+            state: "working",
+            surface_id: "surface:incident-echo-active",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:incident-echo-active")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:incident-echo-active",
+          text: [
+            "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer",
+            "→ Implement the fix. When complete, print exactly:",
+            "TASK_DONE",
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "Working (1m 02s • esc to interrupt)",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("incident-echo-active", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("incident-echo-active");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
       } finally {
         vi.useRealTimers();
       }
@@ -1729,7 +1857,7 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("sweep");
+        expect(result.source).toBe("evidence");
         expect(result.state).toBe("done");
         expect(engine.getAgentState("claude-output-done")).toMatchObject({
           state: "done",
@@ -1756,6 +1884,37 @@ To continue this session, run codex resume ${sessionId}`,
       expect(result.state).toBe("error");
       expect(result.agent?.agent_id).toBe("agent-err");
       expect(result.agent?.state).toBe("error");
+    });
+
+    it("fails fast when reconcile detects the waited agent surface disappeared", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-surface-gone",
+            state: "ready",
+            surface_id: "surface:gone-during-wait",
+            cli: "claude",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gone-during-wait")];
+        await engine.getRegistry().reconstitute();
+
+        liveSurfaces = [];
+        const pending = engine.waitFor("agent-surface-gone", "done", 25 * 60_000);
+        await vi.advanceTimersByTimeAsync(1_100);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.state).toBe("error");
+        expect(result.source).toBe("sweep");
+        expect(result.elapsed).toBeLessThan(25 * 60_000);
+        expect(result.error).toContain(
+          "Surface surface:gone-during-wait disappeared",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("times out when target state is never reached", async () => {

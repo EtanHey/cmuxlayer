@@ -2,7 +2,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import { EventEmitter, once } from "node:events";
@@ -11,7 +10,7 @@ import { CmuxLayerDaemon, SocketJsonRpcTransport } from "../src/daemon.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
-const TEST_ROOT = join(tmpdir(), "cmuxlayer-daemon-test");
+const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 
 function socketPath(name: string): string {
   return join(TEST_ROOT, `${name}-${process.pid}-${Date.now()}.sock`);

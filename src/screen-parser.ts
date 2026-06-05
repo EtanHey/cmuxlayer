@@ -250,6 +250,9 @@ function parseDoneSignal(text: string): string | null {
     const line = lines[i];
     const explicitDoneSignal = line.match(DONE_SIGNAL_LINE_RE)?.[1];
     if (explicitDoneSignal) {
+      if (isUnsafeDoneSignalContext(lines, i)) {
+        return null;
+      }
       return explicitDoneSignal;
     }
 
@@ -266,6 +269,44 @@ function parseDoneSignal(text: string): string | null {
   }
 
   return null;
+}
+
+function isUnsafeDoneSignalContext(lines: string[], index: number): boolean {
+  const immediateTail = lines.slice(Math.max(0, index - 3), index);
+  const immediateText = immediateTail.join("\n");
+
+  if (
+    CODEX_WORKING_RE.test(immediateText) ||
+    CLAUDE_WORKING_LINE_RE.test(immediateText) ||
+    THINKING_RE.test(immediateText) ||
+    CURSOR_HEX_RUNNING_RE.test(immediateText) ||
+    GEMINI_WORKING_RE.test(immediateText)
+  ) {
+    return true;
+  }
+
+  return immediateTail.some((line) => isEchoedPromptContextLine(line));
+}
+
+function isEchoedPromptContextLine(line: string): boolean {
+  const hasDoneToken = /\b[A-Z][A-Z0-9_]*_DONE\b/.test(line);
+  const hasInstructionVerb = /\b(?:print|emit|write|respond)\b/i.test(line);
+
+  if (
+    /^\s*(?:→|>|[│┃║])\s+/.test(line) ||
+    /^\s*(?:╭|╰|┌|└|├|┬|┴|┼)/.test(line)
+  ) {
+    return true;
+  }
+
+  return (
+    (hasInstructionVerb && hasDoneToken) ||
+    (/\bwhen\b.*\bcomplete\b/i.test(line) &&
+      (hasInstructionVerb || hasDoneToken || /\bdone signal\b/i.test(line))) ||
+    (/\bon its own line\b/i.test(line) &&
+      (hasInstructionVerb || hasDoneToken || /\bdone signal\b/i.test(line))) ||
+    (/\bdone signal\b/i.test(line) && (hasInstructionVerb || hasDoneToken))
+  );
 }
 
 function trimBlankEdges(lines: string[]): string[] {
