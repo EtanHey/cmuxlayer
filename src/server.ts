@@ -36,15 +36,34 @@ import {
   formatListAgents,
   formatAgentState,
   formatOk,
+  formatDelivery,
   formatResync,
 } from "./format.js";
-import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import {
+  cleanScreenText,
+  inferContextWindow,
+  parseScreen,
+} from "./screen-parser.js";
+import {
+  dispatch,
+  inboxPath,
+  monitorAlive,
+  pendingDispatches,
+  replayUndelivered,
+} from "./inbox.js";
+import {
+  applyHarnessState,
+  harnessJsonlEnabled,
+  loadHarnessSession,
+  type Harness,
+} from "./harness-session.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import {
   canInferAgentRole,
   collectRoleSurfaceIds,
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
+  deriveColumnIndex,
   inferAgentRole,
   launcherNameForCli,
 } from "./layout-policy.js";
@@ -57,6 +76,7 @@ import type {
 import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -114,7 +134,13 @@ const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
-const READY_PATTERN_CLIS: CliType[] = ["claude", "codex", "gemini", "kiro", "cursor"];
+const READY_PATTERN_CLIS: CliType[] = [
+  "claude",
+  "codex",
+  "gemini",
+  "kiro",
+  "cursor",
+];
 const SendToArgsSchema = z.object({
   agent_id: z.string(),
   text: z.string(),
@@ -124,7 +150,7 @@ const SendToArgsSchema = z.object({
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
-interface DeliveryRecord {
+export interface DeliveryRecord {
   delivery_id: string;
   surface: string;
   workspace?: string;
@@ -283,6 +309,12 @@ function toMinimalSurface(
       typeof surface.workspace_ref === "string" ? surface.workspace_ref : "",
   };
 
+  if (typeof surface.pane_ref === "string") {
+    minimal.pane_ref = surface.pane_ref;
+  }
+  if (typeof surface.column === "number") {
+    minimal.column = surface.column;
+  }
   if (typeof surface.screen_preview === "string") {
     minimal.screen_preview = surface.screen_preview;
   }
@@ -415,8 +447,10 @@ function isRetryableDeliveryError(error: unknown): boolean {
   return /socket|connection_|connection closed|timeout/i.test(message);
 }
 
-
-function formatToolValidationError(toolName: string, error: z.ZodError): string {
+function formatToolValidationError(
+  toolName: string,
+  error: z.ZodError,
+): string {
   const details = error.issues
     .map((issue) => {
       const path = issue.path.length > 0 ? issue.path.join(".") : "input";
@@ -432,7 +466,10 @@ function isSubmitVerifiedStatus(
   return status === "working" || status === "thinking" || status === "done";
 }
 
-function screenShowsPendingInput(screenText: string, submittedText: string): boolean {
+function screenShowsPendingInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
   const trimmed = submittedText.trim();
   if (!trimmed) {
     return false;
@@ -445,7 +482,10 @@ function screenShowsPendingInput(screenText: string, submittedText: string): boo
 function computeEnterDelayMs(bytes: number, chunkCount: number): number {
   const extraChunks = Math.max(0, chunkCount - 1);
   const longPayloadPenalty = bytes >= SEND_INPUT_CHUNK_THRESHOLD ? 100 : 0;
-  return Math.min(250, SEND_INPUT_ENTER_DELAY_MS + extraChunks * 50 + longPayloadPenalty);
+  return Math.min(
+    250,
+    SEND_INPUT_ENTER_DELAY_MS + extraChunks * 50 + longPayloadPenalty,
+  );
 }
 
 function pickLatestSurfaceModel(
@@ -466,6 +506,72 @@ function pickLatestSurfaceModel(
   });
 
   return matches[0]?.model ?? null;
+}
+
+const JSONL_HARNESSES = new Set<Harness>(["claude", "codex", "cursor"]);
+
+// AIDEV-NOTE: P2 — real agent state from the harness JSONL (the sterile read channel).
+// Flag-gated (CMUXLAYER_HARNESS_JSONL=1); screen-parser is the fallback. Resolves the
+// surface's cli + cli_session_id from the in-memory state cache, then loads the
+// transcript by sessionId (no cwd needed — the id is unique). Returns null whenever the
+// flag is off, the harness is unsupported, or no session file is found → screen values stand.
+function resolveHarnessStateForSurface(
+  stateMgr: StateManager,
+  surfaceRef: string,
+): ReturnType<typeof loadHarnessSession> {
+  if (!harnessJsonlEnabled()) return null;
+  const matches = stateMgr
+    .listStates()
+    .filter((record) => record.surface_id === surfaceRef)
+    .sort((a, b) => {
+      if (b.version !== a.version) return b.version - a.version;
+      return (
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+    });
+  const record = matches[0];
+  const cli = record?.cli as Harness | undefined;
+  const sessionId = record?.cli_session_id ?? null;
+  if (!cli || !sessionId || !JSONL_HARNESSES.has(cli)) return null;
+  // Honor CODEX_HOME (already used by app-server-bridge) and a test-only home override.
+  const opts = {
+    ...(process.env.CMUXLAYER_HARNESS_HOME
+      ? { home: process.env.CMUXLAYER_HARNESS_HOME }
+      : {}),
+    ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {}),
+  };
+  return loadHarnessSession(cli, sessionId, opts);
+}
+
+export interface TargetIdentity {
+  surface: string;
+  title?: string;
+  model?: string;
+  agent_type?: string;
+}
+
+// Best-effort, CHEAP target-agent identity for delivery responses (send_input /
+// send_command). Sourced from the in-memory state cache only — no extra socket
+// round-trip / read_screen per send. Unknown fields are omitted.
+function resolveTargetIdentity(
+  stateMgr: StateManager,
+  surfaceRef: string,
+): TargetIdentity {
+  const identity: TargetIdentity = { surface: surfaceRef };
+  const matches = stateMgr
+    .listStates()
+    .filter((record) => record.surface_id === surfaceRef)
+    .sort((a, b) => {
+      if (b.version !== a.version) return b.version - a.version;
+      return (
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+    });
+  const record = matches[0];
+  if (record?.task_summary) identity.title = record.task_summary;
+  if (record?.model) identity.model = record.model;
+  if (record?.cli) identity.agent_type = record.cli;
+  return identity;
 }
 
 function enrichParsedScreen(
@@ -504,6 +610,8 @@ export interface CreateServerOptions {
   bin?: string;
   /** Pre-built client (socket or CLI). If omitted, creates a CLI client. */
   client?: CmuxClient | CmuxSocketClient;
+  /** Shared server-side world-model reused across many MCP connections. */
+  context?: CmuxServerContext;
   /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
@@ -514,6 +622,71 @@ export interface CreateServerOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   /** Explicitly disable spawn preflight checks (primarily for mocked tests). */
   disableSpawnPreflight?: boolean;
+}
+
+type CmuxLayerClient = CmuxClient | CmuxSocketClient;
+
+export interface CmuxServerContext {
+  client: CmuxLayerClient;
+  stateDir: string;
+  stateMgr: StateManager;
+  roleSurfaceOverrides: Map<
+    string,
+    { role: AgentRole; workspace: string | null }
+  >;
+  eventLog: ReturnType<StateManager["getEventLog"]>;
+  deliveries: Map<string, DeliveryRecord>;
+  latestDeliveryBySurface: Map<string, string>;
+  activeDeliveryBySurface: Map<string, string>;
+  activeSurfaceWrites: Map<string, string>;
+  enableClaudeChannels: boolean;
+  skipAgentLifecycle: boolean;
+  spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  disableSpawnPreflight?: boolean;
+  lifecycleRegistry: AgentRegistry | null;
+  lifecycleStarted: boolean;
+  lifecycleStartPromise: Promise<void> | null;
+  lifecycleSweepEngine: AgentEngine | null;
+  dispose(): void;
+}
+
+export function createServerContext(
+  opts?: Omit<CreateServerOptions, "context">,
+): CmuxServerContext {
+  const client =
+    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const stateDir =
+    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+  const stateMgr = new StateManager(stateDir);
+  const context: CmuxServerContext = {
+    client,
+    stateDir,
+    stateMgr,
+    roleSurfaceOverrides: new Map(),
+    eventLog: stateMgr.getEventLog(),
+    deliveries: new Map(),
+    latestDeliveryBySurface: new Map(),
+    activeDeliveryBySurface: new Map(),
+    activeSurfaceWrites: new Map(),
+    enableClaudeChannels:
+      opts?.enableClaudeChannels ??
+      process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1",
+    skipAgentLifecycle: opts?.skipAgentLifecycle ?? false,
+    spawnPreflight: opts?.spawnPreflight,
+    disableSpawnPreflight: opts?.disableSpawnPreflight,
+    lifecycleRegistry: null,
+    lifecycleStarted: false,
+    lifecycleStartPromise: null,
+    lifecycleSweepEngine: null,
+    dispose() {
+      context.lifecycleSweepEngine?.dispose();
+      context.lifecycleSweepEngine = null;
+      context.lifecycleStarted = false;
+      context.lifecycleStartPromise = null;
+    },
+  };
+
+  return context;
 }
 
 function formatLifecycleChannelContent(
@@ -559,24 +732,22 @@ function buildLifecycleChannelMeta(
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
-  const client =
-    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
-  const stateDir =
-    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
-  const stateMgr = new StateManager(stateDir);
-  const roleSurfaceOverrides = new Map<
-    string,
-    { role: AgentRole; workspace: string | null }
-  >();
-  let lifecycleRegistry: AgentRegistry | null = null;
-  const eventLog = stateMgr.getEventLog();
-  const deliveries = new Map<string, DeliveryRecord>();
-  const latestDeliveryBySurface = new Map<string, string>();
-  const activeDeliveryBySurface = new Map<string, string>();
-  const activeSurfaceWrites = new Map<string, string>();
+  const context = opts?.context ?? createServerContext(opts);
+  const client = context.client;
+  const stateMgr = context.stateMgr;
+  const roleSurfaceOverrides = context.roleSurfaceOverrides;
+  const eventLog = context.eventLog;
+  const deliveries = context.deliveries;
+  const latestDeliveryBySurface = context.latestDeliveryBySurface;
+  const activeDeliveryBySurface = context.activeDeliveryBySurface;
+  const activeSurfaceWrites = context.activeSurfaceWrites;
   const enableClaudeChannels =
-    opts?.enableClaudeChannels ??
-    process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1";
+    opts?.enableClaudeChannels ?? context.enableClaudeChannels;
+  const skipAgentLifecycle =
+    opts?.skipAgentLifecycle ?? context.skipAgentLifecycle;
+  const spawnPreflight = opts?.spawnPreflight ?? context.spawnPreflight;
+  const disableSpawnPreflight =
+    opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
 
   const server = new McpServer(
     {
@@ -613,7 +784,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
   ) => {
-    const roleRecords = lifecycleRegistry?.list() ?? [];
+    const roleRecords = context.lifecycleRegistry?.list() ?? [];
     const ids = collectRoleSurfaceIds(roleRecords);
     if (liveSurfaceIds) {
       for (const role of ["orchestrator", "ic", "worker"] as const) {
@@ -827,10 +998,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lines: 30,
       });
       const text = typeof screen === "string" ? screen : (screen.text ?? "");
-      const parsed = enrichParsedScreen(
-        parseScreen(text),
-        text,
-        pickLatestSurfaceModel(stateMgr, surface),
+      const parsed = applyHarnessState(
+        enrichParsedScreen(
+          parseScreen(text),
+          text,
+          pickLatestSurfaceModel(stateMgr, surface),
+        ),
+        resolveHarnessStateForSurface(stateMgr, surface),
       );
       return { text, parsed };
     } catch {
@@ -868,6 +1042,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     verify_submit: boolean;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
+      // null means submit verification was not attempted, usually because the
+      // command was at or below SEND_INPUT_CHUNK_THRESHOLD; it is not a failure.
       return { submit_verified: null, retry_count: 0 };
     }
 
@@ -1080,7 +1256,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         if (
           matchesShellPrompt(screen.text) ||
-          READY_PATTERN_CLIS.some((cli) => matchReadyPattern(cli, screen.text).matched)
+          READY_PATTERN_CLIS.some(
+            (cli) => matchReadyPattern(cli, screen.text).matched,
+          )
         ) {
           return;
         }
@@ -1119,8 +1297,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         lastText = screen.text;
         if (
-          READY_PATTERN_CLIS.some((cli) =>
-            matchReadyPattern(cli, screen.text).matched,
+          READY_PATTERN_CLIS.some(
+            (cli) => matchReadyPattern(cli, screen.text).matched,
           )
         ) {
           return;
@@ -1277,6 +1455,62 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return null;
   };
 
+  // Resolve a surface's 0-based column + the workspace column_count using the
+  // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
+  // geometry, then attribute the surface to its pane by membership (pane_id),
+  // NOT the unfiltered surface.list. Best-effort: returns nulls on any failure
+  // so callers (e.g. read_screen) never break when geometry is unavailable.
+  const resolveSurfaceColumn = async (
+    surfaceRef: string,
+    workspace?: string,
+  ): Promise<{ column: number | null; column_count: number | null }> => {
+    try {
+      const workspaceRefs = workspace
+        ? [workspace]
+        : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+
+      for (const workspaceRef of workspaceRefs) {
+        const panes = await client.listPanes({ workspace: workspaceRef });
+        if (!panes.panes || panes.panes.length === 0) {
+          continue;
+        }
+        const columnIndex = deriveColumnIndex(panes.panes);
+        const columnCount = new Set(columnIndex.values()).size;
+        const rawGroups = await Promise.all(
+          panes.panes.map(async (pane) => {
+            const group = await client.listPaneSurfaces({
+              workspace: workspaceRef,
+              pane: pane.ref,
+            });
+            return {
+              ...group,
+              workspace_ref: group.workspace_ref ?? workspaceRef,
+              pane_ref: group.pane_ref ?? pane.ref,
+            };
+          }),
+        );
+        const partitioned = partitionPaneSurfacesByMembership(
+          panes.panes,
+          rawGroups,
+          {
+            workspace_ref: panes.workspace_ref ?? workspaceRef,
+            window_ref: panes.window_ref,
+          },
+        );
+        for (const group of partitioned) {
+          if (group.surfaces.some((surface) => surface.ref === surfaceRef)) {
+            const column = columnIndex.get(group.pane_ref);
+            return { column: column ?? null, column_count: columnCount };
+          }
+        }
+      }
+    } catch {
+      return { column: null, column_count: null };
+    }
+
+    return { column: null, column_count: null };
+  };
+
   // 1. list_surfaces
   server.tool(
     "list_surfaces",
@@ -1317,16 +1551,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes: await client.listPanes({ workspace: workspaceRef }),
           })),
         );
-        const surfaceGroups = await Promise.all(
-          panesByWorkspace.flatMap(({ workspaceRef, panes }) =>
-            panes.panes.map((pane) =>
-              client.listPaneSurfaces({
-                workspace: workspaceRef,
-                pane: pane.ref,
+        const columnIndexByWorkspace = new Map<string, Map<string, number>>();
+        const columnCountByWorkspace = new Map<string, number>();
+        for (const { workspaceRef, panes } of panesByWorkspace) {
+          const columnIndex = deriveColumnIndex(panes.panes);
+          columnIndexByWorkspace.set(workspaceRef, columnIndex);
+          columnCountByWorkspace.set(
+            workspaceRef,
+            new Set(columnIndex.values()).size,
+          );
+        }
+        const surfaceGroupsByWorkspace = await Promise.all(
+          panesByWorkspace.map(async ({ workspaceRef, panes }) => {
+            const rawGroups = await Promise.all(
+              panes.panes.map(async (pane) => {
+                const group = await client.listPaneSurfaces({
+                  workspace: workspaceRef,
+                  pane: pane.ref,
+                });
+                return {
+                  ...group,
+                  workspace_ref: group.workspace_ref ?? workspaceRef,
+                  pane_ref: group.pane_ref ?? pane.ref,
+                };
               }),
-            ),
-          ),
+            );
+            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+              workspace_ref: panes.workspace_ref ?? workspaceRef,
+              window_ref: panes.window_ref,
+            });
+          }),
         );
+        const surfaceGroups = surfaceGroupsByWorkspace.flat();
         const uniqueSurfaceEntries: Array<{
           group: {
             workspace_ref: string;
@@ -1363,6 +1619,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               window_ref: group.window_ref,
               pane_ref: group.pane_ref,
             };
+            const column = columnIndexByWorkspace
+              .get(group.workspace_ref)
+              ?.get(group.pane_ref);
+            if (typeof column === "number") {
+              enrichedSurface.column = column;
+            }
 
             if (args.include_screen_preview && surface.type === "terminal") {
               try {
@@ -1394,6 +1656,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data: Record<string, unknown> = {
           workspaces: responseWorkspaces,
           surfaces: responseSurfaces,
+          column_count: targetWorkspaceRefs.reduce(
+            (max, workspaceRef) =>
+              Math.max(max, columnCountByWorkspace.get(workspaceRef) ?? 0),
+            0,
+          ),
         };
         if (args.workspace) {
           data.workspace_ref = args.workspace;
@@ -1506,10 +1773,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         const targetWorkspace =
           args.workspace ??
-          (await resolveWorkspaceForRepo(inferRepoFromLauncherTitle(args.title)));
+          (await resolveWorkspaceForRepo(
+            inferRepoFromLauncherTitle(args.title),
+          ));
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
-            throw new Error("boot_prompt_path is only supported for terminal surfaces");
+            throw new Error(
+              "boot_prompt_path is only supported for terminal surfaces",
+            );
           }
           await preflightBootPromptFile(bootPromptPath);
         }
@@ -1531,7 +1802,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           const panes = await client.listPanes({ workspace: targetWorkspace });
-          const paneSurfaces = await Promise.all(
+          const rawPaneSurfaces = await Promise.all(
             panes.panes.map(async (pane) => {
               const ps = await client.listPaneSurfaces({
                 workspace: targetWorkspace,
@@ -1541,6 +1812,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // can match panes to their surfaces for role-based placement.
               return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
             }),
+          );
+          const paneSurfaces = partitionPaneSurfacesByMembership(
+            panes.panes,
+            rawPaneSurfaces,
+            {
+              workspace_ref: panes.workspace_ref ?? targetWorkspace,
+              window_ref: panes.window_ref,
+            },
           );
           const liveSurfaceIds = new Set(
             paneSurfaces.flatMap((group) =>
@@ -1687,7 +1966,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
-            throw new Error("boot_prompt_path is only supported for terminal surfaces");
+            throw new Error(
+              "boot_prompt_path is only supported for terminal surfaces",
+            );
           }
           await preflightBootPromptFile(bootPromptPath);
         }
@@ -1776,13 +2057,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           index: args.index,
           focus: args.focus,
         });
-        const data = { ...result };
+        // F8: slim, phone-readable confirmation — drop the verbose passthrough.
+        const data = {
+          surface: result.surface,
+          pane: result.pane,
+          workspace: result.workspace,
+        };
+        const dest = result.pane ?? result.workspace ?? "destination";
         return okFormatted(
-          formatOk("move_surface", {
-            surface: result.surface,
-            pane: result.pane,
-            workspace: result.workspace,
-          }),
+          `✔ move_surface ─ moved ${result.surface} → ${dest}`,
           data,
         );
       } catch (e) {
@@ -1849,9 +2132,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .boolean()
         .optional()
         .default(false)
-        .describe(
-          "Press return once after all chunks have landed.",
-        ),
+        .describe("Press return once after all chunks have landed."),
       rename_to_task: z
         .string()
         .optional()
@@ -1883,12 +2164,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           startBackgroundDelivery(record);
 
+          const identity = resolveTargetIdentity(stateMgr, args.surface);
           const data = {
-            surface: args.surface,
+            ...identity,
+            delivered: false,
             delivery_id: record.delivery_id,
             status: record.status,
           };
-          return okFormatted(formatOk("send_input", data), data);
+          return okFormatted(
+            formatDelivery("send_input", {
+              ...identity,
+              delivered: false,
+              pending: true,
+            }) + ` (background ${record.delivery_id})`,
+            data,
+          );
         }
 
         await withSurfaceWrite(args.surface, async () => {
@@ -1903,8 +2193,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         });
 
-        const data = { surface: args.surface };
-        return okFormatted(formatOk("send_input", data), data);
+        const identity = resolveTargetIdentity(stateMgr, args.surface);
+        const data = { ...identity, delivered: true };
+        return okFormatted(
+          formatDelivery("send_input", { ...identity, delivered: true }),
+          data,
+        );
       } catch (e) {
         if (e instanceof DeliveryError) {
           return err(e, { failed_chunk: e.failed_chunk ?? null });
@@ -1970,8 +2264,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "send_command",
-            verify_submit:
-              sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD,
+            verify_submit: sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD,
           }),
         );
 
@@ -1988,15 +2281,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
 
+        const identity = resolveTargetIdentity(stateMgr, args.surface);
         const data = {
-          surface: args.surface,
+          ...identity,
           command: sanitizedCommand,
+          delivered: true,
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
           boot_prompt_delivered: Boolean(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
         };
-        return okFormatted(formatOk("send_command", data), data);
+        return okFormatted(
+          formatDelivery("send_command", {
+            ...identity,
+            delivered: true,
+            submit_verified: delivery.submit_verified,
+          }),
+          data,
+        );
       } catch (e) {
         if (e instanceof BootPromptTimeoutError) {
           return err(e, { last_10_lines: e.last_10_lines });
@@ -2041,7 +2343,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 9. read_screen
   server.tool(
     "read_screen",
-    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata for the current or most recent background send_input operation. Use parsed_only=true for monitoring (omits raw terminal content). Do not treat read_screen alone as visual confirmation of the highlighted row in interactive terminal menus.",
+    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata. LEAN BY DEFAULT: the response is returned once (parsed.response); the raw terminal dump is NOT included — instead a compact, de-chromed screen_preview (box-drawing rules + status-bar art stripped) is included only when there is no parsed.response. Pass raw=true for the full untrimmed terminal content, or parsed_only=true for parsed fields alone (best for monitoring). Do not treat read_screen alone as visual confirmation of the highlighted row in interactive terminal menus.",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -2063,7 +2365,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe(
-          "If true, return only parsed fields (omit raw content). Best for agent monitoring.",
+          "If true, return only parsed fields (omit screen content). Best for agent monitoring.",
+        ),
+      raw: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "If true, include the full untrimmed terminal content (separators, status-bar art, all lines). Default false returns a compact de-chromed screen_preview instead.",
         ),
     },
     ANNOTATIONS.readOnly,
@@ -2075,16 +2384,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           scrollback: args.scrollback,
         });
         const surface = await findSurfaceByRef(result.surface, args.workspace);
-        const parsed = enrichParsedScreen(
-          parseScreen(result.text),
-          result.text,
-          pickLatestSurfaceModel(stateMgr, result.surface),
+        const parsed = applyHarnessState(
+          enrichParsedScreen(
+            parseScreen(result.text),
+            result.text,
+            pickLatestSurfaceModel(stateMgr, result.surface),
+          ),
+          resolveHarnessStateForSurface(stateMgr, result.surface),
+        );
+        // F7: surface column + workspace column_count so sprawl is visible on
+        // every read. Best-effort — omitted (null) if geometry is unavailable.
+        const { column, column_count } = await resolveSurfaceColumn(
+          result.surface,
+          args.workspace,
         );
 
         if (args.parsed_only) {
           const data = {
             surface: result.surface,
             title: surface?.title ?? null,
+            column,
+            column_count,
             parsed,
             delivery: getSurfaceDelivery(result.surface),
           };
@@ -2095,26 +2415,62 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             parsed,
             false,
             0,
+            column,
+            column_count,
           );
           return okFormatted(formatted, data);
         }
 
+        if (args.raw) {
+          // Full untrimmed terminal content on explicit request.
+          const data = {
+            surface: result.surface,
+            title: surface?.title ?? null,
+            column,
+            column_count,
+            lines: result.lines,
+            content: result.text,
+            scrollback_used: result.scrollback_used,
+            parsed,
+            delivery: getSurfaceDelivery(result.surface),
+          };
+          const formatted = formatReadScreen(
+            result.surface,
+            surface?.title ?? null,
+            result.text,
+            parsed,
+            result.scrollback_used,
+            result.lines,
+            column,
+            column_count,
+          );
+          return okFormatted(formatted, data);
+        }
+
+        // LEAN DEFAULT: response returned once (parsed.response); no raw dump. Show a
+        // compact de-chromed preview ONLY when there's no response, so non-agent panes
+        // (shell prompts, menus) still surface something without duplicating the response.
+        const screenPreview = parsed.response
+          ? null
+          : cleanScreenText(result.text, 12) || null;
         const data = {
           surface: result.surface,
           title: surface?.title ?? null,
-          lines: result.lines,
-          content: result.text,
-          scrollback_used: result.scrollback_used,
+          column,
+          column_count,
           parsed,
+          ...(screenPreview ? { screen_preview: screenPreview } : {}),
           delivery: getSurfaceDelivery(result.surface),
         };
         const formatted = formatReadScreen(
           result.surface,
           surface?.title ?? null,
-          result.text,
+          screenPreview,
           parsed,
-          result.scrollback_used,
-          result.lines,
+          false,
+          screenPreview ? screenPreview.split("\n").length : 0,
+          column,
+          column_count,
         );
         return okFormatted(formatted, data);
       } catch (e) {
@@ -2291,11 +2647,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             identified?.focused?.workspace_ref;
           if (workspace) {
             const panes = await client.listPanes({ workspace });
-            const paneSurfaces = await Promise.all(
+            const rawPaneSurfaces = await Promise.all(
               panes.panes.map(async (pane) => {
-                const ps = await client.listPaneSurfaces({ workspace, pane: pane.ref });
+                const ps = await client.listPaneSurfaces({
+                  workspace,
+                  pane: pane.ref,
+                });
                 return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
               }),
+            );
+            const paneSurfaces = partitionPaneSurfacesByMembership(
+              panes.panes,
+              rawPaneSurfaces,
+              {
+                workspace_ref: panes.workspace_ref ?? workspace,
+                window_ref: panes.window_ref,
+              },
             );
             const workerSurfaceIds = new Set(
               stateMgr.listStates().map((record) => record.surface_id),
@@ -2433,9 +2800,94 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
+  // 12. dispatch_to_agent — metacommlayer WRITE channel (sterile dispatch; send_input fallback)
+  server.tool(
+    "dispatch_to_agent",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. Use this as the primary dispatch path; send_input remains the fallback. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    {
+      agent_id: z
+        .string()
+        .describe(
+          "Recipient agent id (its inbox is ~/.cmux/agents/<id>/inbox.jsonl)",
+        ),
+      task: z.string().describe("The dispatch payload / instruction"),
+      from: z.string().optional().default("orc").describe("Sender id"),
+      tag: z
+        .string()
+        .optional()
+        .default("dispatch")
+        .describe("Routing/semantics tag"),
+      persist: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Opt-in: mark this message as a candidate for BrainLayer ingestion",
+        ),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const msg = dispatch(args.agent_id, {
+          from: args.from,
+          to: args.agent_id,
+          tag: args.tag,
+          task: args.task,
+          persist: args.persist,
+        });
+        return ok({ dispatched: msg, inbox: inboxPath(args.agent_id) });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  // 13. inbox_check — orc-side liveness/delivery view of an agent's write channel
+  server.tool(
+    "inbox_check",
+    "Inspect an agent's inbox channel: undelivered (un-acked) messages, monitor liveness (heartbeat freshness), and stale dispatches past the ACK-timeout. A non-empty 'pending' for a live-looking agent means its monitor is wedged → fall back to send_input. Read-only.",
+    {
+      agent_id: z.string().describe("Agent id to inspect"),
+      ack_timeout_ms: z
+        .number()
+        .int()
+        .min(1000)
+        .optional()
+        .default(120000)
+        .describe("Treat un-acked dispatches older than this as stale/wedged"),
+      heartbeat_max_age_ms: z
+        .number()
+        .int()
+        .min(1000)
+        .optional()
+        .default(60000)
+        .describe(
+          "Monitor is considered alive if it heartbeated within this window",
+        ),
+    },
+    ANNOTATIONS.readOnly,
+    async (args) => {
+      try {
+        const undelivered = replayUndelivered(args.agent_id);
+        const pending = pendingDispatches(args.agent_id, args.ack_timeout_ms);
+        const alive = monitorAlive(args.agent_id, args.heartbeat_max_age_ms);
+        return ok({
+          agent_id: args.agent_id,
+          monitor_alive: alive,
+          undelivered_count: undelivered.length,
+          undelivered,
+          stale_count: pending.length,
+          stale: pending,
+        });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
   // --- Agent Lifecycle Tools (Phase 5) ---
 
-  if (!opts?.skipAgentLifecycle) {
+  if (!skipAgentLifecycle) {
     const surfaceProvider = async () => {
       try {
         const workspaces = await client.listWorkspaces();
@@ -2445,13 +2897,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes: await client.listPanes({ workspace: ws.ref }),
           })),
         );
-        const surfaceGroups = await Promise.all(
-          panesByWorkspace.flatMap(({ ref, panes }) =>
-            panes.panes.map((p) =>
-              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
-            ),
-          ),
+        const surfaceGroupsByWorkspace = await Promise.all(
+          panesByWorkspace.map(async ({ ref, panes }) => {
+            const rawGroups = await Promise.all(
+              panes.panes.map((p) =>
+                client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
+              ),
+            );
+            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+              workspace_ref: panes.workspace_ref ?? ref,
+              window_ref: panes.window_ref,
+            });
+          }),
         );
+        const surfaceGroups = surfaceGroupsByWorkspace.flat();
         return surfaceGroups.flatMap((group) =>
           group.surfaces.map((surface) => ({
             ...surface,
@@ -2463,8 +2922,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return [];
       }
     };
-    const registry = new AgentRegistry(stateMgr, surfaceProvider);
-    lifecycleRegistry = registry;
+    const registry =
+      context.lifecycleRegistry ?? new AgentRegistry(stateMgr, surfaceProvider);
+    context.lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
@@ -2486,76 +2946,86 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
-    const engine = new AgentEngine(
-      stateMgr,
-      registry,
-      {
-        log: (message, eventOpts) => client.log(message, eventOpts),
-        listWorkspaces: () => client.listWorkspaces(),
-        setStatus: (key, value, statusOpts) =>
-          client.setStatus(key, value, statusOpts),
-        clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
-        readScreen: (surface, readOpts) => client.readScreen(surface, readOpts),
-        send: (surface, text, sendOpts) =>
-          withSurfaceWrite(surface, () => client.send(surface, text, sendOpts)),
-        sendKey: (surface, key, keyOpts) =>
-          withSurfaceWrite(surface, () =>
-            client.sendKey(surface, key, keyOpts),
-          ),
-        setProgress: (value, progressOpts) =>
-          client.setProgress(value, progressOpts),
-        newSplit: (direction, splitOpts) =>
-          client.newSplit(direction, splitOpts),
-        newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
-        selectWorkspace: (workspace) => client.selectWorkspace(workspace),
-        listPanes: (paneOpts) => client.listPanes(paneOpts),
-        listPaneSurfaces: (surfaceOpts) => client.listPaneSurfaces(surfaceOpts),
-        closeSurface: (surface, closeOpts) =>
-          withSurfaceWrite(surface, () =>
-            client.closeSurface(surface, closeOpts),
-          ),
-        notifyLifecycleEvent,
-      },
-      {
-        spawnPreflight:
-          opts?.spawnPreflight ??
-          (opts?.disableSpawnPreflight ? async () => {} : undefined),
-        roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
-        launchCommandSender: async ({ surface, workspace, command }) => {
-          const sanitizedCommand = sanitizeTerminalInput(command);
-          const chunks =
-            sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
-              ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
-              : [sanitizedCommand];
-
-          await waitForLaunchShellReady({ surface, workspace });
-          await withSurfaceWrite(surface, async () => {
-            try {
-              await deliverInputChunks({
-                surface,
-                workspace,
-                chunks,
-                chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-                chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-                press_enter: true,
-                source_event: "spawn_agent",
-                verify_submit: true,
-              });
-            } catch (error) {
-              const message =
-                error instanceof Error ? error.message : String(error);
-              if (!/Enter submit could not be verified/.test(message)) {
-                throw error;
-              }
-              // The command can remain visible in shell history while the
-              // launcher is already booting. Verification still retried Enter;
-              // agent readiness detection is the authoritative launch check.
-              await waitForAgentLaunchReady({ surface, workspace });
-            }
-          });
+    const engine =
+      context.lifecycleSweepEngine ??
+      new AgentEngine(
+        stateMgr,
+        registry,
+        {
+          log: (message, eventOpts) => client.log(message, eventOpts),
+          listWorkspaces: () => client.listWorkspaces(),
+          setStatus: (key, value, statusOpts) =>
+            client.setStatus(key, value, statusOpts),
+          clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
+          readScreen: (surface, readOpts) =>
+            client.readScreen(surface, readOpts),
+          send: (surface, text, sendOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.send(surface, text, sendOpts),
+            ),
+          sendKey: (surface, key, keyOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.sendKey(surface, key, keyOpts),
+            ),
+          setProgress: (value, progressOpts) =>
+            client.setProgress(value, progressOpts),
+          newSplit: (direction, splitOpts) =>
+            client.newSplit(direction, splitOpts),
+          newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+          selectWorkspace: (workspace) => client.selectWorkspace(workspace),
+          listPanes: (paneOpts) => client.listPanes(paneOpts),
+          listPaneSurfaces: (surfaceOpts) =>
+            client.listPaneSurfaces(surfaceOpts),
+          closeSurface: (surface, closeOpts) =>
+            withSurfaceWrite(surface, () =>
+              client.closeSurface(surface, closeOpts),
+            ),
+          notifyLifecycleEvent,
         },
-      },
-    );
+        {
+          spawnPreflight:
+            spawnPreflight ??
+            (disableSpawnPreflight ? async () => {} : undefined),
+          roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
+          launchCommandSender: async ({ surface, workspace, command }) => {
+            const sanitizedCommand = sanitizeTerminalInput(command);
+            const chunks =
+              sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
+                ? chunkTerminalInput(
+                    sanitizedCommand,
+                    SEND_INPUT_CHUNK_THRESHOLD,
+                  )
+                : [sanitizedCommand];
+
+            await waitForLaunchShellReady({ surface, workspace });
+            await withSurfaceWrite(surface, async () => {
+              try {
+                await deliverInputChunks({
+                  surface,
+                  workspace,
+                  chunks,
+                  chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+                  chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+                  press_enter: true,
+                  source_event: "spawn_agent",
+                  verify_submit: true,
+                });
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                if (!/Enter submit could not be verified/.test(message)) {
+                  throw error;
+                }
+                // The command can remain visible in shell history while the
+                // launcher is already booting. Verification still retried Enter;
+                // agent readiness detection is the authoritative launch check.
+                await waitForAgentLaunchReady({ surface, workspace });
+              }
+            });
+          },
+        },
+      );
+    context.lifecycleSweepEngine = engine;
 
     const deliverAgentInput = async (args: {
       agent_id: string;
@@ -2620,10 +3090,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const isForeign = (occ: typeof cachedOccupant): boolean =>
           Boolean(
             occ &&
-              occ.has_agent &&
-              !occ.read_error &&
-              occ.cli !== "unknown" &&
-              occ.cli !== expectedCli,
+            occ.has_agent &&
+            !occ.read_error &&
+            occ.cli !== "unknown" &&
+            occ.cli !== expectedCli,
           );
         if (isForeign(cachedOccupant)) {
           // Confirm against a FRESH scan before refusing. discovery.scan(false)
@@ -2681,13 +3151,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Reconstitute registry from disk on startup (async, best-effort).
     // Enable startup purge so the first sweep clears stale terminal-state
     // agents from previous cmux sessions.
-    registry
-      .reconstitute()
-      .then(() => engine.enableStartupPurge())
-      .catch((e) =>
-        console.error("[cmux-mcp] registry reconstitution failed:", e),
-      );
-    engine.startSweep(5000);
+    if (!context.lifecycleStarted) {
+      context.lifecycleStarted = true;
+      context.lifecycleStartPromise = registry
+        .reconstitute()
+        .then(() => engine.enableStartupPurge())
+        .catch((e) =>
+          console.error("[cmux-mcp] registry reconstitution failed:", e),
+        );
+      engine.startSweep(5000);
+    }
 
     // 11. spawn_agent
     server.tool(
@@ -2722,7 +3195,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .positive()
           .optional()
           .default(BOOT_PROMPT_TIMEOUT_MS)
-          .describe("Timeout in milliseconds waiting for the agent ready prompt"),
+          .describe(
+            "Timeout in milliseconds waiting for the agent ready prompt",
+          ),
         workspace: z.string().optional().describe("Target workspace ref"),
         parent_agent_id: z
           .string()
@@ -2769,7 +3244,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             model: args.model,
             cli: args.cli,
             prompt: args.prompt ?? "",
-            boot_prompt_pending: hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
+            boot_prompt_pending:
+              hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: args.workspace,
             parent_agent_id: args.parent_agent_id,
             role: args.role,
@@ -2900,7 +3376,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         reuse_workspace: z
           .string()
           .optional()
-          .describe("Ref of an existing workspace to use instead of creating a new one"),
+          .describe(
+            "Ref of an existing workspace to use instead of creating a new one",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -3643,10 +4121,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ),
                   ),
                 ]);
-                screenData = enrichParsedScreen(
-                  parseScreen(screen.text),
-                  screen.text,
-                  pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                screenData = applyHarnessState(
+                  enrichParsedScreen(
+                    parseScreen(screen.text),
+                    screen.text,
+                    pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                  ),
+                  resolveHarnessStateForSurface(stateMgr, agent.surface_id),
                 );
               } catch {
                 // Surface may be closed, unavailable, or timed out

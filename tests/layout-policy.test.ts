@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
+  deriveColumnIndex,
   inferAgentRole,
   launcherNameForCli,
 } from "../src/layout-policy.js";
@@ -11,6 +12,7 @@ function makePane(
   ref: string,
   index: number,
   surfaceRefs: string[],
+  pixelFrame?: CmuxPane["pixel_frame"],
 ): CmuxPane {
   return {
     ref,
@@ -19,6 +21,7 @@ function makePane(
     surface_count: surfaceRefs.length,
     surface_refs: surfaceRefs,
     selected_surface_ref: surfaceRefs[0],
+    ...(pixelFrame ? { pixel_frame: pixelFrame } : {}),
   };
 }
 
@@ -45,6 +48,74 @@ function makePaneSurfaces(
 }
 
 describe("layout policy", () => {
+  it("derives columns from distinct pane x positions", () => {
+    const columns = deriveColumnIndex([
+      makePane("pane:left", 0, [], { x: 10, y: 0, width: 300, height: 800 }),
+      makePane("pane:middle", 1, [], { x: 320, y: 0, width: 300, height: 800 }),
+      makePane("pane:right", 2, [], { x: 640, y: 0, width: 300, height: 800 }),
+    ]);
+
+    expect(columns.get("pane:left")).toBe(0);
+    expect(columns.get("pane:middle")).toBe(1);
+    expect(columns.get("pane:right")).toBe(2);
+  });
+
+  it("assigns the same column to panes sharing an x position", () => {
+    const columns = deriveColumnIndex([
+      makePane("pane:left", 0, [], { x: 10, y: 0, width: 300, height: 400 }),
+      makePane("pane:right-top", 1, [], {
+        x: 320,
+        y: 0,
+        width: 300,
+        height: 400,
+      }),
+      makePane("pane:right-bottom", 2, [], {
+        x: 320,
+        y: 400,
+        width: 300,
+        height: 400,
+      }),
+    ]);
+
+    expect(columns.get("pane:left")).toBe(0);
+    expect(columns.get("pane:right-top")).toBe(1);
+    expect(columns.get("pane:right-bottom")).toBe(1);
+  });
+
+  it("falls back to pane index ordering when geometry is missing", () => {
+    const columns = deriveColumnIndex([
+      makePane("pane:third", 2, []),
+      makePane("pane:first", 0, []),
+      makePane("pane:second", 1, []),
+    ]);
+
+    expect(columns.get("pane:first")).toBe(0);
+    expect(columns.get("pane:second")).toBe(1);
+    expect(columns.get("pane:third")).toBe(2);
+  });
+
+  it("falls back to index ordering for all panes when any pane lacks geometry", () => {
+    const columns = deriveColumnIndex([
+      makePane("pane:geometric-left", 2, [], {
+        x: 0,
+        y: 0,
+        width: 300,
+        height: 800,
+      }),
+      makePane("pane:index-first", 0, []),
+      makePane("pane:geometric-right", 1, [], {
+        x: 600,
+        y: 0,
+        width: 300,
+        height: 800,
+      }),
+    ]);
+
+    expect(columns.get("pane:index-first")).toBe(0);
+    expect(columns.get("pane:geometric-right")).toBe(1);
+    expect(columns.get("pane:geometric-left")).toBe(2);
+  });
+
   it("infers default role from repoGolem launcher names", () => {
     expect(inferAgentRole({ launcherName: "orcClaude" })).toBe(
       "orchestrator",
@@ -167,6 +238,41 @@ describe("layout policy", () => {
     });
   });
 
+  it("keeps a parent IC's first child local even when an unrelated worker zone exists", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orc"]),
+      makePane("pane:ic", 1, ["surface:ic"]),
+      makePane("pane:other-workers", 2, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orc"]),
+      makePaneSurfaces("pane:ic", ["surface:ic"]),
+      makePaneSurfaces("pane:other-workers", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orc"]),
+        ic: new Set(["surface:ic"]),
+        worker: new Set(["surface:worker-1"]),
+      },
+      {
+        role: "worker",
+        parentRole: "ic",
+        parentSurfaceId: "surface:ic",
+        childWorkerSurfaceIds: new Set(),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "down",
+      pane: "pane:ic",
+    });
+  });
+
   it("reuses an existing worker pane under the parent IC for sibling workers", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),
@@ -218,6 +324,39 @@ describe("layout policy", () => {
         orchestrator: new Set(["surface:orchestrator"]),
         ic: new Set(),
         worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        childWorkerSurfaceIds: new Set(),
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:lead",
+    });
+  });
+
+  it("keeps a parent orchestrator's first child local even when an unrelated worker zone exists", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"]),
+      makePane("pane:other-workers", 1, ["surface:worker-1"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:other-workers", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
       },
       {
         role: "worker",
@@ -418,6 +557,105 @@ describe("layout policy", () => {
       kind: "split",
       direction: "right",
       pane: "pane:left",
+    });
+  });
+
+  it("docks into an existing non-lead unknown worker zone instead of creating a third column", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orchestrator"], {
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+      makePane("pane:right", 1, ["surface:unknown-worker"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:unknown-worker"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+        unknown: new Set(["surface:unknown-worker"]),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("uses geometry columns, not pane indexes, to identify the non-lead worker zone", () => {
+    const panes = [
+      makePane("pane:right", 0, ["surface:unknown-worker"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+      makePane("pane:left", 1, ["surface:orchestrator"], {
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:right", ["surface:unknown-worker"]),
+      makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+        unknown: new Set(["surface:unknown-worker"]),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("repairs a contaminated non-lead unknown worker zone instead of docking into it", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orchestrator"]),
+      makePane("pane:right", 1, ["surface:unknown-worker", "surface:shell"]),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:unknown-worker", "surface:shell"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+        unknown: new Set(["surface:unknown-worker"]),
+      },
+      { role: "worker" },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:right",
     });
   });
 

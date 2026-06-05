@@ -37,6 +37,7 @@ describe("B1: ToolAnnotations on all tools", () => {
     "list_agents",
     "my_agents",
     "read_agent_output",
+    "inbox_check",
   ];
 
   const DESTRUCTIVE_TOOLS = ["kill", "close_surface", "stop_agent"];
@@ -64,6 +65,7 @@ describe("B1: ToolAnnotations on all tools", () => {
     "wait_for",
     "wait_for_all",
     "interact",
+    "dispatch_to_agent",
   ];
 
   let tools: Record<string, { annotations?: Record<string, unknown> }>;
@@ -81,9 +83,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 31 tools have annotations", () => {
+  it("all 33 tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(31);
+    expect(toolNames.length).toBe(33);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

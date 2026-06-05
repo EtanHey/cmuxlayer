@@ -468,7 +468,19 @@ Working (2m 06s • esc to interrupt)
 
       expect(parsed.agent_type).toBe("codex");
       expect(parsed.context_pct).toBe(13); // 100 - 87 = 13% used
-      expect(parsed.context_window).toBe(1_000_000); // gpt-5.4 resolves to 1M
+      expect(parsed.context_window).toBe(400_000); // gpt-5.x/Codex = 400K total window
+    });
+
+    it("reports 400K (NOT 1M) for Codex gpt-5.5 — the P1 bug", () => {
+      const parsed = parseScreen(`
+gpt-5.5 xhigh · 60% left · ~/Gits/brainlayer
+Working (1m 12s • esc to interrupt)
+• Ran rg -n "context_window" src
+`);
+
+      expect(parsed.agent_type).toBe("codex");
+      expect(parsed.context_window).toBe(400_000); // NOT 1_000_000
+      expect(parsed.context_pct).toBe(40); // 100 - 60 = 40% used
     });
 
     it("returns null context_pct when model is unknown", () => {
@@ -536,8 +548,8 @@ Model: gemini-2.5-pro
       expect(parsed.agent_type).toBe("gemini");
       expect(parsed.model).toBe("gemini-2.5-pro");
       expect(parsed.token_count).toBe(100000);
-      expect(parsed.context_window).toBe(1_000_000);
-      expect(parsed.context_pct).toBe(10); // 100K/1M = 10%
+      expect(parsed.context_window).toBe(1_048_576); // Gemini real window
+      expect(parsed.context_pct).toBe(10); // 100K/1,048,576 ≈ 9.5% → 10%
     });
   });
 
@@ -551,15 +563,15 @@ Model: gemini-2.5-pro
       expect(resolveModelMax("haiku")).toBe(200_000);
     });
 
-    it("resolves Gemini models to 1M", () => {
-      expect(resolveModelMax("gemini-3.1-pro")).toBe(1_000_000);
-      expect(resolveModelMax("gemini-2.5-pro")).toBe(1_000_000);
+    it("resolves Gemini models to 1,048,576", () => {
+      expect(resolveModelMax("gemini-3.1-pro")).toBe(1_048_576);
+      expect(resolveModelMax("gemini-2.5-pro")).toBe(1_048_576);
     });
 
-    it("resolves GPT-5/Codex models to 1M (hyphenated and space-separated)", () => {
-      expect(resolveModelMax("gpt-5.4 high")).toBe(1_000_000);
-      expect(resolveModelMax("gpt-5.4")).toBe(1_000_000);
-      expect(resolveModelMax("GPT 5")).toBe(1_000_000);
+    it("resolves GPT-5/Codex models to 400K (NOT 1M)", () => {
+      expect(resolveModelMax("gpt-5.4 high")).toBe(400_000);
+      expect(resolveModelMax("gpt-5.4")).toBe(400_000);
+      expect(resolveModelMax("GPT 5")).toBe(400_000);
     });
 
     it("resolves GPT-4 variants to 128K", () => {
@@ -597,13 +609,20 @@ Model: gemini-2.5-pro
       );
     });
 
-    it("keeps 1M for models that default to 1M (GPT, Gemini)", () => {
+    it("uses the real fixed window for non-Claude models (GPT-5=400K, Gemini=1.048M); no 1M bump", () => {
       expect(inferContextWindow("gpt-5.4 high", 50_000, "gpt-5.4")).toBe(
-        1_000_000,
+        400_000,
       );
       expect(
         inferContextWindow("gemini-2.5-pro", 50_000, "gemini-2.5-pro"),
-      ).toBe(1_000_000);
+      ).toBe(1_048_576);
+    });
+
+    it("does NOT bump non-Claude models to 1M even when token_count exceeds their window", () => {
+      // gpt-5 at 500K tokens stays 400K (clamps pct), never the Claude-only 1M tier
+      expect(inferContextWindow("gpt-5.4 high", 500_000, "gpt-5.4")).toBe(
+        400_000,
+      );
     });
 
     it("returns null for unknown models", () => {

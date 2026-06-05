@@ -197,7 +197,7 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).toHaveBeenCalled();
     });
 
-    it("launches Claude via repoGolem launcher", async () => {
+    it("launches Claude via repoGolem launcher with requested model tier", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "sonnet",
@@ -210,7 +210,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("brainlayerClaude -s");
+      expect(launchCmd).toBe("brainlayerClaude -s -m sonnet");
     });
 
     it("writes initial state file", async () => {
@@ -557,6 +557,85 @@ describe("AgentEngine", () => {
               : [makeSurface("surface:orc")],
         }),
       );
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("partitions unfiltered surface lists by pane membership when placing spawned agents", async () => {
+      engine.dispose();
+      const surfaceProvider = async () => liveSurfaces;
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        roleSurfaceIdsProvider: () => ({
+          orchestrator: new Set(["surface:orc"]),
+          ic: new Set(),
+          worker: new Set(["surface:worker-shell"]),
+        }),
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            id: "pane-left-id",
+            index: 0,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:orc"],
+            surface_ids: ["surface-orc-id"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            id: "pane-right-id",
+            index: 1,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:worker-shell"],
+            surface_ids: ["surface-worker-id"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        surfaces: [
+          {
+            id: "surface-orc-id",
+            pane_id: "pane-left-id",
+            ref: "surface:orc",
+            title: "orc",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+          {
+            id: "surface-worker-id",
+            pane_id: "pane-right-id",
+            ref: "surface:worker-shell",
+            title: "worker",
+            type: "terminal",
+            index: 1,
+            selected: false,
+          },
+        ],
+      });
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -1785,9 +1864,51 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("adds safe model flags for recognized launcher model aliases", () => {
+    expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
+      "brainlayerClaude -s -m sonnet",
+    );
+    expect(
+      buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
+    ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
+    expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
+      "brainlayerCodex -s",
+    );
+    expect(buildLaunchCommand("cursor", "cmuxlayer", "sonnet")).toBe(
+      "cmuxlayerCursor -s -m sonnet-4",
+    );
+  });
+
+  it("preserves launcher defaults when model is omitted", () => {
+    expect(buildLaunchCommand("claude", "brainlayer", undefined)).toBe(
+      "brainlayerClaude -s",
+    );
+  });
+
+  it("omits unsafe or unrecognized model values instead of passing them raw", () => {
+    expect(
+      buildLaunchCommand("claude", "brainlayer", "Opus 4.8 (1M context)"),
+    ).toBe("brainlayerClaude -s");
+    expect(buildLaunchCommand("codex", "brainlayer", "gpt-5.5 xhigh")).toBe(
+      "brainlayerCodex -s",
+    );
+    expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
+      "brainlayerCodex -s",
+    );
+  });
+
   it("uses cd + env vars + raw command for gemini", () => {
     expect(buildLaunchCommand("gemini", "voicelayer")).toBe(
       "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
+    );
+  });
+
+  it("adds safe --model flags for recognized raw CLI model aliases", () => {
+    expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
+      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --model gemini-2.5-pro",
+    );
+    expect(buildLaunchCommand("kiro", "golems", "sonnet")).toBe(
+      "cd ~/Gits/golems && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli --model sonnet",
     );
   });
 

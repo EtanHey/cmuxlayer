@@ -27,6 +27,8 @@ const EXPECTED_TOOLS = [
   "set_progress",
   "close_surface",
   "browser_surface",
+  "dispatch_to_agent",
+  "inbox_check",
 ] as const;
 
 const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
@@ -73,7 +75,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 17 core tools", () => {
+  it("registers all 19 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
@@ -346,7 +348,12 @@ describe("tool handler integration", () => {
       {
         workspace_title: "red-team",
         agents: [
-          { repo: "brainlayer", model: "sonnet", cli: "claude", role: "orchestrator" },
+          {
+            repo: "brainlayer",
+            model: "sonnet",
+            cli: "claude",
+            role: "orchestrator",
+          },
           { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
         ],
       },
@@ -546,15 +553,254 @@ describe("tool handler integration", () => {
     expect(parsed.surfaces[0]).toEqual({
       ref: "surface:1",
       workspace_ref: "workspace:1",
+      pane_ref: "pane:1",
+      column: 0,
       title: "One",
       type: "terminal",
     });
     expect(parsed.surfaces[1]).toEqual({
       ref: "surface:2",
       workspace_ref: "workspace:1",
+      pane_ref: "pane:2",
+      column: 1,
       title: "Two",
       type: "browser",
     });
+  });
+
+  it("list_surfaces reports pane_ref, column, and column_count in condensed and verbose output", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:left"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-top",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:right-top"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 450 },
+              },
+              {
+                ref: "pane:right-bottom",
+                index: 2,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:right-bottom"],
+                pixel_frame: { x: 500, y: 450, width: 500, height: 450 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces: [
+              {
+                ref:
+                  pane === "pane:left"
+                    ? "surface:left"
+                    : pane === "pane:right-top"
+                      ? "surface:right-top"
+                      : "surface:right-bottom",
+                title: pane,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const condensedResult = await tool.handler({}, {} as any);
+    const condensed =
+      condensedResult.structuredContent ??
+      JSON.parse(condensedResult.content[0].text);
+
+    expect(condensed.column_count).toBe(2);
+    expect(condensed.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-top",
+        pane_ref: "pane:right-top",
+        column: 1,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-bottom",
+        pane_ref: "pane:right-bottom",
+        column: 1,
+      }),
+    ]);
+
+    const verboseResult = await tool.handler({ verbose: true }, {} as any);
+    const verbose =
+      verboseResult.structuredContent ??
+      JSON.parse(verboseResult.content[0].text);
+
+    expect(verbose.column_count).toBe(2);
+    expect(verbose.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-top",
+        pane_ref: "pane:right-top",
+        column: 1,
+      }),
+      expect.objectContaining({
+        ref: "surface:right-bottom",
+        pane_ref: "pane:right-bottom",
+        column: 1,
+      }),
+    ]);
+  });
+
+  it("list_surfaces backfills pane_ref before assigning columns when the client omits it", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                id: "pane-left-id",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:left"],
+                surface_ids: ["surface-left-id"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right",
+                id: "pane-right-id",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:right"],
+                surface_ids: ["surface-right-id"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            surfaces: [
+              {
+                id: "surface-left-id",
+                pane_id: "pane-left-id",
+                ref: "surface:left",
+                title: "left",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+              {
+                id: "surface-right-id",
+                pane_id: "pane-right-id",
+                ref: "surface:right",
+                title: "right",
+                type: "terminal",
+                index: 1,
+                selected: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const result = await tool.handler({}, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.surfaces).toEqual([
+      expect.objectContaining({
+        ref: "surface:left",
+        pane_ref: "pane:left",
+        column: 0,
+      }),
+      expect.objectContaining({
+        ref: "surface:right",
+        pane_ref: "pane:right",
+        column: 1,
+      }),
+    ]);
+    expect(parsed.column_count).toBe(2);
   });
 
   it("list_surfaces keeps working when a screen preview fails", async () => {
@@ -806,7 +1052,10 @@ describe("tool handler integration", () => {
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.content).toContain("hello");
+    // LEAN DEFAULT: response returned once (parsed.response); NOT duplicated in a raw
+    // content dump, and no screen_preview when there's a response.
+    expect(parsed.content).toBeUndefined();
+    expect(parsed.screen_preview).toBeUndefined();
     expect(parsed.parsed).toMatchObject({
       agent_type: "claude",
       status: "done",
@@ -816,6 +1065,15 @@ describe("tool handler integration", () => {
       model: "Sonnet 4.6",
       cost: 1.25,
     });
+
+    // raw=true returns the full untrimmed terminal content.
+    const rawResult = await tool.handler(
+      { surface: "surface:1", raw: true },
+      {} as any,
+    );
+    const rawParsed =
+      rawResult.structuredContent ?? JSON.parse(rawResult.content[0].text);
+    expect(rawParsed.content).toContain("hello");
   });
 
   it("read_screen parsed_only includes the tab title and recovers model context from agent state", async () => {
@@ -1054,6 +1312,118 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("read_screen reports the surface column + workspace column_count inline (F7)", async () => {
+    // Simulates the real cmux bug: surface.list is unfiltered (every per-pane
+    // query returns the WHOLE workspace list). The column must still be correct
+    // via pane_id membership, NOT first-seen attribution.
+    const fullList = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      surfaces: [
+        {
+          id: "surface-left-id",
+          pane_id: "pane-left-id",
+          ref: "surface:left",
+          title: "left",
+          type: "terminal",
+          index: 0,
+          selected: false,
+        },
+        {
+          id: "surface-right-id",
+          pane_id: "pane-right-id",
+          ref: "surface:right",
+          title: "rightAgent",
+          type: "terminal",
+          index: 1,
+          selected: true,
+        },
+      ],
+    };
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:right",
+        text: "right pane content\n",
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            id: "pane-left-id",
+            index: 0,
+            surface_refs: ["surface:left"],
+            surface_ids: ["surface-left-id"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            id: "pane-right-id",
+            index: 1,
+            surface_refs: ["surface:right"],
+            surface_ids: ["surface-right-id"],
+            pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue(fullList),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["read_screen"];
+    const result = await tool.handler(
+      { surface: "surface:right", workspace: "workspace:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.column).toBe(1);
+    expect(data.column_count).toBe(2);
+    expect(result.content[0].text).toContain("col 2/2");
+  });
+
+  it("read_screen omits column when pane geometry is unavailable but still returns the screen (F7)", async () => {
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:1",
+        text: "screen content\n",
+        lines: 20,
+        scrollback_used: false,
+      }),
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      // geometry unavailable: listPanes fails — column resolution must degrade.
+      listPanes: vi.fn().mockRejectedValue(new Error("no panes")),
+      listPaneSurfaces: vi.fn().mockRejectedValue(new Error("no surfaces")),
+    } as any;
+
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["read_screen"];
+    const result = await tool.handler(
+      { surface: "surface:1", workspace: "workspace:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.column).toBeNull();
+    expect(data.column_count).toBeNull();
+    // Lean default: no parsed.response → cleaned screen_preview carries the content.
+    expect(data.content).toBeUndefined();
+    expect(data.screen_preview).toBe("screen content");
+    expect(result.content[0].text).not.toContain("col ");
+  });
+
   it("send_input handler calls cmux send", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
@@ -1128,6 +1498,166 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.surface).toBe("surface:6");
+  });
+
+  it("send_input background reads 'delivering' (not FAILED) while in flight (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:7", text: "hi", background: true },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.status).toBe("delivering");
+    expect(typeof data.delivery_id).toBe("string");
+    expect(result.content[0].text).toContain("delivering to surface:7");
+    expect(result.content[0].text).not.toContain("FAILED");
+  });
+
+  it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "bl-lead-1",
+      surface_id: "surface:95",
+      state: "idle",
+      repo: "brainlayer",
+      model: "Opus 4.8",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "BL-LEAD",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:95", text: "hi" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:95");
+    expect(data.title).toBe("BL-LEAD");
+    expect(data.model).toBe("Opus 4.8");
+    expect(data.agent_type).toBe("claude");
+    expect(result.content[0].text).toContain("delivered to BL-LEAD");
+    expect(result.content[0].text).toContain("Opus 4.8");
+    expect(result.content[0].text).toContain("claude");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("send_input degrades gracefully when no identity is cached (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const result = await tool.handler(
+      { surface: "surface:unknown", text: "hi" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:unknown");
+    expect(data.title).toBeUndefined();
+    expect(data.model).toBeUndefined();
+    expect(data.agent_type).toBeUndefined();
+    expect(result.content[0].text).toContain("delivered to surface:unknown");
+  });
+
+  it("send_command returns delivered + identity + submit_verified (F8)", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-command");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "codex-1",
+      surface_id: "surface:6",
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "GPT-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "cmuxlayerCodex",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_command"];
+    const result = await tool.handler(
+      { surface: "surface:6", command: "codex resume 123" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(data.delivered).toBe(true);
+    expect(data.surface).toBe("surface:6");
+    expect(data.title).toBe("cmuxlayerCodex");
+    expect(data.model).toBe("GPT-5.5");
+    expect(data.agent_type).toBe("codex");
+    expect("submit_verified" in data).toBe(true);
+    expect(result.content[0].text).toContain("delivered to cmuxlayerCodex");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("move_surface returns a slim, phone-readable confirmation (F8)", async () => {
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        ok: true,
+        workspace: "workspace:1",
+        surface: "surface:102",
+        pane: "pane:1",
+        // verbose passthrough that should NOT leak into the slim response:
+        window_ref: "window:1",
+        surfaces: [{ ref: "surface:102" }],
+      }),
+      stderr: "",
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["move_surface"];
+    const result = await tool.handler(
+      { surface: "surface:102", pane: "pane:1" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(Object.keys(data).sort()).toEqual([
+      "ok",
+      "pane",
+      "surface",
+      "workspace",
+    ]);
+    expect(data.surface).toBe("surface:102");
+    expect(data.pane).toBe("pane:1");
+    expect(result.content[0].text).toContain("moved surface:102 → pane:1");
   });
 
   it("send_command rejects boot_prompt_path for non-launcher commands before sending", async () => {
@@ -2157,6 +2687,150 @@ describe("tool handler integration", () => {
     expect(parsed.role).toBe("worker");
     expect(parsed.placement).toBe("surface");
     expect(parsed.direction).toBeNull();
+  });
+
+  it("new_split with role=worker partitions unfiltered surface lists by pane membership", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-unfiltered-surfaces");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:worker-1",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "existing worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-05-25T12:00:00.000Z",
+      updated_at: "2026-05-25T12:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "worker",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                id: "pane-left-id",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:orc"],
+                surface_ids: ["surface-orc-id"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right",
+                id: "pane-right-id",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker-1"],
+                surface_ids: ["surface-worker-id"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            surfaces: [
+              {
+                id: "surface-orc-id",
+                pane_id: "pane-left-id",
+                ref: "surface:orc",
+                title: "orc",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+              {
+                id: "surface-worker-id",
+                pane_id: "pane-right-id",
+                ref: "surface:worker-1",
+                title: "worker",
+                type: "terminal",
+                index: 1,
+                selected: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:unexpected-split",
+            pane: "pane:third",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:right"]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.placement).toBe("surface");
   });
 
   it("new_split ignores disk-only role state when no live lifecycle registry is available", async () => {

@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-06-04T22:46:15.000Z","payload":{"id":"019e942c-0dda-76f2-bbca-0ef6e484d1c9","cwd":"/Users/etanheyman/Gits/brainlayer","cli_version":"0.118.0","model_provider":"openai"}}
+{"type":"turn_context","timestamp":"2026-06-04T22:46:16.000Z","payload":{"type":"turn_context","model":"gpt-5.5","cwd":"/Users/etanheyman/Gits/brainlayer","effort":"xhigh"}}
+{"type":"event","timestamp":"2026-06-04T22:46:20.000Z","payload":{"type":"agent_message","message":"older codex message","phase":"plan"}}
+{"type":"event","timestamp":"2026-06-04T22:46:21.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50000,"cached_input_tokens":40000,"output_tokens":1000,"reasoning_output_tokens":500,"total_tokens":51000},"total_token_usage":{"input_tokens":5000000,"output_tokens":40000,"total_tokens":5040000},"model_context_window":258400}}}
+{"type":"event","timestamp":"2026-06-04T22:47:00.000Z","payload":{"type":"function_call","name":"exec_command","call_id":"call_a","arguments":"{}"}}
+{"type":"event","timestamp":"2026-06-04T22:47:30.000Z","payload":{"type":"agent_message","message":"codex latest message","phase":"execute"}}
+{"type":"event","timestamp":"2026-06-04T22:48:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":107745,"cached_input_tokens":106368,"output_tokens":824,"reasoning_output_tokens":516,"total_tokens":108569},"total_token_usage":{"input_tokens":20265083,"output_tokens":87553,"total_tokens":20352636},"model_context_window":258400}}}

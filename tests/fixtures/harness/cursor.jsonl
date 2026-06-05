@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>do the thing</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","name":"Write","input":{"path":"/x","contents":"y"}}]}}
+{"role":"user","message":{"content":[{"type":"tool_result","content":"done"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"cursor latest message"},{"type":"tool_use","name":"Read","input":{"path":"/z"}}]}}
