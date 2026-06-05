@@ -6,6 +6,7 @@
  */
 
 import type { AgentRecord, PublicAgent } from "./agent-types.js";
+import { buildResumeCommand } from "./agent-command.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
 function truncate(text: string, maxLen: number = 60): string {
@@ -184,6 +185,9 @@ export function formatAgentState(agent: AgentRecord): string {
   lines.push(`\u2502 surface: ${agent.surface_id}  cli: ${agent.cli}`);
   if (agent.cli_session_id) {
     lines.push(`\u2502 session: ${agent.cli_session_id}`);
+    lines.push(
+      `\u2502 resume: ${buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id)}`,
+    );
   }
   if (agent.cli_session_path) {
     lines.push(`\u2502 transcript: ${agent.cli_session_path}`);

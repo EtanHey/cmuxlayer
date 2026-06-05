@@ -9,6 +9,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
+import {
+  AGENT_ENV,
+  buildResumeCommand,
+  sanitizeRepoName,
+} from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import {
   resolveAgentRoute as resolvePublicAgentRoute,
@@ -125,6 +130,8 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
 const execFileAsync = promisify(execFile);
 
 const JSONL_HARNESSES = new Set<CliType>(["claude", "codex", "cursor"]);
+
+export { buildResumeCommand } from "./agent-command.js";
 
 interface SidebarStatusSnapshot {
   statusValue: string;
@@ -268,21 +275,6 @@ const LIFECYCLE_LOGS = {
  * For gemini/kiro: uses `cd ~/Gits/<repo> && <cli>` since they
  * don't have launcher functions yet.
  */
-// Env vars for headless/spawned agent sessions:
-// - MCP_CONNECTION_NONBLOCKING: skip MCP connection wait (Claude Code 2.1.90+)
-// - CLAUDE_CODE_NO_FLICKER: stable alt-screen rendering for terminal parsing
-const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
-
-function sanitizeRepoName(repo: string): string {
-  const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
-    throw new Error(
-      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed. "." and ".." are not permitted.`,
-    );
-  }
-  return safeRepo;
-}
-
 const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
   claude: {
     opus: "opus",
@@ -358,26 +350,6 @@ export function buildLaunchCommand(
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
       return `${safeRepo}Cursor -s${launcherModelArgs}`;
-  }
-}
-
-export function buildResumeCommand(
-  cli: CliType,
-  repo: string,
-  sessionId: string,
-): string {
-  const safeRepo = sanitizeRepoName(repo);
-  switch (cli) {
-    case "claude":
-      return `${safeRepo}Claude -s --resume ${sessionId}`;
-    case "codex":
-      return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
-    case "gemini":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
-    case "kiro":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
-    case "cursor":
-      return `${safeRepo}Cursor -s --resume ${sessionId}`;
   }
 }
 

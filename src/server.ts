@@ -22,7 +22,11 @@ import {
   type SpawnAgentParams,
 } from "./agent-engine.js";
 import { AgentDiscovery } from "./agent-discovery.js";
-import { toPublicAgent } from "./agent-facade.js";
+import {
+  resumeCommandForAgent,
+  toAgentStatePayload,
+  toPublicAgent,
+} from "./agent-facade.js";
 import type {
   AgentRecord,
   AgentRole,
@@ -3667,9 +3671,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const formatted = formatAgentState(state);
+          const payload = toAgentStatePayload(state);
           return okFormatted(
             formatted,
-            state as unknown as Record<string, unknown>,
+            payload as unknown as Record<string, unknown>,
           );
         } catch (e) {
           return err(e);
@@ -4240,12 +4245,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 // Surface may be closed, unavailable, or timed out
               }
 
+              const resumeCommand = resumeCommandForAgent(agent);
               return {
                 agent_id: agent.agent_id,
                 repo: agent.repo,
                 state: agent.state,
                 model: agent.model,
                 cli: agent.cli,
+                session_id: agent.cli_session_id,
+                ...(resumeCommand ? { resume_command: resumeCommand } : {}),
                 surface_id: agent.surface_id,
                 token_count: screenData?.token_count ?? null,
                 context_pct: screenData?.context_pct ?? null,

@@ -386,13 +386,13 @@ function parseCodexSessionMeta(
       if (obj.type !== "session_meta") continue;
       const payload = asRecord(obj.payload);
       const id = typeof payload?.id === "string" ? payload.id : null;
-      if (!id) return null;
+      if (!id) continue;
       return {
         session_id: id,
         cwd: typeof payload?.cwd === "string" ? payload.cwd : null,
       };
     } catch {
-      return null;
+      continue;
     }
   }
 

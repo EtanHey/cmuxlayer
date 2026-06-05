@@ -790,7 +790,43 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0].repo).toBe("brainlayer");
     expect(parsed.agents[0].session_id).toBeNull();
+    expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
+  });
+
+  it("list_agents includes resume_command when a session id is captured", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "task 1",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const stateMgr = engine["stateMgr"];
+    const updated = stateMgr.updateRecord(agentId, {
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    });
+    engine.getRegistry().set(agentId, updated);
+
+    const result = await list.handler({}, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.agents[0]).toMatchObject({
+      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      resume_command:
+        "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    });
   });
 
   it("get_agent_state returns full record", async () => {
@@ -817,6 +853,40 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.cli).toBe("codex");
+    expect(parsed.resume_command).toBeUndefined();
+  });
+
+  it("get_agent_state includes resume_command when a session id is captured", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "golems",
+        model: "codex",
+        cli: "codex",
+        prompt: "prune skills",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const stateMgr = engine["stateMgr"];
+    const updated = stateMgr.updateRecord(agentId, {
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    });
+    engine.getRegistry().set(agentId, updated);
+
+    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.resume_command).toBe(
+      "golemsCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
   });
 
   it("get_agent_state returns error for unknown agent", async () => {
@@ -1336,5 +1406,32 @@ describe("agent lifecycle tool handlers", () => {
     expect(agent).toHaveProperty("spawn_depth");
     expect(agent).toHaveProperty("created_at");
     expect(agent).toHaveProperty("quality");
+  });
+
+  it("my_agents includes resume_command when a session id is captured", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const myAgents = (server as any)._registeredTools["my_agents"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      { repo: "voicelayer", model: "opus", cli: "claude", prompt: "fix tts" },
+      {} as any,
+    );
+    const agentId = spawnResult.structuredContent.agent_id;
+    const stateMgr = engine["stateMgr"];
+    const updated = stateMgr.updateRecord(agentId, {
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    });
+    engine.getRegistry().set(agentId, updated);
+
+    const result = await myAgents.handler({}, {} as any);
+    const agent = result.structuredContent.agents[0];
+
+    expect(agent).toMatchObject({
+      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      resume_command:
+        "voicelayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    });
   });
 });

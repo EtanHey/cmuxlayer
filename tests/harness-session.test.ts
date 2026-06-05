@@ -297,6 +297,43 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
     });
     expect(identity?.path).toContain("not-the-real-id.jsonl");
   });
+
+  it("Codex: skips malformed lines and session_meta entries missing ids", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-bad-jsonl-"));
+    const root = join(localHome, ".codex", "sessions", "2026", "06", "05");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(
+      join(root, "rollout-2026-06-05T20-00-00-jsonl-noise.jsonl"),
+      [
+        "{not-json",
+        JSON.stringify({
+          type: "session_meta",
+          payload: { cwd: "/Users/etanheyman/Gits/brainlayer" },
+        }),
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            cwd: "/Users/etanheyman/Gits/brainlayer",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    try {
+      const identity = findLatestHarnessSessionIdentity(
+        "codex",
+        "/Users/etanheyman/Gits/brainlayer",
+        { home: localHome },
+      );
+
+      expect(identity?.session_id).toBe(
+        "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      );
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("applyHarnessState (overlay; JSONL wins, screen is fallback)", () => {

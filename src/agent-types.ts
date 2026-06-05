@@ -67,6 +67,7 @@ export interface PublicAgent {
   model: string;
   state: AgentState;
   session_id: string | null;
+  resume_command?: string;
 }
 
 export interface AgentRoute {
@@ -75,6 +76,7 @@ export interface AgentRoute {
   workspace_id?: string | null;
   state: AgentState;
   session_id: string | null;
+  resume_command?: string;
 }
 
 export function hasRecoverableCrashError(error: string | null): boolean {
