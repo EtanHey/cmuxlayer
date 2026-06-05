@@ -258,6 +258,18 @@ TASK_DONE
     expect(parsed.status).toBe("done");
   });
 
+  it("does not revive stale done evidence when later output starts with an arrow", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+TASK_DONE
+→ Later output from the agent
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).not.toBe("done");
+  });
+
   it("does not treat a done token as output while the current tail is still working", () => {
     const parsed = parseScreen(`
 gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer

@@ -290,7 +290,7 @@ function parseDoneSignal(text: string): string | null {
       return `CLAUDE_COUNTER:${claudeCounter}`;
     }
 
-    if (isDoneSignalTailChromeLine(line)) {
+    if (isDoneSignalTailChromeLine(line, lines, i)) {
       continue;
     }
 
@@ -569,14 +569,20 @@ function parseCursorDoneSignal(text: string): string | null {
     const line = lines[i];
     if (CURSOR_SESSION_COMPLETE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
     if (CURSOR_CHECKMARK_DONE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
-    if (isDoneSignalTailChromeLine(line)) continue;
+    if (isDoneSignalTailChromeLine(line, lines, i)) continue;
     break;
   }
 
   return null;
 }
 
-function isDoneSignalTailChromeLine(line: string): boolean {
+function isDoneSignalTailChromeLine(
+  line: string,
+  lines: string[] = [line],
+  index = 0,
+): boolean {
+  const hasCursorContext = hasCursorChromeContext(lines);
+
   return (
     RULE_LINE_RE.test(line) ||
     TOKEN_USAGE_RE.test(line) ||
@@ -588,12 +594,32 @@ function isDoneSignalTailChromeLine(line: string): boolean {
     CURSOR_MODE_BAR_RE.test(line) ||
     CURSOR_FOLLOWUP_RE.test(line) ||
     CURSOR_STOP_RE.test(line) ||
-    CURSOR_STATUS_PCT_RE.test(line) ||
-    CURSOR_AUTO_FOOTER_RE.test(line) ||
-    CURSOR_CWD_FOOTER_RE.test(line) ||
-    CURSOR_COMPOSER_LINE_RE.test(line) ||
+    (hasCursorContext && CURSOR_STATUS_PCT_RE.test(line)) ||
+    (hasCursorContext && CURSOR_AUTO_FOOTER_RE.test(line)) ||
+    (hasCursorContext && CURSOR_CWD_FOOTER_RE.test(line)) ||
+    (hasCursorContext && isCursorComposerTailLine(line, lines, index)) ||
     CURSOR_HEX_IDLE_RE.test(line)
   );
+}
+
+function hasCursorChromeContext(lines: string[]): boolean {
+  const text = lines.join("\n");
+  return (
+    CURSOR_AGENT_BANNER_RE.test(text) ||
+    CURSOR_MODE_BAR_RE.test(text) ||
+    CURSOR_FOLLOWUP_RE.test(text) ||
+    (CURSOR_COMPOSER_RULE_RE.test(text) && CURSOR_COMPOSER_LINE_RE.test(text))
+  );
+}
+
+function isCursorComposerTailLine(
+  line: string,
+  lines: string[],
+  index: number,
+): boolean {
+  if (!CURSOR_COMPOSER_LINE_RE.test(line)) return false;
+  const tail = lines.slice(index).join("\n");
+  return CURSOR_COMPOSER_RULE_RE.test(tail) && CURSOR_AUTO_FOOTER_RE.test(tail);
 }
 
 function inferStatus(
