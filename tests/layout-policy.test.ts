@@ -154,6 +154,15 @@ describe("layout policy", () => {
     );
   });
 
+  it("uses the final launcher marker when repo names contain role words", () => {
+    expect(inferAgentRole({ launcherName: "myClaude-toolsCodex" })).toBe(
+      "worker",
+    );
+    expect(inferAgentRole({ launcherName: "myCodex-toolsClaude" })).toBe(
+      "orchestrator",
+    );
+  });
+
   it("lets an explicit role override launcher inference", () => {
     expect(
       inferAgentRole({ launcherName: "skillcreatorClaude", role: "ic" }),

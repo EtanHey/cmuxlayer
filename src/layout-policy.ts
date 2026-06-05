@@ -263,8 +263,12 @@ export function isAgentRoleInferenceError(
 function roleFromLauncherLabel(label: string | undefined): AgentRole | null {
   if (!label) return null;
   const launcher = extractPrefix(label);
-  if (/Claude(?:$|[^a-z0-9])/i.test(launcher)) return "orchestrator";
-  if (/(Codex|Cursor)(?:$|[^a-z0-9])/i.test(launcher)) return "worker";
+  const matches = [
+    ...launcher.matchAll(/(Claude|Codex|Cursor)(?=$|[^a-z0-9])/gi),
+  ];
+  const marker = matches.at(-1)?.[1]?.toLowerCase();
+  if (marker === "claude") return "orchestrator";
+  if (marker === "codex" || marker === "cursor") return "worker";
   return null;
 }
 
