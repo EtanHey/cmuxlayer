@@ -25,8 +25,18 @@ const CLAUDE_ACTIVE_RE =
 
 const CURSOR_ACTIVE_RE =
   /(?:^|\n)[^\S\r\n]*(?:(?:[⠀-⣿]+|⬢|⬡|•)[^\S\r\n]*)?(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating|Thinking|Waiting)\b(?:\.\.\.|…)?(?:[^\S\r\n]+[0-9][0-9,]*(?:\.[0-9]+)?[km]?[^\S\r\n]+tokens\b|[^\S\r\n]*(?=\r?(?:\n|$)))/i;
-const CURSOR_READY_RE =
-  /cursor>|⬡\s+Idle\b|→\s*Add a follow-up|\/ commands · @ files · ! shell|(?:^|\n)\s*(?:Auto|Agent)\s*·\s*\d+(?:\.\d+)?\s*%\s*·[^\n]*files? edited\b/i;
+const CURSOR_READY_RE = new RegExp(
+  [
+    String.raw`cursor>`,
+    String.raw`⬡\s+Idle\b`,
+    String.raw`→\s*Add a follow-up`,
+    String.raw`\/ commands · @ files · ! shell`,
+    String.raw`(?:^|\n)\s*(?:Auto|Agent)\s*·\s*\d+(?:\.\d+)?\s*%\s*·[^\n]*files? edited\b`,
+    String.raw`(?=[\s\S]*(?:^|\n)\s*Cursor Agent\s*(?:\n|$))(?=[\s\S]*(?:^|\n)\s*(?:v20\d{2}\.\d{2}\.\d{2}-[a-f0-9]+|Use\s+\/plan to iterate\b|→\s+Plan, search, build anything|Auto(?:\s*·\s*\d+(?:\.\d+)?\s*%)?)\s*(?:\n|$))`,
+    String.raw`(?=[\s\S]*(?:^|\n)\s*→\s+Plan, search, build anything\s*(?:\n|$))(?=[\s\S]*(?:^|\n)\s*Auto(?:\s*·\s*\d+(?:\.\d+)?\s*%)?\s*(?:\n|$))`,
+  ].join("|"),
+  "i",
+);
 
 export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
   claude: {

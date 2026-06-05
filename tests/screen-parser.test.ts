@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   parseScreen,
@@ -5,6 +6,9 @@ import {
   resolveModelMax,
   inferContextWindow,
 } from "../src/screen-parser.js";
+
+const readFixture = (name: string) =>
+  readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
 describe("parseScreen", () => {
   it("parses Claude-style output with response block and done signal", () => {
@@ -254,6 +258,18 @@ TASK_DONE
     expect(parsed.status).toBe("done");
   });
 
+  it("does not revive stale done evidence when later output starts with an arrow", () => {
+    const parsed = parseScreen(`
+gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
+TASK_DONE
+→ Later output from the agent
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.status).not.toBe("done");
+  });
+
   it("does not treat a done token as output while the current tail is still working", () => {
     const parsed = parseScreen(`
 gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer
@@ -424,6 +440,43 @@ Using claude-sonnet-4-20250514
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.model).toBe("claude-sonnet-4-20250514");
+  });
+
+  it("parses Cursor Agent v2026.06.04 fresh-boot ready chrome", () => {
+    const parsed = parseScreen(
+      readFixture("cursor-2026-06-04-boot-ready.txt"),
+    );
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.done_signal).toBeNull();
+    expect(parsed.model).toBeNull();
+    expect(parsed.context_pct).toBeNull();
+  });
+
+  it("parses Cursor Agent v2026.06.04 standalone TASK_DONE output evidence", () => {
+    const parsed = parseScreen(
+      readFixture("cursor-2026-06-04-task-done.txt"),
+    );
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("done");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+    expect(parsed.model).toBeNull();
+    expect(parsed.context_pct).toBe(19);
+  });
+
+  it("parses Cursor TASK_DONE before a legacy status footer without mode chrome", () => {
+    const parsed = parseScreen(`
+Auto · 10% · 2 files edited
+TASK_DONE
+Auto · 10% · 2 files edited
+`);
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("done");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+    expect(parsed.context_pct).toBe(10);
   });
 
   it.each([

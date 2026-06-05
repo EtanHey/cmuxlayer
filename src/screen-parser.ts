@@ -135,6 +135,17 @@ const THINKING_RE =
   /(?:^|\n)\s*(?:(?:[✻✢✳✶]\s*)?thinking(?:\s+with\s+[a-z-]+\s+effort)?(?:\s*(?:\.{3,}|…))?|(?:Reticulating splines|Perambulating|Cooked|Crunched|Razzmatazzing|Schlepping|Nucleating|Seasoning)(?:\s*(?:\.{3,}|…))?|(?:⬡\s*)?(?:Running|Generating)(?:\s*(?:\.{3,}|…))?\s+[0-9][0-9,]*(?:\.[0-9]+)?[km]?\s+tokens)\s*$/im;
 
 /** Cursor Agent CLI — mode bar, hex status, context strip, follow-up prompt */
+const CURSOR_AGENT_BANNER_RE = /(?:^|\n)\s*Cursor Agent\s*(?:\n|$)/i;
+const CURSOR_VERSION_RE =
+  /(?:^|\n)\s*v20\d{2}\.\d{2}\.\d{2}-[a-f0-9]+\s*(?:\n|$)/i;
+const CURSOR_PLAN_HINT_RE = /\bUse\s+\/plan\s+to iterate\b/i;
+const CURSOR_COMPOSER_RULE_RE = /(?:^|\n)\s*[▄▀]{12,}\s*(?:\n|$)/;
+const CURSOR_COMPOSER_LINE_RE =
+  /(?:^|\n)\s*→\s+(?:Plan, search, build anything|[^\n]+)\s*(?:\n|$)/;
+const CURSOR_AUTO_FOOTER_RE =
+  /(?:^|\n)\s*Auto(?:\s*·\s*\d+(?:\.\d+)?\s*%)?(?:\s*·[^\n]*)?\s*(?:\n|$)/i;
+const CURSOR_CWD_FOOTER_RE =
+  /(?:^|\n)\s*(?:~|\/)[^\n]*\s+·\s+[^\n]+\s*(?:\n|$)/;
 const CURSOR_MODE_BAR_RE =
   /\/ commands · @ files · ! shell · ctrl\+r to review edits/i;
 const CURSOR_HEX_RUNNING_RE = /⬡\s+Running\.\.\./i;
@@ -168,12 +179,30 @@ function normalizeText(text: string): string {
 function isCursorAgentScreen(text: string): boolean {
   if (CURSOR_MODE_BAR_RE.test(text)) return true;
   if (CURSOR_FOLLOWUP_RE.test(text) && CURSOR_STOP_RE.test(text)) return true;
-  if (CURSOR_STATUS_PCT_RE.test(text) && /files edited/i.test(text)) {
+  if (CURSOR_STATUS_PCT_RE.test(text) && /files? edited/i.test(text)) {
     return true;
   }
   if (
     (CURSOR_HEX_RUNNING_RE.test(text) || CURSOR_HEX_IDLE_RE.test(text)) &&
     CURSOR_TOKEN_LINE_RE.test(text)
+  ) {
+    return true;
+  }
+  if (
+    CURSOR_AGENT_BANNER_RE.test(text) &&
+    (CURSOR_VERSION_RE.test(text) ||
+      CURSOR_PLAN_HINT_RE.test(text) ||
+      (CURSOR_COMPOSER_RULE_RE.test(text) &&
+        CURSOR_COMPOSER_LINE_RE.test(text)) ||
+      CURSOR_AUTO_FOOTER_RE.test(text))
+  ) {
+    return true;
+  }
+  if (
+    CURSOR_COMPOSER_RULE_RE.test(text) &&
+    CURSOR_COMPOSER_LINE_RE.test(text) &&
+    CURSOR_AUTO_FOOTER_RE.test(text) &&
+    CURSOR_CWD_FOOTER_RE.test(text)
   ) {
     return true;
   }
@@ -261,7 +290,7 @@ function parseDoneSignal(text: string): string | null {
       return `CLAUDE_COUNTER:${claudeCounter}`;
     }
 
-    if (isDoneSignalTailChromeLine(line)) {
+    if (isDoneSignalTailChromeLine(line, lines, i)) {
       continue;
     }
 
@@ -274,6 +303,10 @@ function parseDoneSignal(text: string): string | null {
 function isUnsafeDoneSignalContext(lines: string[], index: number): boolean {
   const immediateTail = lines.slice(Math.max(0, index - 3), index);
   const immediateText = immediateTail.join("\n");
+  const hasPostDoneCursorComposer = hasCursorComposerAfterDoneSignal(
+    lines,
+    index,
+  );
 
   if (
     CODEX_WORKING_RE.test(immediateText) ||
@@ -285,7 +318,9 @@ function isUnsafeDoneSignalContext(lines: string[], index: number): boolean {
     return true;
   }
 
-  return immediateTail.some((line) => isEchoedPromptContextLine(line));
+  return immediateTail.some((line) =>
+    isUnsafeDoneSignalContextLine(line, hasPostDoneCursorComposer),
+  );
 }
 
 function isEchoedPromptContextLine(line: string): boolean {
@@ -306,6 +341,41 @@ function isEchoedPromptContextLine(line: string): boolean {
     (/\bon its own line\b/i.test(line) &&
       (hasInstructionVerb || hasDoneToken || /\bdone signal\b/i.test(line))) ||
     (/\bdone signal\b/i.test(line) && (hasInstructionVerb || hasDoneToken))
+  );
+}
+
+function isUnsafeDoneSignalContextLine(
+  line: string,
+  hasPostDoneCursorComposer: boolean,
+): boolean {
+  if (!isEchoedPromptContextLine(line)) return false;
+
+  // Cursor v2026 can leave the submitted task text in the transcript above the
+  // real output line, then render a fresh composer below. That transcript line
+  // is safe; actual composer/box lines before a done token remain unsafe.
+  if (hasPostDoneCursorComposer && !isComposerLine(line)) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasCursorComposerAfterDoneSignal(
+  lines: string[],
+  index: number,
+): boolean {
+  const tail = lines.slice(index + 1).join("\n");
+  return (
+    CURSOR_COMPOSER_RULE_RE.test(tail) &&
+    CURSOR_COMPOSER_LINE_RE.test(tail) &&
+    CURSOR_AUTO_FOOTER_RE.test(tail)
+  );
+}
+
+function isComposerLine(line: string): boolean {
+  return (
+    /^\s*(?:→|>|[│┃║])\s+/.test(line) ||
+    /^\s*(?:╭|╰|┌|└|├|┬|┴|┼)/.test(line)
   );
 }
 
@@ -499,14 +569,20 @@ function parseCursorDoneSignal(text: string): string | null {
     const line = lines[i];
     if (CURSOR_SESSION_COMPLETE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
     if (CURSOR_CHECKMARK_DONE_RE.test(line)) return "CURSOR_SESSION_COMPLETE";
-    if (isDoneSignalTailChromeLine(line)) continue;
+    if (isDoneSignalTailChromeLine(line, lines, i)) continue;
     break;
   }
 
   return null;
 }
 
-function isDoneSignalTailChromeLine(line: string): boolean {
+function isDoneSignalTailChromeLine(
+  line: string,
+  lines: string[] = [line],
+  index = 0,
+): boolean {
+  const hasCursorContext = hasCursorChromeContext(lines);
+
   return (
     RULE_LINE_RE.test(line) ||
     TOKEN_USAGE_RE.test(line) ||
@@ -518,9 +594,33 @@ function isDoneSignalTailChromeLine(line: string): boolean {
     CURSOR_MODE_BAR_RE.test(line) ||
     CURSOR_FOLLOWUP_RE.test(line) ||
     CURSOR_STOP_RE.test(line) ||
-    CURSOR_STATUS_PCT_RE.test(line) ||
+    (hasCursorContext && CURSOR_STATUS_PCT_RE.test(line)) ||
+    (hasCursorContext && CURSOR_AUTO_FOOTER_RE.test(line)) ||
+    (hasCursorContext && CURSOR_CWD_FOOTER_RE.test(line)) ||
+    (hasCursorContext && isCursorComposerTailLine(line, lines, index)) ||
     CURSOR_HEX_IDLE_RE.test(line)
   );
+}
+
+function hasCursorChromeContext(lines: string[]): boolean {
+  const text = lines.join("\n");
+  return (
+    CURSOR_AGENT_BANNER_RE.test(text) ||
+    CURSOR_MODE_BAR_RE.test(text) ||
+    CURSOR_FOLLOWUP_RE.test(text) ||
+    (CURSOR_STATUS_PCT_RE.test(text) && /files? edited/i.test(text)) ||
+    (CURSOR_COMPOSER_RULE_RE.test(text) && CURSOR_COMPOSER_LINE_RE.test(text))
+  );
+}
+
+function isCursorComposerTailLine(
+  line: string,
+  lines: string[],
+  index: number,
+): boolean {
+  if (!CURSOR_COMPOSER_LINE_RE.test(line)) return false;
+  const tail = lines.slice(index).join("\n");
+  return CURSOR_COMPOSER_RULE_RE.test(tail) && CURSOR_AUTO_FOOTER_RE.test(tail);
 }
 
 function inferStatus(
