@@ -39,13 +39,13 @@ project's `.claude/settings.json` (or `settings.local.json`):
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "python3 /Users/etanheyman/Gits/cmuxlayer/scripts/hooks/inbox_hook.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 <path-to-cmuxlayer>/scripts/hooks/inbox_hook.py" }] }
     ],
     "FileChanged": [
-      { "hooks": [{ "type": "command", "command": "python3 /Users/etanheyman/Gits/cmuxlayer/scripts/hooks/inbox_hook.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 <path-to-cmuxlayer>/scripts/hooks/inbox_hook.py" }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "python3 /Users/etanheyman/Gits/cmuxlayer/scripts/hooks/inbox_hook.py" }] }
+      { "hooks": [{ "type": "command", "command": "python3 <path-to-cmuxlayer>/scripts/hooks/inbox_hook.py" }] }
     ]
   }
 }

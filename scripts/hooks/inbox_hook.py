@@ -82,6 +82,7 @@ def undelivered(agent_id):
     acked = {
         row.get("ack_of")
         for row in read_jsonl(os.path.join(base, "inbox.ack.jsonl"))
+        if row.get("ack_of") is not None
     }
     return [
         row
