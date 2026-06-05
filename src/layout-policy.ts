@@ -181,6 +181,11 @@ function isWorkerDockPane(layout: PaneLayout): boolean {
   );
 }
 
+function isWorkerMajorityPane(layout: PaneLayout): boolean {
+  const nonWorkerCount = layout.surfaces.length - layout.workerCount;
+  return layout.workerCount > 0 && layout.workerCount > nonWorkerCount;
+}
+
 function isNonLeadWorkerZonePane(
   layout: PaneLayout,
   leftPane: PaneLayout | undefined,
@@ -427,7 +432,7 @@ export function chooseAgentSpawnPlacement(
 
   if (role === "orchestrator") {
     const leftLeadPane =
-      leftPane && leftPane.workerCount === 0
+      leftPane && !isWorkerMajorityPane(leftPane)
         ? leftPane
         : undefined;
     const orchestratorPane =
