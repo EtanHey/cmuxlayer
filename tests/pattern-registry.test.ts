@@ -1,9 +1,13 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   CLI_READY_PATTERNS,
   matchReadyPattern,
   type PatternMatch,
 } from "../src/pattern-registry.js";
+
+const readFixture = (name: string) =>
+  readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
 describe("CLI_READY_PATTERNS", () => {
   it("has entries for all supported CLIs", () => {
@@ -228,6 +232,19 @@ ctrl+c to stop
 `,
     );
     expect(result.matched).toBe(true);
+  });
+
+  it("matches Cursor Agent v2026.06.04 fresh-boot ready chrome", () => {
+    const result = matchReadyPattern(
+      "cursor",
+      readFixture("cursor-2026-06-04-boot-ready.txt"),
+    );
+
+    expect(result).toEqual<PatternMatch>({
+      matched: true,
+      confidence: "high",
+      consecutive: 1,
+    });
   });
 
   it("does not match active Cursor generation as ready", () => {
