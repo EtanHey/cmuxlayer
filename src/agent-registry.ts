@@ -45,6 +45,7 @@ class AgentNotFoundError extends Error {
 
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
+  private aliases = new Map<string, string>();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
 
@@ -59,6 +60,7 @@ export class AgentRegistry {
    */
   async reconstitute(): Promise<void> {
     this.agents.clear();
+    this.aliases.clear();
 
     const stateFiles = this.stateMgr.listStates();
     for (const record of stateFiles) {
@@ -133,8 +135,18 @@ export class AgentRegistry {
     }
   }
 
+  private resolveAlias(agentId: string): string {
+    let current = agentId;
+    const seen = new Set<string>();
+    while (this.aliases.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = this.aliases.get(current)!;
+    }
+    return current;
+  }
+
   get(agentId: string): AgentRecord | null {
-    return this.agents.get(agentId) ?? null;
+    return this.agents.get(this.resolveAlias(agentId)) ?? null;
   }
 
   list(filter?: AgentFilter): AgentRecord[] {
@@ -322,11 +334,42 @@ export class AgentRegistry {
    * write state through the StateManager and need to sync the registry.
    */
   set(agentId: string, record: AgentRecord): void {
-    this.agents.set(agentId, record);
+    const resolved = this.resolveAlias(agentId);
+    if (resolved !== agentId && record.agent_id === resolved) {
+      this.agents.set(resolved, record);
+      return;
+    }
+    if (agentId !== record.agent_id) {
+      this.aliases.set(agentId, record.agent_id);
+    }
+    this.agents.set(record.agent_id, record);
+  }
+
+  rename(oldAgentId: string, newAgentId: string, record: AgentRecord): void {
+    this.agents.delete(oldAgentId);
+    for (const [alias, target] of this.aliases) {
+      if (target === oldAgentId) {
+        this.aliases.set(alias, newAgentId);
+      }
+    }
+    for (const [id, agent] of this.agents) {
+      if (agent.parent_agent_id === oldAgentId) {
+        this.agents.set(id, { ...agent, parent_agent_id: newAgentId });
+      }
+    }
+    this.aliases.set(oldAgentId, newAgentId);
+    this.agents.set(newAgentId, record);
   }
 
   remove(agentId: string): void {
-    this.agents.delete(agentId);
+    const resolved = this.resolveAlias(agentId);
+    this.agents.delete(resolved);
+    this.aliases.delete(agentId);
+    for (const [alias, target] of this.aliases) {
+      if (target === resolved) {
+        this.aliases.delete(alias);
+      }
+    }
   }
 
   private evictMissingStateAgent(agentId: string): boolean {

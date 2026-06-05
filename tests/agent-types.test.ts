@@ -96,21 +96,29 @@ describe("assertValidTransition", () => {
 });
 
 describe("generateAgentId", () => {
-  it("produces a model-repo-timestamp-rand pattern", () => {
-    const id = generateAgentId("codex", "brainlayer");
-    expect(id).toMatch(/^codex-brainlayer-\d+-[a-z0-9]+$/);
+  it("uses golemName-session-prefix when a real session id is known", () => {
+    const id = generateAgentId(
+      "codex",
+      "brainlayer",
+      "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(id).toBe("brainlayerCodex-019d9aa5");
   });
 
-  it("sanitizes repo names with special characters", () => {
-    const id = generateAgentId("claude", "my/weird repo");
-    expect(id).toMatch(/^claude-my-weird-repo-\d+-[a-z0-9]+$/);
+  it("keeps repoGolem launcher identity in the golemName prefix", () => {
+    const id = generateAgentId(
+      "claude",
+      "skill-creator",
+      "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",
+    );
+    expect(id).toBe("skill-creatorClaude-5b9f4f35");
   });
 
-  it("generates unique IDs for sequential calls within the same second", () => {
-    const id1 = generateAgentId("sonnet", "test");
-    const id2 = generateAgentId("sonnet", "test");
-    expect(id1).toMatch(/^sonnet-test-\d+-[a-z0-9]+$/);
-    expect(id2).toMatch(/^sonnet-test-\d+-[a-z0-9]+$/);
+  it("uses a golemName-pending fallback until session capture finishes", () => {
+    const id1 = generateAgentId("codex", "brainlayer");
+    const id2 = generateAgentId("codex", "brainlayer");
+    expect(id1).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
+    expect(id2).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
     // Random suffix should make them different even in the same second
     expect(id1).not.toBe(id2);
   });

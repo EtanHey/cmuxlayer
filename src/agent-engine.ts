@@ -4,9 +4,16 @@
  */
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
+import {
+  AGENT_ENV,
+  buildResumeCommand,
+  sanitizeRepoName,
+} from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import {
   resolveAgentRoute as resolvePublicAgentRoute,
@@ -50,6 +57,10 @@ import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { SpawnGuard } from "./spawn-guard.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
+import {
+  findLatestHarnessSessionIdentity,
+  type Harness,
+} from "./harness-session.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -72,9 +83,19 @@ export interface SpawnAgentResult {
   state: AgentState;
 }
 
+export interface CapturedSessionIdentity {
+  session_id: string;
+  path?: string | null;
+}
+
+export type SessionIdentityResolver = (
+  agent: AgentRecord,
+) => CapturedSessionIdentity | string | null;
+
 export interface AgentEngineOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   spawnGuard?: SpawnGuard;
+  sessionIdentityResolver?: SessionIdentityResolver;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -107,6 +128,10 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
 const execFileAsync = promisify(execFile);
+
+const JSONL_HARNESSES = new Set<CliType>(["claude", "codex", "cursor"]);
+
+export { buildResumeCommand } from "./agent-command.js";
 
 interface SidebarStatusSnapshot {
   statusValue: string;
@@ -250,21 +275,6 @@ const LIFECYCLE_LOGS = {
  * For gemini/kiro: uses `cd ~/Gits/<repo> && <cli>` since they
  * don't have launcher functions yet.
  */
-// Env vars for headless/spawned agent sessions:
-// - MCP_CONNECTION_NONBLOCKING: skip MCP connection wait (Claude Code 2.1.90+)
-// - CLAUDE_CODE_NO_FLICKER: stable alt-screen rendering for terminal parsing
-const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
-
-function sanitizeRepoName(repo: string): string {
-  const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
-    throw new Error(
-      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed. "." and ".." are not permitted.`,
-    );
-  }
-  return safeRepo;
-}
-
 const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
   claude: {
     opus: "opus",
@@ -343,26 +353,6 @@ export function buildLaunchCommand(
   }
 }
 
-export function buildResumeCommand(
-  cli: CliType,
-  repo: string,
-  sessionId: string,
-): string {
-  const safeRepo = sanitizeRepoName(repo);
-  switch (cli) {
-    case "claude":
-      return `${safeRepo}Claude -s --resume ${sessionId}`;
-    case "codex":
-      return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
-    case "gemini":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
-    case "kiro":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
-    case "cursor":
-      return `${safeRepo}Cursor -s --resume ${sessionId}`;
-  }
-}
-
 export function extractSessionId(text: string): string | null {
   for (const pattern of CONTEXTUAL_SESSION_ID_PATTERNS) {
     const match = text.match(pattern);
@@ -408,6 +398,7 @@ export class AgentEngine {
     workspace?: string,
   ) => RoleSurfaceIds;
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
+  private sessionIdentityResolver: SessionIdentityResolver;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
@@ -428,6 +419,9 @@ export class AgentEngine {
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
+    this.sessionIdentityResolver =
+      opts?.sessionIdentityResolver ??
+      ((agent) => this.findTranscriptSessionIdentity(agent));
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.spawnPreflight =
       opts?.spawnPreflight ??
@@ -618,8 +612,78 @@ export class AgentEngine {
     return Date.now() - since <= BOOT_SESSION_CAPTURE_WINDOW_MS;
   }
 
+  private harnessCwdForAgent(agent: AgentRecord): string {
+    return join(homedir(), "Gits", agent.repo);
+  }
+
+  private findTranscriptSessionIdentity(
+    agent: AgentRecord,
+  ): CapturedSessionIdentity | null {
+    if (!JSONL_HARNESSES.has(agent.cli)) {
+      return null;
+    }
+
+    const createdAt = Date.parse(agent.created_at);
+    const sinceMs = Number.isNaN(createdAt) ? undefined : createdAt - 5_000;
+    const identity = findLatestHarnessSessionIdentity(
+      agent.cli as Harness,
+      this.harnessCwdForAgent(agent),
+      { sinceMs },
+    );
+    return identity
+      ? { session_id: identity.session_id, path: identity.path }
+      : null;
+  }
+
+  private normalizeCapturedSessionIdentity(
+    identity: CapturedSessionIdentity | string,
+  ): CapturedSessionIdentity {
+    if (typeof identity === "string") {
+      return { session_id: identity, path: null };
+    }
+    return { session_id: identity.session_id, path: identity.path ?? null };
+  }
+
+  private finalizeCapturedSession(
+    agent: AgentRecord,
+    capturedIdentity: CapturedSessionIdentity | string,
+  ): AgentRecord {
+    const identity = this.normalizeCapturedSessionIdentity(capturedIdentity);
+    let updated = this.stateMgr.updateRecord(agent.agent_id, {
+      cli_session_id: identity.session_id,
+      cli_session_path: identity.path,
+    });
+    this.registry.set(agent.agent_id, updated);
+
+    const finalAgentId = generateAgentId(
+      agent.cli,
+      agent.repo,
+      identity.session_id,
+    );
+    if (updated.agent_id === finalAgentId) {
+      return updated;
+    }
+    if (this.stateMgr.readState(finalAgentId)) {
+      return updated;
+    }
+
+    const previousAgentId = updated.agent_id;
+    updated = this.stateMgr.renameState(previousAgentId, finalAgentId);
+    this.registry.rename(previousAgentId, finalAgentId, updated);
+    return updated;
+  }
+
   private async maybeCaptureBootSessionId(agent: AgentRecord): Promise<AgentRecord> {
     if (agent.cli_session_id || !this.isBootCaptureWindowOpen(agent)) {
+      return agent;
+    }
+
+    try {
+      const transcriptSessionId = this.sessionIdentityResolver(agent);
+      if (transcriptSessionId) {
+        return this.finalizeCapturedSession(agent, transcriptSessionId);
+      }
+    } catch {
       return agent;
     }
 
@@ -633,11 +697,10 @@ export class AgentEngine {
         return agent;
       }
 
-      const updated = this.stateMgr.updateRecord(agent.agent_id, {
-        cli_session_id: sessionId,
+      return this.finalizeCapturedSession(agent, {
+        session_id: sessionId,
+        path: null,
       });
-      this.registry.set(agent.agent_id, updated);
-      return updated;
     } catch {
       return agent;
     }
@@ -1052,7 +1115,7 @@ export class AgentEngine {
     }
 
     // Clean up sidebar entries for agents that were purged from the registry
-    const currentAgentIds = new Set(agents.map((a) => a.agent_id));
+    const currentAgentIds = new Set(this.registry.list().map((a) => a.agent_id));
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
         try {
@@ -1143,7 +1206,7 @@ export class AgentEngine {
    * Does NOT wait for ready state.
    */
   async spawnAgent(params: SpawnAgentParams): Promise<SpawnAgentResult> {
-    const agentId = generateAgentId(params.model, params.repo);
+    const agentId = generateAgentId(params.cli, params.repo);
 
     // Resolve parent hierarchy
     let spawnDepth = 0;
@@ -1194,6 +1257,7 @@ export class AgentEngine {
       model: params.model,
       cli: params.cli,
       cli_session_id: null,
+      cli_session_path: null,
       task_summary: params.prompt,
       pid: null,
       version: 1,

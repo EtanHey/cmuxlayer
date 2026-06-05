@@ -44,8 +44,21 @@ describe("agent facade projections", () => {
       model: "sonnet",
       state: "ready",
       session_id: "session-1",
+      resume_command: "brainlayerClaude -s --resume session-1",
     });
     expect((projected as any).surface_id).toBeUndefined();
+  });
+
+  it("omits resume_command when no session id has been captured", () => {
+    const projected = toPublicAgent(makeRecord({ cli_session_id: null }));
+
+    expect(projected).toEqual({
+      agent_id: "agent-1",
+      repo: "brainlayer",
+      model: "sonnet",
+      state: "ready",
+      session_id: null,
+    });
   });
 });
 
@@ -62,6 +75,7 @@ describe("agent route table", () => {
       workspace_id: "ws:1",
       state: "ready",
       session_id: "session-1",
+      resume_command: "brainlayerClaude -s --resume session-1",
     });
     expect(table.get("agent-2")?.surface_id).toBe("surface:2");
   });

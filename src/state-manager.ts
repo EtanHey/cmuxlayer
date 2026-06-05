@@ -80,7 +80,9 @@ export class StateManager {
   transition(
     agentId: string,
     toState: AgentState,
-    extra?: Partial<Pick<AgentRecord, "error" | "pid" | "cli_session_id">>,
+    extra?: Partial<
+      Pick<AgentRecord, "error" | "pid" | "cli_session_id" | "cli_session_path">
+    >,
   ): AgentRecord {
     const current = this.readState(agentId);
     if (!current) {
@@ -98,6 +100,9 @@ export class StateManager {
       ...(extra?.pid !== undefined ? { pid: extra.pid } : {}),
       ...(extra?.cli_session_id !== undefined
         ? { cli_session_id: extra.cli_session_id }
+        : {}),
+      ...(extra?.cli_session_path !== undefined
+        ? { cli_session_path: extra.cli_session_path }
         : {}),
     };
 
@@ -158,6 +163,59 @@ export class StateManager {
     return updated;
   }
 
+  renameState(agentId: string, newAgentId: string): AgentRecord {
+    if (agentId === newAgentId) {
+      const current = this.readState(agentId);
+      if (!current) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+      return current;
+    }
+
+    const current = this.readState(agentId);
+    if (!current) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (this.readState(newAgentId)) {
+      throw new Error(`Agent already exists: ${newAgentId}`);
+    }
+
+    const updated: AgentRecord = {
+      ...current,
+      agent_id: newAgentId,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+
+    const newAgentDir = join(this.baseDir, newAgentId);
+    mkdirSync(newAgentDir, { recursive: true });
+    const stateFile = join(newAgentDir, "state.json");
+    const tmpFile = join(newAgentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, stateFile);
+
+    rmSync(join(this.baseDir, agentId), { recursive: true, force: true });
+
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: newAgentId,
+      event: "transition",
+      from_state: current.state,
+      to_state: current.state,
+      surface_id: updated.surface_id,
+      source: `renameState:${agentId}`,
+      error: null,
+    });
+
+    for (const child of this.listStates()) {
+      if (child.parent_agent_id === agentId) {
+        this.updateRecord(child.agent_id, { parent_agent_id: newAgentId });
+      }
+    }
+
+    return updated;
+  }
+
   listStates(): AgentRecord[] {
     if (!existsSync(this.baseDir)) return [];
     const entries = readdirSync(this.baseDir, { withFileTypes: true });
@@ -204,6 +262,7 @@ export class StateManager {
       model: discovered.model ?? "unknown",
       cli: discovered.cli === "unknown" ? "claude" : discovered.cli,
       cli_session_id: null,
+      cli_session_path: null,
       task_summary: "(auto-discovered)",
       pid: null,
       version: 1,

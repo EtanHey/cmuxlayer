@@ -1,5 +1,12 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +14,7 @@ import {
   modelContextWindow,
   resolveSessionPath,
   readHarnessSessionFromFile,
+  findLatestHarnessSessionIdentity,
   findHarnessSessionPath,
   loadHarnessSession,
   applyHarnessState,
@@ -234,6 +242,97 @@ describe("findHarnessSessionPath / loadHarnessSession (resolve by sessionId, no 
 
   it("unknown sessionId → null", () => {
     expect(loadHarnessSession("claude", "does-not-exist", { home })).toBeNull();
+  });
+});
+
+describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
+  const home = mkdtempSync(join(tmpdir(), "cmux-harness-identity-"));
+
+  mkdirSync(join(home, ".codex", "sessions", "2026", "06", "04"), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(
+      home,
+      ".codex",
+      "sessions",
+      "2026",
+      "06",
+      "04",
+      "rollout-2026-06-04T21-00-00-old.jsonl",
+    ),
+    JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        cwd: "/Users/etanheyman/Gits/other",
+      },
+    }),
+  );
+  cpSync(
+    join(FIX, "codex.jsonl"),
+    join(
+      home,
+      ".codex",
+      "sessions",
+      "2026",
+      "06",
+      "04",
+      "rollout-2026-06-04T22-46-15-not-the-real-id.jsonl",
+    ),
+  );
+
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+  it("Codex: scans transcripts for matching cwd and returns payload.session_meta id", () => {
+    const identity = findLatestHarnessSessionIdentity(
+      "codex",
+      "/Users/etanheyman/Gits/brainlayer",
+      { home },
+    );
+
+    expect(identity).toMatchObject({
+      harness: "codex",
+      session_id: "019e942c-0dda-76f2-bbca-0ef6e484d1c9",
+    });
+    expect(identity?.path).toContain("not-the-real-id.jsonl");
+  });
+
+  it("Codex: skips malformed lines and session_meta entries missing ids", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-bad-jsonl-"));
+    const root = join(localHome, ".codex", "sessions", "2026", "06", "05");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(
+      join(root, "rollout-2026-06-05T20-00-00-jsonl-noise.jsonl"),
+      [
+        "{not-json",
+        JSON.stringify({
+          type: "session_meta",
+          payload: { cwd: "/Users/etanheyman/Gits/brainlayer" },
+        }),
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            cwd: "/Users/etanheyman/Gits/brainlayer",
+          },
+        }),
+      ].join("\n"),
+    );
+
+    try {
+      const identity = findLatestHarnessSessionIdentity(
+        "codex",
+        "/Users/etanheyman/Gits/brainlayer",
+        { home: localHome },
+      );
+
+      expect(identity?.session_id).toBe(
+        "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      );
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
   });
 });
 

@@ -16,6 +16,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     model: "codex",
     cli: "codex",
     cli_session_id: null,
+    cli_session_path: null,
     task_summary: "Fix search gap F",
     pid: null,
     version: 0,
@@ -65,6 +66,7 @@ describe("StateManager", () => {
       expect(parsed.model).toBe(record.model);
       expect(parsed.cli).toBe(record.cli);
       expect(parsed.cli_session_id).toBeNull();
+      expect(parsed.cli_session_path).toBeNull();
       expect(parsed.version).toBe(0);
     });
 

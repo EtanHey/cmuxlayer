@@ -7,7 +7,7 @@
 // (its JSONL carries neither tokens nor window).
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 export type Harness = "claude" | "codex" | "cursor";
 
@@ -253,6 +253,18 @@ export interface ResolveOpts {
   codexHome?: string;
 }
 
+export interface HarnessSessionIdentity {
+  harness: Harness;
+  session_id: string;
+  cwd: string | null;
+  path: string;
+  mtime_ms: number;
+}
+
+export interface IdentityResolveOpts extends ResolveOpts {
+  sinceMs?: number;
+}
+
 /**
  * Resolve the JSONL path from a thread's cwd + sessionId.
  * Claude/Cursor are deterministic. Codex rollout filenames embed a timestamp, so the
@@ -319,6 +331,164 @@ function isFile(path: string): boolean {
     return statSync(path).isFile();
   } catch {
     return false;
+  }
+}
+
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function mtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function afterSince(path: string, sinceMs: number | undefined): boolean {
+  return sinceMs === undefined || mtimeMs(path) >= sinceMs;
+}
+
+function newestIdentity(
+  current: HarnessSessionIdentity | null,
+  candidate: HarnessSessionIdentity,
+): HarnessSessionIdentity {
+  return !current || candidate.mtime_ms > current.mtime_ms
+    ? candidate
+    : current;
+}
+
+function sessionIdFromJsonlName(path: string): string | null {
+  const name = basename(path);
+  return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : null;
+}
+
+function parseCodexSessionMeta(
+  path: string,
+): { session_id: string; cwd: string | null } | null {
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+
+  for (const raw of content.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line) as Record<string, unknown>;
+      if (obj.type !== "session_meta") continue;
+      const payload = asRecord(obj.payload);
+      const id = typeof payload?.id === "string" ? payload.id : null;
+      if (!id) continue;
+      return {
+        session_id: id,
+        cwd: typeof payload?.cwd === "string" ? payload.cwd : null,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Find the newest harness transcript identity for a cwd. This is the bootstrap
+ * path for resume: it discovers the real session id before callers already know
+ * that id.
+ */
+export function findLatestHarnessSessionIdentity(
+  harness: Harness,
+  cwd: string,
+  opts: IdentityResolveOpts = {},
+): HarnessSessionIdentity | null {
+  if (!cwd) return null;
+  const home = opts.home ?? homedir();
+
+  switch (harness) {
+    case "claude": {
+      const root = join(home, ".claude", "projects", encodeClaudeCwd(cwd));
+      let found: HarnessSessionIdentity | null = null;
+      for (const name of safeReaddir(root)) {
+        const path = join(root, name);
+        if (!name.endsWith(".jsonl") || !isFile(path) || !afterSince(path, opts.sinceMs)) {
+          continue;
+        }
+        const sessionId = sessionIdFromJsonlName(path);
+        if (!sessionId) continue;
+        found = newestIdentity(found, {
+          harness,
+          session_id: sessionId,
+          cwd,
+          path,
+          mtime_ms: mtimeMs(path),
+        });
+      }
+      return found;
+    }
+    case "cursor": {
+      const root = join(
+        home,
+        ".cursor",
+        "projects",
+        encodeCursorCwd(cwd),
+        "agent-transcripts",
+      );
+      let found: HarnessSessionIdentity | null = null;
+      for (const dir of safeReaddir(root)) {
+        const transcriptDir = join(root, dir);
+        if (!isDir(transcriptDir)) continue;
+        for (const name of safeReaddir(transcriptDir)) {
+          const path = join(transcriptDir, name);
+          if (!name.endsWith(".jsonl") || !isFile(path) || !afterSince(path, opts.sinceMs)) {
+            continue;
+          }
+          const sessionId = sessionIdFromJsonlName(path) ?? dir;
+          found = newestIdentity(found, {
+            harness,
+            session_id: sessionId,
+            cwd,
+            path,
+            mtime_ms: mtimeMs(path),
+          });
+        }
+      }
+      return found;
+    }
+    case "codex": {
+      const root = join(opts.codexHome ?? join(home, ".codex"), "sessions");
+      let found: HarnessSessionIdentity | null = null;
+      const walk = (dir: string, depth: number): void => {
+        for (const name of safeReaddir(dir)) {
+          const child = join(dir, name);
+          if (isFile(child) && name.endsWith(".jsonl")) {
+            if (!afterSince(child, opts.sinceMs)) continue;
+            const meta = parseCodexSessionMeta(child);
+            if (!meta || meta.cwd !== cwd) continue;
+            found = newestIdentity(found, {
+              harness,
+              session_id: meta.session_id,
+              cwd: meta.cwd,
+              path: child,
+              mtime_ms: mtimeMs(child),
+            });
+            continue;
+          }
+          if (depth > 0 && isDir(child)) {
+            walk(child, depth - 1);
+          }
+        }
+      };
+      walk(root, 4);
+      return found;
+    }
   }
 }
 
