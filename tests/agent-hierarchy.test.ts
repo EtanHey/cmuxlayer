@@ -362,6 +362,35 @@ describe("Agent Hierarchy", () => {
       stopAgent.mockRestore();
     });
 
+    it("cascadeKill includes children spawned through a finalized parent's pending alias", async () => {
+      stateMgr.writeState(
+        makeRecord({ agent_id: "root-pending", surface_id: "s:1" }),
+      );
+      liveSurfaces = [makeSurface("s:1")];
+      await engine.getRegistry().reconstitute();
+      const renamed = stateMgr.renameState("root-pending", "root-final");
+      engine.getRegistry().rename("root-pending", "root-final", renamed);
+
+      const child = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "Fix gap F",
+        parent_agent_id: "root-pending",
+      });
+      const stoppedOrder: string[] = [];
+      const stopAgent = vi
+        .spyOn(engine, "stopAgent")
+        .mockImplementation(async (agentId) => {
+          stoppedOrder.push(agentId);
+        });
+
+      await engine.cascadeKill("root-pending");
+
+      expect(stoppedOrder).toEqual([child.agent_id, "root-final"]);
+      stopAgent.mockRestore();
+    });
+
     it("cascadeKill continues if one child stop fails", async () => {
       let callCount = 0;
       const stopAgent = vi

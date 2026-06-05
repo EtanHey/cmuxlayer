@@ -1226,12 +1226,12 @@ export class AgentEngine {
       if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
         throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);
       }
-      const children = this.registry.getChildren(params.parent_agent_id);
+      const children = this.registry.getChildren(parent.agent_id);
       if (children.length >= MAX_CHILDREN) {
         throw new Error(`Max children exceeded: ${MAX_CHILDREN}`);
       }
       spawnDepth = parent.spawn_depth + 1;
-      parentAgentId = params.parent_agent_id;
+      parentAgentId = parent.agent_id;
       parentAgent = parent;
     }
 

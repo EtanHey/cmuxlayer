@@ -511,8 +511,17 @@ export class AgentRegistry {
    * Get direct children of parentId.
    */
   getChildren(parentId: string): AgentRecord[] {
+    const parentIds = new Set<string>([parentId]);
+    const parent = this.get(parentId);
+    if (parent) {
+      parentIds.add(parent.agent_id);
+      for (const alias of this.aliasesResolvingTo(parent.agent_id)) {
+        parentIds.add(alias);
+      }
+    }
+
     return [...this.agents.values()].filter(
-      (a) => a.parent_agent_id === parentId,
+      (a) => a.parent_agent_id !== null && parentIds.has(a.parent_agent_id),
     );
   }
 
