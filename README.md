@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 29 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 33 MCP tools that give AI agents programmatic control over terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,8 +8,8 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-29%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-335%20passing-brightgreen.svg)](#testing)
+[![MCP Tools](https://img.shields.io/badge/MCP-33%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-669%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -54,7 +54,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 29 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer exposes 33 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
@@ -62,20 +62,22 @@ For managed agents, use the agent-first path: `list_agents` to find the target, 
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (29)
+## MCP Tools (33)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
-**Terminal control** — `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+**Terminal control** — `list_surfaces` `select_workspace` `create_workspace` `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
+**Agent lifecycle** — `spawn_agent` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
 
-**Workspace** — `list_surfaces` `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
+**Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
+
+**Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
 <details>
-<summary>Full tool reference (29 tools)</summary>
+<summary>Full tool reference (33 tools)</summary>
 
-### Read-only (6)
+### Read-only (7)
 
 | Tool | What it does |
 |------|-------------|
@@ -85,16 +87,20 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `list_agents` | All agents, with optional filters |
 | `my_agents` | Children of a parent agent with live screen status |
 | `read_agent_output` | Structured output between delimiter markers |
+| `inbox_check` | Inspect an agent's inbox channel: pending messages, monitor liveness, stale dispatches |
 
-### Mutating (17)
+### Mutating (23)
 
 | Tool | What it does |
 |------|-------------|
+| `select_workspace` | Switch the active workspace |
+| `create_workspace` | Create a new named workspace |
 | `new_split` | Create a terminal or browser split pane |
 | `new_surface` | Create a tab in an existing pane |
 | `move_surface` | Move a surface to another pane or position |
 | `reorder_surface` | Reorder tabs within a pane |
 | `send_input` | Send text to a raw surface; use `send_to` for tracked agents |
+| `send_command` | Atomically send a command and press return on the same surface |
 | `send_key` | Send key press (return, escape, ctrl-c, etc.) to a raw surface |
 | `rename_tab` | Rename a surface tab |
 | `notify` | Show a cmux notification banner |
@@ -102,6 +108,9 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `set_progress` | Set progress indicator (0.0-1.0) |
 | `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
+| `spawn_in_workspace` | Create a workspace and spawn a multi-agent team into a clean grid |
+| `resync_agents` | Re-sync the agent registry from live surfaces |
+| `dispatch_to_agent` | Append a task to an agent's inbox file (deterministic write channel) |
 | `send_to` | Preferred path for sending text to a tracked agent by `agent_id` |
 | `send_to_agent` | Legacy/internal agent send path; prefer `send_to` |
 | `wait_for` | Block until agent reaches a target state (defaults to `done`) |
@@ -135,7 +144,9 @@ AI Agent  ─── MCP ───>  cmuxLayer  ─── Unix socket ───> 
                          ├── Agent engine (spawn → monitor → teardown)
                          ├── Screen parser (5 agent formats)
                          ├── Mode policy (autonomous vs manual)
-                         └── State manager + event log
+                         ├── State manager + event log
+                         ├── Metacomm READ  — harness JSONL (real tokens/context/model)
+                         └── Metacomm WRITE — per-agent inbox file + Monitor dispatch
 ```
 
 The socket client connects to cmux via Unix socket. Auto-reconnects on disconnect, falls back to CLI subprocess if socket is unavailable.
@@ -162,7 +173,7 @@ cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/
 ## Testing
 
 ```bash
-bun run test        # 335 tests via vitest
+bun run test        # 669 tests via vitest
 npm run typecheck   # Type checking
 ```
 
