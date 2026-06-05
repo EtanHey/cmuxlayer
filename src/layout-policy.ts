@@ -71,18 +71,15 @@ function describePaneLayouts(
 
   return panes.map((pane) => {
     const surfaces = groupsByPane.get(pane.ref) ?? [];
-    const orchestratorCount = surfaces.filter((surface) =>
-      roleSurfaceIds.orchestrator.has(surface.ref),
+    const roles = surfaces.map((surface) =>
+      roleForSurface(surface, roleSurfaceIds),
+    );
+    const orchestratorCount = roles.filter(
+      (role) => role === "orchestrator",
     ).length;
-    const icCount = surfaces.filter((surface) =>
-      roleSurfaceIds.ic.has(surface.ref),
-    ).length;
-    const workerCount = surfaces.filter((surface) =>
-      roleSurfaceIds.worker.has(surface.ref),
-    ).length;
-    const unknownCount = surfaces.filter((surface) =>
-      roleSurfaceIds.unknown?.has(surface.ref),
-    ).length;
+    const icCount = roles.filter((role) => role === "ic").length;
+    const workerCount = roles.filter((role) => role === "worker").length;
+    const unknownCount = roles.filter((role) => role === "unknown").length;
     const roleCount = orchestratorCount + icCount + workerCount;
     return {
       pane,
@@ -95,6 +92,18 @@ function describePaneLayouts(
       nonRoleCount: surfaces.length - roleCount,
     };
   });
+}
+
+function roleForSurface(
+  surface: CmuxPaneSurfaces["surfaces"][number],
+  roleSurfaceIds: RoleSurfaceIds,
+): AgentRole | "unknown" | null {
+  if (roleSurfaceIds.orchestrator.has(surface.ref)) return "orchestrator";
+  if (roleSurfaceIds.ic.has(surface.ref)) return "ic";
+  if (roleSurfaceIds.worker.has(surface.ref)) return "worker";
+  if (roleSurfaceIds.unknown?.has(surface.ref)) return "unknown";
+  if (surface.type === "terminal") return roleFromLauncherLabel(surface.title);
+  return null;
 }
 
 export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
@@ -254,8 +263,12 @@ export function isAgentRoleInferenceError(
 function roleFromLauncherLabel(label: string | undefined): AgentRole | null {
   if (!label) return null;
   const launcher = extractPrefix(label);
-  if (/Claude$/i.test(launcher)) return "orchestrator";
-  if (/(Codex|Cursor)$/i.test(launcher)) return "worker";
+  const matches = [
+    ...launcher.matchAll(/(Claude|Codex|Cursor)(?=$|[^a-z0-9])/gi),
+  ];
+  const marker = matches.at(-1)?.[1]?.toLowerCase();
+  if (marker === "claude") return "orchestrator";
+  if (marker === "codex" || marker === "cursor") return "worker";
   return null;
 }
 
@@ -413,11 +426,13 @@ export function chooseAgentSpawnPlacement(
   }
 
   if (role === "orchestrator") {
-    const orchestratorPane =
-      leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane)) ??
-      (leftPane && leftPane.icCount === 0 && leftPane.workerCount === 0
+    const leftLeadPane =
+      leftPane && leftPane.workerCount === 0
         ? leftPane
-        : undefined);
+        : undefined;
+    const orchestratorPane =
+      leftLeadPane ??
+      leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane));
     return orchestratorPane
       ? { kind: "surface", pane: orchestratorPane.pane.ref }
       : { kind: "split", direction: "left" };

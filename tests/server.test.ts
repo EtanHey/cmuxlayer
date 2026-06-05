@@ -2689,6 +2689,150 @@ describe("tool handler integration", () => {
     expect(parsed.direction).toBeNull();
   });
 
+  it("new_split with role=orchestrator tabs into the left lead pane despite stale IC state", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-orchestrator-stale-ic");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "opus-voicelayer-1780659054-nsnv",
+      surface_id: "surface:voicelayer-lead",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "voicelayer",
+      model: "opus",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "stale lead record",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-05T17:00:00.000Z",
+      updated_at: "2026-06-05T17:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      role: "ic",
+    });
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 1,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:voicelayer-lead"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:cmuxlayer-worker"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces:
+              pane === "pane:left"
+                ? [
+                    {
+                      ref: "surface:voicelayer-lead",
+                      title: "voicelayerClaude-LEAD",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : [
+                    {
+                      ref: "surface:cmuxlayer-worker",
+                      title: "cmuxlayerCodex W-B1",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:new-orchestrator",
+            pane: "pane:left",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:unexpected-split",
+            pane: "pane:third",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", role: "orchestrator", workspace: "workspace:1" },
+      {} as any,
+    );
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-surface", "--pane", "pane:left"]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split", "left"]),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:new-orchestrator");
+    expect(parsed.role).toBe("orchestrator");
+    expect(parsed.placement).toBe("surface");
+    expect(parsed.direction).toBeNull();
+  });
+
   it("new_split with role=worker partitions unfiltered surface lists by pane membership", async () => {
     const stateDir = join(CHANNEL_TEST_DIR, "new-split-unfiltered-surfaces");
     rmSync(stateDir, { recursive: true, force: true });
