@@ -1413,7 +1413,9 @@ export class AgentEngine {
             matched: true,
             state: current.state,
             elapsed,
-            source: "sweep",
+            source: this.requiresOutputDoneEvidence(targetState)
+              ? "evidence"
+              : "sweep",
             agent: toPublicAgent(current),
           });
           return;

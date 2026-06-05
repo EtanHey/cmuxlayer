@@ -2,7 +2,6 @@ import net from "node:net";
 import { EventEmitter } from "node:events";
 import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -15,7 +14,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { CmuxLayerProxy, computeReconnectDelay } from "../src/proxy.js";
 
-const TEST_ROOT = join(tmpdir(), "cmuxlayer-proxy-test");
+const TEST_ROOT = join("/tmp", "cmuxlayer-proxy-test");
 
 function socketPath(name: string): string {
   return join(TEST_ROOT, `${name}-${process.pid}-${Date.now()}.sock`);
