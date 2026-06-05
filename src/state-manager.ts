@@ -45,11 +45,46 @@ export class StateManager {
     return this.eventLog;
   }
 
+  private stateFilePath(dirName: string): string {
+    return join(this.baseDir, dirName, "state.json");
+  }
+
+  private readStateFromDir(dirName: string): AgentRecord | null {
+    const stateFile = this.stateFilePath(dirName);
+    if (!existsSync(stateFile)) return null;
+    try {
+      return JSON.parse(readFileSync(stateFile, "utf-8")) as AgentRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveStateDir(agentId: string): string | null {
+    if (existsSync(this.stateFilePath(agentId))) {
+      return agentId;
+    }
+    if (!existsSync(this.baseDir)) {
+      return null;
+    }
+
+    const entries = readdirSync(this.baseDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === agentId) continue;
+      const record = this.readStateFromDir(entry.name);
+      if (record?.agent_id === agentId) {
+        return entry.name;
+      }
+    }
+
+    return null;
+  }
+
   writeState(record: AgentRecord): void {
     const agentDir = join(this.baseDir, record.agent_id);
     mkdirSync(agentDir, { recursive: true });
 
-    const stateFile = join(agentDir, "state.json");
+    const stateFile = this.stateFilePath(record.agent_id);
     const tmpFile = join(agentDir, "state.json.tmp");
 
     writeFileSync(tmpFile, JSON.stringify(record, null, 2), "utf-8");
@@ -68,13 +103,8 @@ export class StateManager {
   }
 
   readState(agentId: string): AgentRecord | null {
-    const stateFile = join(this.baseDir, agentId, "state.json");
-    if (!existsSync(stateFile)) return null;
-    try {
-      return JSON.parse(readFileSync(stateFile, "utf-8")) as AgentRecord;
-    } catch {
-      return null;
-    }
+    const dirName = this.resolveStateDir(agentId);
+    return dirName ? this.readStateFromDir(dirName) : null;
   }
 
   transition(
@@ -84,7 +114,8 @@ export class StateManager {
       Pick<AgentRecord, "error" | "pid" | "cli_session_id" | "cli_session_path">
     >,
   ): AgentRecord {
-    const current = this.readState(agentId);
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -106,8 +137,8 @@ export class StateManager {
         : {}),
     };
 
-    const agentDir = join(this.baseDir, agentId);
-    const stateFile = join(agentDir, "state.json");
+    const agentDir = join(this.baseDir, dirName!);
+    const stateFile = this.stateFilePath(dirName!);
     const tmpFile = join(agentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
@@ -131,7 +162,8 @@ export class StateManager {
    * Update arbitrary non-state fields on an agent record without transition validation.
    */
   updateRecord(agentId: string, fields: AgentRecordPatch): AgentRecord {
-    const current = this.readState(agentId);
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -143,8 +175,8 @@ export class StateManager {
       updated_at: new Date().toISOString(),
     };
 
-    const agentDir = join(this.baseDir, agentId);
-    const stateFile = join(agentDir, "state.json");
+    const agentDir = join(this.baseDir, dirName!);
+    const stateFile = this.stateFilePath(dirName!);
     const tmpFile = join(agentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
@@ -172,7 +204,8 @@ export class StateManager {
       return current;
     }
 
-    const current = this.readState(agentId);
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -189,12 +222,12 @@ export class StateManager {
 
     const newAgentDir = join(this.baseDir, newAgentId);
     mkdirSync(newAgentDir, { recursive: true });
-    const stateFile = join(newAgentDir, "state.json");
+    const stateFile = this.stateFilePath(newAgentId);
     const tmpFile = join(newAgentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
 
-    rmSync(join(this.baseDir, agentId), { recursive: true, force: true });
+    rmSync(join(this.baseDir, dirName!), { recursive: true, force: true });
 
     this.eventLog.append({
       ts: updated.updated_at,
@@ -222,21 +255,24 @@ export class StateManager {
     const records: AgentRecord[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const record = this.readState(entry.name);
+      const record = this.readStateFromDir(entry.name);
       if (record) records.push(record);
     }
     return records;
   }
 
   removeState(agentId: string): void {
-    const agentDir = join(this.baseDir, agentId);
-    if (!existsSync(agentDir)) return;
+    const dirName = this.resolveStateDir(agentId);
+    if (!dirName) return;
+
+    const agentDir = join(this.baseDir, dirName);
+    const current = this.readStateFromDir(dirName);
 
     this.eventLog.append({
       ts: new Date().toISOString(),
       agent_id: agentId,
       event: "removed",
-      from_state: this.readState(agentId)?.state ?? null,
+      from_state: current?.state ?? null,
       to_state: "done" as AgentState,
       surface_id: null,
       source: "removeState",

@@ -3,7 +3,13 @@
  * Tests tool registration and handler dispatch with mocked cmux client.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -125,6 +131,18 @@ function createLifecycleServer(exec: ExecFn) {
     disableSpawnPreflight: true,
     sessionIdentityResolver: () => null,
   });
+}
+
+function moveOnlyAgentStateDir(prefix: string) {
+  const entries = readdirSync(TEST_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => name !== "events");
+  expect(entries).toHaveLength(1);
+  renameSync(
+    join(TEST_DIR, entries[0]),
+    join(TEST_DIR, `${prefix}-${entries[0]}`),
+  );
 }
 
 describe("agent lifecycle tool registration", () => {
@@ -279,6 +297,53 @@ describe("agent lifecycle tool handlers", () => {
         "return",
       ]),
     );
+  });
+
+  it("spawn_agent finalizes a pending Cursor prompt when the state directory is noncanonical", async () => {
+    let movedStateDir = false;
+    const baseExec = makeLifecycleExec();
+    mockExec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (
+        !movedStateDir &&
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "cmuxlayerCursor -s"
+      ) {
+        movedStateDir = true;
+        moveOnlyAgentStateDir("legacy");
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const stop = (server as any)._registeredTools["stop_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        model: "",
+        cli: "cursor",
+        prompt: "Say VERIFY_OK and stop.",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toMatch(
+      /^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/,
+    );
+    expect(parsed.state).toBe("ready");
+    expect(parsed.boot_prompt_delivered).toBe(true);
+
+    const stopResult = await stop.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const stopped =
+      stopResult.structuredContent ?? JSON.parse(stopResult.content[0].text);
+    expect(stopped.ok).toBe(true);
+    expect(stopped.state).toBe("done");
   });
 
   it("spawn_agent sends boot_prompt_path contents after readiness", async () => {

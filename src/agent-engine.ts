@@ -16,7 +16,6 @@ import {
 } from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import {
-  resolveAgentRoute as resolvePublicAgentRoute,
   toPublicAgent,
 } from "./agent-facade.js";
 import type {
@@ -762,12 +761,8 @@ export class AgentEngine {
 
   private async maybeMarkTaskDone(
     agent: AgentRecord,
-    opts?: { allowBootPromptPending?: boolean },
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
-    if (agent.boot_prompt_pending && opts?.allowBootPromptPending !== true) {
-      return { agent };
-    }
 
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
@@ -799,6 +794,7 @@ export class AgentEngine {
       const marked = this.stateMgr.updateRecord(agent.agent_id, {
         task_done_candidate_at: null,
         task_done_detected_at: new Date().toISOString(),
+        ...(agent.boot_prompt_pending ? { boot_prompt_pending: false } : {}),
       });
       this.registry.set(agent.agent_id, marked);
       const updated = this.stateMgr.transition(agent.agent_id, "done");
@@ -1484,7 +1480,17 @@ export class AgentEngine {
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    return resolvePublicAgentRoute(this.listAgents(), agent.agent_id);
+    const resumeCommand = agent.cli_session_id
+      ? buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+      : undefined;
+    return {
+      agent_id: agent.agent_id,
+      surface_id: agent.surface_id,
+      workspace_id: agent.workspace_id ?? null,
+      state: agent.state,
+      session_id: agent.cli_session_id,
+      ...(resumeCommand ? { resume_command: resumeCommand } : {}),
+    };
   }
 
   /**

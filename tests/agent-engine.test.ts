@@ -5,7 +5,7 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -1767,7 +1767,13 @@ To continue this session, run codex resume ${sessionId}`,
         liveSurfaces = [makeSurface("surface:worker-pending-prompt")];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:worker-pending-prompt",
-          text: "TASK_DONE",
+          text: [
+            "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer",
+            "→ Implement the fix. When complete, print exactly:",
+            "TASK_DONE",
+            "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "Working (1m 02s • esc to interrupt)",
+          ].join("\n"),
           lines: 20,
           scrollback_used: false,
         });
@@ -1784,6 +1790,54 @@ To continue this session, run codex resume ${sessionId}`,
         expect(agent?.boot_prompt_pending).toBe(true);
         expect(agent?.task_done_candidate_at ?? null).toBeNull();
         expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves Cursor done evidence when boot prompt pending is stale", async () => {
+      vi.useFakeTimers();
+      try {
+        const agentId = "cmuxlayerCursor-pending-1780696860-r2fu";
+        const candidateAt = new Date("2026-06-05T22:01:10.000Z");
+        vi.setSystemTime(new Date(candidateAt.getTime() + 5_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            state: "booting",
+            surface_id: "surface:cursor-pending",
+            repo: "cmuxlayer",
+            model: "",
+            cli: "cursor",
+            role: "worker",
+            boot_prompt_pending: true,
+            task_done_candidate_at: candidateAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:cursor-pending")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:cursor-pending",
+          text: readFileSync(
+            new URL("./fixtures/cursor-2026-06-04-task-done.txt", import.meta.url),
+            "utf8",
+          ),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(agentId, "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("evidence");
+        expect(result.state).toBe("done");
+        expect(engine.getAgentState(agentId)).toMatchObject({
+          state: "done",
+          boot_prompt_pending: false,
+          task_done_detected_at: expect.any(String),
+        });
       } finally {
         vi.useRealTimers();
       }
@@ -2242,6 +2296,52 @@ To continue this session, run codex resume ${sessionId}`,
         user_killed: true,
       });
       expect(stateMgr.readState("agent-pending")).toBeNull();
+    });
+
+    it("stops a never-renamed pending agent whose state directory is noncanonical", async () => {
+      const agentId = "cmuxlayerCursor-pending-1780696860-r2fu";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "booting",
+          surface_id: "surface:cursor-pending",
+          repo: "cmuxlayer",
+          model: "",
+          cli: "cursor",
+          role: "worker",
+          boot_prompt_pending: true,
+        }),
+      );
+      renameSync(
+        join(TEST_DIR, agentId),
+        join(TEST_DIR, `legacy-${agentId}`),
+      );
+      expect(existsSync(join(TEST_DIR, agentId, "state.json"))).toBe(false);
+      liveSurfaces = [makeSurface("surface:cursor-pending")];
+      await engine.getRegistry().reconstitute();
+
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        agent_id: agentId,
+        state: "booting",
+      });
+
+      await engine.stopAgent(agentId);
+
+      expect(mockClient.sendKey).toHaveBeenCalledWith(
+        "surface:cursor-pending",
+        "c-c",
+        expect.anything(),
+      );
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        agent_id: agentId,
+        state: "done",
+        user_killed: true,
+      });
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        agent_id: agentId,
+        state: "done",
+        user_killed: true,
+      });
     });
 
     it("force stop kills the process when pid is available", async () => {
