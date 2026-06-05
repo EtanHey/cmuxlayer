@@ -1226,12 +1226,12 @@ export class AgentEngine {
       if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
         throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);
       }
-      const children = this.registry.getChildren(params.parent_agent_id);
+      const children = this.registry.getChildren(parent.agent_id);
       if (children.length >= MAX_CHILDREN) {
         throw new Error(`Max children exceeded: ${MAX_CHILDREN}`);
       }
       spawnDepth = parent.spawn_depth + 1;
-      parentAgentId = params.parent_agent_id;
+      parentAgentId = parent.agent_id;
       parentAgent = parent;
     }
 
@@ -1480,7 +1480,11 @@ export class AgentEngine {
   }
 
   resolveAgentRoute(agentId: string): AgentRoute {
-    return resolvePublicAgentRoute(this.listAgents(), agentId);
+    const agent = this.registry.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    return resolvePublicAgentRoute(this.listAgents(), agent.agent_id);
   }
 
   /**
@@ -1491,7 +1495,9 @@ export class AgentEngine {
     force?: boolean,
     opts?: { userInitiated?: boolean },
   ): Promise<void> {
-    const agent = this.registry.get(agentId);
+    const route = this.resolveAgentRoute(agentId);
+    const canonicalAgentId = route.agent_id;
+    const agent = this.registry.get(canonicalAgentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
@@ -1500,10 +1506,10 @@ export class AgentEngine {
 
     if (TERMINAL_STATES.has(agent.state)) {
       if (agent.state === "error" && userInitiated && agent.user_killed !== true) {
-        const marked = this.stateMgr.updateRecord(agentId, {
+        const marked = this.stateMgr.updateRecord(canonicalAgentId, {
           user_killed: true,
         });
-        this.registry.set(agentId, marked);
+        this.registry.set(canonicalAgentId, marked);
       }
       return; // Already stopped
     }
@@ -1516,31 +1522,31 @@ export class AgentEngine {
       }
     } else {
       // Graceful: send Ctrl+C
-      await this.client.sendKey(agent.surface_id, "c-c", {
-        workspace: agent.workspace_id ?? undefined,
+      await this.client.sendKey(route.surface_id, "c-c", {
+        workspace: route.workspace_id ?? undefined,
       });
     }
 
-    const current = this.registry.get(agentId) ?? agent;
+    const current = this.registry.get(canonicalAgentId) ?? agent;
     let marked = current;
     if ((current.user_killed ?? false) !== userInitiated) {
-      marked = this.stateMgr.updateRecord(agentId, {
+      marked = this.stateMgr.updateRecord(canonicalAgentId, {
         user_killed: userInitiated,
       });
-      this.registry.set(agentId, marked);
+      this.registry.set(canonicalAgentId, marked);
     }
 
     // Transition to done
     try {
-      const updated = this.stateMgr.transition(agentId, "done");
-      this.registry.set(agentId, updated);
+      const updated = this.stateMgr.transition(canonicalAgentId, "done");
+      this.registry.set(canonicalAgentId, updated);
     } catch {
       // If transition to done fails (e.g. from error state), try error
       try {
-        const updated = this.stateMgr.transition(agentId, "error", {
+        const updated = this.stateMgr.transition(canonicalAgentId, "error", {
           error: "Force stopped",
         });
-        this.registry.set(agentId, updated);
+        this.registry.set(canonicalAgentId, updated);
       } catch {
         // State is already terminal — that's fine
       }

@@ -4218,9 +4218,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           const merged = await registry.listMerged(discovery);
           const agents = args.parent_agent_id
-            ? merged.filter(
-                (agent) => agent.parent_agent_id === args.parent_agent_id,
-              )
+            ? (() => {
+                const childIds = new Set(
+                  registry
+                    .getChildren(args.parent_agent_id)
+                    .map((agent) => agent.agent_id),
+                );
+                return merged.filter((agent) => childIds.has(agent.agent_id));
+              })()
             : merged.filter((agent) => agent.parent_agent_id === null);
 
           const SCREEN_TIMEOUT = 3000;

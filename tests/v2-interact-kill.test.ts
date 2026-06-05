@@ -72,6 +72,13 @@ function createV2Server(exec: ExecFn) {
   });
 }
 
+function finalizeAgentAlias(server: any, pendingId: string, finalId: string) {
+  const engine = server._registeredTools["interact"]._engine;
+  const renamed = engine.stateMgr.renameState(pendingId, finalId);
+  engine.getRegistry().rename(pendingId, finalId, renamed);
+  return engine;
+}
+
 describe("V2 tool registration", () => {
   it("registers interact and kill tools", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
@@ -232,6 +239,30 @@ describe("interact — agent resolution", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
   });
+
+  it("send resolves a finalized agent through its pending alias", async () => {
+    const spawnResult = await callTool(server, "spawn_agent", {
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+    });
+    const pendingId = parseResult(spawnResult).agent_id;
+    const finalId = "brainlayerClaude-session1";
+    const engine = finalizeAgentAlias(server, pendingId, finalId);
+    const registry = engine.getRegistry();
+    const agent = registry.get(pendingId);
+    registry.set(finalId, { ...agent, state: "ready" });
+
+    const result = await callTool(server, "interact", {
+      agent: pendingId,
+      action: "send",
+      text: "fix gap F",
+    });
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toBe(pendingId);
+  });
 });
 
 describe("kill — scoped targets", () => {
@@ -263,6 +294,24 @@ describe("kill — scoped targets", () => {
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.killed).toContain(agentId);
+  });
+
+  it("kill resolves a finalized agent through its pending alias", async () => {
+    const spawn = await callTool(server, "spawn_agent", {
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+    });
+    const pendingId = parseResult(spawn).agent_id;
+    finalizeAgentAlias(server, pendingId, "brainlayerClaude-session1");
+
+    const result = await callTool(server, "kill", {
+      target: pendingId,
+    });
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.killed).toContain(pendingId);
   });
 
   it("kill multiple agents by array", async () => {

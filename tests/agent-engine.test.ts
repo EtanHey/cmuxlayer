@@ -2216,6 +2216,34 @@ To continue this session, run codex resume ${sessionId}`,
       expect(state!.state).toBe("done");
     });
 
+    it("resolves provisional agent aliases before stopping", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-pending",
+          state: "working",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      const renamed = stateMgr.renameState("agent-pending", "agent-final");
+      engine.getRegistry().rename("agent-pending", "agent-final", renamed);
+
+      await engine.stopAgent("agent-pending");
+
+      expect(mockClient.sendKey).toHaveBeenCalledWith(
+        "surface:42",
+        "c-c",
+        expect.anything(),
+      );
+      expect(stateMgr.readState("agent-final")).toMatchObject({
+        agent_id: "agent-final",
+        state: "done",
+        user_killed: true,
+      });
+      expect(stateMgr.readState("agent-pending")).toBeNull();
+    });
+
     it("force stop kills the process when pid is available", async () => {
       stateMgr.writeState(
         makeRecord({
