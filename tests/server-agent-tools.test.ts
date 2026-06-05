@@ -1385,6 +1385,49 @@ describe("agent lifecycle tool handlers", () => {
     expect(data.parent_agent_id).toBe(parentId);
   });
 
+  it("my_agents resolves finalized parents through their pending aliases", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const myAgents = (server as any)._registeredTools["my_agents"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const parentResult = await spawn.handler(
+      {
+        repo: "orchestrator",
+        model: "opus",
+        cli: "claude",
+        prompt: "orchestrate",
+      },
+      {} as any,
+    );
+    const pendingParentId = parentResult.structuredContent.agent_id;
+    const finalParentId = "orchestratorClaude-session1";
+    const renamed = engine.stateMgr.renameState(pendingParentId, finalParentId);
+    engine
+      .getRegistry()
+      .rename(pendingParentId, finalParentId, renamed);
+
+    await spawn.handler(
+      {
+        repo: "voicelayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "fix",
+        parent_agent_id: pendingParentId,
+      },
+      {} as any,
+    );
+
+    const result = await myAgents.handler(
+      { parent_agent_id: pendingParentId },
+      {} as any,
+    );
+    const data = result.structuredContent;
+    expect(data.count).toBe(1);
+    expect(data.agents[0].repo).toBe("voicelayer");
+    expect(data.parent_agent_id).toBe(pendingParentId);
+  });
+
   it("my_agents returns empty array for nonexistent parent (orphan-safe)", async () => {
     const server = createLifecycleServer(mockExec);
     const myAgents = (server as any)._registeredTools["my_agents"];
