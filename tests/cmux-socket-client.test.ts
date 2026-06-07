@@ -7,9 +7,20 @@
  * 3. Error handling and connection lifecycle
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  vi,
+} from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
@@ -93,6 +104,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
   "progress.clear": {},
   "notification.create": {},
   "surface.close": {},
+  "auth.login": {},
   "system.identify": {
     caller: {
       workspace_ref: "workspace:1",
@@ -106,8 +118,13 @@ let mockServer: net.Server;
 let lastV1Command = "";
 let lastV2Request: { method: string; params: Record<string, unknown> } | null =
   null;
+const mockEvents: Array<
+  | { type: "v1"; command: string }
+  | { type: "v2"; method: string; params: Record<string, unknown> }
+> = [];
 let connectionCount = 0;
 const activeConnections = new Set<net.Socket>();
+const helperServerConnections = new WeakMap<net.Server, Set<net.Socket>>();
 
 function startMockServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -135,6 +152,11 @@ function startMockServer(): Promise<void> {
             const req = JSON.parse(line);
             const method = req.method as string;
             lastV2Request = { method, params: req.params ?? {} };
+            mockEvents.push({
+              type: "v2",
+              method,
+              params: req.params ?? {},
+            });
             const result = MOCK_RESPONSES[method];
 
             if (result !== undefined) {
@@ -156,6 +178,7 @@ function startMockServer(): Promise<void> {
           } catch {
             // Not JSON — handle as V1 plain-text command
             lastV1Command = line;
+            mockEvents.push({ type: "v1", command: line });
             const cmd = line.split(" ")[0];
             if (
               cmd &&
@@ -201,6 +224,151 @@ function stopMockServer(): Promise<void> {
   });
 }
 
+function startSocketServer(socketPath: string): Promise<net.Server> {
+  return new Promise((resolve) => {
+    try {
+      fs.unlinkSync(socketPath);
+    } catch {
+      /* ignore */
+    }
+
+    const connections = new Set<net.Socket>();
+    const server = net.createServer((conn) => {
+      connections.add(conn);
+      conn.on("close", () => connections.delete(conn));
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (!line.trim()) continue;
+
+          const req = JSON.parse(line);
+          conn.write(
+            JSON.stringify({
+              id: req.id,
+              ok: true,
+              result: { pong: true },
+            }) + "\n",
+          );
+        }
+      });
+    });
+    helperServerConnections.set(server, connections);
+
+    server.listen(socketPath, () => resolve(server));
+  });
+}
+
+function stopSocketServer(
+  server: net.Server,
+  socketPath: string,
+): Promise<void> {
+  return new Promise((resolve) => {
+    for (const conn of helperServerConnections.get(server) ?? []) {
+      conn.destroy();
+    }
+    server.close(() => {
+      try {
+        fs.unlinkSync(socketPath);
+      } catch {
+        /* ignore */
+      }
+      resolve();
+    });
+  });
+}
+
+function startCloseAfterMethodServer(
+  socketPath: string,
+  closeMethod: string,
+): Promise<{ server: net.Server; seenMethods: string[] }> {
+  return new Promise((resolve) => {
+    try {
+      fs.unlinkSync(socketPath);
+    } catch {
+      /* ignore */
+    }
+
+    const seenMethods: string[] = [];
+    const connections = new Set<net.Socket>();
+    const server = net.createServer((conn) => {
+      connections.add(conn);
+      conn.on("close", () => connections.delete(conn));
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (!line.trim()) continue;
+
+          const req = JSON.parse(line);
+          seenMethods.push(req.method);
+          if (req.method === closeMethod) {
+            conn.destroy();
+            continue;
+          }
+          conn.write(
+            JSON.stringify({
+              id: req.id,
+              ok: true,
+              result: { pong: true },
+            }) + "\n",
+          );
+        }
+      });
+    });
+    helperServerConnections.set(server, connections);
+
+    server.listen(socketPath, () => resolve({ server, seenMethods }));
+  });
+}
+
+function startProtocolErrorServer(socketPath: string): Promise<net.Server> {
+  return new Promise((resolve) => {
+    try {
+      fs.unlinkSync(socketPath);
+    } catch {
+      /* ignore */
+    }
+
+    const connections = new Set<net.Socket>();
+    const server = net.createServer((conn) => {
+      connections.add(conn);
+      conn.on("close", () => connections.delete(conn));
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (!line.trim()) continue;
+
+          const req = JSON.parse(line);
+          conn.write(
+            JSON.stringify({
+              id: req.id,
+              ok: false,
+              error: {
+                code: "method_not_found",
+                message: "controlled protocol failure",
+              },
+            }) + "\n",
+          );
+        }
+      });
+    });
+    helperServerConnections.set(server, connections);
+
+    server.listen(socketPath, () => resolve(server));
+  });
+}
+
 // ── Shared lifecycle ───────────────────────────────────────────────────
 
 beforeAll(async () => {
@@ -220,6 +388,7 @@ afterAll(async () => {
 beforeEach(() => {
   lastV1Command = "";
   lastV2Request = null;
+  mockEvents.length = 0;
   connectionCount = 0;
 });
 
@@ -404,6 +573,25 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
       workspace: "workspace:1",
     });
     // No throw = success
+  });
+
+  it("authenticates before V1 commands when password is configured", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      password: "secret",
+    });
+
+    await client.setStatus("agent", "active", {
+      icon: "bolt",
+      workspace: "workspace:1",
+    });
+
+    expect(mockEvents).toEqual(
+      expect.arrayContaining([
+        { type: "v2", method: "auth.login", params: { password: "secret" } },
+        expect.objectContaining({ type: "v1", command: expect.stringContaining("set_status") }),
+      ]),
+    );
   });
 
   it("listStatus returns entries", async () => {
@@ -748,5 +936,266 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
     });
     // Should not be a CmuxSocketClient
     expect(client).not.toBeInstanceOf(CmuxSocketClient);
+  });
+
+  it("uses last-socket-path before legacy defaults when no env socket is set", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const liveSocketPath = join(stateDir, "cmux-live.sock");
+    fs.writeFileSync(
+      join(stateDir, "last-socket-path"),
+      `${liveSocketPath}\n`,
+      "utf-8",
+    );
+    const server = await startSocketServer(liveSocketPath);
+    const savedEnv = process.env.CMUX_SOCKET_PATH;
+    delete process.env.CMUX_SOCKET_PATH;
+    const logger = { error: vi.fn() };
+
+    try {
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+        logger,
+      });
+
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(logger.error).toHaveBeenCalledWith(
+        "[cmuxlayer] transport selected: socket",
+      );
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining(liveSocketPath),
+      );
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.CMUX_SOCKET_PATH;
+      } else {
+        process.env.CMUX_SOCKET_PATH = savedEnv;
+      }
+      await stopSocketServer(server, liveSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("probes the uid-suffixed state socket when last-socket-path is absent", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const uid =
+      typeof process.getuid === "function" ? process.getuid() : undefined;
+    const liveSocketPath = join(
+      stateDir,
+      uid === undefined ? "cmux.sock" : `cmux-${uid}.sock`,
+    );
+    const server = await startSocketServer(liveSocketPath);
+    const savedEnv = process.env.CMUX_SOCKET_PATH;
+    delete process.env.CMUX_SOCKET_PATH;
+
+    try {
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+      });
+
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.CMUX_SOCKET_PATH;
+      } else {
+        process.env.CMUX_SOCKET_PATH = savedEnv;
+      }
+      await stopSocketServer(server, liveSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-probes candidate sockets after the selected socket fails", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const firstSocketPath = join(stateDir, "first.sock");
+    const secondSocketPath = join(stateDir, "second.sock");
+    fs.writeFileSync(
+      join(stateDir, "last-socket-path"),
+      `${firstSocketPath}\n`,
+      "utf-8",
+    );
+    const firstServer = await startSocketServer(firstSocketPath);
+    const savedEnv = process.env.CMUX_SOCKET_PATH;
+    delete process.env.CMUX_SOCKET_PATH;
+
+    let secondServer: net.Server | null = null;
+    try {
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+      });
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(await client.ping()).toBe(true);
+
+      await stopSocketServer(firstServer, firstSocketPath);
+      fs.writeFileSync(
+        join(stateDir, "last-socket-path"),
+        `${secondSocketPath}\n`,
+        "utf-8",
+      );
+      secondServer = await startSocketServer(secondSocketPath);
+
+      await expect(client.ping()).resolves.toBe(true);
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.CMUX_SOCKET_PATH;
+      } else {
+        process.env.CMUX_SOCKET_PATH = savedEnv;
+      }
+      if (secondServer) {
+        await stopSocketServer(secondServer, secondSocketPath);
+      }
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replay mutating calls after re-probing a failed socket", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const firstSocketPath = join(stateDir, "first.sock");
+    const secondSocketPath = join(stateDir, "second.sock");
+    fs.writeFileSync(
+      join(stateDir, "last-socket-path"),
+      `${firstSocketPath}\n`,
+      "utf-8",
+    );
+    const first = await startCloseAfterMethodServer(
+      firstSocketPath,
+      "surface.send_text",
+    );
+    const savedEnv = process.env.CMUX_SOCKET_PATH;
+    delete process.env.CMUX_SOCKET_PATH;
+
+    let secondServer: net.Server | null = null;
+    try {
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+      });
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+
+      fs.writeFileSync(
+        join(stateDir, "last-socket-path"),
+        `${secondSocketPath}\n`,
+        "utf-8",
+      );
+      secondServer = await startSocketServer(secondSocketPath);
+
+      await expect(
+        client.send("surface:1", "do-not-duplicate", {
+          workspace: "workspace:1",
+        }),
+      ).rejects.toThrow(/Socket closed unexpectedly|Socket error/i);
+      expect(first.seenMethods).toContain("surface.send_text");
+
+      await expect(client.ping()).resolves.toBe(true);
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.CMUX_SOCKET_PATH;
+      } else {
+        process.env.CMUX_SOCKET_PATH = savedEnv;
+      }
+      await stopSocketServer(first.server, firstSocketPath);
+      if (secondServer) {
+        await stopSocketServer(secondServer, secondSocketPath);
+      }
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hop sockets after non-transport protocol errors", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const firstSocketPath = join(stateDir, "first.sock");
+    const secondSocketPath = join(stateDir, "second.sock");
+    const firstServer = await startProtocolErrorServer(firstSocketPath);
+    const secondServer = await startSocketServer(secondSocketPath);
+
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: firstSocketPath,
+        socketPathResolver: async () => secondSocketPath,
+      });
+
+      await expect(client.ping()).rejects.toThrow(/method_not_found/i);
+    } finally {
+      await stopSocketServer(firstServer, firstSocketPath);
+      await stopSocketServer(secondServer, secondSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips listening but unusable sockets during runtime re-resolution", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const firstSocketPath = join(stateDir, "first.sock");
+    const badSocketPath = join(stateDir, "bad.sock");
+    const uid =
+      typeof process.getuid === "function" ? process.getuid() : undefined;
+    const healthySocketPath = join(
+      stateDir,
+      uid === undefined ? "cmux.sock" : `cmux-${uid}.sock`,
+    );
+    fs.writeFileSync(
+      join(stateDir, "last-socket-path"),
+      `${firstSocketPath}\n`,
+      "utf-8",
+    );
+    const firstServer = await startSocketServer(firstSocketPath);
+    const savedEnv = process.env.CMUX_SOCKET_PATH;
+    delete process.env.CMUX_SOCKET_PATH;
+
+    let badServer: net.Server | null = null;
+    let healthyServer: net.Server | null = null;
+    try {
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+      });
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(await client.ping()).toBe(true);
+
+      await stopSocketServer(firstServer, firstSocketPath);
+      fs.writeFileSync(
+        join(stateDir, "last-socket-path"),
+        `${badSocketPath}\n`,
+        "utf-8",
+      );
+      badServer = await startProtocolErrorServer(badSocketPath);
+      healthyServer = await startSocketServer(healthySocketPath);
+
+      await expect(client.ping()).resolves.toBe(true);
+    } finally {
+      if (savedEnv === undefined) {
+        delete process.env.CMUX_SOCKET_PATH;
+      } else {
+        process.env.CMUX_SOCKET_PATH = savedEnv;
+      }
+      if (badServer) await stopSocketServer(badServer, badSocketPath);
+      if (healthyServer) {
+        await stopSocketServer(healthyServer, healthySocketPath);
+      }
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent reconnects through one socket re-resolution", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const firstSocketPath = join(stateDir, "missing.sock");
+    const secondSocketPath = join(stateDir, "second.sock");
+    const secondServer = await startSocketServer(secondSocketPath);
+    let resolverCalls = 0;
+
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: firstSocketPath,
+        timeoutMs: 50,
+        socketPathResolver: async () => {
+          resolverCalls++;
+          return secondSocketPath;
+        },
+      });
+
+      await expect(Promise.all([client.ping(), client.ping()])).resolves.toEqual(
+        [true, true],
+      );
+      expect(resolverCalls).toBe(1);
+    } finally {
+      await stopSocketServer(secondServer, secondSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 });

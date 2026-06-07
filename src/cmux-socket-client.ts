@@ -31,6 +31,15 @@ export { CmuxSocketError } from "./cmux-socket-error.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
+const RETRY_SAFE_V2_METHODS = new Set([
+  "system.ping",
+  "system.identify",
+  "workspace.list",
+  "surface.list",
+  "pane.list",
+  "surface.read_text",
+  "status.list",
+]);
 
 interface V1RawArg {
   raw: string;
@@ -46,6 +55,8 @@ export interface CmuxSocketClientOptions {
   password?: string;
   /** CLI client fallback for V2 methods not supported by the daemon */
   cliFallback?: CmuxClient;
+  /** Re-resolve a live socket when the current path stops accepting requests */
+  socketPathResolver?: () => Promise<string | null>;
 }
 
 // ── The Client ─────────────────────────────────────────────────────────
@@ -54,15 +65,22 @@ export class CmuxSocketClient {
   private socketPath: string;
   private timeoutMs: number;
   private password?: string;
+  private authPassword?: string;
   private cliFallback?: CmuxClient;
   private transport: CmuxPersistentSocket;
+  private maxInFlight?: number;
+  private socketPathResolver?: () => Promise<string | null>;
+  private reconnecting?: Promise<void>;
 
   constructor(opts?: CmuxSocketClientOptions) {
     this.socketPath =
       opts?.socketPath ?? process.env.CMUX_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.password = opts?.password;
+    this.authPassword = opts?.password;
     this.cliFallback = opts?.cliFallback;
+    this.maxInFlight = opts?.maxInFlight;
+    this.socketPathResolver = opts?.socketPathResolver;
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
@@ -89,7 +107,13 @@ export class CmuxSocketClient {
    * set_progress, log) only exist as V1 commands.
    */
   private sendV1(command: string): Promise<string> {
-    return this.transport.sendLine(command);
+    return this.withConnectionRetry(
+      async () => {
+        await this.ensureAuthenticated();
+        return this.transport.sendLine(command);
+      },
+      false,
+    );
   }
 
   private quoteV1Arg(arg: string): string {
@@ -120,11 +144,76 @@ export class CmuxSocketClient {
     method: string,
     params: Record<string, unknown> = {},
   ): Promise<T> {
-    if (this.password) {
-      await this.transport.call("auth.login", { password: this.password });
-      this.password = undefined;
+    return this.withConnectionRetry(
+      async () => {
+        await this.ensureAuthenticated();
+        return this.transport.call<T>(method, params);
+      },
+      RETRY_SAFE_V2_METHODS.has(method),
+    );
+  }
+
+  private async ensureAuthenticated(): Promise<void> {
+    if (!this.password) return;
+    await this.transport.call("auth.login", { password: this.password });
+    this.password = undefined;
+  }
+
+  private async withConnectionRetry<T>(
+    operation: () => Promise<T>,
+    retryOperation: boolean,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!this.shouldReprobe(error)) {
+        throw error;
+      }
+
+      await this.reconnectTransport(error);
+      if (!retryOperation) {
+        throw error;
+      }
+      return operation();
     }
-    return this.transport.call<T>(method, params);
+  }
+
+  private shouldReprobe(error: unknown): boolean {
+    return (
+      error instanceof CmuxSocketError &&
+      (error.code === "connection_error" || error.code === "connection_closed")
+    );
+  }
+
+  private replaceTransport(socketPath: string): void {
+    this.transport.disconnect();
+    this.socketPath = socketPath;
+    this.password = this.authPassword;
+    this.transport = new CmuxPersistentSocket({
+      socketPath: this.socketPath,
+      timeoutMs: this.timeoutMs,
+      maxInFlight: this.maxInFlight,
+    });
+  }
+
+  private async reconnectTransport(originalError: unknown): Promise<void> {
+    if (!this.reconnecting) {
+      this.reconnecting = (async () => {
+        const nextPath = await this.socketPathResolver?.();
+        if (!nextPath) {
+          throw originalError;
+        }
+        this.replaceTransport(nextPath);
+      })().finally(() => {
+        this.reconnecting = undefined;
+      });
+    }
+
+    return this.reconnecting;
+  }
+
+  currentSocketPath(): string {
+    return this.socketPath;
   }
 
   // ── Public API (mirrors CmuxClient interface) ──────────────────────
