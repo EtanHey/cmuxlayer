@@ -257,7 +257,6 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     const screen = await this.client.readScreen(route.surface_id, {
       workspace: route.workspace_id ?? undefined,
       lines: 40,
-      scrollback: true,
     });
     const text = typeof screen === "string" ? screen : (screen.text ?? "");
     const parsed = parseScreen(text);

@@ -376,6 +376,49 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("read_agent_output scans bounded tail lines by default", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["read_agent_output"];
+
+    const result = await tool.handler(
+      { surface: "surface:new", tag: "OUTPUT", lines: 80 },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.found).toBe(false);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "read-screen",
+        "--surface",
+        "surface:new",
+        "--lines",
+        "80",
+      ]),
+    );
+    const readCalls = (mockExec as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("read-screen"),
+    );
+    expect(readCalls.at(-1)?.[1]).not.toContain("--scrollback");
+  });
+
+  it("read_agent_output can opt into full scrollback", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["read_agent_output"];
+
+    await tool.handler(
+      { surface: "surface:new", tag: "OUTPUT", lines: 80, scrollback: true },
+      {} as any,
+    );
+
+    const readCalls = (mockExec as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("read-screen"),
+    );
+    expect(readCalls.at(-1)?.[1]).toContain("--scrollback");
+  });
+
   it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");

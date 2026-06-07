@@ -88,7 +88,6 @@ describe("CmuxAppServerRuntime", () => {
     expect(client.readScreen).toHaveBeenCalledWith("surface:1", {
       workspace: "workspace:app",
       lines: 40,
-      scrollback: true,
     });
 
     runtime.dispose();
