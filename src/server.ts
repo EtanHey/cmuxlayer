@@ -17,6 +17,7 @@ import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
   AgentEngine,
+  resolveSweepTiming,
   type AgentLifecycleEvent,
   type SessionIdentityResolver,
   type SpawnAgentParams,
@@ -3264,7 +3265,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .catch((e) =>
           console.error("[cmux-mcp] registry reconstitution failed:", e),
         );
-      engine.startSweep(5000);
+      engine.startSweep(resolveSweepTiming());
     }
 
     // 11. spawn_agent

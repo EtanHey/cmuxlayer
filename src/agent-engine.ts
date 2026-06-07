@@ -110,7 +110,10 @@ export type AgentLifecycleEvent = "spawned" | "done" | "errored";
 
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
-const SWEEP_INTERVAL_MS = 1000;
+const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
+const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
+const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
+const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
@@ -138,6 +141,18 @@ interface SidebarStatusSnapshot {
   workspaceId: string | null;
 }
 
+export interface SweepTimingOptions {
+  activeIntervalMs: number;
+  idleIntervalMs: number;
+  idleAfterSweeps: number;
+}
+
+type SweepTimingInput = number | Partial<SweepTimingOptions>;
+
+interface SweepAgentContext {
+  screen?: Promise<CmuxReadScreenResult>;
+}
+
 function autoArchiveEnabledByEnv(): boolean {
   return !["0", "false", "off", "no"].includes(
     (process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE ?? "").toLowerCase(),
@@ -146,6 +161,62 @@ function autoArchiveEnabledByEnv(): boolean {
 
 function tailScreenLines(text: string, lines: number): string {
   return text.split(/\r?\n/).slice(-lines).join("\n");
+}
+
+function parseNonNegativeInteger(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parsePositiveInteger(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function resolveSweepTiming(
+  env: NodeJS.ProcessEnv = process.env,
+  input?: SweepTimingInput,
+): SweepTimingOptions {
+  if (typeof input === "number") {
+    return {
+      activeIntervalMs: input,
+      idleIntervalMs: input,
+      idleAfterSweeps: Number.POSITIVE_INFINITY,
+    };
+  }
+
+  const activeIntervalMs =
+    input?.activeIntervalMs ??
+    parsePositiveInteger(
+      env.CMUXLAYER_SWEEP_INTERVAL_MS,
+      DEFAULT_SWEEP_ACTIVE_INTERVAL_MS,
+    );
+  const idleIntervalMs =
+    input?.idleIntervalMs ??
+    parsePositiveInteger(
+      env.CMUXLAYER_SWEEP_IDLE_INTERVAL_MS,
+      DEFAULT_SWEEP_IDLE_INTERVAL_MS,
+    );
+  const idleAfterSweeps =
+    input?.idleAfterSweeps ??
+    parseNonNegativeInteger(
+      env.CMUXLAYER_SWEEP_IDLE_AFTER_SWEEPS,
+      DEFAULT_SWEEP_IDLE_AFTER_SWEEPS,
+    );
+
+  return {
+    activeIntervalMs,
+    idleIntervalMs,
+    idleAfterSweeps,
+  };
 }
 
 function taskDoneAutoArchiveMs(): number {
@@ -398,7 +469,10 @@ export class AgentEngine {
   ) => RoleSurfaceIds;
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
   private sessionIdentityResolver: SessionIdentityResolver;
-  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private sweepTiming: SweepTimingOptions | null = null;
+  private lastSweepSignature: string | null = null;
+  private unchangedSweepCount = 0;
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
   private progressSnapshot: string | null = null;
@@ -483,7 +557,7 @@ export class AgentEngine {
   ): Promise<AgentRecord> {
     if (!this.requiresOutputDoneEvidence(targetState)) return agent;
     if (TERMINAL_STATES.has(agent.state)) return agent;
-    return (await this.maybeMarkTaskDone(agent)).agent;
+    return (await this.maybeMarkTaskDone(agent, {})).agent;
   }
 
   private async createAgentSurface(
@@ -672,7 +746,20 @@ export class AgentEngine {
     return updated;
   }
 
-  private async maybeCaptureBootSessionId(agent: AgentRecord): Promise<AgentRecord> {
+  private readSweepScreen(
+    agent: AgentRecord,
+    ctx: SweepAgentContext,
+  ): Promise<CmuxReadScreenResult> {
+    ctx.screen ??= this.client.readScreen(agent.surface_id, {
+      lines: BOOT_SESSION_CAPTURE_LINES,
+    });
+    return ctx.screen;
+  }
+
+  private async maybeCaptureBootSessionId(
+    agent: AgentRecord,
+    ctx: SweepAgentContext,
+  ): Promise<AgentRecord> {
     if (agent.cli_session_id || !this.isBootCaptureWindowOpen(agent)) {
       return agent;
     }
@@ -687,9 +774,7 @@ export class AgentEngine {
     }
 
     try {
-      const screen = await this.client.readScreen(agent.surface_id, {
-        lines: BOOT_SESSION_CAPTURE_LINES,
-      });
+      const screen = await this.readSweepScreen(agent, ctx);
       const sessionId = extractSessionId(screen.text);
       if (!sessionId) {
         return agent;
@@ -704,7 +789,10 @@ export class AgentEngine {
     }
   }
 
-  private async maybeMarkBootReady(agent: AgentRecord): Promise<AgentRecord> {
+  private async maybeMarkBootReady(
+    agent: AgentRecord,
+    ctx: SweepAgentContext,
+  ): Promise<AgentRecord> {
     if (agent.state !== "booting") {
       this.readyPatternMatches.delete(agent.agent_id);
       return agent;
@@ -734,9 +822,7 @@ export class AgentEngine {
     }
 
     try {
-      const screen = await this.client.readScreen(agent.surface_id, {
-        lines: BOOT_SESSION_CAPTURE_LINES,
-      });
+      const screen = await this.readSweepScreen(agent, ctx);
       const match = matchReadyPattern(agent.cli, screen.text);
       if (!match.matched) {
         this.readyPatternMatches.delete(agent.agent_id);
@@ -760,13 +846,12 @@ export class AgentEngine {
 
   private async maybeMarkTaskDone(
     agent: AgentRecord,
+    ctx: SweepAgentContext,
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
 
     try {
-      const screen = await this.client.readScreen(agent.surface_id, {
-        lines: BOOT_SESSION_CAPTURE_LINES,
-      });
+      const screen = await this.readSweepScreen(agent, ctx);
       if (!this.hasOutputDoneEvidence(screen.text)) {
         if (agent.task_done_candidate_at) {
           const updated = this.stateMgr.updateRecord(agent.agent_id, {
@@ -993,9 +1078,16 @@ export class AgentEngine {
     const done = agents.filter((a) => a.state === "done").length;
 
     for (const originalAgent of agents) {
-      const capturedAgent = await this.maybeCaptureBootSessionId(originalAgent);
-      const readyAgent = await this.maybeMarkBootReady(capturedAgent);
-      const taskDoneResult = await this.maybeMarkTaskDone(readyAgent);
+      const sweepCtx: SweepAgentContext = {};
+      const capturedAgent = await this.maybeCaptureBootSessionId(
+        originalAgent,
+        sweepCtx,
+      );
+      const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
+      const taskDoneResult = await this.maybeMarkTaskDone(
+        readyAgent,
+        sweepCtx,
+      );
       const agent = taskDoneResult.agent;
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
@@ -1174,16 +1266,72 @@ export class AgentEngine {
     await this.syncSidebar();
   }
 
+  private sweepStateSignature(): string {
+    return this.registry
+      .list()
+      .map((agent) =>
+        [
+          agent.agent_id,
+          agent.surface_id,
+          agent.workspace_id ?? "",
+          agent.state,
+          agent.updated_at,
+          agent.cli_session_id ?? "",
+          agent.task_done_candidate_at ?? "",
+          agent.quality ?? "",
+        ].join(":"),
+      )
+      .sort()
+      .join("|");
+  }
+
+  private recordSweepStability(): void {
+    const signature = this.sweepStateSignature();
+    if (this.lastSweepSignature !== null && signature === this.lastSweepSignature) {
+      this.unchangedSweepCount += 1;
+    } else {
+      this.unchangedSweepCount = 0;
+    }
+    this.lastSweepSignature = signature;
+  }
+
+  private nextSweepIntervalMs(): number {
+    const timing = this.sweepTiming ?? resolveSweepTiming();
+    return this.unchangedSweepCount >= timing.idleAfterSweeps
+      ? timing.idleIntervalMs
+      : timing.activeIntervalMs;
+  }
+
   /**
    * Start the reconciliation sweep on an interval.
    */
-  startSweep(intervalMs: number = 5000): void {
+  startSweep(timingInput?: SweepTimingInput): void {
     if (this.sweepTimer) return;
-    this.sweepTimer = setInterval(() => {
-      this.runSweep().catch((e) => {
+    this.sweepTiming = resolveSweepTiming(process.env, timingInput);
+    this.unchangedSweepCount = 0;
+    this.lastSweepSignature = null;
+
+    const runAndSchedule = async () => {
+      this.sweepTimer = null;
+      try {
+        await this.runSweep();
+      } catch (e) {
         console.error("[cmux-mcp] sweep failed (will retry):", e);
-      });
-    }, intervalMs);
+      } finally {
+        this.recordSweepStability();
+        if (this.sweepTiming) {
+          this.sweepTimer = setTimeout(
+            runAndSchedule,
+            this.nextSweepIntervalMs(),
+          );
+        }
+      }
+    };
+
+    this.sweepTimer = setTimeout(
+      runAndSchedule,
+      this.sweepTiming.activeIntervalMs,
+    );
   }
 
   /**
@@ -1191,9 +1339,12 @@ export class AgentEngine {
    */
   dispose(): void {
     if (this.sweepTimer) {
-      clearInterval(this.sweepTimer);
+      clearTimeout(this.sweepTimer);
       this.sweepTimer = null;
     }
+    this.sweepTiming = null;
+    this.lastSweepSignature = null;
+    this.unchangedSweepCount = 0;
   }
 
   /**
@@ -1432,7 +1583,7 @@ export class AgentEngine {
               current.error ?? `Agent entered terminal state: ${current.state}`,
           });
         }
-      }, SWEEP_INTERVAL_MS);
+      }, WAIT_FOR_SWEEP_INTERVAL_MS);
     });
   }
 

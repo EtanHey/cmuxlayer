@@ -14,6 +14,7 @@ import {
   buildLaunchCommand,
   buildResumeCommand,
   extractSessionId,
+  resolveSweepTiming,
 } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -2042,6 +2043,33 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
+    it("reuses one tail read for boot capture, readiness, task done, and context checks in a sweep", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-reuse",
+          state: "booting",
+          surface_id: "surface:reuse",
+          cli: "codex",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:reuse")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:reuse",
+        text: "codex> ",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:reuse", {
+        lines: 80,
+      });
+      expect(engine.getAgentState("agent-boot-reuse")?.state).toBe("ready");
+    });
+
     it("does not promote booting agents while boot prompt delivery is pending", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -2120,6 +2148,58 @@ To continue this session, run codex resume ${sessionId}`,
       await expect(
         engine.waitFor("nonexistent", "ready", 1000),
       ).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("startSweep", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("backs off to the idle interval after unchanged sweeps", async () => {
+      const sweep = vi.spyOn(engine, "runSweep").mockResolvedValue(undefined);
+
+      engine.startSweep({
+        activeIntervalMs: 50,
+        idleIntervalMs: 150,
+        idleAfterSweeps: 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(sweep).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(3);
+    });
+
+    it("resolves sweep timing from environment with idle defaults", () => {
+      expect(
+        resolveSweepTiming({
+          CMUXLAYER_SWEEP_INTERVAL_MS: "7000",
+          CMUXLAYER_SWEEP_IDLE_INTERVAL_MS: "25000",
+          CMUXLAYER_SWEEP_IDLE_AFTER_SWEEPS: "4",
+        }),
+      ).toEqual({
+        activeIntervalMs: 7000,
+        idleIntervalMs: 25000,
+        idleAfterSweeps: 4,
+      });
+
+      expect(resolveSweepTiming({})).toEqual({
+        activeIntervalMs: 5000,
+        idleIntervalMs: 15000,
+        idleAfterSweeps: 3,
+      });
     });
   });
 
