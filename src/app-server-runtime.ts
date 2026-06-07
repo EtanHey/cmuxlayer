@@ -3,7 +3,7 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
-import { AgentEngine } from "./agent-engine.js";
+import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
@@ -169,7 +169,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   async initialize(): Promise<void> {
     await this.registry.reconstitute();
     this.engine.enableStartupPurge();
-    this.engine.startSweep(5000);
+    this.engine.startSweep(resolveSweepTiming());
   }
 
   dispose(): void {

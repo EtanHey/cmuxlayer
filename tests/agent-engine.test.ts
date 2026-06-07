@@ -2182,6 +2182,75 @@ To continue this session, run codex resume ${sessionId}`,
       expect(sweep).toHaveBeenCalledTimes(3);
     });
 
+    it("keeps the active cadence while screen output changes", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-active-output",
+          state: "ready",
+          surface_id: "surface:active-output",
+          cli: "codex",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:active-output")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({
+          surface: "surface:active-output",
+          text: "Working 1",
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValueOnce({
+          surface: "surface:active-output",
+          text: "Working 2",
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValue({
+          surface: "surface:active-output",
+          text: "Working 3",
+          lines: 80,
+          scrollback_used: false,
+        });
+      await engine.getRegistry().reconstitute();
+
+      engine.startSweep({
+        activeIntervalMs: 50,
+        idleIntervalMs: 150,
+        idleAfterSweeps: 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(mockClient.readScreen).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not start a second loop while a sweep is running", async () => {
+      let finishSweep: (() => void) | null = null;
+      const sweep = vi
+        .spyOn(engine, "runSweep")
+        .mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finishSweep = resolve;
+            }),
+        );
+
+      engine.startSweep({ activeIntervalMs: 50 });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      engine.startSweep({ activeIntervalMs: 50 });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(1);
+
+      finishSweep?.();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sweep).toHaveBeenCalledTimes(2);
+    });
+
     it("resolves sweep timing from environment with idle defaults", () => {
       expect(
         resolveSweepTiming({
@@ -2197,6 +2266,12 @@ To continue this session, run codex resume ${sessionId}`,
 
       expect(resolveSweepTiming({})).toEqual({
         activeIntervalMs: 5000,
+        idleIntervalMs: 15000,
+        idleAfterSweeps: 3,
+      });
+
+      expect(resolveSweepTiming({}, 2500)).toEqual({
+        activeIntervalMs: 2500,
         idleIntervalMs: 15000,
         idleAfterSweeps: 3,
       });

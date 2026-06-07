@@ -163,6 +163,14 @@ function tailScreenLines(text: string, lines: number): string {
   return text.split(/\r?\n/).slice(-lines).join("\n");
 }
 
+function screenTextSignature(text: string): string {
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+  return `${text.length}:${hash.toString(16)}`;
+}
+
 function parseNonNegativeInteger(
   raw: string | undefined,
   fallback: number,
@@ -188,8 +196,14 @@ export function resolveSweepTiming(
   if (typeof input === "number") {
     return {
       activeIntervalMs: input,
-      idleIntervalMs: input,
-      idleAfterSweeps: Number.POSITIVE_INFINITY,
+      idleIntervalMs: parsePositiveInteger(
+        env.CMUXLAYER_SWEEP_IDLE_INTERVAL_MS,
+        DEFAULT_SWEEP_IDLE_INTERVAL_MS,
+      ),
+      idleAfterSweeps: parseNonNegativeInteger(
+        env.CMUXLAYER_SWEEP_IDLE_AFTER_SWEEPS,
+        DEFAULT_SWEEP_IDLE_AFTER_SWEEPS,
+      ),
     };
   }
 
@@ -473,6 +487,7 @@ export class AgentEngine {
   private sweepTiming: SweepTimingOptions | null = null;
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
+  private currentSweepScreenSignatures = new Map<string, string>();
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
   private progressSnapshot: string | null = null;
@@ -750,9 +765,17 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<CmuxReadScreenResult> {
-    ctx.screen ??= this.client.readScreen(agent.surface_id, {
-      lines: BOOT_SESSION_CAPTURE_LINES,
-    });
+    ctx.screen ??= this.client
+      .readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      })
+      .then((screen) => {
+        this.currentSweepScreenSignatures.set(
+          agent.agent_id,
+          `${agent.surface_id}:${screenTextSignature(screen.text)}`,
+        );
+        return screen;
+      });
     return ctx.screen;
   }
 
@@ -1246,6 +1269,7 @@ export class AgentEngine {
    * previous cmux sessions whose surface refs may have been recycled.
    */
   async runSweep(): Promise<void> {
+    this.currentSweepScreenSignatures = new Map();
     await this.registry.reconcile();
     await this.recoverCrashedAgents();
 
@@ -1267,7 +1291,7 @@ export class AgentEngine {
   }
 
   private sweepStateSignature(): string {
-    return this.registry
+    const agentSignature = this.registry
       .list()
       .map((agent) =>
         [
@@ -1283,6 +1307,11 @@ export class AgentEngine {
       )
       .sort()
       .join("|");
+    const screenSignature = [...this.currentSweepScreenSignatures.entries()]
+      .map(([agentId, signature]) => `${agentId}:${signature}`)
+      .sort()
+      .join("|");
+    return `${agentSignature}::screens:${screenSignature}`;
   }
 
   private recordSweepStability(): void {
@@ -1306,7 +1335,7 @@ export class AgentEngine {
    * Start the reconciliation sweep on an interval.
    */
   startSweep(timingInput?: SweepTimingInput): void {
-    if (this.sweepTimer) return;
+    if (this.sweepTiming) return;
     this.sweepTiming = resolveSweepTiming(process.env, timingInput);
     this.unchangedSweepCount = 0;
     this.lastSweepSignature = null;
