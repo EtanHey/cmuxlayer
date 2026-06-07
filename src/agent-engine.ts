@@ -689,7 +689,6 @@ export class AgentEngine {
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
-        scrollback: true,
       });
       const sessionId = extractSessionId(screen.text);
       if (!sessionId) {

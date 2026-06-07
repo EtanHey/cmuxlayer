@@ -3893,6 +3893,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default(200)
           .describe("Number of screen lines to scan (default: 200)"),
+        scrollback: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Scan full scrollback instead of only the current terminal tail. Default: false.",
+          ),
         workspace: z.string().optional().describe("Target workspace ref"),
       },
       ANNOTATIONS.readOnly,
@@ -3900,8 +3907,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           const opts: Record<string, unknown> = {
             lines: args.lines,
-            scrollback: true,
           };
+          if (args.scrollback) opts.scrollback = true;
           if (args.workspace) opts.workspace = args.workspace;
 
           const raw = await client.readScreen(args.surface, opts);

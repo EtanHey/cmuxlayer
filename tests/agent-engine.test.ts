@@ -1411,6 +1411,12 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
 
         await vi.advanceTimersByTimeAsync(1000);
 
+        expect(
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mock.calls,
+        ).not.toContainEqual([
+          "surface:new",
+          { lines: 80, scrollback: true },
+        ]);
         expect(engine.getAgentState(result.agent_id)?.cli_session_id).toBe(
           sessionId,
         );
