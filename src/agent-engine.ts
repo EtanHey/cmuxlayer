@@ -91,8 +91,19 @@ export type SessionIdentityResolver = (
   agent: AgentRecord,
 ) => CapturedSessionIdentity | string | null;
 
+/**
+ * Result of the spawn preflight. `launcherName` carries the launcher function
+ * name resolved by the candidate probe (see resolveLauncherName) so spawnAgent
+ * launches the form that actually registered, even when hyphens were stripped.
+ */
+export interface SpawnPreflightResult {
+  launcherName?: string;
+}
+
 export interface AgentEngineOptions {
-  spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
+  spawnPreflight?: (
+    params: SpawnAgentParams,
+  ) => Promise<SpawnPreflightResult | void>;
   spawnGuard?: SpawnGuard;
   sessionIdentityResolver?: SessionIdentityResolver;
   roleSurfaceIdsProvider?: (
@@ -416,6 +427,10 @@ export function buildLaunchCommand(
   cli: CliType,
   repo: string,
   model?: string,
+  // Resolved launcher function name (from resolveLauncherName). When provided
+  // for a launcher CLI it overrides the naive `${repo}${Suffix}` guess so
+  // hyphen-stripped registrations launch correctly. Ignored for gemini/kiro.
+  launcherName?: string,
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveModelFlag(cli, model);
@@ -424,16 +439,16 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${safeRepo}Claude -s${launcherModelArgs}`;
+      return `${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}`;
     case "codex":
-      return `${safeRepo}Codex -s${launcherModelArgs}`;
+      return `${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}`;
     case "gemini":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini${rawModelArgs}`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${safeRepo}Cursor -s${launcherModelArgs}`;
+      return `${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}`;
   }
 }
 
@@ -450,32 +465,91 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-export async function assertLauncherAvailable(
+export type LauncherSuffix = "Claude" | "Codex" | "Cursor";
+
+/**
+ * Ordered, de-duplicated launcher-name candidates for a repo + suffix.
+ *
+ * The repoGolem registry emits launcher function names INCONSISTENTLY per repo
+ * (see ~/.config/ralphtools/golem-dispatch.zsh `_golem_register_wrappers`):
+ *   - the primary wrapper uses the lowercased, hyphen-stripped registry key
+ *     (`${(L)name}` -> `agenthtmlhostCursor`), and
+ *   - the P10 "hyphen-aware verbatim alias" is emitted ONLY for some repos
+ *     (`agent-html-hostCursor` exists for `maakaf-home`/`skill-creator` but
+ *     NOT for `agent-html-host`).
+ *
+ * cmuxlayer cannot know which form a given repo registered, so we generate
+ * both and probe in order. Candidate #1 preserves today's behavior (verbatim
+ * dir name); candidate #2 matches the registry's primary wrapper.
+ */
+export function launcherNameCandidates(
   repo: string,
-  suffix: "Claude" | "Codex" | "Cursor",
-): Promise<void> {
-  const launcher = `${sanitizeRepoName(repo)}${suffix}`;
+  suffix: LauncherSuffix,
+): string[] {
+  const safeRepo = sanitizeRepoName(repo);
+  const verbatim = `${safeRepo}${suffix}`;
+  const stripped = `${safeRepo.replace(/-/g, "").toLowerCase()}${suffix}`;
+  return stripped === verbatim ? [verbatim] : [verbatim, stripped];
+}
+
+/** Returns true when a launcher function/command resolves in the login shell. */
+export type LauncherProbe = (launcher: string) => Promise<boolean>;
+
+const shellLauncherProbe: LauncherProbe = async (launcher) => {
   const shell = process.env.SHELL || "/bin/zsh";
   const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
-
   try {
     await execFileAsync(shell, ["-ilc", probe]);
+    return true;
   } catch {
-    throw new Error(
-      `Launcher "${launcher}" not found. ` +
-        `For repo "${repo}" with hyphens the launcher strips hyphens ` +
-        `(e.g. "skill-creator" -> "skillcreatorCursor"). ` +
-        `Register the launcher in golem-powers or use cli="gemini"/"kiro" ` +
-        `which use direct cd+exec paths.`,
-    );
+    return false;
   }
+};
+
+/**
+ * Resolve the actual launcher function name by probing candidate forms in
+ * order. Returns the first candidate that resolves in the login shell; throws a
+ * clear registration error (listing every form tried) when none resolve. The
+ * probe is injectable for deterministic tests.
+ */
+export async function resolveLauncherName(
+  repo: string,
+  suffix: LauncherSuffix,
+  probe: LauncherProbe = shellLauncherProbe,
+): Promise<string> {
+  const candidates = launcherNameCandidates(repo, suffix);
+  for (const candidate of candidates) {
+    if (await probe(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Launcher not found for repo "${repo}". Tried: ${candidates.join(", ")}. ` +
+      `The repoGolem registry may strip hyphens (e.g. "agent-html-host" -> ` +
+      `"agenthtmlhostCursor"). Register the launcher in golem-powers or use ` +
+      `cli="gemini"/"kiro" which use direct cd+exec paths.`,
+  );
+}
+
+/**
+ * Validate that a launcher is registered and return its resolved name. Probes
+ * candidate forms so multi-hyphen repos that registered a stripped name resolve
+ * instead of failing on the naive verbatim guess.
+ */
+export async function assertLauncherAvailable(
+  repo: string,
+  suffix: LauncherSuffix,
+): Promise<string> {
+  return resolveLauncherName(repo, suffix);
 }
 
 export class AgentEngine {
   private stateMgr: StateManager;
   private registry: AgentRegistry;
   private client: AgentEngineClient;
-  private spawnPreflight: (params: SpawnAgentParams) => Promise<void>;
+  private spawnPreflight: (
+    params: SpawnAgentParams,
+  ) => Promise<SpawnPreflightResult | void>;
   private spawnGuard: SpawnGuard;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
@@ -513,13 +587,21 @@ export class AgentEngine {
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.spawnPreflight =
       opts?.spawnPreflight ??
-      (async (params) => {
+      (async (params): Promise<SpawnPreflightResult | void> => {
         if (params.cli === "claude") {
-          await assertLauncherAvailable(params.repo, "Claude");
-        } else if (params.cli === "codex") {
-          await assertLauncherAvailable(params.repo, "Codex");
-        } else if (params.cli === "cursor") {
-          await assertLauncherAvailable(params.repo, "Cursor");
+          return {
+            launcherName: await assertLauncherAvailable(params.repo, "Claude"),
+          };
+        }
+        if (params.cli === "codex") {
+          return {
+            launcherName: await assertLauncherAvailable(params.repo, "Codex"),
+          };
+        }
+        if (params.cli === "cursor") {
+          return {
+            launcherName: await assertLauncherAvailable(params.repo, "Cursor"),
+          };
         }
       });
   }
@@ -1412,7 +1494,7 @@ export class AgentEngine {
 
     this.spawnGuard.check(params.workspace);
 
-    await this.spawnPreflight(params);
+    const preflight = await this.spawnPreflight(params);
 
     // 1. Create cmux surface using the deterministic worker layout policy.
     const surface = await this.createAgentSurface(params.workspace, {
@@ -1455,7 +1537,12 @@ export class AgentEngine {
     this.registry.set(agentId, record);
 
     // 3. Send launch command
-    const launchCmd = buildLaunchCommand(params.cli, params.repo, params.model);
+    const launchCmd = buildLaunchCommand(
+      params.cli,
+      params.repo,
+      params.model,
+      preflight?.launcherName,
+    );
     try {
       await this.sendLaunchCommand(surface.surface, surface.workspace, launchCmd);
     } catch (error) {

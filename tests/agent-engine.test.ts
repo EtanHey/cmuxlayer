@@ -14,6 +14,8 @@ import {
   buildLaunchCommand,
   buildResumeCommand,
   extractSessionId,
+  launcherNameCandidates,
+  resolveLauncherName,
   resolveSweepTiming,
 } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
@@ -215,6 +217,28 @@ describe("AgentEngine", () => {
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
       expect(launchCmd).toBe("brainlayerClaude -s -m sonnet");
+    });
+
+    it("launches with the launcher name resolved by preflight", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      const resolvingEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        // agent-html-host registered only as the hyphen-stripped form.
+        spawnPreflight: async () => ({ launcherName: "agenthtmlhostCursor" }),
+        sessionIdentityResolver: () => null,
+      });
+
+      await resolvingEngine.spawnAgent({
+        repo: "agent-html-host",
+        cli: "cursor",
+        prompt: "Fix gap F",
+      });
+
+      const [, launchCmd] = (
+        mockClient.send as ReturnType<typeof vi.fn>
+      ).mock.calls[0];
+      expect(launchCmd).toBe("agenthtmlhostCursor -s");
+
+      resolvingEngine.dispose();
     });
 
     it("writes initial state file", async () => {
@@ -2725,6 +2749,33 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("uses an explicitly resolved launcher name for launcher CLIs", () => {
+    expect(
+      buildLaunchCommand(
+        "cursor",
+        "agent-html-host",
+        undefined,
+        "agenthtmlhostCursor",
+      ),
+    ).toBe("agenthtmlhostCursor -s");
+    expect(
+      buildLaunchCommand(
+        "claude",
+        "agent-html-host",
+        "sonnet",
+        "agenthtmlhostClaude",
+      ),
+    ).toBe("agenthtmlhostClaude -s -m sonnet");
+  });
+
+  it("ignores a launcher override for non-launcher CLIs", () => {
+    expect(
+      buildLaunchCommand("gemini", "voicelayer", undefined, "ignoredGemini"),
+    ).toBe(
+      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
+    );
+  });
+
   it("rejects invalid repo names", () => {
     expect(() => buildLaunchCommand("claude", "foo bar")).toThrow(
       /Invalid repo name/,
@@ -2785,14 +2836,14 @@ describe("assertLauncherAvailable", () => {
     vi.unstubAllEnvs();
   });
 
-  it("passes when the interactive shell probe returns 0", async () => {
+  it("resolves to the verbatim launcher name when the probe returns 0", async () => {
     execFileMock.mockImplementation((_cmd, _args, callback) => {
       callback(null, "", "");
     });
 
-    await expect(
-      assertLauncherAvailable("brainlayer", "Cursor"),
-    ).resolves.toBeUndefined();
+    await expect(assertLauncherAvailable("brainlayer", "Cursor")).resolves.toBe(
+      "brainlayerCursor",
+    );
 
     expect(execFileMock).toHaveBeenCalledWith(
       "/bin/zsh",
@@ -2804,7 +2855,23 @@ describe("assertLauncherAvailable", () => {
     );
   });
 
-  it("throws a clear launcher registration message when the probe fails", async () => {
+  it("falls back to the hyphen-stripped launcher when verbatim is unregistered", async () => {
+    // agent-html-host registered only as agenthtmlhostCursor (hyphens stripped).
+    execFileMock.mockImplementation((_cmd, args, callback) => {
+      const probe = String(args?.[1] ?? "");
+      if (probe.includes("agenthtmlhostCursor")) {
+        callback(null, "", "");
+      } else {
+        callback(new Error("missing launcher"), "", "");
+      }
+    });
+
+    await expect(
+      assertLauncherAvailable("agent-html-host", "Cursor"),
+    ).resolves.toBe("agenthtmlhostCursor");
+  });
+
+  it("throws listing every candidate when none resolve", async () => {
     execFileMock.mockImplementation((_cmd, _args, callback) => {
       callback(new Error("missing launcher"), "", "");
     });
@@ -2812,8 +2879,56 @@ describe("assertLauncherAvailable", () => {
     await expect(
       assertLauncherAvailable("skill-creator", "Cursor"),
     ).rejects.toThrow(
-      /Launcher "skill-creatorCursor" not found.*skillcreatorCursor.*cli="gemini"\/"kiro"/s,
+      /skill-creatorCursor.*skillcreatorCursor.*cli="gemini"\/"kiro"/s,
     );
+  });
+});
+
+describe("launcherNameCandidates", () => {
+  it("returns a single candidate for hyphenless repos", () => {
+    expect(launcherNameCandidates("brainlayer", "Cursor")).toEqual([
+      "brainlayerCursor",
+    ]);
+  });
+
+  it("adds the lowercased hyphen-stripped form for hyphenated repos", () => {
+    expect(launcherNameCandidates("agent-html-host", "Cursor")).toEqual([
+      "agent-html-hostCursor",
+      "agenthtmlhostCursor",
+    ]);
+  });
+
+  it("preserves the verbatim form even when it has hyphens", () => {
+    expect(launcherNameCandidates("maakaf-home", "Claude")).toEqual([
+      "maakaf-homeClaude",
+      "maakafhomeClaude",
+    ]);
+  });
+});
+
+describe("resolveLauncherName", () => {
+  it("returns the verbatim launcher when it resolves first", async () => {
+    const probe = vi.fn(async (name: string) => name === "maakaf-homeCursor");
+    await expect(
+      resolveLauncherName("maakaf-home", "Cursor", probe),
+    ).resolves.toBe("maakaf-homeCursor");
+    expect(probe).toHaveBeenCalledWith("maakaf-homeCursor");
+  });
+
+  it("probes the stripped form only after the verbatim form misses", async () => {
+    const probe = vi.fn(async (name: string) => name === "agenthtmlhostCursor");
+    await expect(
+      resolveLauncherName("agent-html-host", "Cursor", probe),
+    ).resolves.toBe("agenthtmlhostCursor");
+    expect(probe).toHaveBeenNthCalledWith(1, "agent-html-hostCursor");
+    expect(probe).toHaveBeenNthCalledWith(2, "agenthtmlhostCursor");
+  });
+
+  it("throws when no candidate resolves", async () => {
+    const probe = vi.fn(async () => false);
+    await expect(
+      resolveLauncherName("agent-html-host", "Cursor", probe),
+    ).rejects.toThrow(/agent-html-hostCursor.*agenthtmlhostCursor/s);
   });
 });
 
