@@ -12,7 +12,7 @@
 
   <key>EnvironmentVariables</key>
   <dict>
-    <key>CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB</key>
+    <key>CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB</key>
     <string>5</string>
     <key>CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB</key>
     <string>12</string>
