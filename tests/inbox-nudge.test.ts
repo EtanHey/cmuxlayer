@@ -23,7 +23,10 @@ import type { ExecFn } from "../src/cmux-client.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
 
-function makeExec(): ExecFn {
+function makeExec(
+  screenText = "What can I help you with?\n>",
+  surfaceTitle = "agent-pane",
+): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
       return {
@@ -69,7 +72,7 @@ function makeExec(): ExecFn {
           surfaces: [
             {
               ref: "surface:new",
-              title: "agent-pane",
+              title: surfaceTitle,
               type: "terminal",
               index: 0,
               selected: true,
@@ -83,7 +86,7 @@ function makeExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: "What can I help you with?\n>",
+          text: screenText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -228,6 +231,52 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(parsed.nudge.attempted).toBe(false);
     expect(parsed.nudge.sent).toBe(false);
     expect(readInbox("ghost-agent", { baseDir: inboxDir })).toHaveLength(1);
+  });
+
+  it("discovers and registers a launcher-spawned Claude agent before nudging", async () => {
+    exec = makeExec(
+      [
+        "Do you want to allow this command?",
+        "",
+        "❯ 1. Allow for this session",
+        "  2. Allow once",
+        "  3. Deny",
+        "",
+        "[y/n]",
+      ].join("\n"),
+      "agenthtmlhostClaude",
+    );
+    server = createServer({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+    });
+
+    const agentId = "auto-claude-surface-new";
+    const before = sendCalls(exec).length;
+    const dispatchTool = server._registeredTools["dispatch_to_agent"];
+    const result = await dispatchTool.handler(
+      {
+        agent_id: agentId,
+        task: "GO",
+        from: "orc",
+        tag: "dispatch",
+        persist: false,
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.nudge.attempted).toBe(true);
+    expect(parsed.nudge.sent).toBe(true);
+    expect(sendCalls(exec).length).toBeGreaterThan(before);
+    expect(
+      readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
+    ).toContain("GO");
   });
 
   it('nudge:"never" appends to the file only', async () => {
