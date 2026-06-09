@@ -189,6 +189,11 @@ export class AgentRegistry {
     return results;
   }
 
+  async hasLiveSurface(surfaceId: string): Promise<boolean> {
+    const surfaces = await this.surfaceProvider();
+    return surfaces.some((surface) => surface.ref === surfaceId);
+  }
+
   async listMerged(
     discovery: AgentDiscovery,
     opts?: { filter?: AgentFilter; force?: boolean },

@@ -99,6 +99,7 @@ export type SessionIdentityResolver = (
 export interface AgentEngineOptions {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   spawnGuard?: SpawnGuard;
+  postSpawnLivenessMs?: number;
   sessionIdentityResolver?: SessionIdentityResolver;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
@@ -120,6 +121,7 @@ const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
+const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS = 30 * 60_000;
@@ -493,6 +495,7 @@ export class AgentEngine {
   private client: AgentEngineClient;
   private spawnPreflight: (params: SpawnAgentParams) => Promise<void>;
   private spawnGuard: SpawnGuard;
+  private postSpawnLivenessMs: number;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -500,6 +503,7 @@ export class AgentEngine {
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
   private sessionIdentityResolver: SessionIdentityResolver;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
   private sweepTiming: SweepTimingOptions | null = null;
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
@@ -527,6 +531,12 @@ export class AgentEngine {
       opts?.sessionIdentityResolver ??
       ((agent) => this.findTranscriptSessionIdentity(agent));
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
+    this.postSpawnLivenessMs =
+      opts?.postSpawnLivenessMs ??
+      parseNonNegativeInteger(
+        process.env.CMUXLAYER_POST_SPAWN_LIVENESS_MS,
+        DEFAULT_POST_SPAWN_LIVENESS_MS,
+      );
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params) => {
@@ -1439,9 +1449,58 @@ export class AgentEngine {
       clearTimeout(this.sweepTimer);
       this.sweepTimer = null;
     }
+    for (const timer of this.postSpawnLivenessTimers) {
+      clearTimeout(timer);
+    }
+    this.postSpawnLivenessTimers.clear();
     this.sweepTiming = null;
     this.lastSweepSignature = null;
     this.unchangedSweepCount = 0;
+  }
+
+  private schedulePostSpawnLivenessAssertion(agentId: string): void {
+    const timer = setTimeout(() => {
+      this.postSpawnLivenessTimers.delete(timer);
+      void this.assertPostSpawnLiveness(agentId);
+    }, this.postSpawnLivenessMs);
+    this.postSpawnLivenessTimers.add(timer);
+  }
+
+  private async assertPostSpawnLiveness(agentId: string): Promise<void> {
+    const agent = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (!agent || TERMINAL_STATES.has(agent.state)) {
+      return;
+    }
+
+    const registered = this.registry.get(agentId) !== null;
+    const surfaceLive = await this.registry.hasLiveSurface(agent.surface_id);
+    if (registered && surfaceLive) {
+      return;
+    }
+
+    const reason = registered
+      ? `surface ${agent.surface_id} is not live`
+      : `agent ${agentId} is not registered`;
+    const error = `Post-spawn liveness failed: ${reason}`;
+
+    try {
+      const current = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+      if (current && !TERMINAL_STATES.has(current.state)) {
+        const failed = this.stateMgr.transition(agentId, "error", { error });
+        this.registry.set(agentId, failed);
+      }
+    } catch {
+      // Best-effort liveness assertion; still attempt surface cleanup below.
+    }
+
+    try {
+      await this.client.closeSurface(agent.surface_id, {
+        workspace: agent.workspace_id ?? undefined,
+        collapsePane: true,
+      });
+    } catch {
+      // Best-effort zombie cleanup.
+    }
   }
 
   /**
@@ -1538,6 +1597,7 @@ export class AgentEngine {
       }
       throw error;
     }
+    this.schedulePostSpawnLivenessAssertion(agentId);
 
     return {
       agent_id: agentId,

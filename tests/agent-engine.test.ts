@@ -232,6 +232,75 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).toHaveBeenCalled();
     });
 
+    it("marks a post-launch disappeared surface as error and attempts cleanup", async () => {
+      vi.useFakeTimers();
+      try {
+        engine.dispose();
+        engine = new AgentEngine(
+          stateMgr,
+          new AgentRegistry(stateMgr, async () => liveSurfaces),
+          mockClient,
+          {
+            spawnPreflight: async () => {},
+            postSpawnLivenessMs: 0,
+          },
+        );
+
+        const result = await engine.spawnAgent({
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "Fix gap F",
+        });
+
+        expect(stateMgr.readState(result.agent_id)?.state).toBe("booting");
+
+        await vi.runOnlyPendingTimersAsync();
+
+        expect(stateMgr.readState(result.agent_id)).toMatchObject({
+          state: "error",
+          error: "Post-spawn liveness failed: surface surface:new is not live",
+        });
+        expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:new", {
+          workspace: "ws:1",
+          collapsePane: true,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a healthy post-launch surface booting", async () => {
+      vi.useFakeTimers();
+      try {
+        liveSurfaces = [makeSurface("surface:new")];
+        engine.dispose();
+        engine = new AgentEngine(
+          stateMgr,
+          new AgentRegistry(stateMgr, async () => liveSurfaces),
+          mockClient,
+          {
+            spawnPreflight: async () => {},
+            postSpawnLivenessMs: 0,
+          },
+        );
+
+        const result = await engine.spawnAgent({
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "Fix gap F",
+        });
+
+        await vi.runOnlyPendingTimersAsync();
+
+        expect(stateMgr.readState(result.agent_id)?.state).toBe("booting");
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("launches Claude via repoGolem launcher with requested model tier", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
