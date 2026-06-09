@@ -181,3 +181,34 @@ run_case "no cmux pid exits cleanly" \
   $'Pages occupied by compressor: 4194305.\n' \
   "" \
   ""
+
+# Matcher coverage regression guard (2026-06-09): the PID matcher must catch
+# BOTH cmux bundles — stable "cmux.app" AND nightly "cmux NIGHTLY.app". The old
+# `cmux\.app` pattern silently skipped nightly, so a nightly-only fleet (the
+# common case while we run on nightly) went completely unwatched.
+run_matcher_coverage() {
+  local script
+  script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/cmux-memory-watchdog.sh"
+  local stable="/Applications/cmux.app/Contents/MacOS/cmux"
+  local nightly="/Applications/cmux NIGHTLY.app/Contents/MacOS/cmux"
+  local broadened='cmux[^/]*\.app/Contents/MacOS/cmux'
+
+  printf '%s' "$stable" | grep -qE "$broadened" \
+    || { printf 'FAIL: matcher misses STABLE bundle\n'; exit 1; }
+  printf '%s' "$nightly" | grep -qE "$broadened" \
+    || { printf 'FAIL: matcher misses NIGHTLY bundle\n'; exit 1; }
+
+  # The production script must use the broadened form in both discovery sites.
+  local broad_count
+  broad_count="$(grep -cE "pgrep -f 'cmux\[\^/\]\*\\\\\.app/Contents/MacOS/cmux" "$script" || true)"
+  [[ "$broad_count" -ge 2 ]] \
+    || { printf 'FAIL: expected >=2 broadened pgrep matchers in script, found %s\n' "$broad_count"; exit 1; }
+
+  # Regression guard: the narrow stable-only matcher must be gone.
+  if grep -qE "pgrep -f 'cmux\\\\\.app/Contents/MacOS/cmux'" "$script"; then
+    printf 'FAIL: narrow cmux.app matcher regressed (would miss nightly)\n'; exit 1
+  fi
+
+  printf 'PASS: matcher covers both cmux bundles (stable + nightly)\n'
+}
+run_matcher_coverage
