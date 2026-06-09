@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.golems.cmux-ram-sampler</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/bin/cmux-ram-sampler.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB</key>
+    <string>20</string>
+    <key>CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB</key>
+    <string>2</string>
+    <key>CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES</key>
+    <string>30</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/etanheyman/Library/Logs/cmux-ram-sampler/launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/etanheyman/Library/Logs/cmux-ram-sampler/launchd.stderr.log</string>
+</dict>
+</plist>
