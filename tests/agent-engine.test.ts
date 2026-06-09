@@ -5,7 +5,15 @@ vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -101,6 +109,29 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     user_killed: false,
     ...overrides,
   };
+}
+
+function writeCodexDoneTranscript(path: string): void {
+  writeFileSync(
+    path,
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "019eab06-57d6-72b1-b3a8-6cf98a30a3f6",
+          cwd: "/Users/etanheyman/Gits/cmuxlayer",
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: "019eab07-94c8-7610-be92-95610333aa91",
+          last_agent_message: "Implemented the fix.\n\nTASK_DONE",
+        },
+      }),
+    ].join("\n"),
+  );
 }
 
 describe("AgentEngine", () => {
@@ -1622,7 +1653,7 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("evidence");
+        expect(result.source).toBe("screen");
         expect(result.state).toBe("done");
         expect(engine.getAgentState("worker-output-done")).toMatchObject({
           state: "done",
@@ -1666,7 +1697,7 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("evidence");
+        expect(result.source).toBe("screen");
         expect(result.state).toBe("done");
         expect(result.elapsed).toBeLessThan(2_000);
       } finally {
@@ -1838,7 +1869,7 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("evidence");
+        expect(result.source).toBe("screen");
         expect(result.state).toBe("done");
         expect(engine.getAgentState(agentId)).toMatchObject({
           state: "done",
@@ -1918,9 +1949,94 @@ To continue this session, run codex resume ${sessionId}`,
         const result = await pending;
 
         expect(result.matched).toBe(true);
-        expect(result.source).toBe("evidence");
+        expect(result.source).toBe("screen");
         expect(result.state).toBe("done");
         expect(engine.getAgentState("claude-output-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: expect.any(String),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve transcript done while the JSONL mtime is fresh", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-09T10:00:00.000Z");
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "fresh-codex-done.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, now, now);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-fresh",
+            state: "working",
+            surface_id: "surface:worker-transcript-fresh",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-fresh")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-fresh",
+          text: "gpt-5.4\nWorking (1m 02s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-transcript-fresh", "done", 1_200);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(engine.getAgentState("worker-transcript-fresh")?.state).toBe(
+          "working",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves done from stale transcript ground truth with no screen banner", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-09T10:00:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-done",
+            state: "working",
+            surface_id: "surface:worker-transcript-done",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-done",
+          text: "gpt-5.4\nWorked for 16m 44s\ncodex> ",
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("worker-transcript-done", "done", 7_000);
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("transcript");
+        expect(result.state).toBe("done");
+        expect(engine.getAgentState("worker-transcript-done")).toMatchObject({
           state: "done",
           task_done_detected_at: expect.any(String),
         });

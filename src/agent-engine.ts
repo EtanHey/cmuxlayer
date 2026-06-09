@@ -4,6 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -58,7 +59,11 @@ import { SpawnGuard } from "./spawn-guard.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   findLatestHarnessSessionIdentity,
+  harnessJsonlEnabled,
+  loadHarnessSessionWithMeta,
+  readHarnessSessionFromFile,
   type Harness,
+  type HarnessSessionWithMeta,
 } from "./harness-session.js";
 
 export interface SpawnAgentParams {
@@ -119,6 +124,7 @@ const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS = 30 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
+const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -153,6 +159,8 @@ interface SweepAgentContext {
   screen?: Promise<CmuxReadScreenResult>;
 }
 
+type TargetStateEvidenceSource = "state" | "transcript" | "screen";
+
 function autoArchiveEnabledByEnv(): boolean {
   return !["0", "false", "off", "no"].includes(
     (process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE ?? "").toLowerCase(),
@@ -169,6 +177,14 @@ function screenTextSignature(text: string): string {
     hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
   }
   return `${text.length}:${hash.toString(16)}`;
+}
+
+function safeMtimeMs(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
 }
 
 function parseNonNegativeInteger(
@@ -541,6 +557,32 @@ export class AgentEngine {
     return !!agent.task_done_detected_at;
   }
 
+  private loadGroundTruthSession(
+    agent: AgentRecord,
+  ): HarnessSessionWithMeta | null {
+    if (!harnessJsonlEnabled() || !JSONL_HARNESSES.has(agent.cli)) {
+      return null;
+    }
+    const harness = agent.cli as Harness;
+    if (agent.cli_session_path) {
+      const state = readHarnessSessionFromFile(harness, agent.cli_session_path);
+      const mtime_ms = safeMtimeMs(agent.cli_session_path);
+      return state && mtime_ms > 0
+        ? { state, path: agent.cli_session_path, mtime_ms }
+        : null;
+    }
+    if (agent.state === "booting") return null;
+    return agent.cli_session_id
+      ? loadHarnessSessionWithMeta(harness, agent.cli_session_id)
+      : null;
+  }
+
+  private hasGroundTruthDone(agent: AgentRecord): boolean {
+    const session = this.loadGroundTruthSession(agent);
+    if (!session?.state.done) return false;
+    return Date.now() - session.mtime_ms >= DONE_QUIESCENCE_MS;
+  }
+
   private async hasCurrentOutputDoneEvidence(
     agent: AgentRecord,
   ): Promise<boolean> {
@@ -558,12 +600,22 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
   ): Promise<boolean> {
-    if (agent.state !== targetState) return false;
-    if (!this.requiresOutputDoneEvidence(targetState)) return true;
+    return (await this.getTargetStateEvidenceSource(agent, targetState)) !== null;
+  }
+
+  private async getTargetStateEvidenceSource(
+    agent: AgentRecord,
+    targetState: AgentState,
+  ): Promise<TargetStateEvidenceSource | null> {
+    if (agent.state !== targetState) return null;
+    if (!this.requiresOutputDoneEvidence(targetState)) return "state";
+    if (this.hasGroundTruthDone(agent)) return "transcript";
     return (
       this.hasRecordedOutputDoneEvidence(agent) ||
       (await this.hasCurrentOutputDoneEvidence(agent))
-    );
+    )
+      ? "screen"
+      : null;
   }
 
   private async refreshTargetStateEvidence(
@@ -872,6 +924,22 @@ export class AgentEngine {
     ctx: SweepAgentContext,
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
+
+    if (this.hasGroundTruthDone(agent)) {
+      try {
+        const marked = this.stateMgr.updateRecord(agent.agent_id, {
+          task_done_candidate_at: null,
+          task_done_detected_at: new Date().toISOString(),
+          ...(agent.boot_prompt_pending ? { boot_prompt_pending: false } : {}),
+        });
+        this.registry.set(agent.agent_id, marked);
+        const updated = this.stateMgr.transition(agent.agent_id, "done");
+        this.registry.set(agent.agent_id, updated);
+        return { agent: updated };
+      } catch {
+        return { agent };
+      }
+    }
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
@@ -1511,13 +1579,18 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
-    // Retroactive check — already in target state with required output evidence?
-    if (await this.hasTargetStateEvidence(initial, targetState)) {
+    // Retroactive check — already in target state with required evidence?
+    const initialEvidence = await this.getTargetStateEvidenceSource(
+      initial,
+      targetState,
+    );
+    if (initialEvidence) {
       return {
         matched: true,
         state: initial.state,
         elapsed: Date.now() - start,
-        source: "immediate",
+        source:
+          initialEvidence === "state" ? "immediate" : initialEvidence,
         agent: toPublicAgent(initial),
       };
     }
@@ -1582,15 +1655,17 @@ export class AgentEngine {
 
         current = await this.refreshTargetStateEvidence(current, targetState);
 
-        if (await this.hasTargetStateEvidence(current, targetState)) {
+        const evidenceSource = await this.getTargetStateEvidenceSource(
+          current,
+          targetState,
+        );
+        if (evidenceSource) {
           clearInterval(checkInterval);
           resolve({
             matched: true,
             state: current.state,
             elapsed,
-            source: this.requiresOutputDoneEvidence(targetState)
-              ? "evidence"
-              : "sweep",
+            source: evidenceSource === "state" ? "sweep" : evidenceSource,
             agent: toPublicAgent(current),
           });
           return;

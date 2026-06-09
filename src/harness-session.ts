@@ -111,6 +111,89 @@ function lastContentTextAndTool(
   return { lastText, lastTool };
 }
 
+const CLAUDE_TRAILING_METADATA_TYPES = new Set([
+  "system",
+  "permission-mode",
+  "mode",
+  "last-prompt",
+  "bridge-session",
+  "custom-title",
+  "agent-name",
+  "pr-link",
+  "user",
+  "attachment",
+  "file-history-snapshot",
+  "queue-operation",
+  "agent-setting",
+  "worktree-state",
+]);
+
+function messageContent(ev: Record<string, unknown>): unknown[] {
+  const message = asRecord(ev.message);
+  return Array.isArray(message?.content) ? message.content : [];
+}
+
+function collectClaudeToolResults(ev: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  for (const item of messageContent(ev)) {
+    const block = asRecord(item);
+    if (block?.type !== "tool_result") continue;
+    if (typeof block.tool_use_id === "string") ids.add(block.tool_use_id);
+  }
+  return ids;
+}
+
+function collectClaudeToolUses(message: Record<string, unknown>): {
+  ids: string[];
+  missingId: boolean;
+} {
+  const ids: string[] = [];
+  let missingId = false;
+  const content = Array.isArray(message.content) ? message.content : [];
+  for (const item of content) {
+    const block = asRecord(item);
+    if (block?.type !== "tool_use") continue;
+    if (typeof block.id === "string") ids.push(block.id);
+    else missingId = true;
+  }
+  return { ids, missingId };
+}
+
+function claudeDone(events: Record<string, unknown>[]): boolean {
+  const answeredToolUseIds = new Set<string>();
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i];
+    if (ev.type === "user" || ev.role === "user") {
+      for (const id of collectClaudeToolResults(ev)) {
+        answeredToolUseIds.add(id);
+      }
+      continue;
+    }
+
+    if (ev.type !== "assistant" && ev.role !== "assistant") {
+      const type = typeof ev.type === "string" ? ev.type : null;
+      if (type && CLAUDE_TRAILING_METADATA_TYPES.has(type)) continue;
+      continue;
+    }
+
+    const message = asRecord(ev.message);
+    if (!message) return false;
+    const stopReason =
+      typeof message.stop_reason === "string" ? message.stop_reason : null;
+    const toolUses = collectClaudeToolUses(message);
+    if (toolUses.missingId) return false;
+    const hasUnansweredTool = toolUses.ids.some(
+      (id) => !answeredToolUseIds.has(id),
+    );
+    if (hasUnansweredTool) return false;
+    if (stopReason === "end_turn" || stopReason === "stop_sequence") {
+      return true;
+    }
+    return stopReason === "tool_use" && toolUses.ids.length > 0;
+  }
+  return false;
+}
+
 function parseClaude(events: Record<string, unknown>[]): HarnessSessionState {
   let model: string | null = null;
   let tokensUsed: number | null = null;
@@ -138,7 +221,7 @@ function parseClaude(events: Record<string, unknown>[]): HarnessSessionState {
     context_pct: pct(tokensUsed, window),
     last_text: lastText,
     last_tool: lastTool,
-    done: false,
+    done: claudeDone(events),
   };
 }
 
@@ -193,6 +276,10 @@ function parseCodex(events: Record<string, unknown>[]): HarnessSessionState {
         done = true;
         break;
       }
+      case "task_started": {
+        done = false;
+        break;
+      }
     }
   }
   return {
@@ -218,6 +305,7 @@ function parseCursor(events: Record<string, unknown>[]): HarnessSessionState {
     context_pct: null,
     last_text: lastText,
     last_tool: lastTool,
+    // AIDEV-NOTE: Cursor done is screen-scrape-fallback-only until its JSONL has a reliable lifecycle marker.
     done: false,
   };
 }
@@ -316,6 +404,12 @@ export function readHarnessSessionFromFile(
     return null;
   }
   return parseHarnessSession(harness, content);
+}
+
+export interface HarnessSessionWithMeta {
+  state: HarnessSessionState;
+  path: string;
+  mtime_ms: number;
 }
 
 function safeReaddir(dir: string): string[] {
@@ -572,6 +666,27 @@ export function loadHarnessSession(
   }
   if (!path) return null;
   return readHarnessSessionFromFile(harness, path);
+}
+
+export function loadHarnessSessionWithMeta(
+  harness: Harness,
+  sessionId: string,
+  opts: ResolveOpts = {},
+): HarnessSessionWithMeta | null {
+  if (!sessionId) return null;
+  const cacheKey = `${harness}:${sessionId}`;
+  let path = sessionPathCache.get(cacheKey) ?? null;
+  if (path && !isFile(path)) path = null;
+  if (!path) {
+    path = findHarnessSessionPath(harness, sessionId, opts);
+    if (path) sessionPathCache.set(cacheKey, path);
+  }
+  if (!path) return null;
+  const state = readHarnessSessionFromFile(harness, path);
+  if (!state) return null;
+  const mtime_ms = mtimeMs(path);
+  if (mtime_ms <= 0) return null;
+  return { state, path, mtime_ms };
 }
 
 /**

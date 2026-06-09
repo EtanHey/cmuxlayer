@@ -5,3 +5,4 @@
 {"type":"event","timestamp":"2026-06-04T22:47:00.000Z","payload":{"type":"function_call","name":"exec_command","call_id":"call_a","arguments":"{}"}}
 {"type":"event","timestamp":"2026-06-04T22:47:30.000Z","payload":{"type":"agent_message","message":"codex latest message","phase":"execute"}}
 {"type":"event","timestamp":"2026-06-04T22:48:00.000Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":107745,"cached_input_tokens":106368,"output_tokens":824,"reasoning_output_tokens":516,"total_tokens":108569},"total_token_usage":{"input_tokens":20265083,"output_tokens":87553,"total_tokens":20352636},"model_context_window":258400}}}
+{"type":"event_msg","timestamp":"2026-06-04T22:49:00.000Z","payload":{"type":"task_complete","turn_id":"019e942c-turn-1","last_agent_message":"codex latest message\n\nTASK_DONE","completed_at":1780613340,"duration_ms":60000}}
