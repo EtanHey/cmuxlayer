@@ -780,6 +780,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_event: DeliveryEventType;
       }) => Promise<unknown>)
     | null = null;
+  let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
 
   const server = new McpServer(
     {
@@ -2899,7 +2900,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // INTERACTIVE_STATES gate, but the guarded relay path keeps the
           // stale-surface resync + recycled-occupant identity checks so the
           // pointer can never land in a foreign agent's pane.
-          const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          let record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+          if (!record) {
+            try {
+              await lifecycleEnsureRegistered?.();
+              record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+            } catch {
+              // Best-effort only: dispatch has already appended the durable inbox message.
+            }
+          }
           if (!record || !lifecycleAgentInputDeliverer) {
             nudge.reason = record
               ? "agent lifecycle relay unavailable — message waits in the inbox file"
@@ -3031,6 +3040,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
     });
+    lifecycleEnsureRegistered = async () => {
+      await registry.listMerged(discovery, { force: true });
+    };
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
       agent: AgentRecord,

@@ -117,6 +117,8 @@ const MODEL_EMOJI_RE =
 // Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
+const CLAUDE_PERMISSION_APPROVAL_RE =
+  /allow for this session|do you want to allow|\[y\/n\]/i;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_CONTEXT_LEFT_RE =
@@ -216,7 +218,10 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     "---RESPONSE_START---",
     "Claude Code",
   ];
-  if (claudeMarkers.some((marker) => text.includes(marker))) {
+  if (
+    claudeMarkers.some((marker) => text.includes(marker)) ||
+    CLAUDE_PERMISSION_APPROVAL_RE.test(text)
+  ) {
     return "claude";
   }
   if (
@@ -446,6 +451,7 @@ function parseErrors(text: string): string[] {
     "permission denied",
     "permission prompt",
     "do you want to allow",
+    "allow for this session",
     "[y/n]",
   ];
 

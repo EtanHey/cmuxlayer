@@ -56,6 +56,22 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.status).toBe("working");
   });
 
+  it("recognizes Claude permission approval dialogs as Claude", () => {
+    const parsed = parseScreen(`
+Do you want to allow this command?
+
+❯ 1. Allow for this session
+  2. Allow once
+  3. Deny
+
+[y/n]
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("permission_prompt");
+  });
+
   it("extracts model from no-cost status line (production format)", () => {
     const parsed = parseScreen(`
 ✻ Working…
