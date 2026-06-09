@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
   findLatestHarnessSessionIdentity,
   findHarnessSessionPath,
   loadHarnessSession,
+  loadHarnessSessionWithMeta,
   applyHarnessState,
   harnessJsonlEnabled,
 } from "../src/harness-session.js";
@@ -93,6 +95,116 @@ describe("parseHarnessSession", () => {
     expect(s.context_pct).toBeNull();
     expect(s.done).toBe(false);
   });
+
+  it("Claude: settled end_turn with trailing harness metadata is done", () => {
+    const s = parseHarnessSession(
+      "claude",
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            model: "claude-opus-4-8",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "TASK_DONE" }],
+          },
+        }),
+        JSON.stringify({ type: "system", content: "harness metadata" }),
+        JSON.stringify({ type: "last-prompt", prompt: "previous prompt" }),
+        JSON.stringify({ type: "mode", mode: "default" }),
+        JSON.stringify({ type: "permission-mode", mode: "acceptEdits" }),
+        JSON.stringify({ type: "pr-link", url: "https://example.invalid/pr" }),
+      ].join("\n"),
+    );
+
+    expect(s.done).toBe(true);
+  });
+
+  it("Claude: unanswered terminal tool_use is still in flight", () => {
+    const s = parseHarnessSession(
+      "claude",
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            model: "claude-opus-4-8",
+            stop_reason: "tool_use",
+            content: [
+              { type: "text", text: "I will inspect the file." },
+              { type: "tool_use", id: "toolu_018xNv2zPGrCXaudR29Wsdef", name: "Read" },
+            ],
+          },
+        }),
+        JSON.stringify({ type: "queue-operation", op: "append" }),
+        JSON.stringify({ type: "last-prompt", prompt: "continue" }),
+        JSON.stringify({ type: "agent-setting", name: "model" }),
+        JSON.stringify({ type: "mode", mode: "default" }),
+        JSON.stringify({ type: "permission-mode", mode: "acceptEdits" }),
+      ].join("\n"),
+    );
+
+    expect(s.done).toBe(false);
+  });
+
+  it("Claude: terminal tool_use is done once a later user tool_result answers it", () => {
+    const toolUseId = "toolu_019cdJd1eHLJHcwLgEHTUU2L";
+    const s = parseHarnessSession(
+      "claude",
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            model: "claude-opus-4-8",
+            stop_reason: "tool_use",
+            content: [
+              { type: "text", text: "Running the check." },
+              { type: "tool_use", id: toolUseId, name: "Bash" },
+            ],
+          },
+        }),
+        JSON.stringify({ type: "attachment", name: "ctx" }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: toolUseId, content: "ok" },
+            ],
+          },
+        }),
+        JSON.stringify({ type: "attachment", name: "more ctx" }),
+        JSON.stringify({ type: "last-prompt", prompt: "continue" }),
+        JSON.stringify({ type: "custom-title", title: "private-tmp" }),
+        JSON.stringify({ type: "agent-name", name: "cmuxlayerClaude" }),
+        JSON.stringify({ type: "mode", mode: "default" }),
+        JSON.stringify({ type: "permission-mode", mode: "acceptEdits" }),
+        JSON.stringify({ type: "bridge-session", id: "bridge" }),
+      ].join("\n"),
+    );
+
+    expect(s.done).toBe(true);
+  });
+
+  it("Codex: task_complete marks done", () => {
+    const s = parseHarnessSession("codex", read("codex.jsonl"));
+    expect(s.done).toBe(true);
+  });
+
+  it("Codex: later task_started resets stale task_complete done", () => {
+    const s = parseHarnessSession(
+      "codex",
+      [
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn-1" },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-2" },
+        }),
+      ].join("\n"),
+    );
+
+    expect(s.done).toBe(false);
+  });
 });
 
 describe("modelContextWindow (Claude denominator + no-JSONL fallback)", () => {
@@ -163,6 +275,38 @@ describe("readHarnessSessionFromFile", () => {
   it("missing file → null (caller falls back to screen-parser)", () => {
     const s = readHarnessSessionFromFile("codex", join(FIX, "nope.jsonl"));
     expect(s).toBeNull();
+  });
+});
+
+describe("loadHarnessSessionWithMeta", () => {
+  it("returns parsed state with transcript mtime for quiescence checks", () => {
+    const home = mkdtempSync(join(tmpdir(), "cmux-harness-meta-"));
+    const root = join(home, ".codex", "sessions", "2026", "06", "09");
+    const path = join(root, "rollout-2026-06-09T09-16-20-sid-meta.jsonl");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "sid-meta", cwd: "/Users/e/Gits/cmuxlayer" },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn-1" },
+        }),
+      ].join("\n"),
+    );
+    const mtime = new Date("2026-06-09T10:00:00.000Z");
+    utimesSync(path, mtime, mtime);
+
+    try {
+      const meta = loadHarnessSessionWithMeta("codex", "sid-meta", { home });
+      expect(meta?.state.done).toBe(true);
+      expect(meta?.mtime_ms).toBe(mtime.getTime());
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

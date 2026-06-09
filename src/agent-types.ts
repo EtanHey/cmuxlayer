@@ -153,7 +153,15 @@ export interface WaitResult {
   matched: boolean;
   state: AgentState;
   elapsed: number;
-  source: "immediate" | "poll" | "sweep" | "watch" | "evidence" | "timeout";
+  source:
+    | "immediate"
+    | "poll"
+    | "sweep"
+    | "watch"
+    | "evidence"
+    | "transcript"
+    | "screen"
+    | "timeout";
   agent: PublicAgent | null;
   error?: string;
 }
