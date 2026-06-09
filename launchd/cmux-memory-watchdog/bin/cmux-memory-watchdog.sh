@@ -68,7 +68,9 @@ get_cmux_pid() {
     return 0
   fi
 
-  pid="$(pgrep -f 'cmux\.app/Contents/MacOS/cmux' 2>/dev/null | head -n 1 || true)"
+  # cmux[^/]*\.app matches BOTH the stable bundle (cmux.app) and the nightly
+  # bundle (cmux NIGHTLY.app); the old cmux\.app pattern missed nightly entirely.
+  pid="$(pgrep -f 'cmux[^/]*\.app/Contents/MacOS/cmux' 2>/dev/null | head -n 1 || true)"
   if [[ -n "$pid" ]]; then
     printf '%s\n' "$pid"
     return 0
@@ -115,7 +117,10 @@ aggregate_cmux_footprint_bytes() {
   local footprint_bytes
   local pids
 
-  pids="$(pgrep -f 'cmux\.app/Contents/MacOS/cmux|/Applications/cmux\.app/Contents/Resources/bin/bun' 2>/dev/null || true)"
+  # Match BOTH cmux bundles (stable cmux.app + nightly "cmux NIGHTLY.app") so
+  # the watchdog covers whichever instance(s) are running — including when only
+  # nightly is up. The old cmux\.app pattern silently skipped nightly.
+  pids="$(pgrep -f 'cmux[^/]*\.app/Contents/MacOS/cmux|cmux[^/]*\.app/Contents/Resources/bin/bun' 2>/dev/null || true)"
   for pid in $pids; do
     footprint_bytes="$(cmux_footprint_bytes_for_pid "$pid")"
     if [[ -n "$footprint_bytes" ]]; then
