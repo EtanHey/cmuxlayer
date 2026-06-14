@@ -240,9 +240,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(
-      /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
-    );
+    expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
 
@@ -521,9 +519,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(
-      /^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/,
-    );
+    expect(parsed.agent_id).toMatch(/^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/);
     expect(parsed.state).toBe("ready");
     expect(parsed.boot_prompt_delivered).toBe(true);
 
@@ -1702,9 +1698,7 @@ describe("agent lifecycle tool handlers", () => {
     const pendingParentId = parentResult.structuredContent.agent_id;
     const finalParentId = "orchestratorClaude-session1";
     const renamed = engine.stateMgr.renameState(pendingParentId, finalParentId);
-    engine
-      .getRegistry()
-      .rename(pendingParentId, finalParentId, renamed);
+    engine.getRegistry().rename(pendingParentId, finalParentId, renamed);
 
     await spawn.handler(
       {
@@ -1785,5 +1779,144 @@ describe("agent lifecycle tool handlers", () => {
       resume_command:
         "voicelayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
+  });
+});
+
+describe("auto-focus discipline (focus target before split, restore after render)", () => {
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  // Builds an exec mock that records every call, reports `selectedWorkspace` as
+  // the focused one, and returns a non-ready screen for the first `notReadyFor`
+  // read-screen polls before reporting ready.
+  function makeFocusExec(opts: {
+    selectedWorkspace: string;
+    notReadyFor?: number;
+  }): { exec: ExecFn; calls: string[][]; readScreenCount: () => number } {
+    const calls: string[][] = [];
+    let readScreens = 0;
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "One",
+                index: 0,
+                selected: opts.selectedWorkspace === "workspace:1",
+                pinned: false,
+              },
+              {
+                ref: "workspace:2",
+                title: "Two",
+                index: 1,
+                selected: opts.selectedWorkspace === "workspace:2",
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("read-screen")) {
+        readScreens++;
+        const notReady = (opts.notReadyFor ?? 0) >= readScreens;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: notReady
+              ? "still booting up please wait"
+              : "What can I help you with?\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      // Default: split/surface creation result.
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:2",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    }) as unknown as ExecFn;
+    return { exec, calls, readScreenCount: () => readScreens };
+  }
+
+  const selectIdx = (calls: string[][], ws: string) =>
+    calls.findIndex((a) => a.includes("select-workspace") && a.includes(ws));
+  const firstReadScreenIdx = (calls: string[][]) =>
+    calls.findIndex((a) => a.includes("read-screen"));
+  const lastReadScreenIdx = (calls: string[][]) =>
+    calls.reduce((last, a, i) => (a.includes("read-screen") ? i : last), -1);
+
+  it("new_split focuses the target workspace before the split and restores prior focus after readiness when a jump is needed", async () => {
+    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:new");
+
+    const focusTarget = selectIdx(calls, "workspace:2");
+    const restorePrior = selectIdx(calls, "workspace:1");
+    const readScreen = firstReadScreenIdx(calls);
+
+    // Target was focused BEFORE the prior focus was restored.
+    expect(focusTarget).toBeGreaterThanOrEqual(0);
+    expect(restorePrior).toBeGreaterThan(focusTarget);
+    // Readiness was awaited between the split and the focus-back.
+    expect(readScreen).toBeGreaterThan(focusTarget);
+    expect(readScreen).toBeLessThan(restorePrior);
+  });
+
+  it("new_split does NOT touch focus when the target is already the focused workspace", async () => {
+    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:2" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    const selectCalls = calls.filter((a) => a.includes("select-workspace"));
+    expect(selectCalls).toHaveLength(0);
+  });
+
+  it("new_split waits for the new terminal to render before restoring focus", async () => {
+    const { exec, calls, readScreenCount } = makeFocusExec({
+      selectedWorkspace: "workspace:1",
+      notReadyFor: 2,
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    // Polled until ready (2 not-ready + 1 ready) and only then restored focus.
+    expect(readScreenCount()).toBeGreaterThanOrEqual(3);
+    const restorePrior = selectIdx(calls, "workspace:1");
+    expect(restorePrior).toBeGreaterThan(lastReadScreenIdx(calls));
   });
 });

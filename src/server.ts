@@ -1115,7 +1115,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ) {
     context.controlHealthTimer = setInterval(() => {
       appendControlHealthSnapshot().catch((error) => {
-        console.error("[cmux-mcp] control_health periodic sample failed:", error);
+        console.error(
+          "[cmux-mcp] control_health periodic sample failed:",
+          error,
+        );
       });
     }, context.controlHealthIntervalMs);
     context.controlHealthTimer.unref?.();
@@ -1520,6 +1523,60 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         deliveredChars,
       );
     }
+  };
+
+  // ── Auto-focus discipline for split/pane creation ──────────────────
+  // cmux attaches a new split to the *currently focused* workspace. When a
+  // spawn targets a different workspace, we must focus it BEFORE creating the
+  // pane (otherwise the split lands in the wrong workspace — happy-camper's
+  // split failed for exactly this reason), then restore the prior focus AFTER
+  // the new terminal is fully rendered — but ONLY when a jump was needed.
+
+  /** Currently-focused workspace ref, or undefined if it can't be read. */
+  const currentFocusedWorkspace = async (): Promise<string | undefined> => {
+    try {
+      const { workspaces } = await client.listWorkspaces();
+      return workspaces.find((w) => w.selected)?.ref;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Focus the target workspace before a split when it differs from the prior
+   * focus. Returns the prior focus ref IF a jump was performed (so the caller
+   * passes it to restoreFocusAfterRender), or null when no jump was needed.
+   */
+  const focusTargetBeforeSplit = async (
+    targetWorkspace: string | undefined,
+  ): Promise<string | null> => {
+    if (!targetWorkspace) return null;
+    const prior = await currentFocusedWorkspace();
+    if (!prior || prior === targetWorkspace) return null;
+    await client.selectWorkspace(targetWorkspace);
+    return prior;
+  };
+
+  /**
+   * Restore the prior focus AFTER the new terminal is fully rendered — only
+   * when a jump actually happened (priorFocus non-null). Waits for shell
+   * readiness so focus is not restored mid-render. Restores focus even if
+   * readiness times out (never strand focus on the wrong workspace).
+   */
+  const restoreFocusAfterRender = async (
+    priorFocus: string | null,
+    surface: string | undefined,
+    workspace: string | undefined,
+  ): Promise<void> => {
+    if (!priorFocus) return;
+    if (surface) {
+      try {
+        await waitForLaunchShellReady({ surface, workspace });
+      } catch {
+        // Readiness timed out — restore focus anyway rather than strand it.
+      }
+    }
+    await client.selectWorkspace(priorFocus);
   };
 
   const startBackgroundDelivery = (record: DeliveryRecord) => {
@@ -1935,6 +1992,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await preflightBootPromptFile(bootPromptPath);
         }
 
+        // Auto-focus only applies to workspace-targeted splits (no explicit
+        // pane/surface anchor). Captured right before creation, AFTER all
+        // validation, so a rejected request has no focus side effects.
+        let priorFocus: string | null = null;
         const shouldInferRole =
           Boolean(args.role) ||
           (!args.pane &&
@@ -1990,6 +2051,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "focus=false is not supported when role-based new_split reuses an existing pane as a tab",
             );
           }
+          // Role-based placement has no explicit pane/surface (validated above),
+          // so it is always a workspace-targeted split — apply auto-focus.
+          priorFocus = await focusTargetBeforeSplit(targetWorkspace);
           result =
             placement.kind === "surface"
               ? await client.newSurface({
@@ -2007,6 +2071,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   focus: args.focus,
                 });
         } else {
+          // Only workspace-targeted splits need auto-focus; an explicit
+          // pane/surface anchor already pins the destination workspace.
+          if (!args.pane && !args.surface) {
+            priorFocus = await focusTargetBeforeSplit(targetWorkspace);
+          }
           result = await client.newSplit(args.direction, {
             workspace: targetWorkspace,
             surface: args.surface,
@@ -2040,6 +2109,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             timeout_ms: args.boot_prompt_timeout_ms,
           });
         }
+        await restoreFocusAfterRender(
+          priorFocus,
+          result.surface,
+          result.workspace || targetWorkspace,
+        );
         const data: Record<string, unknown> = { ...result };
         data.placement = actualPlacement;
         data.direction = actualDirection;
@@ -3281,10 +3355,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return registryDirect;
     };
 
-    const canonicalizeSpawnResult = <T extends {
-      agent_id: string;
-      surface_id: string;
-    }>(
+    const canonicalizeSpawnResult = <
+      T extends {
+        agent_id: string;
+        surface_id: string;
+      },
+    >(
       result: T,
     ): AgentRecord | null => {
       const record = resolveSpawnRecord(result.agent_id, result.surface_id);
@@ -3316,8 +3392,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       return {
         prepared,
-        mcpProfileLabel:
-          typeof profile === "string" ? profile : "custom",
+        mcpProfileLabel: typeof profile === "string" ? profile : "custom",
         mcpEnv: formatMcpProfileEnv(profile),
       };
     };
@@ -3717,6 +3792,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           assertBootPromptMode(args.prompt, null);
+          const priorFocus = await focusTargetBeforeSplit(args.workspace);
           const worktree = await prepareSpawnWorktree(
             args.repo,
             args.worktree ?? true,
@@ -3758,6 +3834,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
             registry.set(result.agent_id, updated);
           }
+
+          await restoreFocusAfterRender(
+            priorFocus,
+            result.surface_id,
+            result.workspace_id ?? args.workspace,
+          );
 
           return okFormatted(
             formatOk("new_worktree_split", {
@@ -3818,6 +3900,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw new Error("create_workspace returned an empty workspace ref");
           }
 
+          const priorFocus = await focusTargetBeforeSplit(workspace);
+          // Always focus the target so agents spawn into it; harmless when the
+          // workspace was just created (and is already selected) or already
+          // focused. priorFocus drives the focus-back only when a jump happened.
           await client.selectWorkspace(workspace);
 
           const spawnedAgents: Array<{
@@ -3874,6 +3960,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               cli: agent.cli,
             });
           }
+
+          const lastSurface =
+            spawnedAgents[spawnedAgents.length - 1]?.surface_id;
+          await restoreFocusAfterRender(priorFocus, lastSurface, workspace);
 
           return okFormatted(
             formatOk("spawn_in_workspace", {
