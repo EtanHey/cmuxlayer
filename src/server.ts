@@ -1932,7 +1932,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 2. new_split
   server.tool(
     "new_split",
-    "Create a new split pane (terminal or browser). For terminal panes that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
+    "Create a new split pane (terminal or browser). PLACEMENT IS BY ROLE, NOT BY HAND: pass `role` (or let it infer from the launcher title) and the layout policy enforces the two-column invariant — leads/orchestrators land in the LEFT column, workers land in the RIGHT column, and extra workers dock as tabs in the rightmost worker pane (never a third column). Workspace-targeted splits auto-focus the target before splitting and restore your prior focus after the new pane renders, so you do not hand-run focus-pane around splits. For terminal panes that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
     {
       direction: z
         .enum(["left", "right", "up", "down"])
@@ -1951,7 +1951,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .enum(["orchestrator", "ic", "worker"])
         .optional()
         .describe(
-          "Optional agent role used for deterministic placement. Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker.",
+          "Agent role drives deterministic column placement: orchestrator/ic → LEFT column (leads, the Claude that coordinates), worker → RIGHT column (Codex/Cursor that implement/gather). Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker. Pass this instead of trying to control left/right via direction.",
         ),
       focus: z
         .boolean()
@@ -2333,7 +2333,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxLayer resolves the current backing surface. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
+    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxLayer resolves the current backing surface. WARNING — DO NOT include a bare `@word` (e.g. `@narration-lead`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats `@` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (`narration-lead:`) for pane-to-pane addressing; reserve `@<name>` for collab-file posts where monitors match it. If a literal `@` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),
@@ -2435,7 +2435,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 7. send_command
   server.tool(
     "send_command",
-    "Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command. For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
+    "Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command. WARNING — never include a bare `@word` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; `@<name>` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
     {
       surface: z.string().describe("Target surface ref"),
       command: z
