@@ -8,9 +8,10 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 
-// The 12 low-level tools from the design doc
+// Core low-level and metadata tools.
 const EXPECTED_TOOLS = [
   "list_surfaces",
+  "control_health",
   "select_workspace",
   "create_workspace",
   "new_split",
@@ -75,7 +76,7 @@ describe("createServer", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 19 core tools", () => {
+  it("registers all 20 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;

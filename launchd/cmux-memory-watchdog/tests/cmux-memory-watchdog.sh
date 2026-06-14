@@ -97,6 +97,65 @@ EOF
   chmod +x "$root_dir/bin/pgrep"
 }
 
+seed_ps_fallback_commands() {
+  local root_dir="$1"
+  local log_dir="$2"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  cat >"$root_dir/bin/socat" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/socat.log"
+EOF
+  chmod +x "$root_dir/bin/socat"
+
+  cat >"$root_dir/bin/sleep" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/sleep.log"
+EOF
+  chmod +x "$root_dir/bin/sleep"
+
+  cat >"$root_dir/bin/kill" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/kill.log"
+EOF
+  chmod +x "$root_dir/bin/kill"
+
+  cat >"$root_dir/bin/pgrep" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+  chmod +x "$root_dir/bin/pgrep"
+
+  cat >"$root_dir/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${*: -1}" == "pid=,command=" ]]; then
+  printf '4242 /Applications/cmux NIGHTLY.app/Contents/MacOS/cmux\n'
+  exit 0
+fi
+printf '   PID  PPID   RSS      VSZ  %%CPU ELAPSED COMMAND\n'
+printf ' 4242  1000  16384   12345   0.0  01:00:00 /Applications/cmux NIGHTLY.app/Contents/MacOS/cmux\n'
+EOF
+  chmod +x "$root_dir/bin/ps"
+
+  cat >"$root_dir/bin/footprint" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'phys_footprint: 6.00 GB (peak 8.00 GB)\\n'
+EOF
+  chmod +x "$root_dir/bin/footprint"
+}
+
 run_case() {
   local name="$1"
   local expect_breach="$2"
@@ -191,24 +250,62 @@ run_matcher_coverage() {
   script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/cmux-memory-watchdog.sh"
   local stable="/Applications/cmux.app/Contents/MacOS/cmux"
   local nightly="/Applications/cmux NIGHTLY.app/Contents/MacOS/cmux"
-  local broadened='cmux[^/]*\.app/Contents/MacOS/cmux'
+  local broadened='^/Applications/cmux[^/]*\.app/Contents/MacOS/cmux([[:space:]]|$)'
 
   printf '%s' "$stable" | grep -qE "$broadened" \
     || { printf 'FAIL: matcher misses STABLE bundle\n'; exit 1; }
   printf '%s' "$nightly" | grep -qE "$broadened" \
     || { printf 'FAIL: matcher misses NIGHTLY bundle\n'; exit 1; }
 
-  # The production script must use the broadened form in both discovery sites.
-  local broad_count
-  broad_count="$(grep -cE "pgrep -f 'cmux\[\^/\]\*\\\\\.app/Contents/MacOS/cmux" "$script" || true)"
-  [[ "$broad_count" -ge 2 ]] \
-    || { printf 'FAIL: expected >=2 broadened pgrep matchers in script, found %s\n' "$broad_count"; exit 1; }
+  # The production script must use the ps fallback matcher because broad
+  # pgrep -f can match its own transient pgrep command on macOS.
+  grep -q 'ps_cmux_pids()' "$script" \
+    || { printf 'FAIL: missing ps_cmux_pids fallback\n'; exit 1; }
+  grep -qE 'Contents.*MacOS.*cmux' "$script" \
+    || { printf 'FAIL: missing cmux app-path matcher in script\n'; exit 1; }
 
-  # Regression guard: the narrow stable-only matcher must be gone.
-  if grep -qE "pgrep -f 'cmux\\\\\.app/Contents/MacOS/cmux'" "$script"; then
-    printf 'FAIL: narrow cmux.app matcher regressed (would miss nightly)\n'; exit 1
+  # Regression guard: broad pgrep -f app matching must stay gone.
+  if grep -qE "pgrep -f 'cmux" "$script"; then
+    printf 'FAIL: broad pgrep app matcher regressed (can match itself)\n'; exit 1
   fi
 
   printf 'PASS: matcher covers both cmux bundles (stable + nightly)\n'
 }
 run_matcher_coverage
+
+run_ps_fallback_case() {
+  local root_dir log_dir snapshot
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
+  seed_ps_fallback_commands "$root_dir" "$log_dir"
+
+  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
+4242 phys_footprint: 6 GB (peak 8 GB)
+EOF
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Pages occupied by compressor: 1048576.
+EOF
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB=5
+  export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
+  export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
+  export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
+  export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  run_once
+
+  assert_file_contains "$log_dir/kill.log" "-TERM 4242"
+  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  assert_file_contains "$snapshot" "breached_signals=footprint"
+
+  printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
+  rm -rf "$root_dir"
+}
+
+run_ps_fallback_case

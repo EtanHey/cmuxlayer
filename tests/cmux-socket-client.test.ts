@@ -80,7 +80,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
     text: "$ echo hello\nhello\n$",
     lines: 3,
   },
-  "pane.split": {
+  "surface.split": {
     workspace_ref: "workspace:1",
     surface_ref: "surface:2",
     pane_ref: "pane:2",
@@ -470,6 +470,14 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
   it("newSplit creates a surface and returns refs", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     const result = await client.newSplit("right", { workspace: "workspace:1" });
+    expect(lastV2Request).toEqual({
+      method: "surface.split",
+      params: {
+        direction: "right",
+        workspace_id: "workspace:1",
+        surface_id: "surface:1",
+      },
+    });
     expect(result).toHaveProperty("workspace");
     expect(result).toHaveProperty("surface");
     expect(result).toHaveProperty("pane");
@@ -486,7 +494,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     });
 
     expect(lastV2Request).toEqual({
-      method: "pane.split",
+      method: "surface.split",
       params: {
         direction: "right",
         workspace_id: "workspace:1",
@@ -513,7 +521,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
       });
 
       expect(lastV2Request).toEqual({
-        method: "pane.split",
+        method: "surface.split",
         params: {
           direction: "right",
           workspace_id: "workspace:1",
@@ -757,9 +765,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     } as unknown as CmuxClient;
   }
 
-  it("newSplit falls back to CLI when pane.split returns method_not_found", async () => {
-    const saved = MOCK_RESPONSES["pane.split"];
-    delete MOCK_RESPONSES["pane.split"];
+  it("newSplit falls back to CLI when surface.split returns method_not_found", async () => {
+    const saved = MOCK_RESPONSES["surface.split"];
+    delete MOCK_RESPONSES["surface.split"];
     try {
       const client = new CmuxSocketClient({
         socketPath: MOCK_SOCKET_PATH,
@@ -772,7 +780,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       expect(cliCalls[0].method).toBe("newSplit");
       expect(result.surface).toBe("surface:cli");
     } finally {
-      MOCK_RESPONSES["pane.split"] = saved;
+      MOCK_RESPONSES["surface.split"] = saved;
     }
   });
 
@@ -887,15 +895,15 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
   });
 
   it("newSplit throws when no CLI fallback and method_not_found", async () => {
-    const saved = MOCK_RESPONSES["pane.split"];
-    delete MOCK_RESPONSES["pane.split"];
+    const saved = MOCK_RESPONSES["surface.split"];
+    delete MOCK_RESPONSES["surface.split"];
     try {
       const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
       await expect(
         client.newSplit("right", { workspace: "workspace:1" }),
       ).rejects.toThrow("method_not_found");
     } finally {
-      MOCK_RESPONSES["pane.split"] = saved;
+      MOCK_RESPONSES["surface.split"] = saved;
     }
   });
 
@@ -913,7 +921,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
   });
 
   it("uses V2 when method is available (no fallback triggered)", async () => {
-    // pane.split IS in MOCK_RESPONSES — V2 should work directly
+    // surface.split IS in MOCK_RESPONSES — V2 should work directly
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
       cliFallback: createMockCli(),
@@ -970,6 +978,43 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
       } else {
         process.env.CMUX_SOCKET_PATH = savedEnv;
       }
+      await stopSocketServer(server, liveSocketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds CLI fallback calls to the selected socket path", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
+    const liveSocketPath = join(stateDir, "cmux-live.sock");
+    const fakeCmux = join(stateDir, "cmux-fake");
+    fs.writeFileSync(
+      fakeCmux,
+      [
+        "#!/bin/sh",
+        `if [ "$CMUX_SOCKET_PATH" != "${liveSocketPath}" ]; then`,
+        '  echo "wrong socket: $CMUX_SOCKET_PATH" >&2',
+        "  exit 42",
+        "fi",
+        'printf \'{"workspace_ref":"workspace:1","surface_ref":"surface:cli","pane_ref":"pane:1","type":"terminal"}\\n\'',
+      ].join("\n"),
+      "utf-8",
+    );
+    fs.chmodSync(fakeCmux, 0o755);
+    const server = await startSocketServer(liveSocketPath);
+
+    try {
+      const client = await createCmuxClient({
+        socketPath: liveSocketPath,
+        bin: fakeCmux,
+      });
+
+      expect(client).toBeInstanceOf(CmuxSocketClient);
+      const result = await (client as CmuxSocketClient).newSurface({
+        pane: "pane:1",
+        workspace: "workspace:1",
+      });
+      expect(result.surface).toBe("surface:cli");
+    } finally {
       await stopSocketServer(server, liveSocketPath);
       fs.rmSync(stateDir, { recursive: true, force: true });
     }

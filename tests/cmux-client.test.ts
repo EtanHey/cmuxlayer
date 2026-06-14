@@ -36,6 +36,26 @@ describe("CmuxClient.listWorkspaces", () => {
   });
 });
 
+describe("CmuxClient.createWorkspace", () => {
+  it("uses the current workspace create --name CLI shape", async () => {
+    const { client, exec } = mockClient({
+      workspace_ref: "workspace:7",
+      title: "red-team",
+    });
+
+    const result = await client.createWorkspace("red-team");
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "workspace",
+      "create",
+      "--name",
+      "red-team",
+    ]);
+    expect(result).toEqual({ workspace: "workspace:7", title: "red-team" });
+  });
+});
+
 describe("CmuxClient.listPaneSurfaces", () => {
   it("calls with workspace flag when provided", async () => {
     const data = {

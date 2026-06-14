@@ -32,6 +32,7 @@ function makeMockExec(): ExecFn {
 describe("B1: ToolAnnotations on all tools", () => {
   const READONLY_TOOLS = [
     "list_surfaces",
+    "control_health",
     "read_screen",
     "get_agent_state",
     "list_agents",
@@ -83,9 +84,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 33 tools have annotations", () => {
+  it("all 35 tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(33);
+    expect(toolNames.length).toBe(35);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

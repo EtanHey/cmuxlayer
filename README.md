@@ -1,6 +1,6 @@
 # cmuxLayer
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 33 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 35 MCP tools that give AI agents programmatic control over terminal workspaces.
 
 <p align="center">
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
@@ -8,8 +8,8 @@
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-33%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-669%20passing-brightgreen.svg)](#testing)
+[![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-798%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -54,7 +54,7 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 33 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer exposes 35 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
@@ -62,26 +62,27 @@ For managed agents, use the agent-first path: `list_agents` to find the target, 
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (33)
+## MCP Tools (35)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
-**Terminal control** — `list_surfaces` `select_workspace` `create_workspace` `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+**Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
 
-**Agent lifecycle** — `spawn_agent` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
+**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
 
 **Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
 
 **Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
 <details>
-<summary>Full tool reference (33 tools)</summary>
+<summary>Full tool reference (35 tools)</summary>
 
-### Read-only (7)
+### Read-only (8)
 
 | Tool | What it does |
 |------|-------------|
 | `list_surfaces` | List all surfaces across workspaces |
+| `control_health` | Report socket, binary, process, and job-control diagnostics |
 | `read_screen` | Read terminal output with parsed agent status |
 | `get_agent_state` | Full state of a tracked agent |
 | `list_agents` | All agents, with optional filters |
@@ -89,7 +90,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `read_agent_output` | Structured output between delimiter markers |
 | `inbox_check` | Inspect an agent's inbox channel: pending messages, monitor liveness, stale dispatches |
 
-### Mutating (23)
+### Mutating (24)
 
 | Tool | What it does |
 |------|-------------|
@@ -108,6 +109,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `set_progress` | Set progress indicator (0.0-1.0) |
 | `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
+| `new_worktree_split` | Create or reuse a git worktree and spawn a worker there |
 | `spawn_in_workspace` | Create a workspace and spawn a multi-agent team into a clean grid |
 | `resync_agents` | Re-sync the agent registry from live surfaces |
 | `dispatch_to_agent` | Append a task to an agent's inbox file (deterministic write channel) |
@@ -173,7 +175,7 @@ cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/
 ## Testing
 
 ```bash
-bun run test        # 669 tests via vitest
+bun run test        # 798 tests via vitest
 npm run typecheck   # Type checking
 ```
 

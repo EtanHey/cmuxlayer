@@ -20,7 +20,7 @@ import type {
   CmuxSendOptions,
   CmuxStatusEntry,
 } from "./types.js";
-import type { CmuxClient } from "./cmux-client.js";
+import { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
 import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
@@ -81,6 +81,7 @@ export class CmuxSocketClient {
     this.cliFallback = opts?.cliFallback;
     this.maxInFlight = opts?.maxInFlight;
     this.socketPathResolver = opts?.socketPathResolver;
+    this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
@@ -189,11 +190,21 @@ export class CmuxSocketClient {
     this.transport.disconnect();
     this.socketPath = socketPath;
     this.password = this.authPassword;
+    this.syncCliFallbackSocketEnv();
     this.transport = new CmuxPersistentSocket({
       socketPath: this.socketPath,
       timeoutMs: this.timeoutMs,
       maxInFlight: this.maxInFlight,
     });
+  }
+
+  private syncCliFallbackSocketEnv(): void {
+    if (this.cliFallback instanceof CmuxClient) {
+      this.cliFallback.setEnv({
+        ...process.env,
+        CMUX_SOCKET_PATH: this.socketPath,
+      });
+    }
   }
 
   private async reconnectTransport(originalError: unknown): Promise<void> {
@@ -300,6 +311,16 @@ export class CmuxSocketClient {
     return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
   }
 
+  private async resolveSelectedSurface(opts?: {
+    workspace?: string;
+  }): Promise<string | undefined> {
+    const paneSurfaces = await this.listPaneSurfaces({
+      workspace: opts?.workspace,
+    });
+    const surfaces = paneSurfaces.surfaces ?? [];
+    return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
+  }
+
   async newSplit(
     direction: string,
     opts?: {
@@ -359,7 +380,7 @@ export class CmuxSocketClient {
             workspace: opts.workspace,
             pane: opts.pane,
           })
-        : undefined);
+        : await this.resolveSelectedSurface({ workspace: opts?.workspace }));
     // AIDEV-NOTE(2026-06-01): keep socket terminal splits aligned with the CLI
     // workaround for the cmux app `new-split --panel <pane>` regression. Raw CLI
     // reproduces "Surface not found"; `new-surface --pane` is unaffected.
@@ -367,7 +388,7 @@ export class CmuxSocketClient {
 
     try {
       const result = await this.call<Record<string, unknown>>(
-        "pane.split",
+        "surface.split",
         params,
       );
       return this.mapSplitResult(result, "terminal");

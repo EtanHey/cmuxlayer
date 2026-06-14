@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   mkdirSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -14,11 +15,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 
 const AGENT_TOOLS = [
   "spawn_agent",
+  "new_worktree_split",
   "spawn_in_workspace",
   "resync_agents",
   "send_to",
@@ -145,8 +148,33 @@ function moveOnlyAgentStateDir(prefix: string) {
   );
 }
 
+function renameOnlyAgentStateToSession(sessionId: string): string {
+  const entries = readdirSync(TEST_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => name !== "events");
+  expect(entries).toHaveLength(1);
+
+  const statePath = join(TEST_DIR, entries[0], "state.json");
+  const current = JSON.parse(readFileSync(statePath, "utf8")) as AgentRecord;
+  const finalAgentId = generateAgentId(current.cli, current.repo, sessionId);
+  const updated: AgentRecord = {
+    ...current,
+    agent_id: finalAgentId,
+    cli_session_id: sessionId,
+    version: current.version + 1,
+    updated_at: new Date().toISOString(),
+  };
+
+  const finalDir = join(TEST_DIR, finalAgentId);
+  mkdirSync(finalDir, { recursive: true });
+  writeFileSync(join(finalDir, "state.json"), JSON.stringify(updated, null, 2));
+  rmSync(join(TEST_DIR, entries[0]), { recursive: true, force: true });
+  return finalAgentId;
+}
+
 describe("agent lifecycle tool registration", () => {
-  it("registers all 12 agent lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 13 agent lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -174,11 +202,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 33 (19 low-level + 12 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 35 (20 low-level + 13 agent lifecycle + 2 v2)", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(33);
+    expect(Object.keys(registeredTools)).toHaveLength(35);
   });
 });
 
@@ -212,9 +240,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(
-      /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
-    );
+    expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
 
@@ -299,6 +325,169 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("spawn_agent canonicalizes the agent id after session capture renames pending state", async () => {
+    const sessionId = "019ec0e6-1111-2222-3333-444455556666";
+    let finalAgentId: string | null = null;
+    let renamed = false;
+    const baseExec = makeLifecycleExec();
+    mockExec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (
+        !renamed &&
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "probe renamed state"
+      ) {
+        renamed = true;
+        finalAgentId = renameOnlyAgentStateToSession(sessionId);
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "probe renamed state",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toBe(finalAgentId);
+    expect(parsed.agent_id).toBe("cmuxlayerCodex-019ec0e6");
+    expect(parsed.boot_prompt_delivered).toBe(true);
+
+    const stateTool = (server as any)._registeredTools["get_agent_state"];
+    const stateResult = await stateTool.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const persisted =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(persisted.boot_prompt_pending).toBe(false);
+    expect(persisted.task_summary).toBe("probe renamed state");
+  });
+
+  it("spawn_agent with worktree launches from the worktree and inherits MCPs by default", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "cmuxlayer");
+    mkdirSync(repoRoot, { recursive: true });
+    const worktreeExec = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(gitsDir, "cmuxlayer.wt", "skill-eval"), {
+        recursive: true,
+      });
+      return { stdout: "", stderr: "" };
+    });
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        role: "worker",
+        worktree: {
+          name: "skill eval",
+          branch: "fix/skill-eval",
+          base: "origin/main",
+        },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const worktreePath = join(gitsDir, "cmuxlayer.wt", "skill-eval");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.worktree).toMatchObject({
+      path: worktreePath,
+      branch: "fix/skill-eval",
+      created: true,
+      reused: false,
+    });
+    expect(parsed.mcp_profile).toBe("inherit");
+    expect(worktreeExec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "add",
+      "-b",
+      "fix/skill-eval",
+      worktreePath,
+      "origin/main",
+    ]);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        `cd '${worktreePath}' && CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s`,
+      ]),
+    );
+  });
+
+  it("new_worktree_split launches a worker with the requested MCP profile", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "cmuxlayer");
+    mkdirSync(repoRoot, { recursive: true });
+    const worktreeExec = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(gitsDir, "cmuxlayer.wt", "sterile-worker"), {
+        recursive: true,
+      });
+      return { stdout: "", stderr: "" };
+    });
+    const server = createServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        worktree: { name: "sterile worker" },
+        mcp_profile: "sterile",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const worktreePath = join(gitsDir, "cmuxlayer.wt", "sterile-worker");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.role).toBe("worker");
+    expect(parsed.mcp_profile).toBe("sterile");
+    expect(parsed.worktree.path).toBe(worktreePath);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        `cd '${worktreePath}' && CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s`,
+      ]),
+    );
+  });
+
   it("spawn_agent finalizes a pending Cursor prompt when the state directory is noncanonical", async () => {
     let movedStateDir = false;
     const baseExec = makeLifecycleExec();
@@ -330,9 +519,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(
-      /^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/,
-    );
+    expect(parsed.agent_id).toMatch(/^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/);
     expect(parsed.state).toBe("ready");
     expect(parsed.boot_prompt_delivered).toBe(true);
 
@@ -1511,9 +1698,7 @@ describe("agent lifecycle tool handlers", () => {
     const pendingParentId = parentResult.structuredContent.agent_id;
     const finalParentId = "orchestratorClaude-session1";
     const renamed = engine.stateMgr.renameState(pendingParentId, finalParentId);
-    engine
-      .getRegistry()
-      .rename(pendingParentId, finalParentId, renamed);
+    engine.getRegistry().rename(pendingParentId, finalParentId, renamed);
 
     await spawn.handler(
       {
@@ -1594,5 +1779,144 @@ describe("agent lifecycle tool handlers", () => {
       resume_command:
         "voicelayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
+  });
+});
+
+describe("auto-focus discipline (focus target before split, restore after render)", () => {
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  // Builds an exec mock that records every call, reports `selectedWorkspace` as
+  // the focused one, and returns a non-ready screen for the first `notReadyFor`
+  // read-screen polls before reporting ready.
+  function makeFocusExec(opts: {
+    selectedWorkspace: string;
+    notReadyFor?: number;
+  }): { exec: ExecFn; calls: string[][]; readScreenCount: () => number } {
+    const calls: string[][] = [];
+    let readScreens = 0;
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "One",
+                index: 0,
+                selected: opts.selectedWorkspace === "workspace:1",
+                pinned: false,
+              },
+              {
+                ref: "workspace:2",
+                title: "Two",
+                index: 1,
+                selected: opts.selectedWorkspace === "workspace:2",
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("read-screen")) {
+        readScreens++;
+        const notReady = (opts.notReadyFor ?? 0) >= readScreens;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: notReady
+              ? "still booting up please wait"
+              : "What can I help you with?\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      // Default: split/surface creation result.
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:2",
+          surface: "surface:new",
+          pane: "pane:1",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    }) as unknown as ExecFn;
+    return { exec, calls, readScreenCount: () => readScreens };
+  }
+
+  const selectIdx = (calls: string[][], ws: string) =>
+    calls.findIndex((a) => a.includes("select-workspace") && a.includes(ws));
+  const firstReadScreenIdx = (calls: string[][]) =>
+    calls.findIndex((a) => a.includes("read-screen"));
+  const lastReadScreenIdx = (calls: string[][]) =>
+    calls.reduce((last, a, i) => (a.includes("read-screen") ? i : last), -1);
+
+  it("new_split focuses the target workspace before the split and restores prior focus after readiness when a jump is needed", async () => {
+    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.surface).toBe("surface:new");
+
+    const focusTarget = selectIdx(calls, "workspace:2");
+    const restorePrior = selectIdx(calls, "workspace:1");
+    const readScreen = firstReadScreenIdx(calls);
+
+    // Target was focused BEFORE the prior focus was restored.
+    expect(focusTarget).toBeGreaterThanOrEqual(0);
+    expect(restorePrior).toBeGreaterThan(focusTarget);
+    // Readiness was awaited between the split and the focus-back.
+    expect(readScreen).toBeGreaterThan(focusTarget);
+    expect(readScreen).toBeLessThan(restorePrior);
+  });
+
+  it("new_split does NOT touch focus when the target is already the focused workspace", async () => {
+    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:2" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    const selectCalls = calls.filter((a) => a.includes("select-workspace"));
+    expect(selectCalls).toHaveLength(0);
+  });
+
+  it("new_split waits for the new terminal to render before restoring focus", async () => {
+    const { exec, calls, readScreenCount } = makeFocusExec({
+      selectedWorkspace: "workspace:1",
+      notReadyFor: 2,
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    // Polled until ready (2 not-ready + 1 ready) and only then restored focus.
+    expect(readScreenCount()).toBeGreaterThanOrEqual(3);
+    const restorePrior = selectIdx(calls, "workspace:1");
+    expect(restorePrior).toBeGreaterThan(lastReadScreenIdx(calls));
   });
 });

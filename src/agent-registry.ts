@@ -88,7 +88,14 @@ export class AgentRegistry {
   }
 
   private async reconcileSurfaces(): Promise<void> {
-    const surfaces = await this.surfaceProvider();
+    let surfaces: CmuxSurface[];
+    try {
+      surfaces = await this.surfaceProvider();
+    } catch {
+      // Treat enumeration failures as "unknown", not "zero surfaces". A transient
+      // socket/listing failure must not mark every active agent as disappeared.
+      return;
+    }
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
 
     // Phase 1: Mark agents with disappeared surfaces as error

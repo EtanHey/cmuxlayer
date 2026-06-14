@@ -6,7 +6,11 @@
 import type { ControlMode, IntentMode } from "./types.js";
 
 /** Tools that only read state — always allowed */
-const READ_ONLY_TOOLS = new Set(["list_surfaces", "read_screen"]);
+const READ_ONLY_TOOLS = new Set([
+  "list_surfaces",
+  "control_health",
+  "read_screen",
+]);
 
 /** Tools that mutate state — blocked in manual mode */
 const MUTATING_TOOLS = new Set([

@@ -221,6 +221,33 @@ describe("AgentRegistry", () => {
       expect(agent!.error).toContain("disappeared");
     });
 
+    it("does not mark agents disappeared when surface enumeration fails", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-live",
+          surface_id: "surface:1",
+          state: "working",
+        }),
+      );
+
+      let shouldThrow = false;
+      const surfaceProvider = async () => {
+        if (shouldThrow) {
+          throw new Error("socket unavailable");
+        }
+        return [makeSurface("surface:1")];
+      };
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+
+      shouldThrow = true;
+      await registry.reconcile();
+
+      const agent = registry.get("agent-live");
+      expect(agent!.state).toBe("working");
+      expect(agent!.error).toBeNull();
+    });
+
     it("picks up new state files created by other processes", async () => {
       const surfaceProvider = async () => [makeSurface("surface:new")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);

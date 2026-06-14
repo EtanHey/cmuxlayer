@@ -6,6 +6,10 @@ import type { CliType } from "./agent-types.js";
 export const AGENT_ENV =
   "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
 
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function sanitizeRepoName(repo: string): string {
   const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
   if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {

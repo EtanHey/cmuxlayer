@@ -7,6 +7,7 @@
 import { appendFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  ControlHealthTelemetryEvent,
   DeliveryTelemetryEvent,
   EventLogEntry,
   StateTransition,
@@ -25,6 +26,10 @@ export class EventLog {
   }
 
   appendDelivery(event: DeliveryTelemetryEvent): void {
+    this.appendEntry(event);
+  }
+
+  appendControlHealth(event: ControlHealthTelemetryEvent): void {
     this.appendEntry(event);
   }
 

@@ -62,21 +62,30 @@ threshold_bytes() {
 
 get_cmux_pid() {
   local pid
-  pid="$(pgrep -x cmux 2>/dev/null | head -n 1 || true)"
+  pid="$(ps_cmux_pids | awk 'NF && found == "" { found = $1 } END { if (found != "") print found }')"
   if [[ -n "$pid" ]]; then
     printf '%s\n' "$pid"
     return 0
   fi
 
-  # cmux[^/]*\.app matches BOTH the stable bundle (cmux.app) and the nightly
-  # bundle (cmux NIGHTLY.app); the old cmux\.app pattern missed nightly entirely.
-  pid="$(pgrep -f 'cmux[^/]*\.app/Contents/MacOS/cmux' 2>/dev/null | head -n 1 || true)"
+  pid="$(pgrep -x cmux 2>/dev/null | awk 'NF && found == "" { found = $1 } END { if (found != "") print found }' || true)"
   if [[ -n "$pid" ]]; then
     printf '%s\n' "$pid"
     return 0
   fi
 
   return 1
+}
+
+ps_cmux_pids() {
+  ps -ww -axo pid=,command= 2>/dev/null | awk '
+    {
+      pid = $1
+      command = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", command)
+      if (command ~ /^\/Applications\/cmux[^\/]*\.app\/Contents\/MacOS\/cmux([[:space:]]|$)/) print pid
+      else if (command ~ /^\/Applications\/cmux[^\/]*\.app\/Contents\/Resources\/bin\/bun([[:space:]]|$)/) print pid
+    }'
 }
 
 parse_phys_footprint_bytes() {
@@ -119,8 +128,9 @@ aggregate_cmux_footprint_bytes() {
 
   # Match BOTH cmux bundles (stable cmux.app + nightly "cmux NIGHTLY.app") so
   # the watchdog covers whichever instance(s) are running — including when only
-  # nightly is up. The old cmux\.app pattern silently skipped nightly.
-  pids="$(pgrep -f 'cmux[^/]*\.app/Contents/MacOS/cmux|cmux[^/]*\.app/Contents/Resources/bin/bun' 2>/dev/null || true)"
+  # nightly is up. Use ps as the primary source: broad pgrep -f can match the
+  # transient pgrep command itself on macOS.
+  pids="$({ ps_cmux_pids || true; pgrep -x cmux 2>/dev/null || true; } | awk 'NF && !seen[$1]++ { print $1 }')"
   for pid in $pids; do
     footprint_bytes="$(cmux_footprint_bytes_for_pid "$pid")"
     if [[ -n "$footprint_bytes" ]]; then
