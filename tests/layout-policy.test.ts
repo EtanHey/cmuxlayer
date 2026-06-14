@@ -144,14 +144,25 @@ describe("layout policy", () => {
     expect(columns.get("pane:geometric-left")).toBe(2);
   });
 
+  it("does not collapse columns when cmux reports zero-area frames for an unfocused workspace", () => {
+    // cmux reports {x:0, width:0} for every pane in a workspace it is not
+    // currently rendering. A naive truthy check on pixel_frame would treat all
+    // panes as sharing x:0 and collapse them into one column, disabling
+    // left-vs-right (lead-vs-worker) docking. Geometry must be ignored here so
+    // index ordering keeps the columns distinct.
+    const columns = deriveColumnIndex([
+      makePane("pane:left", 0, [], { x: 0, y: 0, width: 0, height: 0 }),
+      makePane("pane:right", 1, [], { x: 0, y: 0, width: 0, height: 0 }),
+    ]);
+
+    expect(columns.get("pane:left")).toBe(0);
+    expect(columns.get("pane:right")).toBe(1);
+  });
+
   it("infers default role from repoGolem launcher names", () => {
-    expect(inferAgentRole({ launcherName: "orcClaude" })).toBe(
-      "orchestrator",
-    );
+    expect(inferAgentRole({ launcherName: "orcClaude" })).toBe("orchestrator");
     expect(inferAgentRole({ launcherName: "cmuxlayerCodex" })).toBe("worker");
-    expect(inferAgentRole({ launcherName: "brainlayerCursor" })).toBe(
-      "worker",
-    );
+    expect(inferAgentRole({ launcherName: "brainlayerCursor" })).toBe("worker");
   });
 
   it("uses the final launcher marker when repo names contain role words", () => {
@@ -486,9 +497,7 @@ describe("layout policy", () => {
   });
 
   it("docks workers into launcher-title Codex panes without registry state", () => {
-    const panes = [
-      makePane("pane:worker", 0, ["surface:cmuxlayer-worker"]),
-    ];
+    const panes = [makePane("pane:worker", 0, ["surface:cmuxlayer-worker"])];
     const paneSurfaces = [
       makeTitledPaneSurfaces("pane:worker", [
         {
@@ -742,7 +751,10 @@ describe("layout policy", () => {
       makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
     ];
     const paneSurfaces = [
-      makePaneSurfaces("pane:left", ["surface:interactive", "surface:worker-1"]),
+      makePaneSurfaces("pane:left", [
+        "surface:interactive",
+        "surface:worker-1",
+      ]),
     ];
 
     const placement = chooseAgentSpawnPlacement(
@@ -943,7 +955,10 @@ describe("layout policy", () => {
 
   it("docks into a clean right-column pane when an unknown worker contaminates the left pane", () => {
     const panes = [
-      makePane("pane:left", 0, ["surface:interactive", "surface:unknown-worker"]),
+      makePane("pane:left", 0, [
+        "surface:interactive",
+        "surface:unknown-worker",
+      ]),
       makePane("pane:right", 1, ["surface:notes"]),
     ];
     const paneSurfaces = [
@@ -1049,7 +1064,10 @@ describe("layout policy", () => {
     ];
     const paneSurfaces = [
       makePaneSurfaces("pane:left", ["surface:orchestrator"]),
-      makePaneSurfaces("pane:right", ["surface:unknown-worker", "surface:shell"]),
+      makePaneSurfaces("pane:right", [
+        "surface:unknown-worker",
+        "surface:shell",
+      ]),
     ];
 
     const placement = chooseAgentSpawnPlacement(
@@ -1250,7 +1268,10 @@ describe("layout policy", () => {
       makePane("pane:left", 0, ["surface:interactive", "surface:worker-1"]),
     ];
     const paneSurfaces = [
-      makePaneSurfaces("pane:left", ["surface:interactive", "surface:worker-1"]),
+      makePaneSurfaces("pane:left", [
+        "surface:interactive",
+        "surface:worker-1",
+      ]),
     ];
 
     const policy = chooseSurfaceClosePolicy(

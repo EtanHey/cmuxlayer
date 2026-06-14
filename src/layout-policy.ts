@@ -3,7 +3,11 @@ import type { AgentRecord, AgentRole, CliType } from "./agent-types.js";
 import { extractPrefix } from "./naming.js";
 
 export type AgentSpawnPlacement =
-  | { kind: "split"; direction: "left" | "right" | "up" | "down"; pane?: string }
+  | {
+      kind: "split";
+      direction: "left" | "right" | "up" | "down";
+      pane?: string;
+    }
   | { kind: "surface"; pane: string };
 
 export interface SurfaceClosePolicy {
@@ -107,7 +111,17 @@ function roleForSurface(
 }
 
 export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
-  const useGeometry = panes.every((pane) => pane.pixel_frame);
+  // A pixel_frame is only usable for column detection when it has real area.
+  // cmux reports {x:0, width:0, ...} for panes in a workspace it isn't
+  // currently rendering (background/unfocused workspaces), and that frame is
+  // truthy — so a naive `pane.pixel_frame` check would treat every pane as
+  // sharing x:0, collapse them into a single column, and silently disable the
+  // left-vs-right (lead-vs-worker) docking logic. Require non-zero width on
+  // every pane before trusting geometry; otherwise fall back to pane.index,
+  // which is monotonic left-to-right and always present.
+  const useGeometry = panes.every(
+    (pane) => pane.pixel_frame && pane.pixel_frame.width > 0,
+  );
   const sortedGroups = [
     ...new Map(
       [...panes]
@@ -305,9 +319,9 @@ export function canInferAgentRole(input: {
 }): boolean {
   return Boolean(
     input.role ||
-      roleFromLauncherLabel(input.launcherName) ||
-      roleFromLauncherLabel(input.title) ||
-      roleFromCli(input.cli),
+    roleFromLauncherLabel(input.launcherName) ||
+    roleFromLauncherLabel(input.title) ||
+    roleFromCli(input.cli),
   );
 }
 
@@ -443,9 +457,7 @@ export function chooseAgentSpawnPlacement(
 
   if (role === "orchestrator") {
     const leftLeadPane =
-      leftPane && !isWorkerMajorityPane(leftPane)
-        ? leftPane
-        : undefined;
+      leftPane && !isWorkerMajorityPane(leftPane) ? leftPane : undefined;
     const orchestratorPane =
       leftLeadPane ??
       leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane));
@@ -612,11 +624,10 @@ export function chooseSurfaceClosePolicy(
   workerSurfaceIds: ReadonlySet<string>,
   surfaceId: string,
 ): SurfaceClosePolicy {
-  const layout = describePaneLayouts(
-    panes,
-    paneSurfaces,
-    { ...emptyRoleSurfaceIds(), worker: new Set(workerSurfaceIds) },
-  ).find((candidate) =>
+  const layout = describePaneLayouts(panes, paneSurfaces, {
+    ...emptyRoleSurfaceIds(),
+    worker: new Set(workerSurfaceIds),
+  }).find((candidate) =>
     candidate.surfaces.some((surface) => surface.ref === surfaceId),
   );
 
