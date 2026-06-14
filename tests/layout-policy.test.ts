@@ -144,19 +144,41 @@ describe("layout policy", () => {
     expect(columns.get("pane:geometric-left")).toBe(2);
   });
 
-  it("does not collapse columns when cmux reports zero-area frames for an unfocused workspace", () => {
-    // cmux reports {x:0, width:0} for every pane in a workspace it is not
-    // currently rendering. A naive truthy check on pixel_frame would treat all
-    // panes as sharing x:0 and collapse them into one column, disabling
-    // left-vs-right (lead-vs-worker) docking. Geometry must be ignored here so
-    // index ordering keeps the columns distinct.
-    const columns = deriveColumnIndex([
-      makePane("pane:left", 0, [], { x: 0, y: 0, width: 0, height: 0 }),
-      makePane("pane:right", 1, [], { x: 0, y: 0, width: 0, height: 0 }),
-    ]);
+  it("stays two-way (worker docks right, never a third column) when an unfocused workspace reports zero-area frames", () => {
+    // THE invariant: cmux geometry is two-way — a LEFT lead column and a RIGHT
+    // worker column, never three. cmux reports {x:0, width:0} for every pane in
+    // a workspace it is not currently rendering. If that zero geometry collapses
+    // the two columns into one, the lead's next worker splits RIGHT off the lead
+    // pane and a THIRD column appears. Ignoring zero-area frames keeps the
+    // columns distinct, so the worker docks into the existing right column.
+    const zero = { x: 0, y: 0, width: 0, height: 0 };
+    const panes = [
+      makePane("pane:left", 0, ["surface:orchestrator"], zero),
+      makePane("pane:right", 1, [], zero),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", []),
+    ];
 
-    expect(columns.get("pane:left")).toBe(0);
-    expect(columns.get("pane:right")).toBe(1);
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+      },
+    );
+
+    // Docks into the existing right column (two-way). The regression is
+    // { kind: "split", direction: "right", pane: "pane:left" } — a third column.
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
   it("infers default role from repoGolem launcher names", () => {
