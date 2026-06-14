@@ -83,6 +83,17 @@ import { normalizeKeyName } from "./key-names.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
+import {
+  collectControlHealth,
+  formatControlHealth,
+  type ControlHealth,
+} from "./control-health.js";
+import {
+  formatMcpProfileEnv,
+  prepareWorktree,
+  type McpProfile,
+  type WorktreeExec,
+} from "./worktree.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -634,6 +645,13 @@ export interface CreateServerOptions {
   inboxBaseDir?: string;
   /** Override session identity lookup (primarily for mocked tests). */
   sessionIdentityResolver?: SessionIdentityResolver;
+  /** Override git worktree execution/home for tests. */
+  worktreeExec?: WorktreeExec;
+  worktreeHomeDir?: string;
+  /** Override control health collection (primarily for tests). */
+  controlHealthCollector?: () => Promise<ControlHealth>;
+  /** Periodic control health sample interval. Defaults to env or 60000ms; 0 disables. */
+  controlHealthIntervalMs?: number;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -660,7 +678,28 @@ export interface CmuxServerContext {
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
   lifecycleSweepEngine: AgentEngine | null;
+  controlHealthCollector?: () => Promise<ControlHealth>;
+  controlHealthIntervalMs: number;
+  controlHealthTimer: ReturnType<typeof setInterval> | null;
   dispose(): void;
+}
+
+const DEFAULT_CONTROL_HEALTH_INTERVAL_MS = 60_000;
+const MIN_CONTROL_HEALTH_INTERVAL_MS = 5_000;
+
+function resolveControlHealthIntervalMs(input?: number): number {
+  const raw =
+    input ??
+    (process.env.CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS
+      ? Number(process.env.CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS)
+      : DEFAULT_CONTROL_HEALTH_INTERVAL_MS);
+  if (!Number.isFinite(raw) || raw < 0) {
+    return DEFAULT_CONTROL_HEALTH_INTERVAL_MS;
+  }
+  if (raw === 0) {
+    return 0;
+  }
+  return Math.max(MIN_CONTROL_HEALTH_INTERVAL_MS, Math.floor(raw));
 }
 
 export function createServerContext(
@@ -692,8 +731,17 @@ export function createServerContext(
     lifecycleStarted: false,
     lifecycleStartPromise: null,
     lifecycleSweepEngine: null,
+    controlHealthCollector: opts?.controlHealthCollector,
+    controlHealthIntervalMs: resolveControlHealthIntervalMs(
+      opts?.controlHealthIntervalMs,
+    ),
+    controlHealthTimer: null,
     dispose() {
       context.lifecycleSweepEngine?.dispose();
+      if (context.controlHealthTimer) {
+        clearInterval(context.controlHealthTimer);
+        context.controlHealthTimer = null;
+      }
       context.lifecycleSweepEngine = null;
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
@@ -765,6 +813,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const spawnPreflight = opts?.spawnPreflight ?? context.spawnPreflight;
   const disableSpawnPreflight =
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
+  const controlHealthCollector =
+    opts?.controlHealthCollector ?? context.controlHealthCollector;
   const inboxOpts = opts?.inboxBaseDir
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
@@ -904,6 +954,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const worktreeArgSchema = z.union([
+    z.boolean(),
+    z.object({
+      create: z.boolean().optional(),
+      reuse: z.boolean().optional(),
+      name: z.string().optional(),
+      path: z.string().optional(),
+      branch: z.string().optional(),
+      base: z.string().optional(),
+    }),
+  ]);
+
+  const mcpProfileSchema = z.union([
+    z.enum(["inherit", "sterile", "skill_eval"]),
+    z.object({
+      include: z.array(z.string()).optional(),
+      exclude: z.array(z.string()).optional(),
+    }),
+  ]);
+
   const pruneCompletedDeliveryHistory = (surface: string) => {
     const latestDeliveryId = latestDeliveryBySurface.get(surface);
     for (const [deliveryId, record] of deliveries.entries()) {
@@ -1020,6 +1090,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ...event,
     });
   };
+
+  const appendControlHealthSnapshot = async (): Promise<ControlHealth> => {
+    const health = controlHealthCollector
+      ? await controlHealthCollector()
+      : await collectControlHealth({ client });
+    eventLog.appendControlHealth({
+      ts: health.generated_at,
+      event_type: "control_health",
+      selected_socket_path:
+        health.selected_transport.current_socket_path ?? null,
+      production_socket_path: health.cmux_instances.production.socket_path,
+      nightly_socket_path: health.cmux_instances.nightly.socket_path,
+      cmux_binary: health.current_process.cmux_resolution[0]?.path ?? null,
+      warnings: health.warnings,
+      snapshot: health,
+    });
+    return health;
+  };
+
+  if (
+    context.controlHealthIntervalMs > 0 &&
+    context.controlHealthTimer === null
+  ) {
+    context.controlHealthTimer = setInterval(() => {
+      appendControlHealthSnapshot().catch((error) => {
+        console.error("[cmux-mcp] control_health periodic sample failed:", error);
+      });
+    }, context.controlHealthIntervalMs);
+    context.controlHealthTimer.unref?.();
+  }
 
   const readParsedSurface = async (
     surface: string,
@@ -1710,6 +1810,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           responseWorkspaces as Array<{ ref: string; title?: string }>,
         );
         return okFormatted(formatted, data);
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "control_health",
+    "Report cmuxlayer control-path health: selected transport, prod/nightly socket markers, cmux binary resolution, process env, and job-control diagnostics.",
+    {},
+    ANNOTATIONS.readOnly,
+    async () => {
+      try {
+        const health = await appendControlHealthSnapshot();
+        return okFormatted(formatControlHealth(health), {
+          health,
+        });
       } catch (e) {
         return err(e);
       }
@@ -3000,38 +3117,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   if (!skipAgentLifecycle) {
     const surfaceProvider = async () => {
-      try {
-        const workspaces = await client.listWorkspaces();
-        const panesByWorkspace = await Promise.all(
-          workspaces.workspaces.map(async (ws) => ({
-            ref: ws.ref,
-            panes: await client.listPanes({ workspace: ws.ref }),
-          })),
-        );
-        const surfaceGroupsByWorkspace = await Promise.all(
-          panesByWorkspace.map(async ({ ref, panes }) => {
-            const rawGroups = await Promise.all(
-              panes.panes.map((p) =>
-                client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
-              ),
-            );
-            return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
-              workspace_ref: panes.workspace_ref ?? ref,
-              window_ref: panes.window_ref,
-            });
-          }),
-        );
-        const surfaceGroups = surfaceGroupsByWorkspace.flat();
-        return surfaceGroups.flatMap((group) =>
-          group.surfaces.map((surface) => ({
-            ...surface,
-            workspace_ref: group.workspace_ref,
-            pane_ref: group.pane_ref,
-          })),
-        );
-      } catch {
-        return [];
-      }
+      const workspaces = await client.listWorkspaces();
+      const panesByWorkspace = await Promise.all(
+        workspaces.workspaces.map(async (ws) => ({
+          ref: ws.ref,
+          panes: await client.listPanes({ workspace: ws.ref }),
+        })),
+      );
+      const surfaceGroupsByWorkspace = await Promise.all(
+        panesByWorkspace.map(async ({ ref, panes }) => {
+          const rawGroups = await Promise.all(
+            panes.panes.map((p) =>
+              client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
+            ),
+          );
+          return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+            workspace_ref: panes.workspace_ref ?? ref,
+            window_ref: panes.window_ref,
+          });
+        }),
+      );
+      const surfaceGroups = surfaceGroupsByWorkspace.flat();
+      return surfaceGroups.flatMap((group) =>
+        group.surfaces.map((surface) => ({
+          ...surface,
+          workspace_ref: group.workspace_ref,
+          pane_ref: group.pane_ref,
+        })),
+      );
     };
     const registry =
       context.lifecycleRegistry ?? new AgentRegistry(stateMgr, surfaceProvider);
@@ -3142,6 +3255,73 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     context.lifecycleSweepEngine = engine;
 
+    const resolveSpawnRecord = (
+      agentId: string,
+      surfaceId: string,
+    ): AgentRecord | null => {
+      const diskDirect = stateMgr.readState(agentId);
+      if (diskDirect) {
+        registry.set(agentId, diskDirect);
+        return diskDirect;
+      }
+
+      const bySurface =
+        stateMgr.listStates().find((agent) => agent.surface_id === surfaceId) ??
+        registry.list().find((agent) => agent.surface_id === surfaceId) ??
+        null;
+      if (bySurface) {
+        registry.set(agentId, bySurface);
+        return bySurface;
+      }
+
+      const registryDirect = registry.get(agentId);
+      if (registryDirect) {
+        registry.set(agentId, registryDirect);
+      }
+      return registryDirect;
+    };
+
+    const canonicalizeSpawnResult = <T extends {
+      agent_id: string;
+      surface_id: string;
+    }>(
+      result: T,
+    ): AgentRecord | null => {
+      const record = resolveSpawnRecord(result.agent_id, result.surface_id);
+      if (record) {
+        result.agent_id = record.agent_id;
+      }
+      return record;
+    };
+
+    const prepareSpawnWorktree = async (
+      repo: string,
+      worktree: boolean | object | undefined,
+      mcpProfile: McpProfile | undefined,
+    ) => {
+      if (!worktree) {
+        return {
+          prepared: undefined,
+          mcpProfileLabel: undefined,
+          mcpEnv: undefined,
+        };
+      }
+
+      const profile = mcpProfile ?? "inherit";
+      const prepared = await prepareWorktree({
+        repo,
+        worktree: worktree as Parameters<typeof prepareWorktree>[0]["worktree"],
+        exec: opts?.worktreeExec,
+        homeGitsDir: opts?.worktreeHomeDir,
+      });
+      return {
+        prepared,
+        mcpProfileLabel:
+          typeof profile === "string" ? profile : "custom",
+        mcpEnv: formatMcpProfileEnv(profile),
+      };
+    };
+
     const deliverAgentInput = async (args: {
       agent_id: string;
       text: string;
@@ -3159,10 +3339,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // is unavailable (empty) so a transient listing failure never blocks a
       // healthy relay.
       const liveSurfaceRefs = async (): Promise<Set<string> | null> => {
-        const surfaces = await surfaceProvider();
-        return surfaces.length > 0
-          ? new Set(surfaces.map((surface) => surface.ref))
-          : null;
+        try {
+          const surfaces = await surfaceProvider();
+          return surfaces.length > 0
+            ? new Set(surfaces.map((surface) => surface.ref))
+            : null;
+        } catch {
+          return null;
+        }
       };
       const isPositivelyStale = (
         refs: Set<string> | null,
@@ -3317,6 +3501,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "Timeout in milliseconds waiting for the agent ready prompt",
           ),
         workspace: z.string().optional().describe("Target workspace ref"),
+        worktree: worktreeArgSchema
+          .optional()
+          .describe(
+            "When set, create or reuse a git worktree before launch. true uses ~/Gits/<repo>.wt/<generated-name>; object fields can set name, path, branch, base, create, and reuse.",
+          ),
+        mcp_profile: mcpProfileSchema
+          .optional()
+          .describe(
+            "MCP profile hint for worktree launches. Defaults to inherit. Use sterile/skill_eval or include/exclude lists for narrower evals.",
+          ),
         parent_agent_id: z
           .string()
           .optional()
@@ -3357,6 +3551,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await preflightBootPromptFile(bootPromptPath);
           }
 
+          const worktree = await prepareSpawnWorktree(
+            args.repo,
+            args.worktree,
+            args.mcp_profile as McpProfile | undefined,
+          );
+
           const result = await engine.spawnAgent({
             repo: args.repo,
             model: args.model,
@@ -3365,6 +3565,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_pending:
               hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: args.workspace,
+            cwd: worktree.prepared?.path,
+            mcp_env: worktree.mcpEnv,
+            mcp_profile_label: worktree.mcpProfileLabel,
+            worktree_branch: worktree.prepared?.branch,
             parent_agent_id: args.parent_agent_id,
             role: args.role,
             auto_archive_on_done: args.auto_archive_on_done ?? true,
@@ -3387,8 +3591,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 timeout_ms: args.boot_prompt_timeout_ms,
               });
 
-              result.agent_id =
-                registry.get(result.agent_id)?.agent_id ?? result.agent_id;
+              canonicalizeSpawnResult(result);
               if (bootPromptDelivery.prompt_text !== null) {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   task_summary: bootPromptDelivery.prompt_text,
@@ -3414,8 +3617,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             try {
-              result.agent_id =
-                registry.get(result.agent_id)?.agent_id ?? result.agent_id;
+              canonicalizeSpawnResult(result);
               let updated = stateMgr.updateRecord(result.agent_id, {
                 boot_prompt_pending: false,
               });
@@ -3463,6 +3665,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }),
             {
               ...result,
+              worktree: worktree.prepared,
+              mcp_profile: worktree.mcpProfileLabel,
               role:
                 engine.getAgentState(result.agent_id)?.role ??
                 inferAgentRole({
@@ -3470,6 +3674,103 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   cli: args.cli,
                   launcherName: launcherNameForCli(args.repo, args.cli),
                 }),
+              boot_prompt_delivered: Boolean(bootPromptDelivery),
+              boot_prompt_bytes: bootPromptDelivery?.bytes,
+            },
+          );
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    server.tool(
+      "new_worktree_split",
+      "Create or reuse a git worktree and spawn one worker agent into a right-side cmux split. Defaults to inherited MCPs and preserves the existing worker layout policy.",
+      {
+        repo: z.string().describe("Repository name"),
+        model: z.string().describe("Model name"),
+        cli: z
+          .enum(["claude", "codex", "gemini", "kiro", "cursor"])
+          .describe("CLI tool to launch"),
+        prompt: z.string().optional().describe("Optional boot prompt"),
+        boot_prompt_timeout_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .default(BOOT_PROMPT_TIMEOUT_MS),
+        workspace: z.string().optional().describe("Target workspace ref"),
+        worktree: worktreeArgSchema
+          .optional()
+          .describe(
+            "Worktree options. Defaults to true, creating/reusing ~/Gits/<repo>.wt/<generated-name>.",
+          ),
+        mcp_profile: mcpProfileSchema
+          .optional()
+          .describe("MCP profile hint. Defaults to inherit."),
+        parent_agent_id: z.string().optional(),
+        auto_archive_on_done: z.boolean().optional().default(true),
+        crash_recover: z.boolean().optional().default(false),
+      },
+      ANNOTATIONS.mutating,
+      async (args) => {
+        try {
+          assertBootPromptMode(args.prompt, null);
+          const worktree = await prepareSpawnWorktree(
+            args.repo,
+            args.worktree ?? true,
+            args.mcp_profile as McpProfile | undefined,
+          );
+          const hasPrompt = hasInlinePrompt(args.prompt);
+          const result = await engine.spawnAgent({
+            repo: args.repo,
+            model: args.model,
+            cli: args.cli,
+            prompt: args.prompt ?? "",
+            boot_prompt_pending: hasPrompt,
+            workspace: args.workspace,
+            cwd: worktree.prepared?.path,
+            mcp_env: worktree.mcpEnv,
+            mcp_profile_label: worktree.mcpProfileLabel,
+            worktree_branch: worktree.prepared?.branch,
+            parent_agent_id: args.parent_agent_id,
+            role: "worker",
+            auto_archive_on_done: args.auto_archive_on_done ?? true,
+            crash_recover: args.crash_recover,
+          });
+
+          let bootPromptDelivery:
+            | Awaited<ReturnType<typeof deliverBootPrompt>>
+            | undefined;
+          if (hasPrompt) {
+            bootPromptDelivery = await deliverBootPrompt({
+              surface: result.surface_id,
+              workspace: result.workspace_id ?? args.workspace,
+              cli: args.cli,
+              prompt: args.prompt,
+              timeout_ms: args.boot_prompt_timeout_ms,
+            });
+            canonicalizeSpawnResult(result);
+            const updated = stateMgr.updateRecord(result.agent_id, {
+              task_summary: bootPromptDelivery.prompt_text ?? args.prompt ?? "",
+              boot_prompt_pending: false,
+            });
+            registry.set(result.agent_id, updated);
+          }
+
+          return okFormatted(
+            formatOk("new_worktree_split", {
+              agent_id: result.agent_id,
+              surface: result.surface_id,
+              worktree: worktree.prepared?.path ?? "",
+              mcp_profile: worktree.mcpProfileLabel ?? "inherit",
+            }),
+            {
+              ...result,
+              role: "worker",
+              worktree: worktree.prepared,
+              mcp_profile: worktree.mcpProfileLabel ?? "inherit",
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },
@@ -3548,8 +3849,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
               });
 
-              result.agent_id =
-                registry.get(result.agent_id)?.agent_id ?? result.agent_id;
+              canonicalizeSpawnResult(result);
               const updated = stateMgr.updateRecord(result.agent_id, {
                 task_summary:
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",

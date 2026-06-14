@@ -54,6 +54,11 @@ export interface AgentRecord {
   user_killed?: boolean;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
+  // Launch context for worktree/profile-aware spawns
+  launch_cwd?: string | null;
+  mcp_profile?: string | null;
+  worktree_path?: string | null;
+  worktree_branch?: string | null;
 }
 
 export interface MergedAgent extends AgentRecord {
@@ -147,7 +152,21 @@ export interface DeliveryTelemetryEvent {
   retry_count: number;
 }
 
-export type EventLogEntry = StateTransition | DeliveryTelemetryEvent;
+export interface ControlHealthTelemetryEvent {
+  ts: string;
+  event_type: "control_health";
+  selected_socket_path: string | null;
+  production_socket_path: string | null;
+  nightly_socket_path: string | null;
+  cmux_binary: string | null;
+  warnings: string[];
+  snapshot: unknown;
+}
+
+export type EventLogEntry =
+  | StateTransition
+  | DeliveryTelemetryEvent
+  | ControlHealthTelemetryEvent;
 
 export interface WaitResult {
   matched: boolean;

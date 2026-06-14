@@ -26,8 +26,6 @@ export interface ExecFn {
   (cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
 }
 
-const defaultExec: ExecFn = (cmd, args) => execFileAsync(cmd, args);
-
 interface CmuxIdentifyResult {
   caller?: {
     workspace_ref?: string;
@@ -42,17 +40,27 @@ interface CmuxIdentifyResult {
 }
 
 export class CmuxClient {
-  private exec: ExecFn;
+  private exec?: ExecFn;
   private bin: string;
+  private env?: NodeJS.ProcessEnv;
 
-  constructor(opts?: { exec?: ExecFn; bin?: string }) {
-    this.exec = opts?.exec ?? defaultExec;
+  constructor(opts?: { exec?: ExecFn; bin?: string; env?: NodeJS.ProcessEnv }) {
+    this.exec = opts?.exec;
     this.bin = opts?.bin ?? "cmux";
+    this.env = opts?.env;
+  }
+
+  setEnv(env: NodeJS.ProcessEnv | undefined): void {
+    this.env = env;
   }
 
   private async run(args: string[]): Promise<string> {
     try {
-      const { stdout } = await this.exec(this.bin, ["--json", ...args]);
+      const { stdout } = this.exec
+        ? await this.exec(this.bin, ["--json", ...args])
+        : await execFileAsync(this.bin, ["--json", ...args], {
+            ...(this.env ? { env: this.env } : {}),
+          });
       return stdout;
     } catch (error) {
       throw this.normalizeCliError(args, error);
@@ -417,8 +425,8 @@ export class CmuxClient {
   async createWorkspace(
     title: string,
   ): Promise<{ workspace: string; title: string }> {
-    const raw = await this.run(["new-workspace", "--title", title]);
-    const parsed = this.parse<Record<string, unknown>>(raw, "new-workspace");
+    const raw = await this.run(["workspace", "create", "--name", title]);
+    const parsed = this.parse<Record<string, unknown>>(raw, "workspace create");
     return {
       workspace:
         (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",

@@ -10,4 +10,13 @@ docs.local/
 # Local agent scratch + settings
 claude.scratchpad.md
 .claude/
+
+# graphify knowledge graph output (local build artifact)
+graphify-out/
 node_modules
+
+# git worktrees (e.g. isolated PR branches)
+.worktrees/
+
+# local collab/scratch notes
+collab/

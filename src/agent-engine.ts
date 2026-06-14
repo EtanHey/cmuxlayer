@@ -3,17 +3,17 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
   AGENT_ENV,
   buildResumeCommand,
   sanitizeRepoName,
+  shellQuote,
 } from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
 import {
@@ -73,6 +73,10 @@ export interface SpawnAgentParams {
   prompt: string;
   boot_prompt_pending?: boolean;
   workspace?: string;
+  cwd?: string;
+  mcp_env?: string;
+  mcp_profile_label?: string;
+  worktree_branch?: string;
   parent_agent_id?: string;
   role?: AgentRole;
   auto_archive_on_done?: boolean;
@@ -85,6 +89,8 @@ export interface SpawnAgentResult {
   surface_id: string;
   workspace_id?: string;
   state: AgentState;
+  cwd?: string;
+  mcp_env?: string;
 }
 
 export interface CapturedSessionIdentity {
@@ -148,8 +154,6 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`chatid:\\s*(${SESSION_ID_PATTERN})`, "i"),
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
-const execFileAsync = promisify(execFile);
-
 const JSONL_HARNESSES = new Set<CliType>(["claude", "codex", "cursor"]);
 
 export { buildResumeCommand } from "./agent-command.js";
@@ -449,24 +453,27 @@ export function buildLaunchCommand(
   // for a launcher CLI it overrides the naive `${repo}${Suffix}` guess so
   // hyphen-stripped registrations launch correctly. Ignored for gemini/kiro.
   launcherName?: string,
+  opts?: { cwd?: string; envPrefix?: string },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveModelFlag(cli, model);
   const launcherModelArgs = modelFlag ? ` -m ${modelFlag}` : "";
   const rawModelArgs = modelFlag ? ` --model ${modelFlag}` : "";
+  const cdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
+  const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}`;
+      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}`;
     case "codex":
-      return `${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}`;
+      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}`;
     case "gemini":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini${rawModelArgs}`;
+      return `${cdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} gemini${rawModelArgs}`;
     case "kiro":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli${rawModelArgs}`;
+      return `${cdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}`;
+      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}`;
   }
 }
 
@@ -484,6 +491,12 @@ export function extractSessionId(text: string): string | null {
 }
 
 export type LauncherSuffix = "Claude" | "Codex" | "Cursor";
+
+const REPO_LAUNCHER_ALIASES: Record<string, string[]> = {
+  // The orchestrator checkout lives at ~/Gits/orchestrator, but the
+  // repoGolem registry key is `orc`, so the launchers are orcClaude/Codex/Cursor.
+  orchestrator: ["orc"],
+};
 
 /**
  * Ordered, de-duplicated launcher-name candidates for a repo + suffix.
@@ -505,9 +518,12 @@ export function launcherNameCandidates(
   suffix: LauncherSuffix,
 ): string[] {
   const safeRepo = sanitizeRepoName(repo);
-  const verbatim = `${safeRepo}${suffix}`;
-  const stripped = `${safeRepo.replace(/-/g, "").toLowerCase()}${suffix}`;
-  return stripped === verbatim ? [verbatim] : [verbatim, stripped];
+  const prefixes = [
+    safeRepo,
+    safeRepo.replace(/-/g, "").toLowerCase(),
+    ...(REPO_LAUNCHER_ALIASES[safeRepo] ?? []),
+  ];
+  return [...new Set(prefixes)].map((prefix) => `${prefix}${suffix}`);
 }
 
 /** Returns true when a launcher function/command resolves in the login shell. */
@@ -517,12 +533,43 @@ const shellLauncherProbe: LauncherProbe = async (launcher) => {
   const shell = process.env.SHELL || "/bin/zsh";
   const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
   try {
-    await execFileAsync(shell, ["-ilc", probe]);
+    await runDetachedShellProbe(shell, probe);
     return true;
   } catch {
     return false;
   }
 };
+
+function runDetachedShellProbe(shell: string, probe: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(shell, ["-ilc", probe], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("launcher probe timed out"));
+    }, 5_000);
+
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `launcher probe exited with ${code ?? `signal ${signal ?? "unknown"}`}`,
+        ),
+      );
+    });
+  });
+}
 
 /**
  * Resolve the actual launcher function name by probing candidate forms in
@@ -1659,6 +1706,10 @@ export class AgentEngine {
       respawn_attempts: 0,
       user_killed: false,
       boot_prompt_pending: params.boot_prompt_pending ?? false,
+      launch_cwd: params.cwd ?? null,
+      mcp_profile: params.mcp_profile_label ?? null,
+      worktree_path: params.cwd ?? null,
+      worktree_branch: params.worktree_branch ?? null,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
@@ -1669,6 +1720,7 @@ export class AgentEngine {
       params.repo,
       params.model,
       preflight?.launcherName,
+      { cwd: params.cwd, envPrefix: params.mcp_env },
     );
     try {
       await this.sendLaunchCommand(surface.surface, surface.workspace, launchCmd);
@@ -1691,6 +1743,8 @@ export class AgentEngine {
       surface_id: surface.surface,
       workspace_id: surface.workspace,
       state: "booting",
+      cwd: params.cwd,
+      mcp_env: params.mcp_env,
     };
   }
 

@@ -73,7 +73,24 @@ timestamp_to_epoch() {
 
 pid_for_path() {
   local app_path="$1"
-  pgrep -f "$app_path" 2>/dev/null | head -n 1 || true
+  local pid
+
+  pid="$(pgrep -f "$app_path" 2>/dev/null | awk 'NF && found == "" { found = $1 } END { if (found != "") print found }' || true)"
+  if [[ -n "$pid" ]]; then
+    printf '%s\n' "$pid"
+    return
+  fi
+
+  ps -ww -axo pid=,command= 2>/dev/null | awk -v app_path="$app_path" '
+    {
+      pid = $1
+      command = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", command)
+      if (found == "" && index(command, app_path) == 1) found = pid
+    }
+    END {
+      if (found != "") print found
+    }'
 }
 
 footprint_output_for_pid() {
