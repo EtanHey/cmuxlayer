@@ -29,14 +29,8 @@ import {
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
-import {
-  MAX_RESPAWN_ATTEMPTS,
-  type AgentRecord,
-} from "../src/agent-types.js";
-import {
-  SpawnGuard,
-  SpawnRateLimitedError,
-} from "../src/spawn-guard.js";
+import { MAX_RESPAWN_ATTEMPTS, type AgentRecord } from "../src/agent-types.js";
+import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -347,9 +341,8 @@ describe("AgentEngine", () => {
         prompt: "Fix gap F",
       });
 
-      const [, launchCmd] = (
-        mockClient.send as ReturnType<typeof vi.fn>
-      ).mock.calls[0];
+      const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
+        .calls[0];
       expect(launchCmd).toBe("agenthtmlhostCursor -s");
 
       resolvingEngine.dispose();
@@ -395,7 +388,9 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "ws:1",
         window_ref: "window:1",
         pane_ref: "pane:left",
@@ -430,7 +425,9 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "workspace:red-team",
         window_ref: "window:1",
         pane_ref: "pane:left",
@@ -445,7 +442,9 @@ describe("AgentEngine", () => {
         workspace: "workspace:red-team",
       });
 
-      expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:red-team");
+      expect(mockClient.selectWorkspace).toHaveBeenCalledWith(
+        "workspace:red-team",
+      );
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
         pane: "pane:left",
         workspace: "workspace:red-team",
@@ -461,20 +460,22 @@ describe("AgentEngine", () => {
     });
 
     it("inherits the workspace whose current directory matches the target repo", async () => {
-      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspaces: [
-          {
-            ref: "workspace:brainlayer",
-            title: "BrainLayer",
-            current_directory: "/Users/etanheyman/Gits/brainlayer",
-          },
-          {
-            ref: "workspace:voice",
-            title: "VoiceLayer",
-            current_directory: "/Users/etanheyman/Gits/voicelayer",
-          },
-        ],
-      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        {
+          workspaces: [
+            {
+              ref: "workspace:brainlayer",
+              title: "BrainLayer",
+              current_directory: "/Users/etanheyman/Gits/brainlayer",
+            },
+            {
+              ref: "workspace:voice",
+              title: "VoiceLayer",
+              current_directory: "/Users/etanheyman/Gits/voicelayer",
+            },
+          ],
+        },
+      );
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
           {
@@ -486,7 +487,9 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "workspace:voice",
         window_ref: "window:1",
         pane_ref: "pane:voice",
@@ -508,7 +511,9 @@ describe("AgentEngine", () => {
       });
 
       expect(result.workspace_id).toBe("workspace:voice");
-      expect(mockClient.selectWorkspace).toHaveBeenCalledWith("workspace:voice");
+      expect(mockClient.selectWorkspace).toHaveBeenCalledWith(
+        "workspace:voice",
+      );
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
         pane: "pane:voice",
         workspace: "workspace:voice",
@@ -535,17 +540,17 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
-        async ({ pane }: { pane?: string }) => ({
-          workspace_ref: "ws:1",
-          window_ref: "window:1",
-          pane_ref: pane ?? "pane:left",
-          surfaces:
-            pane === "pane:right"
-              ? [makeSurface("surface:interactive-right")]
-              : [makeSurface("surface:interactive-left")],
-        }),
-      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [makeSurface("surface:interactive-right")]
+            : [makeSurface("surface:interactive-left")],
+      }));
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -578,7 +583,10 @@ describe("AgentEngine", () => {
           surface_id: "surface:worker-2",
         }),
       );
-      liveSurfaces = [makeSurface("surface:worker-1"), makeSurface("surface:worker-2")];
+      liveSurfaces = [
+        makeSurface("surface:worker-1"),
+        makeSurface("surface:worker-2"),
+      ];
       await engine.getRegistry().reconstitute();
 
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -599,17 +607,17 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
-        async ({ pane }: { pane?: string }) => ({
-          workspace_ref: "ws:1",
-          window_ref: "window:1",
-          pane_ref: pane ?? "pane:left",
-          surfaces:
-            pane === "pane:right"
-              ? [makeSurface("surface:worker-1"), makeSurface("surface:worker-2")]
-              : [makeSurface("surface:interactive")],
-        }),
-      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [makeSurface("surface:worker-1"), makeSurface("surface:worker-2")]
+            : [makeSurface("surface:interactive")],
+      }));
       (mockClient.newSurface as ReturnType<typeof vi.fn>).mockResolvedValue({
         workspace: "ws:1",
         surface: "surface:new",
@@ -655,7 +663,9 @@ describe("AgentEngine", () => {
       });
 
       expect(stateMgr.readState(result.agent_id)?.role).toBe("worker");
-      expect(stateMgr.readState(result.agent_id)?.auto_archive_on_done).toBeUndefined();
+      expect(
+        stateMgr.readState(result.agent_id)?.auto_archive_on_done,
+      ).toBeUndefined();
     });
 
     it("uses role panes created by new_split when placing spawned agents", async () => {
@@ -688,17 +698,17 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
-        async ({ pane }: { pane?: string }) => ({
-          workspace_ref: "ws:1",
-          window_ref: "window:1",
-          pane_ref: pane ?? "pane:left",
-          surfaces:
-            pane === "pane:right"
-              ? [makeSurface("surface:worker-shell")]
-              : [makeSurface("surface:orc")],
-        }),
-      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [makeSurface("surface:worker-shell")]
+            : [makeSurface("surface:orc")],
+      }));
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -754,7 +764,9 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
         workspace_ref: "ws:1",
         window_ref: "window:1",
         surfaces: [
@@ -866,17 +878,17 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
-        async ({ pane }: { pane?: string }) => ({
-          workspace_ref: "ws:1",
-          window_ref: "window:1",
-          pane_ref: pane ?? "pane:left",
-          surfaces:
-            pane === "pane:ic"
-              ? [makeSurface("surface:ic")]
-              : [makeSurface("surface:orc")],
-        }),
-      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:ic"
+            ? [makeSurface("surface:ic")]
+            : [makeSurface("surface:orc")],
+      }));
 
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -1103,7 +1115,9 @@ describe("AgentEngine", () => {
           { workspace: undefined },
         );
         expect(mockClient.setStatus).not.toHaveBeenCalled();
-        expect(engine.getAgentState("worker-archived-before-status")).toBeNull();
+        expect(
+          engine.getAgentState("worker-archived-before-status"),
+        ).toBeNull();
         expect(stateMgr.readState("worker-archived-before-status")).toBeNull();
 
         (mockClient.setStatus as ReturnType<typeof vi.fn>).mockClear();
@@ -1552,10 +1566,7 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
 
         expect(
           (mockClient.readScreen as ReturnType<typeof vi.fn>).mock.calls,
-        ).not.toContainEqual([
-          "surface:new",
-          { lines: 80, scrollback: true },
-        ]);
+        ).not.toContainEqual(["surface:new", { lines: 80, scrollback: true }]);
         expect(engine.getAgentState(result.agent_id)?.cli_session_id).toBe(
           sessionId,
         );
@@ -1584,7 +1595,9 @@ To continue this session, run codex resume ${sessionId}`,
       });
 
       const finalAgentId = "brainlayerCodex-019d9aa5";
-      expect(result.agent_id).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
+      expect(result.agent_id).toMatch(
+        /^brainlayerCodex-pending-\d+-[a-z0-9]+$/,
+      );
 
       await vi.advanceTimersByTimeAsync(1000);
 
@@ -1963,7 +1976,10 @@ To continue this session, run codex resume ${sessionId}`,
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:cursor-pending",
           text: readFileSync(
-            new URL("./fixtures/cursor-2026-06-04-task-done.txt", import.meta.url),
+            new URL(
+              "./fixtures/cursor-2026-06-04-task-done.txt",
+              import.meta.url,
+            ),
             "utf8",
           ),
           lines: 20,
@@ -2094,7 +2110,11 @@ To continue this session, run codex resume ${sessionId}`,
         });
         await engine.getRegistry().reconstitute();
 
-        const pending = engine.waitFor("worker-transcript-fresh", "done", 1_200);
+        const pending = engine.waitFor(
+          "worker-transcript-fresh",
+          "done",
+          1_200,
+        );
         await vi.advanceTimersByTimeAsync(2_000);
         const result = await pending;
 
@@ -2185,7 +2205,11 @@ To continue this session, run codex resume ${sessionId}`,
         await engine.getRegistry().reconstitute();
 
         liveSurfaces = [];
-        const pending = engine.waitFor("agent-surface-gone", "done", 25 * 60_000);
+        const pending = engine.waitFor(
+          "agent-surface-gone",
+          "done",
+          25 * 60_000,
+        );
         await vi.advanceTimersByTimeAsync(1_100);
         const result = await pending;
 
@@ -2451,14 +2475,12 @@ To continue this session, run codex resume ${sessionId}`,
 
     it("does not start a second loop while a sweep is running", async () => {
       let finishSweep: (() => void) | null = null;
-      const sweep = vi
-        .spyOn(engine, "runSweep")
-        .mockImplementation(
-          () =>
-            new Promise<void>((resolve) => {
-              finishSweep = resolve;
-            }),
-        );
+      const sweep = vi.spyOn(engine, "runSweep").mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishSweep = resolve;
+          }),
+      );
 
       engine.startSweep({ activeIntervalMs: 50 });
       await vi.advanceTimersByTimeAsync(50);
@@ -2696,10 +2718,7 @@ To continue this session, run codex resume ${sessionId}`,
           boot_prompt_pending: true,
         }),
       );
-      renameSync(
-        join(TEST_DIR, agentId),
-        join(TEST_DIR, `legacy-${agentId}`),
-      );
+      renameSync(join(TEST_DIR, agentId), join(TEST_DIR, `legacy-${agentId}`));
       expect(existsSync(join(TEST_DIR, agentId, "state.json"))).toBe(false);
       liveSurfaces = [makeSurface("surface:cursor-pending")];
       await engine.getRegistry().reconstitute();
@@ -2921,16 +2940,20 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("uses cd + env vars + raw command for gemini", () => {
+  it("uses repoGolem launcher for gemini (no cd prefix, wires MCP)", () => {
     expect(buildLaunchCommand("gemini", "voicelayer")).toBe(
-      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
+      "voicelayerGemini -s",
+    );
+    expect(buildLaunchCommand("gemini", "golems")).toBe("golemsGemini -s");
+  });
+
+  it("adds safe -m model flags for the gemini launcher", () => {
+    expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
+      "voicelayerGemini -s -m gemini-2.5-pro",
     );
   });
 
   it("adds safe --model flags for recognized raw CLI model aliases", () => {
-    expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
-      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --model gemini-2.5-pro",
-    );
     expect(buildLaunchCommand("kiro", "golems", "sonnet")).toBe(
       "cd ~/Gits/golems && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli --model sonnet",
     );
@@ -2967,11 +2990,20 @@ describe("buildLaunchCommand", () => {
     ).toBe("agenthtmlhostClaude -s -m sonnet");
   });
 
-  it("ignores a launcher override for non-launcher CLIs", () => {
+  it("honors an explicitly resolved launcher name for gemini", () => {
     expect(
-      buildLaunchCommand("gemini", "voicelayer", undefined, "ignoredGemini"),
-    ).toBe(
-      "cd ~/Gits/voicelayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini",
+      buildLaunchCommand(
+        "gemini",
+        "agent-html-host",
+        undefined,
+        "agenthtmlhostGemini",
+      ),
+    ).toBe("agenthtmlhostGemini -s");
+  });
+
+  it("ignores a launcher override for non-launcher CLIs (kiro)", () => {
+    expect(buildLaunchCommand("kiro", "golems", undefined, "ignoredKiro")).toBe(
+      "cd ~/Gits/golems && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli",
     );
   });
 
@@ -3013,9 +3045,15 @@ describe("buildLaunchCommand", () => {
     expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
   });
 
-  it("includes MCP_CONNECTION_NONBLOCKING=1 for non-Claude CLIs", () => {
-    const cmd = buildLaunchCommand("gemini", "voicelayer");
+  it("includes MCP_CONNECTION_NONBLOCKING=1 for raw cd+exec CLIs (kiro)", () => {
+    const cmd = buildLaunchCommand("kiro", "golems");
     expect(cmd).toContain("MCP_CONNECTION_NONBLOCKING=1");
+  });
+
+  it("does NOT include env vars for gemini (launcher handles them)", () => {
+    const cmd = buildLaunchCommand("gemini", "voicelayer");
+    expect(cmd).not.toContain("MCP_CONNECTION_NONBLOCKING");
+    expect(cmd).not.toContain("CLAUDE_CODE_NO_FLICKER");
   });
 
   it("does NOT include env vars for claude (launcher handles them)", () => {
@@ -3076,9 +3114,7 @@ describe("assertLauncherAvailable", () => {
 
     await expect(
       assertLauncherAvailable("skill-creator", "Cursor"),
-    ).rejects.toThrow(
-      /skill-creatorCursor.*skillcreatorCursor.*cli="gemini"\/"kiro"/s,
-    );
+    ).rejects.toThrow(/skill-creatorCursor.*skillcreatorCursor.*cli="kiro"/s);
   });
 });
 
@@ -3181,9 +3217,9 @@ describe("extractSessionId", () => {
     expect(
       extractSessionId(`request ${traceId}\nSession ID: ${sessionId}`),
     ).toBe(sessionId);
-    expect(
-      extractSessionId(`request ${traceId}\nchatId: ${sessionId}`),
-    ).toBe(sessionId);
+    expect(extractSessionId(`request ${traceId}\nchatId: ${sessionId}`)).toBe(
+      sessionId,
+    );
     expect(
       extractSessionId(`request ${traceId}\nResumable session: ${sessionId}`),
     ).toBe(sessionId);
