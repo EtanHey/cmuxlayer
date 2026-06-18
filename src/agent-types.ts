@@ -31,6 +31,7 @@ export interface AgentRecord {
   cli: CliType;
   cli_session_id: string | null;
   cli_session_path?: string | null;
+  launcher_name?: string | null;
   task_summary: string;
   pid: number | null;
   version: number;

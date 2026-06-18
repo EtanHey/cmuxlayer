@@ -16,9 +16,7 @@ import {
   shellQuote,
 } from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
-import {
-  toPublicAgent,
-} from "./agent-facade.js";
+import { toPublicAgent } from "./agent-facade.js";
 import type {
   CmuxPane,
   CmuxPaneSurfaces,
@@ -146,10 +144,12 @@ const TASK_DONE_CONFIRMATION_MS = 5_000;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const SESSION_ID_RE =
-  new RegExp(`\\b${SESSION_ID_PATTERN}\\b`, "gi");
+const SESSION_ID_RE = new RegExp(`\\b${SESSION_ID_PATTERN}\\b`, "gi");
 const CONTEXTUAL_SESSION_ID_PATTERNS = [
-  new RegExp(`(?:codex\\s+resume|--resume(?:-id)?|resume-id)\\s+(${SESSION_ID_PATTERN})`, "i"),
+  new RegExp(
+    `(?:codex\\s+resume|--resume(?:-id)?|resume-id)\\s+(${SESSION_ID_PATTERN})`,
+    "i",
+  ),
   new RegExp(`session\\s+id:\\s*(${SESSION_ID_PATTERN})`, "i"),
   new RegExp(`chatid:\\s*(${SESSION_ID_PATTERN})`, "i"),
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
@@ -310,11 +310,7 @@ interface AgentEngineClient {
     surface: string,
     opts?: { workspace?: string; lines?: number; scrollback?: boolean },
   ): Promise<CmuxReadScreenResult>;
-  send(
-    surface: string,
-    text: string,
-    opts?: CmuxSendOptions,
-  ): Promise<void>;
+  send(surface: string, text: string, opts?: CmuxSendOptions): Promise<void>;
   sendKey(
     surface: string,
     key: string,
@@ -385,12 +381,13 @@ const LIFECYCLE_LOGS = {
  * Build the shell command that launches a CLI agent.
  * Repo name is sanitized to prevent command injection.
  *
- * For claude: uses repoGolem launchers (e.g. `voicelayerClaude -s`)
- * which handle cd, model, iTerm profile, MCP config, and contexts.
+ * For claude/codex/cursor/gemini: uses repoGolem launchers (e.g.
+ * `voicelayerClaude -s`, `golemsGemini -s`) which handle cd, model,
+ * iTerm profile, MCP config (brainlayer etc.), and contexts.
  * No `cd` prefix needed — the launcher does it.
  *
- * For gemini/kiro: uses `cd ~/Gits/<repo> && <cli>` since they
- * don't have launcher functions yet.
+ * For kiro: uses `cd ~/Gits/<repo> && kiro-cli` since it doesn't have
+ * a launcher function yet.
  */
 const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
   claude: {
@@ -451,7 +448,8 @@ export function buildLaunchCommand(
   model?: string,
   // Resolved launcher function name (from resolveLauncherName). When provided
   // for a launcher CLI it overrides the naive `${repo}${Suffix}` guess so
-  // hyphen-stripped registrations launch correctly. Ignored for gemini/kiro.
+  // hyphen-stripped registrations launch correctly. Honored for the launcher
+  // CLIs (claude/codex/cursor/gemini); ignored for kiro (raw cd+exec).
   launcherName?: string,
   opts?: { cwd?: string; envPrefix?: string },
 ): string {
@@ -468,7 +466,8 @@ export function buildLaunchCommand(
     case "codex":
       return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}`;
     case "gemini":
-      return `${cdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} gemini${rawModelArgs}`;
+      // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
+      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Gemini`} -s${launcherModelArgs}`;
     case "kiro":
       return `${cdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
@@ -490,7 +489,7 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-export type LauncherSuffix = "Claude" | "Codex" | "Cursor";
+export type LauncherSuffix = "Claude" | "Codex" | "Cursor" | "Gemini";
 
 const REPO_LAUNCHER_ALIASES: Record<string, string[]> = {
   // The orchestrator checkout lives at ~/Gits/orchestrator, but the
@@ -592,7 +591,7 @@ export async function resolveLauncherName(
     `Launcher not found for repo "${repo}". Tried: ${candidates.join(", ")}. ` +
       `The repoGolem registry may strip hyphens (e.g. "agent-html-host" -> ` +
       `"agenthtmlhostCursor"). Register the launcher in golem-powers or use ` +
-      `cli="gemini"/"kiro" which use direct cd+exec paths.`,
+      `cli="kiro" which uses a direct cd+exec path.`,
   );
 }
 
@@ -676,6 +675,11 @@ export class AgentEngine {
             launcherName: await assertLauncherAvailable(params.repo, "Cursor"),
           };
         }
+        if (params.cli === "gemini") {
+          return {
+            launcherName: await assertLauncherAvailable(params.repo, "Gemini"),
+          };
+        }
       });
   }
 
@@ -739,7 +743,9 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
   ): Promise<boolean> {
-    return (await this.getTargetStateEvidenceSource(agent, targetState)) !== null;
+    return (
+      (await this.getTargetStateEvidenceSource(agent, targetState)) !== null
+    );
   }
 
   private async getTargetStateEvidenceSource(
@@ -749,10 +755,8 @@ export class AgentEngine {
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (this.hasGroundTruthDone(agent)) return "transcript";
-    return (
-      this.hasRecordedOutputDoneEvidence(agent) ||
+    return this.hasRecordedOutputDoneEvidence(agent) ||
       (await this.hasCurrentOutputDoneEvidence(agent))
-    )
       ? "screen"
       : null;
   }
@@ -827,7 +831,9 @@ export class AgentEngine {
               .map((agent) => agent.surface_id)
           : [],
       );
-      const parentRole = parentAgent ? inferRecordRoleOrNull(parentAgent) : null;
+      const parentRole = parentAgent
+        ? inferRecordRoleOrNull(parentAgent)
+        : null;
       const placement = chooseAgentSpawnPlacement(
         panes.panes,
         paneSurfaces,
@@ -1172,7 +1178,9 @@ export class AgentEngine {
       this.registry.set(agentId, failed);
     } catch (persistError) {
       const persistMessage =
-        persistError instanceof Error ? persistError.message : String(persistError);
+        persistError instanceof Error
+          ? persistError.message
+          : String(persistError);
       if (persistMessage.includes("Agent not found")) {
         this.registry.remove(agentId);
         await this.client.log(
@@ -1219,13 +1227,16 @@ export class AgentEngine {
         });
         this.registry.set(agent.agent_id, attempted);
 
-        const surface = await this.createAgentSurface(agent.workspace_id ?? undefined, {
-          role: inferRecordRole(agent),
-          parentAgent: agent.parent_agent_id
-            ? this.registry.get(agent.parent_agent_id)
-            : null,
-          repo: agent.repo,
-        });
+        const surface = await this.createAgentSurface(
+          agent.workspace_id ?? undefined,
+          {
+            role: inferRecordRole(agent),
+            parentAgent: agent.parent_agent_id
+              ? this.registry.get(agent.parent_agent_id)
+              : null,
+            repo: agent.repo,
+          },
+        );
         const creating = this.stateMgr.transition(agent.agent_id, "creating", {
           error: null,
           pid: null,
@@ -1256,6 +1267,7 @@ export class AgentEngine {
           agent.cli,
           agent.repo,
           agent.cli_session_id!,
+          agent.launcher_name,
         );
         await this.sendLaunchCommand(
           surface.surface,
@@ -1314,10 +1326,7 @@ export class AgentEngine {
         sweepCtx,
       );
       const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
-      const taskDoneResult = await this.maybeMarkTaskDone(
-        readyAgent,
-        sweepCtx,
-      );
+      const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
       const agent = taskDoneResult.agent;
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
@@ -1432,7 +1441,9 @@ export class AgentEngine {
     }
 
     // Clean up sidebar entries for agents that were purged from the registry
-    const currentAgentIds = new Set(this.registry.list().map((a) => a.agent_id));
+    const currentAgentIds = new Set(
+      this.registry.list().map((a) => a.agent_id),
+    );
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
         try {
@@ -1523,7 +1534,10 @@ export class AgentEngine {
 
   private recordSweepStability(): void {
     const signature = this.sweepStateSignature();
-    if (this.lastSweepSignature !== null && signature === this.lastSweepSignature) {
+    if (
+      this.lastSweepSignature !== null &&
+      signature === this.lastSweepSignature
+    ) {
       this.unchangedSweepCount += 1;
     } else {
       this.unchangedSweepCount = 0;
@@ -1596,7 +1610,8 @@ export class AgentEngine {
   }
 
   private async assertPostSpawnLiveness(agentId: string): Promise<void> {
-    const agent = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    const agent =
+      this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
     if (!agent || TERMINAL_STATES.has(agent.state)) {
       return;
     }
@@ -1613,7 +1628,8 @@ export class AgentEngine {
     const error = `Post-spawn liveness failed: ${reason}`;
 
     try {
-      const current = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+      const current =
+        this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
       if (current && !TERMINAL_STATES.has(current.state)) {
         const failed = this.stateMgr.transition(agentId, "error", { error });
         this.registry.set(agentId, failed);
@@ -1689,6 +1705,7 @@ export class AgentEngine {
       cli: params.cli,
       cli_session_id: null,
       cli_session_path: null,
+      launcher_name: preflight?.launcherName ?? null,
       task_summary: params.prompt,
       pid: null,
       version: 1,
@@ -1723,7 +1740,11 @@ export class AgentEngine {
       { cwd: params.cwd, envPrefix: params.mcp_env },
     );
     try {
-      await this.sendLaunchCommand(surface.surface, surface.workspace, launchCmd);
+      await this.sendLaunchCommand(
+        surface.surface,
+        surface.workspace,
+        launchCmd,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
@@ -1790,8 +1811,7 @@ export class AgentEngine {
         matched: true,
         state: initial.state,
         elapsed: Date.now() - start,
-        source:
-          initialEvidence === "state" ? "immediate" : initialEvidence,
+        source: initialEvidence === "state" ? "immediate" : initialEvidence,
         agent: toPublicAgent(initial),
       };
     }
@@ -1936,7 +1956,12 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
     const resumeCommand = agent.cli_session_id
-      ? buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+      ? buildResumeCommand(
+          agent.cli,
+          agent.repo,
+          agent.cli_session_id,
+          agent.launcher_name,
+        )
       : undefined;
     return {
       agent_id: agent.agent_id,
@@ -1966,7 +1991,11 @@ export class AgentEngine {
     const userInitiated = opts?.userInitiated ?? true;
 
     if (TERMINAL_STATES.has(agent.state)) {
-      if (agent.state === "error" && userInitiated && agent.user_killed !== true) {
+      if (
+        agent.state === "error" &&
+        userInitiated &&
+        agent.user_killed !== true
+      ) {
         const marked = this.stateMgr.updateRecord(canonicalAgentId, {
           user_killed: true,
         });
