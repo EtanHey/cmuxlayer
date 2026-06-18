@@ -335,7 +335,7 @@ describe("AgentEngine", () => {
         sessionIdentityResolver: () => null,
       });
 
-      await resolvingEngine.spawnAgent({
+      const result = await resolvingEngine.spawnAgent({
         repo: "agent-html-host",
         cli: "cursor",
         prompt: "Fix gap F",
@@ -344,6 +344,8 @@ describe("AgentEngine", () => {
       const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
       expect(launchCmd).toBe("agenthtmlhostCursor -s");
+      const state = resolvingEngine.getAgentState(result.agent_id);
+      expect(state?.launcher_name).toBe("agenthtmlhostCursor");
 
       resolvingEngine.dispose();
     });
@@ -1319,6 +1321,33 @@ describe("AgentEngine", () => {
       expect(recovered?.state).toBe("booting");
       expect(recovered?.surface_id).toBe("surface:new");
       expect(recovered?.respawn_attempts).toBe(1);
+    });
+
+    it("respawns launcher CLI agents with their resolved launcher name", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-crash",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "agent-html-host",
+          model: "gemini-2.5-pro",
+          cli: "gemini",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          launcher_name: "agenthtmlhostGemini",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "agenthtmlhostGemini -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "ws:1" },
+      );
     });
 
     it("does not respawn an errored agent the user intentionally stopped", async () => {
@@ -3197,6 +3226,16 @@ describe("buildResumeCommand", () => {
     );
     expect(buildResumeCommand("gemini", "brainlayer", sessionId)).toBe(
       "brainlayerGemini -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+    expect(
+      buildResumeCommand(
+        "gemini",
+        "agent-html-host",
+        sessionId,
+        "agenthtmlhostGemini",
+      ),
+    ).toBe(
+      "agenthtmlhostGemini -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
     expect(buildResumeCommand("kiro", "brainlayer", sessionId)).toBe(
       "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",

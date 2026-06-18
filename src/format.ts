@@ -186,7 +186,7 @@ export function formatAgentState(agent: AgentRecord): string {
   if (agent.cli_session_id) {
     lines.push(`\u2502 session: ${agent.cli_session_id}`);
     lines.push(
-      `\u2502 resume: ${buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id)}`,
+      `\u2502 resume: ${buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id, agent.launcher_name)}`,
     );
   }
   if (agent.cli_session_path) {

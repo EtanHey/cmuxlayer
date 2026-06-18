@@ -24,18 +24,19 @@ export function buildResumeCommand(
   cli: CliType,
   repo: string,
   sessionId: string,
+  launcherName?: string | null,
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   switch (cli) {
     case "claude":
-      return `${safeRepo}Claude -s --resume ${sessionId}`;
+      return `${launcherName ?? `${safeRepo}Claude`} -s --resume ${sessionId}`;
     case "codex":
-      return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
+      return `${launcherName ?? `${safeRepo}Codex`} --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
     case "gemini":
-      return `${safeRepo}Gemini -s --resume ${sessionId}`;
+      return `${launcherName ?? `${safeRepo}Gemini`} -s --resume ${sessionId}`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     case "cursor":
-      return `${safeRepo}Cursor -s --resume ${sessionId}`;
+      return `${launcherName ?? `${safeRepo}Cursor`} -s --resume ${sessionId}`;
   }
 }

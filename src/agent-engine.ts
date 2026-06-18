@@ -1267,6 +1267,7 @@ export class AgentEngine {
           agent.cli,
           agent.repo,
           agent.cli_session_id!,
+          agent.launcher_name,
         );
         await this.sendLaunchCommand(
           surface.surface,
@@ -1704,6 +1705,7 @@ export class AgentEngine {
       cli: params.cli,
       cli_session_id: null,
       cli_session_path: null,
+      launcher_name: preflight?.launcherName ?? null,
       task_summary: params.prompt,
       pid: null,
       version: 1,
@@ -1954,7 +1956,12 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
     const resumeCommand = agent.cli_session_id
-      ? buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+      ? buildResumeCommand(
+          agent.cli,
+          agent.repo,
+          agent.cli_session_id,
+          agent.launcher_name,
+        )
       : undefined;
     return {
       agent_id: agent.agent_id,

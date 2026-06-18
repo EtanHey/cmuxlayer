@@ -4,10 +4,15 @@ import { buildResumeCommand } from "./agent-command.js";
 export type AgentStatePayload = AgentRecord & { resume_command?: string };
 
 export function resumeCommandForAgent(
-  record: Pick<AgentRecord, "cli" | "repo" | "cli_session_id">,
+  record: Pick<AgentRecord, "cli" | "repo" | "cli_session_id" | "launcher_name">,
 ): string | undefined {
   return record.cli_session_id
-    ? buildResumeCommand(record.cli, record.repo, record.cli_session_id)
+    ? buildResumeCommand(
+        record.cli,
+        record.repo,
+        record.cli_session_id,
+        record.launcher_name,
+      )
     : undefined;
 }
 
