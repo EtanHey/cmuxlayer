@@ -32,7 +32,7 @@ export function buildResumeCommand(
     case "codex":
       return `${safeRepo}Codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
     case "gemini":
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} gemini --resume ${sessionId}`;
+      return `${safeRepo}Gemini -s --resume ${sessionId}`;
     case "kiro":
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     case "cursor":
