@@ -3727,7 +3727,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", {
               agent_id: result.agent_id,
               repo: args.repo,
-              model: args.model,
+              model: result.model ?? args.model,
+              requested_model:
+                result.requested_model && result.requested_model !== result.model
+                  ? result.requested_model
+                  : undefined,
+              warning:
+                result.warnings && result.warnings.length > 0
+                  ? result.warnings.join(" | ")
+                  : undefined,
               surface: result.surface_id,
               role:
                 engine.getAgentState(result.agent_id)?.role ??
@@ -3845,6 +3853,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("new_worktree_split", {
               agent_id: result.agent_id,
               surface: result.surface_id,
+              model: result.model ?? args.model,
+              requested_model:
+                result.requested_model && result.requested_model !== result.model
+                  ? result.requested_model
+                  : undefined,
+              warning:
+                result.warnings && result.warnings.length > 0
+                  ? result.warnings.join(" | ")
+                  : undefined,
               worktree: worktree.prepared?.path ?? "",
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
             }),
@@ -3911,7 +3928,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface_id: string;
             repo: string;
             cli: CliType;
+            model?: string;
+            requested_model?: string;
+            warnings?: string[];
           }> = [];
+          const warnings: string[] = [];
 
           for (const agent of args.agents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
@@ -3958,7 +3979,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface_id: result.surface_id,
               repo: agent.repo,
               cli: agent.cli,
+              model: result.model,
+              requested_model: result.requested_model,
+              warnings: result.warnings,
             });
+            warnings.push(...(result.warnings ?? []));
           }
 
           const lastSurface =
@@ -3969,11 +3994,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_in_workspace", {
               workspace,
               agents: spawnedAgents.length,
+              warning:
+                warnings.length > 0 ? warnings.join(" | ") : undefined,
             }),
             {
               workspace,
               title: workspaceResult.title,
               agents: spawnedAgents,
+              warnings,
             },
           );
         } catch (e) {

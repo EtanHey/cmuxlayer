@@ -242,6 +242,92 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).toHaveBeenCalled();
     });
 
+    it("coerces cursor Claude model requests to auto before launch", async () => {
+      const previousAllow = process.env.REPOGOLEM_ALLOW_MODEL;
+      delete process.env.REPOGOLEM_ALLOW_MODEL;
+
+      try {
+        const result = await engine.spawnAgent({
+          repo: "cmuxlayer",
+          model: "sonnet",
+          cli: "cursor",
+          prompt: "Fix cursor model policy",
+        });
+
+        expect(result.model).toBe("auto");
+        expect(result.requested_model).toBe("sonnet");
+        expect(result.warnings?.[0]).toContain("WARNING: CURSOR MODEL POLICY");
+        expect(result.warnings?.[0]).toContain("sonnet");
+        expect(result.warnings?.[0]).toContain("auto");
+        expect(mockClient.send).toHaveBeenCalledWith(
+          "surface:new",
+          "cmuxlayerCursor -s",
+          { workspace: "ws:1" },
+        );
+
+        const state = stateMgr.readState(result.agent_id);
+        expect(state?.model).toBe("auto");
+      } finally {
+        if (previousAllow === undefined) delete process.env.REPOGOLEM_ALLOW_MODEL;
+        else process.env.REPOGOLEM_ALLOW_MODEL = previousAllow;
+      }
+    });
+
+    it("allows cursor model overrides only with REPOGOLEM_ALLOW_MODEL", async () => {
+      const previousAllow = process.env.REPOGOLEM_ALLOW_MODEL;
+      process.env.REPOGOLEM_ALLOW_MODEL = "1";
+
+      try {
+        const result = await engine.spawnAgent({
+          repo: "cmuxlayer",
+          model: "sonnet",
+          cli: "cursor",
+          prompt: "Explicit override",
+        });
+
+        expect(result.model).toBe("sonnet");
+        expect(result.requested_model).toBe("sonnet");
+        expect(result.warnings).toEqual([]);
+        expect(mockClient.send).toHaveBeenCalledWith(
+          "surface:new",
+          "cmuxlayerCursor -s -m sonnet",
+          { workspace: "ws:1" },
+        );
+
+        const state = stateMgr.readState(result.agent_id);
+        expect(state?.model).toBe("sonnet");
+      } finally {
+        if (previousAllow === undefined) delete process.env.REPOGOLEM_ALLOW_MODEL;
+        else process.env.REPOGOLEM_ALLOW_MODEL = previousAllow;
+      }
+    });
+
+    it("coerces any cursor non-auto model without the override env", async () => {
+      const previousAllow = process.env.REPOGOLEM_ALLOW_MODEL;
+      delete process.env.REPOGOLEM_ALLOW_MODEL;
+
+      try {
+        const result = await engine.spawnAgent({
+          repo: "cmuxlayer",
+          model: "gpt-5",
+          cli: "cursor",
+          prompt: "Non-default override",
+        });
+
+        expect(result.model).toBe("auto");
+        expect(result.requested_model).toBe("gpt-5");
+        expect(result.warnings?.[0]).toContain("non-default model");
+        expect(mockClient.send).toHaveBeenCalledWith(
+          "surface:new",
+          "cmuxlayerCursor -s",
+          { workspace: "ws:1" },
+        );
+      } finally {
+        if (previousAllow === undefined) delete process.env.REPOGOLEM_ALLOW_MODEL;
+        else process.env.REPOGOLEM_ALLOW_MODEL = previousAllow;
+      }
+    });
+
     it("marks a post-launch disappeared surface as error and attempts cleanup", async () => {
       vi.useFakeTimers();
       try {
@@ -2946,9 +3032,17 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
     );
+  });
+
+  it("omits cursor model flags unless the explicit override is allowed", () => {
     expect(buildLaunchCommand("cursor", "cmuxlayer", "sonnet")).toBe(
-      "cmuxlayerCursor -s -m sonnet-4",
+      "cmuxlayerCursor -s",
     );
+    expect(
+      buildLaunchCommand("cursor", "cmuxlayer", "sonnet", undefined, {
+        allowModelOverride: true,
+      }),
+    ).toBe("cmuxlayerCursor -s -m sonnet");
   });
 
   it("preserves launcher defaults when model is omitted", () => {

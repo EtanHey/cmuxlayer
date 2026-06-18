@@ -254,6 +254,51 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.auto_archive_on_done).toBe(true);
   });
 
+  it("spawn_agent coerces cursor Claude model requests to auto with a loud warning", async () => {
+    const previousAllow = process.env.REPOGOLEM_ALLOW_MODEL;
+    delete process.env.REPOGOLEM_ALLOW_MODEL;
+
+    try {
+      const server = createLifecycleServer(mockExec);
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "sonnet",
+          cli: "cursor",
+        },
+        {} as any,
+      );
+
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.model).toBe("auto");
+      expect(parsed.requested_model).toBe("sonnet");
+      expect(parsed.warnings[0]).toContain("WARNING: CURSOR MODEL POLICY");
+      expect(parsed.warnings[0]).toContain("sonnet");
+      expect(parsed.warnings[0]).toContain("auto");
+      expect(result.content[0].text).toContain("WARNING: CURSOR MODEL POLICY");
+      expect(mockExec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["send", "cmuxlayerCursor -s"]),
+      );
+
+      const stateTool = (server as any)._registeredTools["get_agent_state"];
+      const stateResult = await stateTool.handler(
+        { agent_id: parsed.agent_id },
+        {} as any,
+      );
+      const persisted =
+        stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+      expect(persisted.model).toBe("auto");
+    } finally {
+      if (previousAllow === undefined) delete process.env.REPOGOLEM_ALLOW_MODEL;
+      else process.env.REPOGOLEM_ALLOW_MODEL = previousAllow;
+    }
+  });
+
   it("spawn_agent accepts explicit role and returns persisted role", async () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];

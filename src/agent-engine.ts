@@ -63,6 +63,11 @@ import {
   type Harness,
   type HarnessSessionWithMeta,
 } from "./harness-session.js";
+import {
+  CURSOR_DEFAULT_MODEL,
+  resolveSpawnModelPolicy,
+  type SpawnModelPolicy,
+} from "./model-policy.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -87,6 +92,10 @@ export interface SpawnAgentResult {
   surface_id: string;
   workspace_id?: string;
   state: AgentState;
+  model?: string;
+  requested_model?: string;
+  warnings?: string[];
+  model_policy?: SpawnModelPolicy;
   cwd?: string;
   mcp_env?: string;
 }
@@ -407,13 +416,6 @@ const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
     "gpt-5.5-mini": "gpt-5.5-mini",
   },
   cursor: {
-    codex: "gpt-5",
-    "gpt-5": "gpt-5",
-    "gpt-5.2-codex-high": "gpt-5.2-codex-high",
-    "gpt-5.2-codex-xhigh": "gpt-5.2-codex-xhigh",
-    sonnet: "sonnet-4",
-    "sonnet-4": "sonnet-4",
-    "sonnet-4-thinking": "sonnet-4-thinking",
   },
   gemini: {
     "gemini-2.5-pro": "gemini-2.5-pro",
@@ -428,10 +430,21 @@ const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
   },
 };
 
-function resolveModelFlag(cli: CliType, model?: string): string | null {
+function resolveModelFlag(
+  cli: CliType,
+  model?: string,
+  opts?: { allowCursorModelOverride?: boolean },
+): string | null {
   const normalized = model?.trim().toLowerCase();
   if (!normalized || !isSafeShellToken(normalized)) {
     return null;
+  }
+
+  if (cli === "cursor") {
+    if (normalized === CURSOR_DEFAULT_MODEL) {
+      return null;
+    }
+    return opts?.allowCursorModelOverride ? normalized : null;
   }
 
   const mapped = MODEL_FLAG_ALIASES[cli][normalized];
@@ -451,10 +464,12 @@ export function buildLaunchCommand(
   // hyphen-stripped registrations launch correctly. Honored for the launcher
   // CLIs (claude/codex/cursor/gemini); ignored for kiro (raw cd+exec).
   launcherName?: string,
-  opts?: { cwd?: string; envPrefix?: string },
+  opts?: { cwd?: string; envPrefix?: string; allowModelOverride?: boolean },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
-  const modelFlag = resolveModelFlag(cli, model);
+  const modelFlag = resolveModelFlag(cli, model, {
+    allowCursorModelOverride: opts?.allowModelOverride,
+  });
   const launcherModelArgs = modelFlag ? ` -m ${modelFlag}` : "";
   const rawModelArgs = modelFlag ? ` --model ${modelFlag}` : "";
   const cdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
@@ -1653,22 +1668,27 @@ export class AgentEngine {
    * Does NOT wait for ready state.
    */
   async spawnAgent(params: SpawnAgentParams): Promise<SpawnAgentResult> {
-    const agentId = generateAgentId(params.cli, params.repo);
+    const modelPolicy = resolveSpawnModelPolicy(params.cli, params.model ?? "");
+    const spawnParams: SpawnAgentParams = {
+      ...params,
+      model: modelPolicy.effective_model,
+    };
+    const agentId = generateAgentId(spawnParams.cli, spawnParams.repo);
 
     // Resolve parent hierarchy
     let spawnDepth = 0;
     let parentAgentId: string | null = null;
     let parentAgent: AgentRecord | null = null;
     const role = inferAgentRole({
-      role: params.role,
-      cli: params.cli,
-      launcherName: launcherNameForCli(params.repo, params.cli),
+      role: spawnParams.role,
+      cli: spawnParams.cli,
+      launcherName: launcherNameForCli(spawnParams.repo, spawnParams.cli),
     });
 
-    if (params.parent_agent_id) {
-      const parent = this.registry.get(params.parent_agent_id);
+    if (spawnParams.parent_agent_id) {
+      const parent = this.registry.get(spawnParams.parent_agent_id);
       if (!parent) {
-        throw new Error(`Parent agent not found: ${params.parent_agent_id}`);
+        throw new Error(`Parent agent not found: ${spawnParams.parent_agent_id}`);
       }
       if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
         throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);
@@ -1682,15 +1702,15 @@ export class AgentEngine {
       parentAgent = parent;
     }
 
-    this.spawnGuard.check(params.workspace);
+    this.spawnGuard.check(spawnParams.workspace);
 
-    const preflight = await this.spawnPreflight(params);
+    const preflight = await this.spawnPreflight(spawnParams);
 
     // 1. Create cmux surface using the deterministic worker layout policy.
-    const surface = await this.createAgentSurface(params.workspace, {
+    const surface = await this.createAgentSurface(spawnParams.workspace, {
       role,
       parentAgent,
-      repo: params.repo,
+      repo: spawnParams.repo,
     });
 
     // 2. Write initial state (creating → booting)
@@ -1700,13 +1720,13 @@ export class AgentEngine {
       surface_id: surface.surface,
       workspace_id: surface.workspace,
       state: "booting",
-      repo: params.repo,
-      model: params.model,
-      cli: params.cli,
+      repo: spawnParams.repo,
+      model: spawnParams.model,
+      cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
       launcher_name: preflight?.launcherName ?? null,
-      task_summary: params.prompt,
+      task_summary: spawnParams.prompt,
       pid: null,
       version: 1,
       created_at: now,
@@ -1715,29 +1735,33 @@ export class AgentEngine {
       parent_agent_id: parentAgentId,
       spawn_depth: spawnDepth,
       role,
-      auto_archive_on_done: params.auto_archive_on_done,
+      auto_archive_on_done: spawnParams.auto_archive_on_done,
       deletion_intent: false,
       quality: "unknown",
-      max_cost_per_agent: params.max_cost_per_agent ?? null,
-      crash_recover: params.crash_recover ?? false,
+      max_cost_per_agent: spawnParams.max_cost_per_agent ?? null,
+      crash_recover: spawnParams.crash_recover ?? false,
       respawn_attempts: 0,
       user_killed: false,
-      boot_prompt_pending: params.boot_prompt_pending ?? false,
-      launch_cwd: params.cwd ?? null,
-      mcp_profile: params.mcp_profile_label ?? null,
-      worktree_path: params.cwd ?? null,
-      worktree_branch: params.worktree_branch ?? null,
+      boot_prompt_pending: spawnParams.boot_prompt_pending ?? false,
+      launch_cwd: spawnParams.cwd ?? null,
+      mcp_profile: spawnParams.mcp_profile_label ?? null,
+      worktree_path: spawnParams.cwd ?? null,
+      worktree_branch: spawnParams.worktree_branch ?? null,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
 
     // 3. Send launch command
     const launchCmd = buildLaunchCommand(
-      params.cli,
-      params.repo,
-      params.model,
+      spawnParams.cli,
+      spawnParams.repo,
+      spawnParams.model,
       preflight?.launcherName,
-      { cwd: params.cwd, envPrefix: params.mcp_env },
+      {
+        cwd: spawnParams.cwd,
+        envPrefix: spawnParams.mcp_env,
+        allowModelOverride: modelPolicy.override_allowed,
+      },
     );
     try {
       await this.sendLaunchCommand(
@@ -1764,8 +1788,12 @@ export class AgentEngine {
       surface_id: surface.surface,
       workspace_id: surface.workspace,
       state: "booting",
-      cwd: params.cwd,
-      mcp_env: params.mcp_env,
+      model: modelPolicy.effective_model,
+      requested_model: modelPolicy.requested_model,
+      warnings: modelPolicy.warnings,
+      model_policy: modelPolicy,
+      cwd: spawnParams.cwd,
+      mcp_env: spawnParams.mcp_env,
     };
   }
 
