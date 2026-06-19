@@ -524,7 +524,7 @@ function screenHasReadyAgentIdentity(
     case "kiro":
       return /(?:^|\n)\s*kiro>\s*$/im.test(screenText);
     case "gemini":
-      return hasParsedAgentIdentity(parsed);
+      return false;
   }
 }
 

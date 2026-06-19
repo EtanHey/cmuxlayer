@@ -58,6 +58,48 @@ describe("false-green empty surface protection", () => {
     );
   });
 
+  it("does not deliver a Gemini boot prompt to a different agent prompt", async () => {
+    mkdirSync(TEST_DIR, { recursive: true });
+    const promptPath = join(TEST_DIR, "boot.md");
+    writeFileSync(promptPath, "boot prompt", "utf8");
+
+    const mockExec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "Claude Code\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerGemini -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 300,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Timed out");
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
+    );
+  });
+
   it("does not verify a cleared long command on a non-agent shell prompt", async () => {
     const longCommand = `echo ${"x".repeat(520)}`;
     const mockExec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
