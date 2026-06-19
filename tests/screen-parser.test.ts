@@ -147,11 +147,11 @@ CLAUDE_COUNTER: 92
     const parsed = parseScreen(`
 ⏺ Completed successfully
 Token usage: total=50,000
-🤖 Sonnet 4.6 | ⏱️  2m 11s
+🤖 Sonnet 4.5 | ⏱️  2m 11s
 `);
 
     expect(parsed.agent_type).toBe("claude");
-    expect(parsed.model).toBe("Sonnet 4.6");
+    expect(parsed.model).toBe("Sonnet 4.5");
     expect(parsed.cost).toBeNull();
     expect(parsed.context_window).toBe(200_000);
     expect(parsed.context_pct).toBe(25); // 50000/200000
@@ -577,17 +577,17 @@ I only have 42 tokens
   // --- context_pct and context_window tests ---
 
   describe("context_pct computation", () => {
-    it("computes context_pct for Claude Sonnet from token_count (200K window)", () => {
+    it("computes context_pct for older Claude Sonnet from token_count (200K window)", () => {
       const parsed = parseScreen(`
 ✻ Working…
   Reading src/server.ts
 Token usage: total=40,000 input=35,000 output=5,000
-🤖 Sonnet 4.6 | 💰 $0.50 | ⏱️  41s
+🤖 Sonnet 4.5 | 💰 $0.50 | ⏱️  41s
 `);
 
       expect(parsed.agent_type).toBe("claude");
       expect(parsed.token_count).toBe(40000);
-      expect(parsed.model).toBe("Sonnet 4.6");
+      expect(parsed.model).toBe("Sonnet 4.5");
       expect(parsed.context_window).toBe(200_000);
       expect(parsed.context_pct).toBe(20); // 40000/200000 = 20%
     });
@@ -607,14 +607,14 @@ Token usage: total=250,000 input=200,000 output=50,000
       expect(parsed.context_pct).toBe(25); // 250000/1000000 = 25%
     });
 
-    it("defaults Opus to 200K when token_count is low and no 1M signal", () => {
+    it("defaults older Opus to 200K when token_count is low and no 1M signal", () => {
       const parsed = parseScreen(`
 ✻ Working…
 Token usage: total=50,000
-🤖 Opus 4.6 | 💰 $2.00
+🤖 Opus 4.5 | 💰 $2.00
 `);
 
-      expect(parsed.model).toBe("Opus 4.6");
+      expect(parsed.model).toBe("Opus 4.5");
       expect(parsed.context_window).toBe(200_000); // default tier
       expect(parsed.context_pct).toBe(25); // 50000/200000
     });
@@ -682,7 +682,7 @@ etanheyman ~ [master] $
       const parsed = parseScreen(`
 ✻ Working…
   Analyzing code
-🤖 Sonnet 4.6 | 💰 $0.10
+🤖 Sonnet 4.5 | 💰 $0.10
 `);
 
       expect(parsed.agent_type).toBe("claude");
@@ -698,11 +698,11 @@ etanheyman ~ [master] $
     });
 
     it("clamps context_pct to 100 when near context limit", () => {
-      // Sonnet 200K tier with exactly 200K tokens
+      // Older Sonnet 200K tier with exactly 200K tokens
       const parsed = parseScreen(`
 ⏺ Completed successfully
 Token usage: total=200,000
-🤖 Sonnet 4.6 | 💰 $8.00
+🤖 Sonnet 4.5 | 💰 $8.00
 `);
 
       expect(parsed.token_count).toBe(200000);
@@ -739,9 +739,18 @@ Model: gemini-2.5-pro
   });
 
   describe("resolveModelMax (default tiers)", () => {
-    it("resolves ALL Claude models to 200K default", () => {
-      expect(resolveModelMax("Sonnet 4.6")).toBe(200_000);
-      expect(resolveModelMax("Opus 4.6")).toBe(200_000);
+    it("resolves current 1M Claude models to 1M", () => {
+      expect(resolveModelMax("Opus 4.8")).toBe(1_000_000);
+      expect(resolveModelMax("Opus 4.7")).toBe(1_000_000);
+      expect(resolveModelMax("Opus 4.6")).toBe(1_000_000);
+      expect(resolveModelMax("claude-opus-4-8")).toBe(1_000_000);
+      expect(resolveModelMax("Sonnet 4.6")).toBe(1_000_000);
+      expect(resolveModelMax("claude-sonnet-4-6")).toBe(1_000_000);
+    });
+
+    it("keeps older Claude models on the 200K default", () => {
+      expect(resolveModelMax("Sonnet 4.5")).toBe(200_000);
+      expect(resolveModelMax("Opus 4.5")).toBe(200_000);
       expect(resolveModelMax("Haiku 3.5")).toBe(200_000);
       expect(resolveModelMax("sonnet")).toBe(200_000);
       expect(resolveModelMax("opus")).toBe(200_000);
@@ -773,9 +782,21 @@ Model: gemini-2.5-pro
   });
 
   describe("inferContextWindow (smart tier detection)", () => {
-    it("returns default 200K for Opus with low token count", () => {
-      expect(inferContextWindow("Opus 4.6", 50_000, "🤖 Opus 4.6")).toBe(
+    it("returns default 200K for older Opus with low token count", () => {
+      expect(inferContextWindow("Opus 4.5", 50_000, "🤖 Opus 4.5")).toBe(
         200_000,
+      );
+    });
+
+    it("returns 1M for Opus 4.8 even without a screen marker", () => {
+      expect(inferContextWindow("Opus 4.8", 50_000, "🤖 Opus 4.8")).toBe(
+        1_000_000,
+      );
+    });
+
+    it("returns 1M for Sonnet 4.6 even without a screen marker", () => {
+      expect(inferContextWindow("Sonnet 4.6", 50_000, "🤖 Sonnet 4.6")).toBe(
+        1_000_000,
       );
     });
 

@@ -9,10 +9,12 @@ import type {
 // FALLBACK only: when the harness JSONL is available it carries the real per-session window
 // (esp. Codex's model_context_window) and supersedes this table — see harness-session.ts +
 // docs/harness-jsonl-field-map.md. All Claude models default to 200K; the 1M tier is detected
-// via "(1M" suffix or token_count > 200K (Claude-only — it's the Claude Max/standard tier).
+// via version-aware rules, "(1M" suffix, or token_count > 200K (Claude-only — it's the Claude
+// Max/standard tier).
 // ORDER MATTERS: resolveModelMax uses substring matching — longer keys must come first.
 export const MODEL_MAX_TOKENS: Record<string, number> = {
-  // Claude models — ALL default to 200K (1M is the Max-plan/standard tier, detected separately)
+  // Claude models — older/unknown versions default to 200K. Current Opus 4.6/4.7/4.8 is 1M
+  // even without a screen "(1M" marker, matching harness-session.ts.
   opus: 200_000,
   sonnet: 200_000,
   haiku: 200_000,
@@ -37,6 +39,11 @@ const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
   ([a], [b]) => b.length - a.length,
 );
 
+const VERSIONED_MODEL_MAX_RULES: Array<[RegExp, number]> = [
+  [/(?:claude[-\s])?opus[-\s]4(?:[.\s-])?[678]\b/i, 1_000_000],
+  [/(?:claude[-\s])?sonnet[-\s]4(?:[.\s-])?6\b/i, 1_000_000],
+];
+
 /**
  * Resolve the DEFAULT context window for a model string.
  * Returns the base tier (e.g. 200K for Claude). Use inferContextWindow() for
@@ -45,6 +52,10 @@ const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
 export function resolveModelMax(model: string | null): number | null {
   if (!model) return null;
   const lower = model.toLowerCase().trim();
+
+  for (const [re, max] of VERSIONED_MODEL_MAX_RULES) {
+    if (re.test(lower)) return max;
+  }
 
   for (const [key, max] of SORTED_MODEL_ENTRIES) {
     if (lower.includes(key) || lower.includes(key.replace("-", " ")))
