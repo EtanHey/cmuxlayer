@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseElapsedSeconds,
+  parseCliOptions,
   parseLaunchdServicePids,
   parseProcessLine,
   selectReapablePids,
@@ -193,5 +194,16 @@ describe("signalProcessBatch", () => {
       },
       { ok: true, pid: 403, signal: "SIGTERM" },
     ]);
+  });
+});
+
+describe("parseCliOptions", () => {
+  it("rejects numeric flags without values", () => {
+    expect(() => parseCliOptions(["--min-age-seconds"])).toThrow(
+      "--min-age-seconds requires a value",
+    );
+    expect(() => parseCliOptions(["--grace-seconds"])).toThrow(
+      "--grace-seconds requires a value",
+    );
   });
 });

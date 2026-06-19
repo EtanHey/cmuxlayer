@@ -282,7 +282,7 @@ function envDryRun(value: string | undefined): boolean {
   return !["0", "false", "no"].includes(value.trim().toLowerCase());
 }
 
-function parseCliOptions(argv: readonly string[]): CliOptions {
+export function parseCliOptions(argv: readonly string[]): CliOptions {
   let dryRun = envDryRun(process.env.REAPER_DRY_RUN);
   let minAgeSeconds = parseIntegerEnv(
     process.env.REAPER_MIN_AGE_SECONDS,
@@ -305,9 +305,15 @@ function parseCliOptions(argv: readonly string[]): CliOptions {
       dryRun = true;
     } else if (arg === "--min-age-seconds") {
       i += 1;
+      if (!argv[i]) {
+        throw new Error("--min-age-seconds requires a value");
+      }
       minAgeSeconds = parseIntegerEnv(argv[i], minAgeSeconds, arg);
     } else if (arg === "--grace-seconds") {
       i += 1;
+      if (!argv[i]) {
+        throw new Error("--grace-seconds requires a value");
+      }
       graceSeconds = parseIntegerEnv(argv[i], graceSeconds, arg);
     } else if (arg === "--log-file") {
       i += 1;
