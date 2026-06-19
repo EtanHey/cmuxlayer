@@ -1272,6 +1272,47 @@ describe("AgentEngine", () => {
       }
     });
 
+    it("does not let idle worker reap bypass the Codex TASK_DONE archive delay", async () => {
+      const previousIdleCloseMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+      process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = "1000";
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(doneAt.getTime() + 1_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "codex-worker-pending-archive",
+            state: "done",
+            surface_id: "surface:codex-pending-archive",
+            cli: "codex",
+            role: "worker",
+            updated_at: doneAt.toISOString(),
+            auto_archive_on_done: true,
+            task_done_detected_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:codex-pending-archive")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("codex-worker-pending-archive")).toMatchObject(
+          {
+            state: "done",
+            task_done_detected_at: doneAt.toISOString(),
+          },
+        );
+      } finally {
+        if (previousIdleCloseMs === undefined) {
+          delete process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+        } else {
+          process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = previousIdleCloseMs;
+        }
+        vi.useRealTimers();
+      }
+    });
+
     it("does not auto-close legacy Codex workers without explicit archive opt-in", async () => {
       vi.useFakeTimers();
       try {

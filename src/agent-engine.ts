@@ -1194,6 +1194,14 @@ export class AgentEngine {
     } catch {
       return false;
     }
+    if (
+      agent.cli === "codex" &&
+      agent.auto_archive_on_done === true &&
+      agent.task_done_detected_at &&
+      autoArchiveEnabledByEnv()
+    ) {
+      return false;
+    }
 
     const updatedAt = Date.parse(agent.updated_at);
     if (Number.isNaN(updatedAt)) return false;
