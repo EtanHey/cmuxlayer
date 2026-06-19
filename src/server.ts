@@ -3993,6 +3993,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface_id: string;
             repo: string;
             cli: CliType;
+            role: AgentRole;
+            monitor_boot?: MonitorBootResult;
           }> = [];
 
           for (const agent of args.agents) {
@@ -4035,11 +4037,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
 
+            const role =
+              engine.getAgentState(result.agent_id)?.role ??
+              inferAgentRole({
+                role: agent.role,
+                cli: agent.cli,
+                launcherName: launcherNameForCli(agent.repo, agent.cli),
+              });
+            const monitorBoot =
+              role === "orchestrator"
+                ? ensureMonitorBoot(result.agent_id)
+                : undefined;
+
             spawnedAgents.push({
               agent_id: result.agent_id,
               surface_id: result.surface_id,
               repo: agent.repo,
               cli: agent.cli,
+              role,
+              monitor_boot: monitorBoot,
             });
           }
 

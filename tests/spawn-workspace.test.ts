@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
+import { inboxPath, monitorAlive } from "../src/inbox.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-spawn-workspace-test");
 
@@ -95,10 +96,12 @@ describe("workspace spawn tools", () => {
 
   it("spawn_in_workspace spawns agents into the created workspace", async () => {
     const client = makeWorkspaceClient();
+    const inboxDir = join(TEST_DIR, "inbox");
     const server = createServer({
       client: client as any,
       stateDir: TEST_DIR,
       disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
     });
     const tool = (server as any)._registeredTools["spawn_in_workspace"];
 
@@ -121,6 +124,11 @@ describe("workspace spawn tools", () => {
         surface_id: "surface:1",
         repo: "brainlayer",
         cli: "claude",
+        monitor_boot: {
+          heartbeat_written: true,
+          heartbeat_source: "server_boot",
+          monitor_command: expect.any(String),
+        },
       }),
       expect.objectContaining({
         surface_id: "surface:2",
@@ -128,6 +136,13 @@ describe("workspace spawn tools", () => {
         cli: "codex",
       }),
     ]);
+    expect(parsed.agents[1].monitor_boot).toBeUndefined();
+    expect(
+      existsSync(inboxPath(parsed.agents[0].agent_id, { baseDir: inboxDir })),
+    ).toBe(true);
+    expect(
+      monitorAlive(parsed.agents[0].agent_id, 1_000, { baseDir: inboxDir }),
+    ).toBe(false);
     expect(client.createWorkspace).toHaveBeenCalledTimes(1);
     expect(client.newSplit).toHaveBeenCalledTimes(2);
     expect(
