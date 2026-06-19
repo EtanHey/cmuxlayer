@@ -973,7 +973,7 @@ export class AgentEngine {
       const index = this.stateMgr.getSurfaceSessionIndex();
       index.removeAgent(updated.agent_id);
       index.persistRecord(canonicalFinal);
-      this.registry.remove(updated.agent_id);
+      this.registry.rename(updated.agent_id, finalAgentId, canonicalFinal);
       this.stateMgr.removeState(updated.agent_id);
       return canonicalFinal;
     }

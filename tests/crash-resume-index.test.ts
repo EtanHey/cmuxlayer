@@ -168,6 +168,7 @@ describe("surface session crash-resume index", () => {
 
   it("removes the pending index entry when the final agent already exists", async () => {
     const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+    const sessionPath = "/tmp/codex-session.jsonl";
     const finalAgentId = "brainlayerCodex-019e942c";
     const pendingAgentId = "brainlayerCodex-pending-existing";
     const stateMgr = new StateManager(TEST_DIR);
@@ -205,7 +206,9 @@ describe("surface session crash-resume index", () => {
     const engine = new AgentEngine(stateMgr, registry, makeClient(), {
       spawnPreflight: async () => {},
       sessionIdentityResolver: (agent) =>
-        agent.agent_id === pendingAgentId ? sessionId : null,
+        agent.agent_id === pendingAgentId
+          ? { session_id: sessionId, path: sessionPath }
+          : null,
     });
 
     try {
@@ -219,6 +222,16 @@ describe("surface session crash-resume index", () => {
       expect(rawIndex.by_agent_id[finalAgentId]).toMatchObject({
         agent_id: finalAgentId,
         cli_session_id: sessionId,
+      });
+      expect(engine.getAgentState(pendingAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+      });
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
       });
       expect(stateMgr.readState(pendingAgentId)).toBeNull();
     } finally {
