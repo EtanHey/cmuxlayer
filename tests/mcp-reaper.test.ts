@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseElapsedSeconds,
+  parseLaunchdServicePids,
   parseProcessLine,
   selectReapablePids,
   signalProcessBatch,
@@ -39,6 +40,13 @@ describe("selectReapablePids", () => {
         ppid: 1,
         etimes: 1200,
         command: "node /Users/etan/Gits/some-mcp-adapter/dist/index.js",
+      },
+      {
+        pid: 106,
+        ppid: 1,
+        etimes: 1200,
+        command: "node /Users/etan/Gits/supervised-mcp/dist/index.js",
+        launchdManaged: true,
       },
     ];
 
@@ -132,6 +140,25 @@ describe("process table parsing", () => {
       etimes: 183845,
       command: "node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
     });
+  });
+
+  it("parses nonzero launchd service pids from launchctl print output", () => {
+    expect(
+      Array.from(
+        parseLaunchdServicePids(
+          [
+            "services = {",
+            "        852      -  com.mcplayer.bus",
+            "      71776      0  com.whatsapp-mcp.bridge-business",
+            "          0      0  com.golems.mcp-reaper",
+            "}",
+          ].join("\n"),
+        ).entries(),
+      ),
+    ).toEqual([
+      [852, "com.mcplayer.bus"],
+      [71776, "com.whatsapp-mcp.bridge-business"],
+    ]);
   });
 });
 

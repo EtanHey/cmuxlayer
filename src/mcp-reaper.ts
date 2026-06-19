@@ -40,6 +40,8 @@ export interface ProcessInfo {
   ppid: number;
   etimes: number;
   command: string;
+  launchdManaged?: boolean;
+  launchdLabel?: string;
 }
 
 export interface SelectReapableOptions {
@@ -90,6 +92,7 @@ export function selectReapablePids(
 
   return procList
     .filter((proc) => proc.ppid === 1)
+    .filter((proc) => proc.launchdManaged !== true)
     .filter((proc) => proc.etimes >= minAgeSeconds)
     .filter((proc) => isNodeCommand(proc.command))
     .filter((proc) => isMcpServerCommand(proc.command, knownServerNames))
@@ -163,6 +166,22 @@ export function parseProcessLine(line: string): ProcessInfo | null {
   }
 }
 
+export function parseLaunchdServicePids(output: string): Map<number, string> {
+  const services = new Map<number, string>();
+  for (const line of output.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+[-\d]+\s+([A-Za-z0-9_.-]+)\s*$/);
+    if (!match) {
+      continue;
+    }
+
+    const pid = Number(match[1]);
+    if (pid > 0) {
+      services.set(pid, match[2]);
+    }
+  }
+  return services;
+}
+
 export function signalProcessBatch(
   processes: readonly ProcessInfo[],
   signal: NodeJS.Signals,
@@ -202,10 +221,42 @@ async function readProcessTable(): Promise<ProcessInfo[]> {
     "-axo",
     "pid=,ppid=,etime=,command=",
   ]);
+  const launchdServices = await readLaunchdServicePids();
   return stdout
     .split("\n")
     .map(parseProcessLine)
-    .filter((proc): proc is ProcessInfo => proc !== null);
+    .filter((proc): proc is ProcessInfo => proc !== null)
+    .map((proc) => {
+      const launchdLabel = launchdServices.get(proc.pid);
+      if (!launchdLabel) {
+        return proc;
+      }
+      return {
+        ...proc,
+        launchdLabel,
+        launchdManaged: true,
+      };
+    });
+}
+
+async function readLaunchdServicePids(): Promise<Map<number, string>> {
+  const domains = ["system"];
+  if (typeof process.getuid === "function") {
+    domains.push(`gui/${process.getuid()}`);
+  }
+
+  const services = new Map<number, string>();
+  for (const domain of domains) {
+    try {
+      const { stdout } = await execFileAsync("launchctl", ["print", domain]);
+      for (const [pid, label] of parseLaunchdServicePids(stdout)) {
+        services.set(pid, label);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return services;
 }
 
 function parseIntegerEnv(
