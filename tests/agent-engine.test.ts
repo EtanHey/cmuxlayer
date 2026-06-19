@@ -3033,6 +3033,9 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
       "brainlayerCodex -s",
     );
+    expect(buildLaunchCommand("gemini", "golems", "constructor")).toBe(
+      "golemsGemini -s",
+    );
   });
 
   it("uses repoGolem launcher for gemini (no cd prefix, wires MCP)", () => {

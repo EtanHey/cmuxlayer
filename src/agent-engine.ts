@@ -436,8 +436,13 @@ function resolveModelFlag(cli: CliType, model?: string): string | null {
     return null;
   }
 
-  const mapped = MODEL_FLAG_ALIASES[cli][normalized];
-  if (!mapped) {
+  const aliases = MODEL_FLAG_ALIASES[cli];
+  if (!Object.prototype.hasOwnProperty.call(aliases, normalized)) {
+    return null;
+  }
+
+  const mapped = aliases[normalized];
+  if (typeof mapped !== "string" || !mapped) {
     return null;
   }
 
