@@ -10,6 +10,7 @@ import {
   monitorAlive,
   pendingDispatches,
   readInbox,
+  readLastHeartbeat,
   recommendedCodexWatch,
   recommendedMonitorCommand,
   replayUndelivered,
@@ -84,6 +85,36 @@ describe("inbox write-channel", () => {
 
   it("FM#1 monitorAlive is false when no heartbeat exists", () => {
     expect(monitorAlive("never-armed", 1_000, opts)).toBe(false);
+  });
+
+  it("FM#1 server boot markers do not prove monitor liveness", () => {
+    clock = 25_000;
+    writeHeartbeat("a5-boot", opts, "server_boot");
+    clock = 25_200;
+    expect(readLastHeartbeat("a5-boot", opts)).toEqual({
+      ts_ms: 25_000,
+      source: "server_boot",
+    });
+    expect(monitorAlive("a5-boot", 1_000, opts)).toBe(false);
+
+    writeHeartbeat("a5-boot", opts);
+    expect(readLastHeartbeat("a5-boot", opts)).toEqual({
+      ts_ms: 25_200,
+      source: "agent",
+    });
+    expect(monitorAlive("a5-boot", 1_000, opts)).toBe(true);
+  });
+
+  it("FM#1 server boot markers do not mask an agent heartbeat", () => {
+    clock = 27_000;
+    writeHeartbeat("a5-mask", opts);
+    clock = 27_100;
+    writeHeartbeat("a5-mask", opts, "server_boot");
+    expect(readLastHeartbeat("a5-mask", opts)).toEqual({
+      ts_ms: 27_100,
+      source: "server_boot",
+    });
+    expect(monitorAlive("a5-mask", 1_000, opts)).toBe(true);
   });
 
   it("ack writes a heartbeat (acting proves liveness)", () => {

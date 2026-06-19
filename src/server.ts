@@ -52,10 +52,13 @@ import {
 } from "./screen-parser.js";
 import {
   dispatch,
+  ensureInboxFile,
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  recommendedMonitorCommand,
   replayUndelivered,
+  writeHeartbeat,
 } from "./inbox.js";
 import {
   applyHarnessState,
@@ -541,6 +544,13 @@ function screenShowsPendingInput(
   return screenText.includes(tail);
 }
 
+type MonitorBootResult = {
+  heartbeat_written: boolean;
+  heartbeat_source: "server_boot";
+  monitor_command: string;
+  error?: string;
+};
+
 function computeEnterDelayMs(bytes: number, chunkCount: number): number {
   const extraChunks = Math.max(0, chunkCount - 1);
   const longPayloadPenalty = bytes >= SEND_INPUT_CHUNK_THRESHOLD ? 100 : 0;
@@ -861,6 +871,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const inboxOpts = opts?.inboxBaseDir
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
+  const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
+    let monitorCommand = "";
+    try {
+      monitorCommand = recommendedMonitorCommand(agentId, inboxOpts);
+      ensureInboxFile(agentId, inboxOpts);
+      writeHeartbeat(agentId, inboxOpts, "server_boot");
+      return {
+        heartbeat_written: true,
+        heartbeat_source: "server_boot",
+        monitor_command: monitorCommand,
+      };
+    } catch (e) {
+      return {
+        heartbeat_written: false,
+        heartbeat_source: "server_boot",
+        monitor_command: monitorCommand,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  };
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
@@ -3774,6 +3804,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e, extra);
           }
 
+          const role =
+            engine.getAgentState(result.agent_id)?.role ??
+            inferAgentRole({
+              role: args.role,
+              cli: args.cli,
+              launcherName: launcherNameForCli(args.repo, args.cli),
+            });
+          const monitorBoot =
+            role === "orchestrator"
+              ? ensureMonitorBoot(result.agent_id)
+              : undefined;
+
           return okFormatted(
             formatOk("spawn_agent", {
               agent_id: result.agent_id,
@@ -3785,26 +3827,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ? result.warnings.join(" | ")
                   : undefined,
               surface: result.surface_id,
-              role:
-                engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({
-                  role: args.role,
-                  cli: args.cli,
-                  launcherName: launcherNameForCli(args.repo, args.cli),
-                }),
+              role,
+              monitor_boot: monitorBoot,
               boot_prompt_delivered: Boolean(bootPromptDelivery),
             }),
             {
               ...result,
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel,
-              role:
-                engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({
-                  role: args.role,
-                  cli: args.cli,
-                  launcherName: launcherNameForCli(args.repo, args.cli),
-                }),
+              role,
+              monitor_boot: monitorBoot,
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },
@@ -3967,6 +3999,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface_id: string;
             repo: string;
             cli: CliType;
+            role: AgentRole;
+            monitor_boot?: MonitorBootResult;
           }> = [];
 
           for (const agent of args.agents) {
@@ -4009,11 +4043,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
 
+            const role =
+              engine.getAgentState(result.agent_id)?.role ??
+              inferAgentRole({
+                role: agent.role,
+                cli: agent.cli,
+                launcherName: launcherNameForCli(agent.repo, agent.cli),
+              });
+            const monitorBoot =
+              role === "orchestrator"
+                ? ensureMonitorBoot(result.agent_id)
+                : undefined;
+
             spawnedAgents.push({
               agent_id: result.agent_id,
               surface_id: result.surface_id,
               repo: agent.repo,
               cli: agent.cli,
+              role,
+              monitor_boot: monitorBoot,
             });
           }
 
