@@ -416,6 +416,8 @@ const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
     "sonnet-4-thinking": "sonnet-4-thinking",
   },
   gemini: {
+    pro: "Gemini 3.1 Pro (High)",
+    "pro-high": "Gemini 3.1 Pro (High)",
     "gemini-2.5-pro": "gemini-2.5-pro",
     "gemini-2.5-flash": "gemini-2.5-flash",
     "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
@@ -430,16 +432,20 @@ const MODEL_FLAG_ALIASES: Record<CliType, Record<string, string>> = {
 
 function resolveModelFlag(cli: CliType, model?: string): string | null {
   const normalized = model?.trim().toLowerCase();
-  if (!normalized || !isSafeShellToken(normalized)) {
+  if (!normalized) {
     return null;
   }
 
   const mapped = MODEL_FLAG_ALIASES[cli][normalized];
-  if (!mapped || !isSafeShellToken(mapped)) {
+  if (!mapped) {
     return null;
   }
 
   return mapped;
+}
+
+function formatModelArg(modelFlag: string): string {
+  return isSafeShellToken(modelFlag) ? modelFlag : shellQuote(modelFlag);
 }
 
 export function buildLaunchCommand(
@@ -455,8 +461,11 @@ export function buildLaunchCommand(
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveModelFlag(cli, model);
-  const launcherModelArgs = modelFlag ? ` -m ${modelFlag}` : "";
-  const rawModelArgs = modelFlag ? ` --model ${modelFlag}` : "";
+  const formattedModelFlag = modelFlag ? formatModelArg(modelFlag) : null;
+  const launcherModelArgs = formattedModelFlag ? ` -m ${formattedModelFlag}` : "";
+  const rawModelArgs = formattedModelFlag
+    ? ` --model ${formattedModelFlag}`
+    : "";
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
   const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";

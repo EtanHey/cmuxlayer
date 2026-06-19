@@ -3046,6 +3046,9 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
       "voicelayerGemini -s -m gemini-2.5-pro",
     );
+    expect(buildLaunchCommand("gemini", "golems", "pro")).toBe(
+      "golemsGemini -s -m 'Gemini 3.1 Pro (High)'",
+    );
   });
 
   it("adds safe --model flags for recognized raw CLI model aliases", () => {
