@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  cmuxlayer MCP orphan reaper launchd template.
+
+  Install:
+    1. Run `bun run build` in the cmuxlayer checkout.
+    2. Copy this file to ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist.
+    3. Edit ProgramArguments if the checkout is not /Users/etanheyman/Gits/cmuxlayer.
+    4. Load it with:
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist
+
+  Safety:
+    REAPER_DRY_RUN defaults to 1 here and in the CLI. Set it to 0 only after
+    reviewing dry-run logs.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cmuxlayer.mcp-reaper</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/etanheyman/Gits/cmuxlayer/scripts/mcp-orphan-reaper.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>REAPER_DRY_RUN</key>
+    <string>1</string>
+    <key>REAPER_MIN_AGE_SECONDS</key>
+    <string>600</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/com.cmuxlayer.mcp-reaper.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.cmuxlayer.mcp-reaper.err.log</string>
+</dict>
+</plist>
