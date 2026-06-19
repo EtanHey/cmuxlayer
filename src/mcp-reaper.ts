@@ -76,6 +76,9 @@ const DEFAULT_KNOWN_SERVER_NAMES = [
   "voicelayer-mcp",
   "whatsapp-mcp",
 ] as const;
+const MCP_PACKAGE_NAME_PATTERN = /-mcp(?:$|[\s/._-])/i;
+const MCP_SERVER_ENTRYPOINT_PATTERN =
+  /(?:^|[\/\s])(?:dist|build|lib)\/(?:index|server|mcp-server)\.(?:js|mjs|cjs)(?:$|[\s"'`])/i;
 
 export function selectReapablePids(
   procList: readonly ProcessInfo[],
@@ -102,7 +105,10 @@ function isMcpServerCommand(
   command: string,
   knownServerNames: readonly string[],
 ): boolean {
-  if (/-mcp(?:$|[\s/._-])/i.test(command)) {
+  if (
+    MCP_PACKAGE_NAME_PATTERN.test(command) &&
+    MCP_SERVER_ENTRYPOINT_PATTERN.test(command)
+  ) {
     return true;
   }
 

@@ -75,6 +75,12 @@ describe("selectReapablePids", () => {
         command:
           "node /Users/etan/Gits/official/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
       },
+      {
+        pid: 205,
+        ppid: 1,
+        etimes: 1200,
+        command: "node /Users/etan/Gits/acme-mcp/scripts/dev.js",
+      },
     ];
 
     expect(selectReapablePids(processes, { minAgeSeconds: 600 })).toEqual([
