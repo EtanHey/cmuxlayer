@@ -31,18 +31,123 @@ type AgentRecordPatch = Partial<
   Omit<AgentRecord, "agent_id" | "created_at" | "updated_at" | "version" | "state">
 >;
 
+export interface SurfaceSessionIndexEntry {
+  agent_id: string;
+  workspace_id: string | null;
+  surface_id: string;
+  cli_session_id: string;
+  updated_at: string;
+}
+
+export interface SurfaceSessionLookupKey {
+  workspace_id?: string | null;
+  surface_id: string;
+}
+
+interface SurfaceSessionIndexFile {
+  version: 1;
+  by_agent_id: Record<string, SurfaceSessionIndexEntry>;
+}
+
+export class SurfaceSessionIndex {
+  private indexPath: string;
+
+  constructor(private baseDir: string) {
+    this.indexPath = join(baseDir, "surface-session-index.json");
+  }
+
+  private readIndex(): SurfaceSessionIndexFile {
+    if (!existsSync(this.indexPath)) {
+      return { version: 1, by_agent_id: {} };
+    }
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.indexPath, "utf-8"),
+      ) as SurfaceSessionIndexFile;
+      return {
+        version: 1,
+        by_agent_id: parsed.by_agent_id ?? {},
+      };
+    } catch {
+      return { version: 1, by_agent_id: {} };
+    }
+  }
+
+  private writeIndex(index: SurfaceSessionIndexFile): void {
+    mkdirSync(this.baseDir, { recursive: true });
+    const tmpFile = join(this.baseDir, "surface-session-index.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(index, null, 2), "utf-8");
+    renameSync(tmpFile, this.indexPath);
+  }
+
+  persist(input: {
+    workspace_id?: string | null;
+    surface_id: string;
+    cli_session_id: string;
+    agent_id: string;
+  }): SurfaceSessionIndexEntry {
+    const index = this.readIndex();
+    const entry: SurfaceSessionIndexEntry = {
+      agent_id: input.agent_id,
+      workspace_id: input.workspace_id ?? null,
+      surface_id: input.surface_id,
+      cli_session_id: input.cli_session_id,
+      updated_at: new Date().toISOString(),
+    };
+    index.by_agent_id[input.agent_id] = entry;
+    this.writeIndex(index);
+    return entry;
+  }
+
+  persistRecord(record: AgentRecord): SurfaceSessionIndexEntry | null {
+    if (!record.cli_session_id) return null;
+    return this.persist({
+      workspace_id: record.workspace_id ?? null,
+      surface_id: record.surface_id,
+      cli_session_id: record.cli_session_id,
+      agent_id: record.agent_id,
+    });
+  }
+
+  removeAgent(agentId: string): void {
+    const index = this.readIndex();
+    if (!index.by_agent_id[agentId]) return;
+    delete index.by_agent_id[agentId];
+    this.writeIndex(index);
+  }
+
+  lookup(key: SurfaceSessionLookupKey): SurfaceSessionIndexEntry | null {
+    const workspaceId = key.workspace_id ?? null;
+    const matches = Object.values(this.readIndex().by_agent_id).filter(
+      (entry) =>
+        entry.workspace_id === workspaceId && entry.surface_id === key.surface_id,
+    );
+    matches.sort(
+      (a, b) =>
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    );
+    return matches[0] ?? null;
+  }
+}
+
 export class StateManager {
   private baseDir: string;
   private eventLog: EventLog;
+  private surfaceSessionIndex: SurfaceSessionIndex;
 
   constructor(baseDir: string) {
     this.baseDir = baseDir;
     this.eventLog = new EventLog(baseDir);
+    this.surfaceSessionIndex = new SurfaceSessionIndex(baseDir);
     mkdirSync(baseDir, { recursive: true });
   }
 
   getEventLog(): EventLog {
     return this.eventLog;
+  }
+
+  getSurfaceSessionIndex(): SurfaceSessionIndex {
+    return this.surfaceSessionIndex;
   }
 
   private stateFilePath(dirName: string): string {
@@ -89,6 +194,7 @@ export class StateManager {
 
     writeFileSync(tmpFile, JSON.stringify(record, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(record);
 
     this.eventLog.append({
       ts: new Date().toISOString(),
@@ -142,6 +248,7 @@ export class StateManager {
     const tmpFile = join(agentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(updated);
 
     const transition: StateTransition = {
       ts: updated.updated_at,
@@ -180,6 +287,7 @@ export class StateManager {
     const tmpFile = join(agentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(updated);
 
     this.eventLog.append({
       ts: updated.updated_at,
@@ -226,6 +334,8 @@ export class StateManager {
     const tmpFile = join(newAgentDir, "state.json.tmp");
     writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
     renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(updated);
+    this.surfaceSessionIndex.removeAgent(agentId);
 
     rmSync(join(this.baseDir, dirName!), { recursive: true, force: true });
 

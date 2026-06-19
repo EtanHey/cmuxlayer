@@ -100,6 +100,13 @@ export type SessionIdentityResolver = (
   agent: AgentRecord,
 ) => CapturedSessionIdentity | string | null;
 
+function defaultCrashRecoverForRole(role: AgentRole): boolean {
+  const override = process.env.CMUXLAYER_CRASH_RECOVER_DEFAULT;
+  if (override === "1" || override?.toLowerCase() === "true") return true;
+  if (override === "0" || override?.toLowerCase() === "false") return false;
+  return role === "orchestrator";
+}
+
 /**
  * Result of the spawn preflight. `launcherName` carries the launcher function
  * name resolved by the candidate probe (see resolveLauncherName) so spawnAgent
@@ -1724,7 +1731,7 @@ export class AgentEngine {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: params.max_cost_per_agent ?? null,
-      crash_recover: params.crash_recover ?? false,
+      crash_recover: params.crash_recover ?? defaultCrashRecoverForRole(role),
       respawn_attempts: 0,
       user_killed: false,
       boot_prompt_pending: params.boot_prompt_pending ?? false,
