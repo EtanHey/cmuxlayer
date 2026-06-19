@@ -155,10 +155,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
-    // Mock readScreen: 160K tokens on Sonnet (200K window) = 80% used
+    // Mock readScreen: 160K tokens on older Sonnet (200K window) = 80% used
     (mockClient.readScreen as any).mockResolvedValue({
       surface: "s:1",
-      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.6 | 💰 $3.50",
+      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.5 | 💰 $3.50",
       lines: 5,
       scrollback_used: false,
     });
@@ -215,10 +215,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
-    // 160K tokens on Sonnet (200K window) = 80% used
+    // 160K tokens on older Sonnet (200K window) = 80% used
     (mockClient.readScreen as any).mockResolvedValue({
       surface: "s:1",
-      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.6 | 💰 $2.00",
+      text: "✻ Working…\nToken usage: total=160,000\n🤖 Sonnet 4.5 | 💰 $2.00",
       lines: 5,
       scrollback_used: false,
     });
@@ -242,10 +242,10 @@ describe("Quality Tracking (sweep)", () => {
     liveSurfaces = [makeSurface("s:1")];
     await engine.getRegistry().reconstitute();
 
-    // 100K tokens on Sonnet (200K window) = 50% used — below threshold
+    // 100K tokens on older Sonnet (200K window) = 50% used — below threshold
     (mockClient.readScreen as any).mockResolvedValue({
       surface: "s:1",
-      text: "✻ Working…\nToken usage: total=100,000\n🤖 Sonnet 4.6 | 💰 $1.00",
+      text: "✻ Working…\nToken usage: total=100,000\n🤖 Sonnet 4.5 | 💰 $1.00",
       lines: 5,
       scrollback_used: false,
     });
