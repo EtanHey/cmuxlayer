@@ -544,9 +544,10 @@ function screenShowsPendingInput(
 }
 
 type MonitorBootResult = {
-  heartbeat_written: true;
+  heartbeat_written: boolean;
   heartbeat_source: "server_boot";
   monitor_command: string;
+  error?: string;
 };
 
 function computeEnterDelayMs(bytes: number, chunkCount: number): number {
@@ -870,12 +871,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
   const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
-    writeHeartbeat(agentId, inboxOpts, "server_boot");
-    return {
-      heartbeat_written: true,
-      heartbeat_source: "server_boot",
-      monitor_command: recommendedMonitorCommand(agentId, inboxOpts),
-    };
+    let monitorCommand = "";
+    try {
+      monitorCommand = recommendedMonitorCommand(agentId, inboxOpts);
+      writeHeartbeat(agentId, inboxOpts, "server_boot");
+      return {
+        heartbeat_written: true,
+        heartbeat_source: "server_boot",
+        monitor_command: monitorCommand,
+      };
+    } catch (e) {
+      return {
+        heartbeat_written: false,
+        heartbeat_source: "server_boot",
+        monitor_command: monitorCommand,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
   };
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface

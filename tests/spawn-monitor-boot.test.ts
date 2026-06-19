@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -166,6 +166,45 @@ describe("spawn monitor boot", () => {
     expect(monitorAlive(parsed.agent_id, 1_000, { baseDir: inboxDir })).toBe(
       false,
     );
+  });
+
+  it("does not fail orchestrator spawn when monitor boot cannot write", async () => {
+    const blockedInboxBase = join(
+      tmpdir(),
+      `cmux-monitor-boot-blocked-${process.pid}-${Date.now()}`,
+    );
+    writeFileSync(blockedInboxBase, "not a directory");
+    const blockedExec = makeExec();
+    const blockedServer = createServer({
+      exec: blockedExec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: blockedInboxBase,
+    });
+
+    try {
+      const spawn = blockedServer._registeredTools["spawn_agent"];
+      const result = await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "sonnet",
+          cli: "claude",
+          role: "orchestrator",
+        },
+        {} as any,
+      );
+
+      const parsed = parseToolResult(result);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.monitor_boot).toEqual({
+        heartbeat_written: false,
+        heartbeat_source: "server_boot",
+        monitor_command: expect.stringContaining(parsed.agent_id),
+        error: expect.stringContaining("ENOTDIR"),
+      });
+    } finally {
+      rmSync(blockedInboxBase, { force: true });
+    }
   });
 
   it("nudges the first orchestrator dispatch until the agent heartbeats", async () => {
