@@ -457,22 +457,23 @@ export function buildLaunchCommand(
   const modelFlag = resolveModelFlag(cli, model);
   const launcherModelArgs = modelFlag ? ` -m ${modelFlag}` : "";
   const rawModelArgs = modelFlag ? ` --model ${modelFlag}` : "";
-  const cdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
+  const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
+  const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
   const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}${launcherWorktreeArg}`;
     case "codex":
-      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
-      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Gemini`} -s${launcherModelArgs}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`} -s${launcherModelArgs}${launcherWorktreeArg}`;
     case "kiro":
-      return `${cdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
+      return `${rawCdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${cdPrefix}${envPrefix}${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}${launcherWorktreeArg}`;
   }
 }
 
@@ -898,6 +899,10 @@ export class AgentEngine {
   }
 
   private harnessCwdForAgent(agent: AgentRecord): string {
+    const launchCwd = agent.launch_cwd?.trim();
+    if (launchCwd) return launchCwd;
+    const worktreePath = agent.worktree_path?.trim();
+    if (worktreePath) return worktreePath;
     return join(homedir(), "Gits", agent.repo);
   }
 

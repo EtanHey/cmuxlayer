@@ -1684,6 +1684,72 @@ To continue this session, run codex resume ${sessionId}`,
         "brainlayerCodex-019e942c",
       );
     });
+
+    it("uses the saved launch cwd when capturing worktree transcript sessions", async () => {
+      vi.setSystemTime(new Date("2026-06-19T05:00:30.000Z"));
+      const home = join(TEST_DIR, "home");
+      const worktreeCwd = join(
+        TEST_DIR,
+        "Gits",
+        "cmuxlayer.wt",
+        "skill-eval",
+      );
+      const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+      const sessionDir = join(home, ".codex", "sessions", "2026", "06", "19");
+      const sessionPath = join(sessionDir, "rollout-worktree.jsonl");
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(
+        sessionPath,
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            cwd: worktreeCwd,
+          },
+        }),
+      );
+
+      vi.stubEnv("HOME", home);
+      try {
+        engine.dispose();
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        engine = new AgentEngine(stateMgr, registry, mockClient, {
+          spawnPreflight: async () => {},
+        });
+        liveSurfaces = [makeSurface("surface:new")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:new",
+          text: "codex> ",
+          lines: 80,
+          scrollback_used: true,
+        });
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-pending-worktree",
+            repo: "cmuxlayer",
+            model: "gpt-5.4",
+            cli: "codex",
+            surface_id: "surface:new",
+            state: "booting",
+            created_at: "2026-06-19T05:00:00.000Z",
+            updated_at: "2026-06-19T05:00:00.000Z",
+            launch_cwd: worktreeCwd,
+            worktree_path: worktreeCwd,
+          }),
+        );
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(engine.getAgentState("cmuxlayerCodex-019e942c")).toMatchObject({
+          agent_id: "cmuxlayerCodex-019e942c",
+          cli_session_id: sessionId,
+          cli_session_path: sessionPath,
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe("waitFor", () => {
@@ -2998,6 +3064,40 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("cursor", "cmuxlayer")).toBe(
       "cmuxlayerCursor -s",
     );
+  });
+
+  it("passes cwd as -w to launcher CLIs while keeping kiro on cd", () => {
+    const cwd = "/Users/x/Gits/golems.wt/t";
+
+    expect(
+      buildLaunchCommand("claude", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsClaude -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("codex", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsCodex -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("cursor", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsCursor -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("gemini", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsGemini -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("claude", "golems", "sonnet", undefined, {
+        cwd: "/p/wt",
+      }),
+    ).toBe("golemsClaude -s -m sonnet -w '/p/wt'");
+    expect(
+      buildLaunchCommand("kiro", "golems", undefined, undefined, {
+        cwd: "/p/wt",
+      }),
+    ).toBe(
+      "cd '/p/wt' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli",
+    );
+    expect(
+      buildLaunchCommand("claude", "golems", undefined, undefined, {
+        cwd: "/Users/x/Gits/worktree launch",
+      }),
+    ).toBe("golemsClaude -s -w '/Users/x/Gits/worktree launch'");
   });
 
   it("uses an explicitly resolved launcher name for launcher CLIs", () => {
