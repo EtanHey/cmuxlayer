@@ -2208,5 +2208,7 @@ export class AgentEngine {
     if (pressEnter) {
       await this.client.sendKey(route.surface_id, "return", { workspace });
     }
+    const refreshed = this.stateMgr.updateRecord(agent.agent_id, {});
+    this.registry.set(agent.agent_id, refreshed);
   }
 }

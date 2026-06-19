@@ -3057,18 +3057,30 @@ To continue this session, run codex resume ${sessionId}`,
     });
 
     it("works for agents in idle state", async () => {
+      vi.useFakeTimers();
+      const sentAt = new Date("2026-05-25T13:00:00.000Z");
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-idle",
           state: "idle",
           surface_id: "surface:42",
+          updated_at: "2026-05-25T12:00:00.000Z",
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];
       await engine.getRegistry().reconstitute();
 
-      await engine.sendToAgent("agent-idle", "continue");
-      expect(mockClient.send).toHaveBeenCalled();
+      try {
+        vi.setSystemTime(sentAt);
+        await engine.sendToAgent("agent-idle", "continue");
+
+        expect(mockClient.send).toHaveBeenCalled();
+        expect(engine.getAgentState("agent-idle")?.updated_at).toBe(
+          sentAt.toISOString(),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("rejects sending to agents in non-interactive states", async () => {
