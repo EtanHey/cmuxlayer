@@ -41,6 +41,7 @@ const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
 
 const VERSIONED_MODEL_MAX_RULES: Array<[RegExp, number]> = [
   [/(?:claude[-\s])?opus[-\s]4(?:[.\s-])?[678]\b/i, 1_000_000],
+  [/(?:claude[-\s])?sonnet[-\s]4(?:[.\s-])?6\b/i, 1_000_000],
 ];
 
 /**
