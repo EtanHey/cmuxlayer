@@ -165,4 +165,64 @@ describe("surface session crash-resume index", () => {
       engine.dispose();
     }
   });
+
+  it("removes the pending index entry when the final agent already exists", async () => {
+    const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+    const finalAgentId = "brainlayerCodex-019e942c";
+    const pendingAgentId = "brainlayerCodex-pending-existing";
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: finalAgentId,
+        surface_id: "surface:final",
+        workspace_id: "workspace:old",
+        cli_session_id: sessionId,
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingAgentId,
+        surface_id: "surface:pending",
+        workspace_id: "workspace:old",
+      }),
+    );
+    const registry = new AgentRegistry(stateMgr, async () => [
+      {
+        ref: "surface:final",
+        title: "",
+        type: "terminal",
+        index: 0,
+        selected: false,
+      },
+      {
+        ref: "surface:pending",
+        title: "",
+        type: "terminal",
+        index: 1,
+        selected: true,
+      },
+    ]);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: (agent) =>
+        agent.agent_id === pendingAgentId ? sessionId : null,
+    });
+
+    try {
+      await registry.reconstitute();
+      await engine.runSweep();
+
+      const rawIndex = JSON.parse(
+        readFileSync(join(TEST_DIR, "surface-session-index.json"), "utf-8"),
+      );
+      expect(rawIndex.by_agent_id[pendingAgentId]).toBeUndefined();
+      expect(rawIndex.by_agent_id[finalAgentId]).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+      });
+      expect(stateMgr.readState(pendingAgentId)).toBeNull();
+    } finally {
+      engine.dispose();
+    }
+  });
 });
