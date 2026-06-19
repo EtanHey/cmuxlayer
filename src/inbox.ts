@@ -51,6 +51,13 @@ export interface InboxOpts {
   now?: () => number;
 }
 
+export type MonitorHeartbeatSource = "agent" | "server_boot";
+
+export interface MonitorHeartbeat {
+  ts_ms: number;
+  source: MonitorHeartbeatSource;
+}
+
 export interface DispatchInput {
   from: string;
   to?: string;
@@ -105,6 +112,16 @@ function readJsonl<T>(path: string): T[] {
     }
   }
   return out;
+}
+
+function parseHeartbeatLine(line: string): MonitorHeartbeat | null {
+  const [tsText, sourceText] = line.trim().split(/\s+/, 2);
+  const ts = Number.parseInt(tsText ?? "", 10);
+  if (!Number.isFinite(ts)) return null;
+  return {
+    ts_ms: ts,
+    source: sourceText === "server_boot" ? "server_boot" : "agent",
+  };
 }
 
 let idCounter = 0;
@@ -195,12 +212,34 @@ export function pendingDispatches(
   return replayUndelivered(agentId, opts).filter((m) => m.ts_ms <= cutoff);
 }
 
-/** FM#1 — heartbeat the agent's monitor writes (on arm + each act) to prove liveness. */
-export function writeHeartbeat(agentId: string, opts?: InboxOpts): number {
+/**
+ * FM#1 — heartbeat the agent's monitor writes (on arm + each act) to prove liveness.
+ * Server boot markers share the file for auditability, but do not satisfy monitorAlive().
+ */
+export function writeHeartbeat(
+  agentId: string,
+  opts?: InboxOpts,
+  source: MonitorHeartbeatSource = "agent",
+): number {
   ensureDir(agentId, opts);
   const ts = nowOf(opts);
-  appendFileSync(heartbeatPath(agentId, opts), `${ts}\n`);
+  const sourceSuffix = source === "agent" ? "" : ` ${source}`;
+  appendFileSync(heartbeatPath(agentId, opts), `${ts}${sourceSuffix}\n`);
   return ts;
+}
+
+export function readLastHeartbeat(
+  agentId: string,
+  opts?: InboxOpts,
+): MonitorHeartbeat | null {
+  let raw: string;
+  try {
+    raw = readFileSync(heartbeatPath(agentId, opts), "utf8");
+  } catch {
+    return null;
+  }
+  const last = raw.trim().split("\n").filter(Boolean).pop();
+  return last ? parseHeartbeatLine(last) : null;
 }
 
 /**
@@ -213,16 +252,9 @@ export function monitorAlive(
   maxAgeMs: number,
   opts?: InboxOpts,
 ): boolean {
-  let raw: string;
-  try {
-    raw = readFileSync(heartbeatPath(agentId, opts), "utf8");
-  } catch {
-    return false;
-  }
-  const last = raw.trim().split("\n").filter(Boolean).pop();
-  const ts = last ? Number.parseInt(last, 10) : NaN;
-  if (!Number.isFinite(ts)) return false;
-  return nowOf(opts) - ts <= maxAgeMs;
+  const heartbeat = readLastHeartbeat(agentId, opts);
+  if (!heartbeat || heartbeat.source === "server_boot") return false;
+  return nowOf(opts) - heartbeat.ts_ms <= maxAgeMs;
 }
 
 /**

@@ -545,6 +545,7 @@ function screenShowsPendingInput(
 
 type MonitorBootResult = {
   heartbeat_written: true;
+  heartbeat_source: "server_boot";
   monitor_command: string;
 };
 
@@ -869,9 +870,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
   const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
-    writeHeartbeat(agentId, inboxOpts);
+    writeHeartbeat(agentId, inboxOpts, "server_boot");
     return {
       heartbeat_written: true,
+      heartbeat_source: "server_boot",
       monitor_command: recommendedMonitorCommand(agentId, inboxOpts),
     };
   };

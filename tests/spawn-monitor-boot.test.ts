@@ -121,7 +121,7 @@ describe("spawn monitor boot", () => {
     rmSync(inboxDir, { recursive: true, force: true });
   });
 
-  it("returns monitor boot metadata and writes a heartbeat for orchestrators", async () => {
+  it("returns monitor boot metadata without marking the monitor alive", async () => {
     const spawn = server._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
@@ -138,11 +138,12 @@ describe("spawn monitor boot", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.monitor_boot).toEqual({
       heartbeat_written: true,
+      heartbeat_source: "server_boot",
       monitor_command: expect.stringContaining(parsed.agent_id),
     });
     expect(parsed.monitor_boot.monitor_command).toContain("tail -n0 -F");
     expect(monitorAlive(parsed.agent_id, 1_000, { baseDir: inboxDir })).toBe(
-      true,
+      false,
     );
   });
 
@@ -167,7 +168,7 @@ describe("spawn monitor boot", () => {
     );
   });
 
-  it("dispatch sees monitor boot heartbeat before the first orchestrator task", async () => {
+  it("nudges the first orchestrator dispatch until the agent heartbeats", async () => {
     const spawn = server._registeredTools["spawn_agent"];
     const dispatch = server._registeredTools["dispatch_to_agent"];
 
@@ -196,9 +197,10 @@ describe("spawn monitor boot", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    expect(parsed.monitor_alive).toBe(true);
-    expect(parsed.nudge.attempted).toBe(false);
-    expect(sendCalls(exec)).toHaveLength(beforeDispatchSendCount);
+    expect(parsed.monitor_alive).toBe(false);
+    expect(parsed.nudge.attempted).toBe(true);
+    expect(parsed.nudge.sent).toBe(true);
+    expect(sendCalls(exec)).toHaveLength(beforeDispatchSendCount + 1);
     expect(readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task)).toEqual(
       ["GO"],
     );
