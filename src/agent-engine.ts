@@ -1052,7 +1052,19 @@ export class AgentEngine {
         return agent;
       }
 
-      const updated = this.stateMgr.transition(agent.agent_id, "ready");
+      let updated = this.stateMgr.transition(agent.agent_id, "ready", {
+        error: agent.error?.startsWith("Post-spawn liveness failed:")
+          ? null
+          : agent.error,
+      });
+      if (
+        updated.quality === "degraded" &&
+        agent.error?.startsWith("Post-spawn liveness failed:")
+      ) {
+        updated = this.stateMgr.updateRecord(agent.agent_id, {
+          quality: "unknown",
+        });
+      }
       this.registry.set(agent.agent_id, updated);
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;

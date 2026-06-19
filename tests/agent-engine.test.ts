@@ -2546,6 +2546,35 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
+    it("clears stale post-spawn liveness errors when a booting agent reaches ready", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-recovered",
+          state: "booting",
+          surface_id: "surface:recovered",
+          cli: "codex",
+          error: "Post-spawn liveness failed: surface surface:recovered is not live",
+          quality: "degraded",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:recovered")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:recovered",
+        text: "codex> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-recovered")).toMatchObject({
+        state: "ready",
+        error: null,
+        quality: "unknown",
+      });
+    });
+
     it("reuses one tail read for boot capture, readiness, task done, and context checks in a sweep", async () => {
       stateMgr.writeState(
         makeRecord({
