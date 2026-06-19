@@ -28,14 +28,27 @@
 
 set -euo pipefail
 
+launchd_safe_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [[ -n "${PATH:-}" ]]; then
+  export PATH="${launchd_safe_path}:${PATH}"
+else
+  export PATH="${launchd_safe_path}"
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "${script_dir}/.." && pwd)"
 dist_cli="${repo_dir}/dist/mcp-reaper.js"
 src_cli="${repo_dir}/src/mcp-reaper.ts"
 local_tsx="${repo_dir}/node_modules/.bin/tsx"
+node_bin="$(command -v node || true)"
+
+if [[ -z "${node_bin}" ]]; then
+  printf '%s\n' "node is required but was not found on PATH: ${PATH}" >&2
+  exit 1
+fi
 
 if [[ -f "${dist_cli}" ]]; then
-  exec node "${dist_cli}" "$@"
+  exec "${node_bin}" "${dist_cli}" "$@"
 fi
 
 if [[ -x "${local_tsx}" ]]; then

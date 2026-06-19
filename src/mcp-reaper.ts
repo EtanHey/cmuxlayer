@@ -67,6 +67,12 @@ export interface SignalAttempt {
 
 export type KillProcess = (pid: number, signal: NodeJS.Signals) => void;
 
+export const PROCESS_TABLE_PS_ARGS = [
+  "-ww",
+  "-axo",
+  "pid=,ppid=,etime=,command=",
+] as const;
+
 const DEFAULT_MIN_AGE_SECONDS = 600;
 const DEFAULT_GRACE_SECONDS = 10;
 const DEFAULT_LOG_FILE = `${homedir()}/.local/state/cmuxlayer/mcp-reaper.log`;
@@ -217,10 +223,7 @@ function signalErrorCode(error: unknown): string {
 }
 
 async function readProcessTable(): Promise<ProcessInfo[]> {
-  const { stdout } = await execFileAsync("ps", [
-    "-axo",
-    "pid=,ppid=,etime=,command=",
-  ]);
+  const { stdout } = await execFileAsync("ps", [...PROCESS_TABLE_PS_ARGS]);
   const launchdServices = await readLaunchdServicePids();
   return stdout
     .split("\n")

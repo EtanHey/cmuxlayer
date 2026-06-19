@@ -27,6 +27,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>REAPER_DRY_RUN</key>
     <string>1</string>
     <key>REAPER_MIN_AGE_SECONDS</key>

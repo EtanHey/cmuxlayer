@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  PROCESS_TABLE_PS_ARGS,
   parseElapsedSeconds,
   parseCliOptions,
   parseLaunchdServicePids,
@@ -205,5 +206,15 @@ describe("parseCliOptions", () => {
     expect(() => parseCliOptions(["--grace-seconds"])).toThrow(
       "--grace-seconds requires a value",
     );
+  });
+});
+
+describe("PROCESS_TABLE_PS_ARGS", () => {
+  it("requests unlimited ps output width before parsing argv", () => {
+    expect(PROCESS_TABLE_PS_ARGS).toEqual([
+      "-ww",
+      "-axo",
+      "pid=,ppid=,etime=,command=",
+    ]);
   });
 });
