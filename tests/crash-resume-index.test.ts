@@ -238,4 +238,132 @@ describe("surface session crash-resume index", () => {
       engine.dispose();
     }
   });
+
+  it("preserves an existing final session path when duplicate capture has none", async () => {
+    const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+    const existingSessionPath = "/tmp/existing-session.jsonl";
+    const finalAgentId = "brainlayerCodex-019e942c";
+    const pendingAgentId = "brainlayerCodex-pending-no-path";
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: finalAgentId,
+        surface_id: "surface:final",
+        workspace_id: "workspace:old",
+        cli_session_id: sessionId,
+        cli_session_path: existingSessionPath,
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingAgentId,
+        surface_id: "surface:pending",
+        workspace_id: "workspace:old",
+      }),
+    );
+    const registry = new AgentRegistry(stateMgr, async () => [
+      {
+        ref: "surface:final",
+        title: "",
+        type: "terminal",
+        index: 0,
+        selected: false,
+      },
+      {
+        ref: "surface:pending",
+        title: "",
+        type: "terminal",
+        index: 1,
+        selected: true,
+      },
+    ]);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: (agent) =>
+        agent.agent_id === pendingAgentId ? sessionId : null,
+    });
+
+    try {
+      await registry.reconstitute();
+      await engine.runSweep();
+
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: existingSessionPath,
+      });
+      expect(engine.getAgentState(pendingAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_path: existingSessionPath,
+      });
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("allocates a disambiguated final id when session-id prefixes collide", async () => {
+    const existingSessionId = "019e942c-1111-76f2-bbca-0ef6e484d1c9";
+    const capturedSessionId = "019e942c-2222-76f2-bbca-0ef6e484d1c9";
+    const finalAgentId = "brainlayerCodex-019e942c";
+    const disambiguatedAgentId = "brainlayerCodex-019e942c-2222-76f";
+    const pendingAgentId = "brainlayerCodex-pending-collision";
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: finalAgentId,
+        surface_id: "surface:final",
+        workspace_id: "workspace:old",
+        cli_session_id: existingSessionId,
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingAgentId,
+        surface_id: "surface:pending",
+        workspace_id: "workspace:old",
+      }),
+    );
+    const registry = new AgentRegistry(stateMgr, async () => [
+      {
+        ref: "surface:final",
+        title: "",
+        type: "terminal",
+        index: 0,
+        selected: false,
+      },
+      {
+        ref: "surface:pending",
+        title: "",
+        type: "terminal",
+        index: 1,
+        selected: true,
+      },
+    ]);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: (agent) =>
+        agent.agent_id === pendingAgentId ? capturedSessionId : null,
+    });
+
+    try {
+      await registry.reconstitute();
+      await engine.runSweep();
+
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: existingSessionId,
+      });
+      expect(engine.getAgentState(disambiguatedAgentId)).toMatchObject({
+        agent_id: disambiguatedAgentId,
+        cli_session_id: capturedSessionId,
+      });
+      expect(engine.getAgentState(pendingAgentId)).toMatchObject({
+        agent_id: disambiguatedAgentId,
+        cli_session_id: capturedSessionId,
+      });
+      expect(stateMgr.readState(pendingAgentId)).toBeNull();
+    } finally {
+      engine.dispose();
+    }
+  });
 });
