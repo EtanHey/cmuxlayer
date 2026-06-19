@@ -105,6 +105,18 @@ describe("inbox write-channel", () => {
     expect(monitorAlive("a5-boot", 1_000, opts)).toBe(true);
   });
 
+  it("FM#1 server boot markers do not mask an agent heartbeat", () => {
+    clock = 27_000;
+    writeHeartbeat("a5-mask", opts);
+    clock = 27_100;
+    writeHeartbeat("a5-mask", opts, "server_boot");
+    expect(readLastHeartbeat("a5-mask", opts)).toEqual({
+      ts_ms: 27_100,
+      source: "server_boot",
+    });
+    expect(monitorAlive("a5-mask", 1_000, opts)).toBe(true);
+  });
+
   it("ack writes a heartbeat (acting proves liveness)", () => {
     clock = 30_000;
     dispatch("a6", { from: "orc", task: "t", id: "h1" }, opts);

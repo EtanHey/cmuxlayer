@@ -94,6 +94,13 @@ function ensureDir(agentId: string, opts?: InboxOpts): void {
   mkdirSync(agentDir(agentId, opts), { recursive: true });
 }
 
+export function ensureInboxFile(agentId: string, opts?: InboxOpts): string {
+  ensureDir(agentId, opts);
+  const path = inboxPath(agentId, opts);
+  appendFileSync(path, "");
+  return path;
+}
+
 function readJsonl<T>(path: string): T[] {
   let raw: string;
   try {
@@ -242,6 +249,24 @@ export function readLastHeartbeat(
   return last ? parseHeartbeatLine(last) : null;
 }
 
+function readLastAgentHeartbeat(
+  agentId: string,
+  opts?: InboxOpts,
+): MonitorHeartbeat | null {
+  let raw: string;
+  try {
+    raw = readFileSync(heartbeatPath(agentId, opts), "utf8");
+  } catch {
+    return null;
+  }
+  const lines = raw.trim().split("\n").filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const heartbeat = parseHeartbeatLine(lines[i] ?? "");
+    if (heartbeat?.source === "agent") return heartbeat;
+  }
+  return null;
+}
+
 /**
  * FM#1 — is the monitor heartbeat fresh within maxAgeMs? false → treat the channel as down.
  * Reads the last written heartbeat timestamp (not file mtime) so it's consistent with the
@@ -252,8 +277,8 @@ export function monitorAlive(
   maxAgeMs: number,
   opts?: InboxOpts,
 ): boolean {
-  const heartbeat = readLastHeartbeat(agentId, opts);
-  if (!heartbeat || heartbeat.source === "server_boot") return false;
+  const heartbeat = readLastAgentHeartbeat(agentId, opts);
+  if (!heartbeat) return false;
   return nowOf(opts) - heartbeat.ts_ms <= maxAgeMs;
 }
 

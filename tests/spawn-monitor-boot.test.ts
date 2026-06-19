@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
-import { monitorAlive, readInbox } from "../src/inbox.js";
+import { inboxPath, monitorAlive, readInbox } from "../src/inbox.js";
 
 const STATE_DIR = join(tmpdir(), "cmuxlayer-spawn-monitor-boot-state");
 
@@ -142,6 +148,9 @@ describe("spawn monitor boot", () => {
       monitor_command: expect.stringContaining(parsed.agent_id),
     });
     expect(parsed.monitor_boot.monitor_command).toContain("tail -n0 -F");
+    expect(existsSync(inboxPath(parsed.agent_id, { baseDir: inboxDir }))).toBe(
+      true,
+    );
     expect(monitorAlive(parsed.agent_id, 1_000, { baseDir: inboxDir })).toBe(
       false,
     );

@@ -52,6 +52,7 @@ import {
 } from "./screen-parser.js";
 import {
   dispatch,
+  ensureInboxFile,
   inboxPath,
   monitorAlive,
   pendingDispatches,
@@ -874,6 +875,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let monitorCommand = "";
     try {
       monitorCommand = recommendedMonitorCommand(agentId, inboxOpts);
+      ensureInboxFile(agentId, inboxOpts);
       writeHeartbeat(agentId, inboxOpts, "server_boot");
       return {
         heartbeat_written: true,
