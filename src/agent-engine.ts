@@ -960,8 +960,22 @@ export class AgentEngine {
     if (updated.agent_id === finalAgentId) {
       return updated;
     }
-    if (this.stateMgr.readState(finalAgentId)) {
-      return updated;
+    const existingFinal = this.stateMgr.readState(finalAgentId);
+    if (existingFinal) {
+      const canonicalFinal =
+        existingFinal.cli_session_id === identity.session_id &&
+        existingFinal.cli_session_path === identity.path
+          ? existingFinal
+          : this.stateMgr.updateRecord(finalAgentId, {
+              cli_session_id: identity.session_id,
+              cli_session_path: identity.path,
+            });
+      const index = this.stateMgr.getSurfaceSessionIndex();
+      index.removeAgent(updated.agent_id);
+      index.persistRecord(canonicalFinal);
+      this.registry.remove(updated.agent_id);
+      this.stateMgr.removeState(updated.agent_id);
+      return canonicalFinal;
     }
 
     const previousAgentId = updated.agent_id;
