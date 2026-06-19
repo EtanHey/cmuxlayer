@@ -3013,8 +3013,13 @@ describe("buildLaunchCommand", () => {
       "brainlayerCodex -s",
     );
     expect(buildLaunchCommand("cursor", "cmuxlayer", "sonnet")).toBe(
-      "cmuxlayerCursor -s -m sonnet-4",
+      "cmuxlayerCursor -s",
     );
+    expect(
+      buildLaunchCommand("cursor", "cmuxlayer", "sonnet", undefined, {
+        allowModelOverride: true,
+      }),
+    ).toBe("cmuxlayerCursor -s -m sonnet");
   });
 
   it("preserves launcher defaults when model is omitted", () => {
@@ -3050,7 +3055,7 @@ describe("buildLaunchCommand", () => {
       "voicelayerGemini -s -m gemini-2.5-pro",
     );
     expect(buildLaunchCommand("gemini", "golems", "pro")).toBe(
-      "golemsGemini -s -m 'Gemini 3.1 Pro (High)'",
+      "golemsGemini -s -m pro",
     );
   });
 
