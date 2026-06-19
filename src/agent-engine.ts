@@ -107,6 +107,19 @@ function defaultCrashRecoverForRole(role: AgentRole): boolean {
   return role === "orchestrator";
 }
 
+function sessionCollisionSuffix(sessionId: string): string {
+  const normalized = sessionId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
+  return (
+    normalized.slice(9, 17).replace(/^-+|-+$/g, "") ||
+    normalized.slice(0, 8).replace(/^-+|-+$/g, "") ||
+    "collision"
+  );
+}
+
 /**
  * Result of the spawn preflight. `launcherName` carries the launcher function
  * name resolved by the candidate probe (see resolveLauncherName) so spawnAgent
@@ -962,13 +975,32 @@ export class AgentEngine {
     }
     const existingFinal = this.stateMgr.readState(finalAgentId);
     if (existingFinal) {
+      if (
+        existingFinal.cli_session_id &&
+        existingFinal.cli_session_id !== identity.session_id
+      ) {
+        const previousAgentId = updated.agent_id;
+        const collisionBaseAgentId = `${finalAgentId}-${sessionCollisionSuffix(
+          identity.session_id,
+        )}`;
+        let collisionAgentId = collisionBaseAgentId;
+        let collisionAttempt = 2;
+        while (this.stateMgr.readState(collisionAgentId)) {
+          collisionAgentId = `${collisionBaseAgentId}-${collisionAttempt}`;
+          collisionAttempt += 1;
+        }
+        updated = this.stateMgr.renameState(previousAgentId, collisionAgentId);
+        this.registry.rename(previousAgentId, collisionAgentId, updated);
+        return updated;
+      }
+      const sessionPath = identity.path ?? existingFinal.cli_session_path ?? null;
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
-        existingFinal.cli_session_path === identity.path
+        existingFinal.cli_session_path === sessionPath
           ? existingFinal
           : this.stateMgr.updateRecord(finalAgentId, {
               cli_session_id: identity.session_id,
-              cli_session_path: identity.path,
+              cli_session_path: sessionPath,
             });
       const index = this.stateMgr.getSurfaceSessionIndex();
       index.removeAgent(updated.agent_id);
