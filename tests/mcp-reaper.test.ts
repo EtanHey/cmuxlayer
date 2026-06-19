@@ -3,6 +3,7 @@ import {
   parseElapsedSeconds,
   parseProcessLine,
   selectReapablePids,
+  signalProcessBatch,
 } from "../src/mcp-reaper.js";
 import type { ProcessInfo } from "../src/mcp-reaper.js";
 
@@ -125,5 +126,39 @@ describe("process table parsing", () => {
       etimes: 183845,
       command: "node /Users/etan/Gits/brainlayer-mcp/dist/index.js",
     });
+  });
+});
+
+describe("signalProcessBatch", () => {
+  it("continues signaling remaining processes when one pid is already gone", () => {
+    const signaled: Array<[number, NodeJS.Signals]> = [];
+    const processes: ProcessInfo[] = [
+      { pid: 401, ppid: 1, etimes: 1200, command: "node a-mcp/index.js" },
+      { pid: 402, ppid: 1, etimes: 1200, command: "node b-mcp/index.js" },
+      { pid: 403, ppid: 1, etimes: 1200, command: "node c-mcp/index.js" },
+    ];
+
+    const attempts = signalProcessBatch(processes, "SIGTERM", (pid, signal) => {
+      if (pid === 402) {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      }
+      signaled.push([pid, signal]);
+    });
+
+    expect(signaled).toEqual([
+      [401, "SIGTERM"],
+      [403, "SIGTERM"],
+    ]);
+    expect(attempts).toEqual([
+      { ok: true, pid: 401, signal: "SIGTERM" },
+      {
+        errorCode: "ESRCH",
+        errorMessage: "no such process",
+        ok: false,
+        pid: 402,
+        signal: "SIGTERM",
+      },
+      { ok: true, pid: 403, signal: "SIGTERM" },
+    ]);
   });
 });

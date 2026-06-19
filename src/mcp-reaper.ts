@@ -55,6 +55,16 @@ interface CliOptions {
   knownServerNames: readonly string[];
 }
 
+export interface SignalAttempt {
+  ok: boolean;
+  pid: number;
+  signal: NodeJS.Signals;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export type KillProcess = (pid: number, signal: NodeJS.Signals) => void;
+
 const DEFAULT_MIN_AGE_SECONDS = 600;
 const DEFAULT_GRACE_SECONDS = 10;
 const DEFAULT_LOG_FILE = `${homedir()}/.local/state/cmuxlayer/mcp-reaper.log`;
@@ -145,6 +155,40 @@ export function parseProcessLine(line: string): ProcessInfo | null {
   } catch {
     return null;
   }
+}
+
+export function signalProcessBatch(
+  processes: readonly ProcessInfo[],
+  signal: NodeJS.Signals,
+  killProcess: KillProcess = process.kill,
+): SignalAttempt[] {
+  return processes.map((proc) => {
+    try {
+      killProcess(proc.pid, signal);
+      return { ok: true, pid: proc.pid, signal };
+    } catch (error) {
+      return {
+        ok: false,
+        pid: proc.pid,
+        signal,
+        errorCode: signalErrorCode(error),
+        errorMessage:
+          error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+}
+
+function signalErrorCode(error: unknown): string {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return "UNKNOWN";
 }
 
 async function readProcessTable(): Promise<ProcessInfo[]> {
@@ -261,6 +305,20 @@ async function appendLogLine(logFile: string, line: string): Promise<void> {
   await appendFile(logFile, `${new Date().toISOString()} ${line}\n`);
 }
 
+async function logSignalFailures(
+  logFile: string,
+  attempts: readonly SignalAttempt[],
+): Promise<void> {
+  for (const attempt of attempts) {
+    if (attempt.ok) {
+      continue;
+    }
+    const line = `SIGNAL_FAILED signal=${attempt.signal} pid=${attempt.pid} code=${attempt.errorCode ?? "UNKNOWN"} message=${attempt.errorMessage ?? ""}`;
+    console.error(line);
+    await appendLogLine(logFile, line);
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -284,14 +342,16 @@ async function runReaper(opts: CliOptions): Promise<void> {
     const line = `${opts.dryRun ? "DRY_RUN would terminate" : "SIGTERM"} ${formatProcess(proc)}`;
     console.log(line);
     await appendLogLine(opts.logFile, line);
-    if (!opts.dryRun) {
-      process.kill(proc.pid, "SIGTERM");
-    }
   }
 
   if (opts.dryRun) {
     return;
   }
+
+  await logSignalFailures(
+    opts.logFile,
+    signalProcessBatch(reapable, "SIGTERM"),
+  );
 
   await sleep(opts.graceSeconds * 1000);
 
@@ -310,8 +370,11 @@ async function runReaper(opts: CliOptions): Promise<void> {
     const line = `SIGKILL ${formatProcess(proc)}`;
     console.log(line);
     await appendLogLine(opts.logFile, line);
-    process.kill(proc.pid, "SIGKILL");
   }
+  await logSignalFailures(
+    opts.logFile,
+    signalProcessBatch(killable, "SIGKILL"),
+  );
 }
 
 async function main(): Promise<void> {
