@@ -323,7 +323,7 @@ describe("tool handler integration", () => {
       sendKey: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
         surface: "surface:1",
-        text: "$ ",
+        text: "Claude Code\n>",
         lines: 1,
         scrollback_used: false,
       }),
@@ -1834,7 +1834,10 @@ describe("tool handler integration", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:1",
-            text: reads === 1 ? "booting\n>" : "ready\n>",
+            text:
+              reads === 1
+                ? "Gemini CLI\nbooting\n>"
+                : "Gemini CLI\nready\n>",
             lines: 20,
             scrollback_used: false,
           }),

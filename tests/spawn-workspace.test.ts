@@ -48,7 +48,7 @@ function makeWorkspaceClient() {
     sendKey: vi.fn().mockResolvedValue(undefined),
     readScreen: vi.fn().mockResolvedValue({
       surface: "surface:1",
-      text: "$ ",
+      text: "Claude Code\n>",
       lines: 1,
       scrollback_used: false,
     }),
