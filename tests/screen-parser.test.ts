@@ -607,14 +607,14 @@ Token usage: total=250,000 input=200,000 output=50,000
       expect(parsed.context_pct).toBe(25); // 250000/1000000 = 25%
     });
 
-    it("defaults Opus to 200K when token_count is low and no 1M signal", () => {
+    it("defaults older Opus to 200K when token_count is low and no 1M signal", () => {
       const parsed = parseScreen(`
 ✻ Working…
 Token usage: total=50,000
-🤖 Opus 4.6 | 💰 $2.00
+🤖 Opus 4.5 | 💰 $2.00
 `);
 
-      expect(parsed.model).toBe("Opus 4.6");
+      expect(parsed.model).toBe("Opus 4.5");
       expect(parsed.context_window).toBe(200_000); // default tier
       expect(parsed.context_pct).toBe(25); // 50000/200000
     });
@@ -739,9 +739,16 @@ Model: gemini-2.5-pro
   });
 
   describe("resolveModelMax (default tiers)", () => {
-    it("resolves ALL Claude models to 200K default", () => {
+    it("resolves current Opus 4.x models to 1M", () => {
+      expect(resolveModelMax("Opus 4.8")).toBe(1_000_000);
+      expect(resolveModelMax("Opus 4.7")).toBe(1_000_000);
+      expect(resolveModelMax("Opus 4.6")).toBe(1_000_000);
+      expect(resolveModelMax("claude-opus-4-8")).toBe(1_000_000);
+    });
+
+    it("keeps older Claude models on the 200K default", () => {
       expect(resolveModelMax("Sonnet 4.6")).toBe(200_000);
-      expect(resolveModelMax("Opus 4.6")).toBe(200_000);
+      expect(resolveModelMax("Opus 4.5")).toBe(200_000);
       expect(resolveModelMax("Haiku 3.5")).toBe(200_000);
       expect(resolveModelMax("sonnet")).toBe(200_000);
       expect(resolveModelMax("opus")).toBe(200_000);
@@ -773,9 +780,15 @@ Model: gemini-2.5-pro
   });
 
   describe("inferContextWindow (smart tier detection)", () => {
-    it("returns default 200K for Opus with low token count", () => {
-      expect(inferContextWindow("Opus 4.6", 50_000, "🤖 Opus 4.6")).toBe(
+    it("returns default 200K for older Opus with low token count", () => {
+      expect(inferContextWindow("Opus 4.5", 50_000, "🤖 Opus 4.5")).toBe(
         200_000,
+      );
+    });
+
+    it("returns 1M for Opus 4.8 even without a screen marker", () => {
+      expect(inferContextWindow("Opus 4.8", 50_000, "🤖 Opus 4.8")).toBe(
+        1_000_000,
       );
     });
 
