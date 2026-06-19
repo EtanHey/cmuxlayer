@@ -434,7 +434,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        `cd '${worktreePath}' && CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s`,
+        `CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
   });
@@ -483,7 +483,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        `cd '${worktreePath}' && CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s`,
+        `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
   });

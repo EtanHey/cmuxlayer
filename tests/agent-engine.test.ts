@@ -3000,6 +3000,40 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("passes cwd as -w to launcher CLIs while keeping kiro on cd", () => {
+    const cwd = "/Users/x/Gits/golems.wt/t";
+
+    expect(
+      buildLaunchCommand("claude", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsClaude -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("codex", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsCodex -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("cursor", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsCursor -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("gemini", "golems", undefined, undefined, { cwd }),
+    ).toBe("golemsGemini -s -w '/Users/x/Gits/golems.wt/t'");
+    expect(
+      buildLaunchCommand("claude", "golems", "sonnet", undefined, {
+        cwd: "/p/wt",
+      }),
+    ).toBe("golemsClaude -s -m sonnet -w '/p/wt'");
+    expect(
+      buildLaunchCommand("kiro", "golems", undefined, undefined, {
+        cwd: "/p/wt",
+      }),
+    ).toBe(
+      "cd '/p/wt' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli",
+    );
+    expect(
+      buildLaunchCommand("claude", "golems", undefined, undefined, {
+        cwd: "/Users/x/Gits/worktree launch",
+      }),
+    ).toBe("golemsClaude -s -w '/Users/x/Gits/worktree launch'");
+  });
+
   it("uses an explicitly resolved launcher name for launcher CLIs", () => {
     expect(
       buildLaunchCommand(
