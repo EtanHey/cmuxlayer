@@ -3549,6 +3549,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Repository name (e.g. 'brainlayer', 'golems')"),
         model: z
           .string()
+          .optional()
           .describe("Model name (e.g. 'sonnet', 'codex', 'opus')"),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
@@ -3727,7 +3728,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", {
               agent_id: result.agent_id,
               repo: args.repo,
-              model: args.model,
+              model: result.model ?? args.model,
+              requested_model: result.requested_model,
+              warning:
+                result.warnings && result.warnings.length > 0
+                  ? result.warnings.join(" | ")
+                  : undefined,
               surface: result.surface_id,
               role:
                 engine.getAgentState(result.agent_id)?.role ??

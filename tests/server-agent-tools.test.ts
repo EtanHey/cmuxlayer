@@ -254,6 +254,39 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.auto_archive_on_done).toBe(true);
   });
 
+  it("spawn_agent accepts an omitted model and resolves the CLI default", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        cli: "claude",
+        prompt: "fix gap F",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.model).toBe("opus-4-8[1m]");
+    expect(parsed.requested_model).toBe("");
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "brainlayerClaude -s"]),
+    );
+
+    const stateTool = (server as any)._registeredTools["get_agent_state"];
+    const stateResult = await stateTool.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const persisted =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(persisted.model).toBe("opus-4-8[1m]");
+  });
+
   it("spawn_agent accepts explicit role and returns persisted role", async () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
