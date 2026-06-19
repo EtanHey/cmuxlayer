@@ -633,13 +633,16 @@ export class CmuxSocketClient {
 
   async closeSurface(
     surface: string,
-    opts?: { workspace?: string },
+    opts?: { workspace?: string; collapsePane?: boolean },
   ): Promise<void> {
     const workspace = await this.resolveWorkspace(surface, opts?.workspace);
     const params: Record<string, unknown> = {
       surface_id: surface,
       workspace_id: workspace,
     };
+    if (opts?.collapsePane) {
+      params.collapse_pane = true;
+    }
     try {
       await this.call("surface.close", params);
     } catch (e) {

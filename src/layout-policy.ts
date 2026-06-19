@@ -111,17 +111,19 @@ function roleForSurface(
 }
 
 export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
-  // A pixel_frame is only usable for column detection when it has real area.
-  // cmux reports {x:0, width:0, ...} for panes in a workspace it isn't
-  // currently rendering (background/unfocused workspaces), and that frame is
-  // truthy — so a naive `pane.pixel_frame` check would treat every pane as
-  // sharing x:0, collapse them into a single column, and silently disable the
-  // left-vs-right (lead-vs-worker) docking logic. Require non-zero width on
-  // every pane before trusting geometry; otherwise fall back to pane.index,
-  // which is monotonic left-to-right and always present.
-  const useGeometry = panes.every(
-    (pane) => pane.pixel_frame && pane.pixel_frame.width > 0,
-  );
+  // cmux can report zero-area frames for background or partially rendered
+  // panes. Those frames still carry an x position, but must not be grouped with
+  // real same-x panes or every {x:0,width:0} pane collapses into one column.
+  // When every pane has a frame, use x ordering and keep zero-width frames as
+  // unique columns; if any frame is missing entirely, fall back to pane.index.
+  const useGeometry = panes.every((pane) => pane.pixel_frame);
+  const columnKey = (pane: CmuxPane): string => {
+    if (!useGeometry) return `index:${pane.index}`;
+    const frame = pane.pixel_frame!;
+    return frame.width > 0
+      ? `x:${frame.x}`
+      : `zero:${frame.x}:index:${pane.index}`;
+  };
   const sortedGroups = [
     ...new Map(
       [...panes]
@@ -130,10 +132,7 @@ export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
           const bPosition = useGeometry ? b.pixel_frame!.x : b.index;
           return aPosition - bPosition || a.index - b.index;
         })
-        .map((pane) => [
-          useGeometry ? `x:${pane.pixel_frame!.x}` : `index:${pane.index}`,
-          pane,
-        ]),
+        .map((pane) => [columnKey(pane), pane]),
     ).keys(),
   ];
   const columnByGroup = new Map(
@@ -142,9 +141,7 @@ export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
 
   return new Map(
     panes.map((pane) => {
-      const group = useGeometry
-        ? `x:${pane.pixel_frame!.x}`
-        : `index:${pane.index}`;
+      const group = columnKey(pane);
       return [pane.ref, columnByGroup.get(group) ?? 0];
     }),
   );

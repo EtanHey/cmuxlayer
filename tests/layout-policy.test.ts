@@ -144,6 +144,26 @@ describe("layout policy", () => {
     expect(columns.get("pane:geometric-left")).toBe(2);
   });
 
+  it("orders partial zero-width geometry by reported x without collapsing panes", () => {
+    const columns = deriveColumnIndex([
+      makePane("pane:visible-right", 0, [], {
+        x: 640,
+        y: 0,
+        width: 320,
+        height: 800,
+      }),
+      makePane("pane:zero-left", 1, [], {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+      }),
+    ]);
+
+    expect(columns.get("pane:zero-left")).toBe(0);
+    expect(columns.get("pane:visible-right")).toBe(1);
+  });
+
   it("stays two-way (worker docks right, never a third column) when an unfocused workspace reports zero-area frames", () => {
     // THE invariant: cmux geometry is two-way — a LEFT lead column and a RIGHT
     // worker column, never three. cmux reports {x:0, width:0} for every pane in

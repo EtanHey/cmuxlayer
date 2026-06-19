@@ -43,6 +43,7 @@ import {
 import { parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
+  chooseSurfaceClosePolicy,
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
@@ -108,6 +109,26 @@ export interface CapturedSessionIdentity {
 export type SessionIdentityResolver = (
   agent: AgentRecord,
 ) => CapturedSessionIdentity | string | null;
+
+function defaultCrashRecoverForRole(role: AgentRole): boolean {
+  const override = process.env.CMUXLAYER_CRASH_RECOVER_DEFAULT;
+  if (override === "1" || override?.toLowerCase() === "true") return true;
+  if (override === "0" || override?.toLowerCase() === "false") return false;
+  return role === "orchestrator";
+}
+
+function sessionCollisionSuffix(sessionId: string): string {
+  const normalized = sessionId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
+  return (
+    normalized.slice(9, 17).replace(/^-+|-+$/g, "") ||
+    normalized.slice(0, 8).replace(/^-+|-+$/g, "") ||
+    "collision"
+  );
+}
 
 /**
  * Result of the spawn preflight. `launcherName` carries the launcher function
@@ -292,6 +313,13 @@ function taskDoneAutoArchiveMs(): number {
   return Number.isFinite(parsed) && parsed >= 0
     ? parsed * 60_000
     : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
+}
+
+function idleWorkerCloseMs(): number | null {
+  const rawMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+  if (rawMs === undefined) return null;
+  const parsed = Number(rawMs);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 interface AgentEngineClient {
@@ -918,8 +946,41 @@ export class AgentEngine {
     if (updated.agent_id === finalAgentId) {
       return updated;
     }
-    if (this.stateMgr.readState(finalAgentId)) {
-      return updated;
+    const existingFinal = this.stateMgr.readState(finalAgentId);
+    if (existingFinal) {
+      if (
+        existingFinal.cli_session_id &&
+        existingFinal.cli_session_id !== identity.session_id
+      ) {
+        const previousAgentId = updated.agent_id;
+        const collisionBaseAgentId = `${finalAgentId}-${sessionCollisionSuffix(
+          identity.session_id,
+        )}`;
+        let collisionAgentId = collisionBaseAgentId;
+        let collisionAttempt = 2;
+        while (this.stateMgr.readState(collisionAgentId)) {
+          collisionAgentId = `${collisionBaseAgentId}-${collisionAttempt}`;
+          collisionAttempt += 1;
+        }
+        updated = this.stateMgr.renameState(previousAgentId, collisionAgentId);
+        this.registry.rename(previousAgentId, collisionAgentId, updated);
+        return updated;
+      }
+      const sessionPath = identity.path ?? existingFinal.cli_session_path ?? null;
+      const canonicalFinal =
+        existingFinal.cli_session_id === identity.session_id &&
+        existingFinal.cli_session_path === sessionPath
+          ? existingFinal
+          : this.stateMgr.updateRecord(finalAgentId, {
+              cli_session_id: identity.session_id,
+              cli_session_path: sessionPath,
+            });
+      const index = this.stateMgr.getSurfaceSessionIndex();
+      index.removeAgent(updated.agent_id);
+      index.persistRecord(canonicalFinal);
+      this.registry.rename(updated.agent_id, finalAgentId, canonicalFinal);
+      this.stateMgr.removeState(updated.agent_id);
+      return canonicalFinal;
     }
 
     const previousAgentId = updated.agent_id;
@@ -1116,6 +1177,97 @@ export class AgentEngine {
       return true;
     } catch {
       // Best-effort archive; the next sweep will retry if the surface remains.
+      return false;
+    }
+  }
+
+  private async workerCloseOptions(
+    agent: AgentRecord,
+  ): Promise<{ workspace?: string; collapsePane?: boolean }> {
+    const workspace = agent.workspace_id ?? undefined;
+    const options: { workspace?: string; collapsePane?: boolean } = {
+      workspace,
+    };
+    if (!workspace) return options;
+
+    try {
+      const panes = await this.client.listPanes({ workspace });
+      const rawPaneSurfaces = await Promise.all(
+        panes.panes.map(async (pane) => {
+          const ps = await this.client.listPaneSurfaces({
+            workspace,
+            pane: pane.ref,
+          });
+          return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+        }),
+      );
+      const paneSurfaces = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawPaneSurfaces,
+        {
+          workspace_ref: panes.workspace_ref ?? workspace,
+          window_ref: panes.window_ref,
+        },
+      );
+      const workerSurfaceIds = new Set<string>();
+      for (const record of this.registry.list()) {
+        try {
+          if (inferRecordRole(record) === "worker") {
+            workerSurfaceIds.add(record.surface_id);
+          }
+        } catch {
+          // Unknown-role records should not influence worker pane collapse.
+        }
+      }
+      workerSurfaceIds.add(agent.surface_id);
+      const closePolicy = chooseSurfaceClosePolicy(
+        panes.panes,
+        paneSurfaces,
+        workerSurfaceIds,
+        agent.surface_id,
+      );
+      if (closePolicy.collapsePane) {
+        options.collapsePane = true;
+      }
+    } catch {
+      // Pane geometry is advisory; close the worker surface even if it cannot
+      // prove the pane is safe to collapse.
+    }
+
+    return options;
+  }
+
+  private async maybeReapIdleWorker(agent: AgentRecord): Promise<boolean> {
+    const closeMs = idleWorkerCloseMs();
+    if (closeMs === null) return false;
+    if (agent.state !== "done" && agent.state !== "idle") return false;
+
+    try {
+      if (inferRecordRole(agent) !== "worker") return false;
+    } catch {
+      return false;
+    }
+    if (
+      agent.cli === "codex" &&
+      agent.auto_archive_on_done === true &&
+      agent.task_done_detected_at &&
+      autoArchiveEnabledByEnv()
+    ) {
+      return false;
+    }
+
+    const updatedAt = Date.parse(agent.updated_at);
+    if (Number.isNaN(updatedAt)) return false;
+    if (Date.now() - updatedAt < closeMs) return false;
+
+    try {
+      await this.client.closeSurface(
+        agent.surface_id,
+        await this.workerCloseOptions(agent),
+      );
+      return true;
+    } catch {
+      // Best-effort reap; the next sweep will retry if the surface remains.
       return false;
     }
   }
@@ -1323,7 +1475,8 @@ export class AgentEngine {
       }
 
       const archived = await this.maybeArchiveDoneAgent(agent);
-      if (archived) {
+      const reaped = archived ? false : await this.maybeReapIdleWorker(agent);
+      if (archived || reaped) {
         try {
           await this.client.clearStatus(agentId, {
             workspace: agent.workspace_id ?? undefined,
@@ -1694,7 +1847,8 @@ export class AgentEngine {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: spawnParams.max_cost_per_agent ?? null,
-      crash_recover: spawnParams.crash_recover ?? false,
+      crash_recover:
+        spawnParams.crash_recover ?? defaultCrashRecoverForRole(role),
       respawn_attempts: 0,
       user_killed: false,
       boot_prompt_pending: spawnParams.boot_prompt_pending ?? false,
@@ -2054,5 +2208,7 @@ export class AgentEngine {
     if (pressEnter) {
       await this.client.sendKey(route.surface_id, "return", { workspace });
     }
+    const refreshed = this.stateMgr.updateRecord(agent.agent_id, {});
+    this.registry.set(agent.agent_id, refreshed);
   }
 }

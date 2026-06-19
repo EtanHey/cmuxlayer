@@ -817,6 +817,24 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     }
   });
 
+  it("closeSurface forwards collapse-pane over the socket", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.closeSurface("surface:1", {
+      workspace: "workspace:1",
+      collapsePane: true,
+    });
+
+    expect(lastV2Request).toMatchObject({
+      method: "surface.close",
+      params: {
+        surface_id: "surface:1",
+        workspace_id: "workspace:1",
+        collapse_pane: true,
+      },
+    });
+  });
+
   it("newSurface uses CLI fallback", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,

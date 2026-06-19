@@ -715,6 +715,25 @@ describe("CmuxClient.closeSurface", () => {
       "surface:1",
     ]);
   });
+
+  it("forwards collapse-pane close option", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.closeSurface("surface:1", {
+      workspace: "workspace:1",
+      collapsePane: true,
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "close-surface",
+      "--surface",
+      "surface:1",
+      "--workspace",
+      "workspace:1",
+      "--collapse-pane",
+    ]);
+  });
 });
 
 describe("CmuxClient CLI error handling", () => {

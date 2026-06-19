@@ -1087,20 +1087,45 @@ describe("agent lifecycle tool handlers", () => {
     expect(state.crash_recover).toBe(true);
   });
 
-  it("spawn_agent defaults crash_recover to false", async () => {
+  it("spawn_agent defaults crash_recover to true for orchestrators", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
-    const spawnResult = await spawn.handler(
-      {
+    const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
         prompt: "fix gap F",
-      },
+    });
+    const spawnResult = await spawn.handler(spawnArgs, {} as any);
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
       {} as any,
     );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+
+    expect(state.crash_recover).toBe(true);
+  });
+
+  it("spawn_agent keeps worker crash_recover default off", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnArgs = spawn.inputSchema.parse({
+        repo: "cmuxlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "fix gap F",
+        role: "worker",
+    });
+    const spawnResult = await spawn.handler(spawnArgs, {} as any);
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;

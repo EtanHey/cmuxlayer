@@ -559,10 +559,11 @@ export class CmuxClient {
 
   async closeSurface(
     surface: string,
-    opts?: { workspace?: string },
+    opts?: { workspace?: string; collapsePane?: boolean },
   ): Promise<void> {
     const args = ["close-surface", "--surface", surface];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.collapsePane) args.push("--collapse-pane");
     await this.run(args);
   }
 
