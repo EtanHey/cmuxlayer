@@ -1059,15 +1059,13 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
-    const spawnResult = await spawn.handler(
-      {
+    const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
         prompt: "fix gap F",
-      },
-      {} as any,
-    );
+    });
+    const spawnResult = await spawn.handler(spawnArgs, {} as any);
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
@@ -1087,16 +1085,14 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
-    const spawnResult = await spawn.handler(
-      {
+    const spawnArgs = spawn.inputSchema.parse({
         repo: "cmuxlayer",
         model: "gpt-5.4",
         cli: "codex",
         prompt: "fix gap F",
         role: "worker",
-      },
-      {} as any,
-    );
+    });
+    const spawnResult = await spawn.handler(spawnArgs, {} as any);
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
