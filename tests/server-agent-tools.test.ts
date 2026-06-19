@@ -943,6 +943,7 @@ describe("agent lifecycle tool handlers", () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launchSent = false;
+    let readCountAfterLaunch = 0;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("send")) {
         launchSent = true;
@@ -954,10 +955,18 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ panes: [] }), stderr: "" };
       }
       if (args.includes("read-screen")) {
+        if (launchSent) {
+          readCountAfterLaunch += 1;
+        }
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
-            text: launchSent ? "$ waiting" : "$ ",
+            text:
+              !launchSent || readCountAfterLaunch === 1
+                ? "$ "
+                : readCountAfterLaunch === 2
+                  ? "codex> "
+                  : "$ waiting",
             lines: 20,
             scrollback_used: false,
           }),

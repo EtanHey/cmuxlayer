@@ -482,7 +482,50 @@ function formatToolValidationError(
 function isSubmitVerifiedStatus(
   status: ParsedScreenResult["status"] | null | undefined,
 ): boolean {
-  return status === "working" || status === "thinking" || status === "done";
+  return status === "working" || status === "thinking";
+}
+
+function hasParsedAgentIdentity(
+  parsed: ParsedScreenResult | null | undefined,
+): boolean {
+  return Boolean(parsed && parsed.agent_type !== "unknown");
+}
+
+function screenHasAnyAgentIdentity(
+  screenText: string,
+  parsed: ParsedScreenResult = parseScreen(screenText),
+): boolean {
+  return (
+    hasParsedAgentIdentity(parsed) ||
+    /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?|(?:^|\n)\s*(?:codex>|cursor>|kiro>)\s*$/im.test(
+      screenText,
+    )
+  );
+}
+
+function screenHasReadyAgentIdentity(
+  cli: CliType,
+  screenText: string,
+  parsed: ParsedScreenResult = parseScreen(screenText),
+): boolean {
+  if (parsed.agent_type === cli) {
+    return true;
+  }
+
+  switch (cli) {
+    case "claude":
+      return /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?/i.test(
+        screenText,
+      );
+    case "codex":
+      return /(?:^|\n)\s*codex>\s*$/im.test(screenText);
+    case "cursor":
+      return /(?:^|\n)\s*(?:cursor>|Cursor Agent)\s*$/im.test(screenText);
+    case "kiro":
+      return /(?:^|\n)\s*kiro>\s*$/im.test(screenText);
+    case "gemini":
+      return hasParsedAgentIdentity(parsed);
+  }
 }
 
 function screenShowsPendingInput(
@@ -1201,10 +1244,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: true, retry_count: retryCount };
       }
 
-      if (!screenShowsPendingInput(snapshot.text, opts.text)) {
+      if (
+        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
+        !screenShowsPendingInput(snapshot.text, opts.text)
+      ) {
         // The submitted text is no longer echoed in the input box: the terminal
-        // accepted it and cleared the prompt, even if the agent has already
-        // settled back to idle. Treat that as a verified landing.
+        // accepted it and cleared the prompt on a parsed agent surface, even if
+        // the agent has already settled back to idle.
         return { submit_verified: true, retry_count: retryCount };
       }
 
@@ -1345,10 +1391,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           scrollback: false,
         });
         lastText = screen.text;
+        const parsed = parseScreen(screen.text);
 
         for (const candidate of candidates) {
           const match = matchReadyPattern(candidate, screen.text);
-          const count = match.matched
+          const ready =
+            match.matched &&
+            screenHasReadyAgentIdentity(candidate, screen.text, parsed);
+          const count = ready
             ? (consecutiveMatches.get(candidate) ?? 0) + 1
             : 0;
           consecutiveMatches.set(candidate, count);
