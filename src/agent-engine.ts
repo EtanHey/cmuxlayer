@@ -1613,15 +1613,20 @@ export class AgentEngine {
       const current =
         this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
       if (current && !TERMINAL_STATES.has(current.state)) {
-        const failed = this.stateMgr.transition(agentId, "error", { error });
-        this.registry.set(agentId, failed);
+        const degraded = this.stateMgr.updateRecord(agentId, {
+          error,
+          quality: "degraded",
+        });
+        this.registry.set(agentId, degraded);
       }
     } catch {
-      // Best-effort liveness assertion; still attempt surface cleanup below.
+      // Best-effort liveness assertion.
     }
 
     // Do not auto-close the surface here. Liveness failures are evidence for
     // spawn/layout bugs, and closing the pane can destroy the user's context.
+    // Keep the agent non-terminal so later sweeps can recover from discovery
+    // races when the surface is actually alive.
   }
 
   /**

@@ -278,8 +278,9 @@ describe("AgentEngine", () => {
         await vi.runOnlyPendingTimersAsync();
 
         expect(stateMgr.readState(result.agent_id)).toMatchObject({
-          state: "error",
+          state: "booting",
           error: "Post-spawn liveness failed: surface surface:new is not live",
+          quality: "degraded",
         });
         expect(mockClient.closeSurface).not.toHaveBeenCalled();
       } finally {
