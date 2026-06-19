@@ -899,6 +899,10 @@ export class AgentEngine {
   }
 
   private harnessCwdForAgent(agent: AgentRecord): string {
+    const launchCwd = agent.launch_cwd?.trim();
+    if (launchCwd) return launchCwd;
+    const worktreePath = agent.worktree_path?.trim();
+    if (worktreePath) return worktreePath;
     return join(homedir(), "Gits", agent.repo);
   }
 
