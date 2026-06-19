@@ -3033,6 +3033,9 @@ describe("buildLaunchCommand", () => {
     expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
       "brainlayerCodex -s",
     );
+    expect(buildLaunchCommand("gemini", "golems", "constructor")).toBe(
+      "golemsGemini -s",
+    );
   });
 
   it("uses repoGolem launcher for gemini (no cd prefix, wires MCP)", () => {
@@ -3045,6 +3048,9 @@ describe("buildLaunchCommand", () => {
   it("adds safe -m model flags for the gemini launcher", () => {
     expect(buildLaunchCommand("gemini", "voicelayer", "gemini-2.5-pro")).toBe(
       "voicelayerGemini -s -m gemini-2.5-pro",
+    );
+    expect(buildLaunchCommand("gemini", "golems", "pro")).toBe(
+      "golemsGemini -s -m 'Gemini 3.1 Pro (High)'",
     );
   });
 
