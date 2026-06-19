@@ -115,7 +115,13 @@ function sendCalls(exec: ExecFn): string[][] {
 async function spawnTestAgent(server: any): Promise<string> {
   const tool = server._registeredTools["spawn_agent"];
   const result = await tool.handler(
-    { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "task" },
+    {
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+      role: "ic",
+      prompt: "task",
+    },
     {} as any,
   );
   const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);

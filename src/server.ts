@@ -55,7 +55,9 @@ import {
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  recommendedMonitorCommand,
   replayUndelivered,
+  writeHeartbeat,
 } from "./inbox.js";
 import {
   applyHarnessState,
@@ -541,6 +543,11 @@ function screenShowsPendingInput(
   return screenText.includes(tail);
 }
 
+type MonitorBootResult = {
+  heartbeat_written: true;
+  monitor_command: string;
+};
+
 function computeEnterDelayMs(bytes: number, chunkCount: number): number {
   const extraChunks = Math.max(0, chunkCount - 1);
   const longPayloadPenalty = bytes >= SEND_INPUT_CHUNK_THRESHOLD ? 100 : 0;
@@ -861,6 +868,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const inboxOpts = opts?.inboxBaseDir
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
+  const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
+    writeHeartbeat(agentId, inboxOpts);
+    return {
+      heartbeat_written: true,
+      monitor_command: recommendedMonitorCommand(agentId, inboxOpts),
+    };
+  };
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
@@ -3773,32 +3787,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e, extra);
           }
 
+          const role =
+            engine.getAgentState(result.agent_id)?.role ??
+            inferAgentRole({
+              role: args.role,
+              cli: args.cli,
+              launcherName: launcherNameForCli(args.repo, args.cli),
+            });
+          const monitorBoot =
+            role === "orchestrator"
+              ? ensureMonitorBoot(result.agent_id)
+              : undefined;
+
           return okFormatted(
             formatOk("spawn_agent", {
               agent_id: result.agent_id,
               repo: args.repo,
               model: args.model,
               surface: result.surface_id,
-              role:
-                engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({
-                  role: args.role,
-                  cli: args.cli,
-                  launcherName: launcherNameForCli(args.repo, args.cli),
-                }),
+              role,
+              monitor_boot: monitorBoot,
               boot_prompt_delivered: Boolean(bootPromptDelivery),
             }),
             {
               ...result,
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel,
-              role:
-                engine.getAgentState(result.agent_id)?.role ??
-                inferAgentRole({
-                  role: args.role,
-                  cli: args.cli,
-                  launcherName: launcherNameForCli(args.repo, args.cli),
-                }),
+              role,
+              monitor_boot: monitorBoot,
               boot_prompt_delivered: Boolean(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },
