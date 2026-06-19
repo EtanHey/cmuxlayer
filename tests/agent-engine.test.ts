@@ -1193,6 +1193,85 @@ describe("AgentEngine", () => {
       }
     });
 
+    it("reaps done non-Codex worker panes after the idle close timeout", async () => {
+      const previousIdleCloseMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+      process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = "1000";
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cursor-worker-done",
+            state: "done",
+            surface_id: "surface:cursor-worker",
+            workspace_id: "ws:1",
+            cli: "cursor",
+            role: "worker",
+            updated_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [
+          makeSurface("surface:orchestrator"),
+          makeSurface("surface:cursor-worker"),
+        ];
+        (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: false,
+              surface_count: 1,
+              surface_refs: ["surface:orchestrator"],
+              selected_surface_ref: "surface:orchestrator",
+            },
+            {
+              ref: "pane:right",
+              index: 1,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:cursor-worker"],
+              selected_surface_ref: "surface:cursor-worker",
+            },
+          ],
+        });
+        (
+          mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+        ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane,
+          surfaces:
+            pane === "pane:right"
+              ? [makeSurface("surface:cursor-worker")]
+              : [makeSurface("surface:orchestrator")],
+        }));
+        await engine.getRegistry().reconstitute();
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 999));
+        await engine.runSweep();
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+
+        vi.setSystemTime(new Date(doneAt.getTime() + 1_000));
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).toHaveBeenCalledWith(
+          "surface:cursor-worker",
+          { workspace: "ws:1", collapsePane: true },
+        );
+        expect(engine.getAgentState("cursor-worker-done")).toBeNull();
+        expect(stateMgr.readState("cursor-worker-done")).toBeNull();
+      } finally {
+        if (previousIdleCloseMs === undefined) {
+          delete process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+        } else {
+          process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = previousIdleCloseMs;
+        }
+        vi.useRealTimers();
+      }
+    });
+
     it("does not auto-close legacy Codex workers without explicit archive opt-in", async () => {
       vi.useFakeTimers();
       try {

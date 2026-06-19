@@ -43,6 +43,7 @@ import {
 import { parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
+  chooseSurfaceClosePolicy,
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
@@ -292,6 +293,13 @@ function taskDoneAutoArchiveMs(): number {
   return Number.isFinite(parsed) && parsed >= 0
     ? parsed * 60_000
     : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
+}
+
+function idleWorkerCloseMs(): number | null {
+  const rawMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+  if (rawMs === undefined) return null;
+  const parsed = Number(rawMs);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 interface AgentEngineClient {
@@ -1120,6 +1128,89 @@ export class AgentEngine {
     }
   }
 
+  private async workerCloseOptions(
+    agent: AgentRecord,
+  ): Promise<{ workspace?: string; collapsePane?: boolean }> {
+    const workspace = agent.workspace_id ?? undefined;
+    const options: { workspace?: string; collapsePane?: boolean } = {
+      workspace,
+    };
+    if (!workspace) return options;
+
+    try {
+      const panes = await this.client.listPanes({ workspace });
+      const rawPaneSurfaces = await Promise.all(
+        panes.panes.map(async (pane) => {
+          const ps = await this.client.listPaneSurfaces({
+            workspace,
+            pane: pane.ref,
+          });
+          return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+        }),
+      );
+      const paneSurfaces = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawPaneSurfaces,
+        {
+          workspace_ref: panes.workspace_ref ?? workspace,
+          window_ref: panes.window_ref,
+        },
+      );
+      const workerSurfaceIds = new Set<string>();
+      for (const record of this.registry.list()) {
+        try {
+          if (inferRecordRole(record) === "worker") {
+            workerSurfaceIds.add(record.surface_id);
+          }
+        } catch {
+          // Unknown-role records should not influence worker pane collapse.
+        }
+      }
+      workerSurfaceIds.add(agent.surface_id);
+      const closePolicy = chooseSurfaceClosePolicy(
+        panes.panes,
+        paneSurfaces,
+        workerSurfaceIds,
+        agent.surface_id,
+      );
+      if (closePolicy.collapsePane) {
+        options.collapsePane = true;
+      }
+    } catch {
+      // Pane geometry is advisory; close the worker surface even if it cannot
+      // prove the pane is safe to collapse.
+    }
+
+    return options;
+  }
+
+  private async maybeReapIdleWorker(agent: AgentRecord): Promise<boolean> {
+    const closeMs = idleWorkerCloseMs();
+    if (closeMs === null) return false;
+    if (agent.state !== "done" && agent.state !== "idle") return false;
+
+    try {
+      if (inferRecordRole(agent) !== "worker") return false;
+    } catch {
+      return false;
+    }
+
+    const updatedAt = Date.parse(agent.updated_at);
+    if (Number.isNaN(updatedAt)) return false;
+    if (Date.now() - updatedAt < closeMs) return false;
+
+    try {
+      await this.client.closeSurface(
+        agent.surface_id,
+        await this.workerCloseOptions(agent),
+      );
+      return true;
+    } catch {
+      // Best-effort reap; the next sweep will retry if the surface remains.
+      return false;
+    }
+  }
+
   private isRecoverableCrash(agent: AgentRecord): boolean {
     return isCrashRecoveryEligible(agent);
   }
@@ -1323,7 +1414,8 @@ export class AgentEngine {
       }
 
       const archived = await this.maybeArchiveDoneAgent(agent);
-      if (archived) {
+      const reaped = archived ? false : await this.maybeReapIdleWorker(agent);
+      if (archived || reaped) {
         try {
           await this.client.clearStatus(agentId, {
             workspace: agent.workspace_id ?? undefined,
