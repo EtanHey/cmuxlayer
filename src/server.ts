@@ -3693,7 +3693,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         crash_recover: z
           .boolean()
           .optional()
-          .default(false)
           .describe(
             "When true, automatically respawn the agent after unexpected PTY death using its captured CLI session ID.",
           ),
@@ -3874,7 +3873,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("MCP profile hint. Defaults to inherit."),
         parent_agent_id: z.string().optional(),
         auto_archive_on_done: z.boolean().optional().default(true),
-        crash_recover: z.boolean().optional().default(false),
+        crash_recover: z.boolean().optional(),
       },
       ANNOTATIONS.mutating,
       async (args) => {
