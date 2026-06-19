@@ -151,8 +151,12 @@ describe("AgentEngine", () => {
   let mockClient: CmuxClient;
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
+  let previousTaskDoneAutoArchive: string | undefined;
 
   beforeEach(() => {
+    previousTaskDoneAutoArchive =
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
+    delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     spawnMock.mockReset();
@@ -171,6 +175,12 @@ describe("AgentEngine", () => {
   afterEach(() => {
     engine.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
+    if (previousTaskDoneAutoArchive === undefined) {
+      delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
+    } else {
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE =
+        previousTaskDoneAutoArchive;
+    }
   });
 
   describe("spawnAgent", () => {
@@ -271,10 +281,7 @@ describe("AgentEngine", () => {
           state: "error",
           error: "Post-spawn liveness failed: surface surface:new is not live",
         });
-        expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:new", {
-          workspace: "ws:1",
-          collapsePane: true,
-        });
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
@@ -908,7 +915,35 @@ describe("AgentEngine", () => {
       });
     });
 
-    it("auto-closes archived Codex worker panes after TASK_DONE inactivity", async () => {
+    it("does not auto-close opted-in done workers unless env enables auto-archive", async () => {
+      vi.useFakeTimers();
+      try {
+        const doneAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(doneAt.getTime() + 31 * 60_000));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-done-without-env",
+            state: "done",
+            surface_id: "surface:done-worker-without-env",
+            cli: "codex",
+            role: "worker",
+            auto_archive_on_done: true,
+            task_done_detected_at: doneAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:done-worker-without-env")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not auto-close Codex worker panes after TASK_DONE inactivity even when env opts in", async () => {
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE = "1";
       vi.useFakeTimers();
       try {
         const doneAt = new Date("2026-05-25T12:00:00.000Z");
@@ -950,10 +985,11 @@ describe("AgentEngine", () => {
         vi.setSystemTime(new Date(doneAt.getTime() + 5_001 + 30 * 60_000 + 1));
         await engine.runSweep();
 
-        expect(mockClient.closeSurface).toHaveBeenCalledWith(
-          "surface:done-worker",
-          { workspace: undefined },
-        );
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("worker-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: expect.any(String),
+        });
       } finally {
         vi.useRealTimers();
       }
@@ -1004,10 +1040,11 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("prefers TASK_DONE auto-archive milliseconds over minutes when both env vars are set", async () => {
+    it("does not close done workers even when TASK_DONE auto-archive delay has elapsed", async () => {
       const previousMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
       const previousMinutes =
         process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES;
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE = "1";
       process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS = "1";
       process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES = "1";
       vi.useFakeTimers();
@@ -1032,10 +1069,11 @@ describe("AgentEngine", () => {
         vi.setSystemTime(new Date(doneAt.getTime() + 2));
         await engine.runSweep();
 
-        expect(mockClient.closeSurface).toHaveBeenCalledWith(
-          "surface:done-worker-ms",
-          { workspace: undefined },
-        );
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("worker-done-ms")).toMatchObject({
+          state: "done",
+          task_done_detected_at: doneAt.toISOString(),
+        });
       } finally {
         if (previousMs === undefined) {
           delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
@@ -1052,7 +1090,8 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("measures TASK_DONE auto-archive delay from detection time, not updated_at", async () => {
+    it("keeps done workers open regardless of TASK_DONE detection time", async () => {
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE = "1";
       vi.useFakeTimers();
       try {
         const detectedAt = new Date("2026-05-25T12:00:00.000Z");
@@ -1075,16 +1114,18 @@ describe("AgentEngine", () => {
 
         await engine.runSweep();
 
-        expect(mockClient.closeSurface).toHaveBeenCalledWith(
-          "surface:detected-done-worker",
-          { workspace: undefined },
-        );
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("worker-detected-done")).toMatchObject({
+          state: "done",
+          task_done_detected_at: detectedAt.toISOString(),
+        });
       } finally {
         vi.useRealTimers();
       }
     });
 
-    it("skips sidebar status writes after auto-archiving a done worker surface", async () => {
+    it("keeps sidebar state for done workers instead of auto-archiving the surface", async () => {
+      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE = "1";
       vi.useFakeTimers();
       try {
         const doneAt = new Date("2026-05-25T12:00:00.000Z");
@@ -1102,25 +1143,23 @@ describe("AgentEngine", () => {
         );
         liveSurfaces = [makeSurface("surface:archived-before-status")];
         await engine.getRegistry().reconstitute();
-        (mockClient.setStatus as ReturnType<typeof vi.fn>).mockRejectedValue(
-          new Error("surface missing"),
-        );
-
         await expect(engine.runSweep()).resolves.toBeUndefined();
 
-        expect(mockClient.closeSurface).toHaveBeenCalledWith(
-          "surface:archived-before-status",
-          { workspace: undefined },
-        );
-        expect(mockClient.clearStatus).toHaveBeenCalledWith(
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(mockClient.clearStatus).not.toHaveBeenCalled();
+        expect(mockClient.setStatus).toHaveBeenCalledWith(
           "worker-archived-before-status",
-          { workspace: undefined },
+          "brainlayer: done",
+          expect.objectContaining({
+            surface: "surface:archived-before-status",
+          }),
         );
-        expect(mockClient.setStatus).not.toHaveBeenCalled();
         expect(
           engine.getAgentState("worker-archived-before-status"),
-        ).toBeNull();
-        expect(stateMgr.readState("worker-archived-before-status")).toBeNull();
+        ).toMatchObject({ state: "done" });
+        expect(stateMgr.readState("worker-archived-before-status")).toMatchObject(
+          { state: "done" },
+        );
 
         (mockClient.setStatus as ReturnType<typeof vi.fn>).mockClear();
         await engine.runSweep();
@@ -1193,7 +1232,7 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("reaps done non-Codex worker panes after the idle close timeout", async () => {
+    it("does not reap done non-Codex worker panes after the idle close timeout", async () => {
       const previousIdleCloseMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
       process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = "1000";
       vi.useFakeTimers();
@@ -1256,12 +1295,13 @@ describe("AgentEngine", () => {
         vi.setSystemTime(new Date(doneAt.getTime() + 1_000));
         await engine.runSweep();
 
-        expect(mockClient.closeSurface).toHaveBeenCalledWith(
-          "surface:cursor-worker",
-          { workspace: "ws:1", collapsePane: true },
-        );
-        expect(engine.getAgentState("cursor-worker-done")).toBeNull();
-        expect(stateMgr.readState("cursor-worker-done")).toBeNull();
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("cursor-worker-done")).toMatchObject({
+          state: "done",
+        });
+        expect(stateMgr.readState("cursor-worker-done")).toMatchObject({
+          state: "done",
+        });
       } finally {
         if (previousIdleCloseMs === undefined) {
           delete process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;

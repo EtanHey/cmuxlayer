@@ -251,7 +251,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-    expect(persisted.auto_archive_on_done).toBe(true);
+    expect(persisted.auto_archive_on_done).toBe(false);
   });
 
   it("spawn_agent accepts an omitted model and resolves the CLI default", async () => {

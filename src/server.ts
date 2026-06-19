@@ -3682,9 +3682,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         auto_archive_on_done: z
           .boolean()
           .optional()
-          .default(true)
+          .default(false)
           .describe(
-            "When true, Codex worker panes that emit TASK_DONE are auto-closed after the inactivity window.",
+            "Deprecated compatibility flag. TASK_DONE updates agent state only; cmuxlayer does not auto-close panes.",
           ),
         max_cost_per_agent: z
           .number()
@@ -3726,7 +3726,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             worktree_branch: worktree.prepared?.branch,
             parent_agent_id: args.parent_agent_id,
             role: args.role,
-            auto_archive_on_done: args.auto_archive_on_done ?? true,
+            auto_archive_on_done: args.auto_archive_on_done ?? false,
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
           });
@@ -3872,7 +3872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .describe("MCP profile hint. Defaults to inherit."),
         parent_agent_id: z.string().optional(),
-        auto_archive_on_done: z.boolean().optional().default(true),
+        auto_archive_on_done: z.boolean().optional().default(false),
         crash_recover: z.boolean().optional(),
       },
       ANNOTATIONS.mutating,
@@ -3899,7 +3899,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             worktree_branch: worktree.prepared?.branch,
             parent_agent_id: args.parent_agent_id,
             role: "worker",
-            auto_archive_on_done: args.auto_archive_on_done ?? true,
+            auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
           });
 
@@ -4012,7 +4012,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_pending: hasPrompt,
               workspace,
               role: agent.role,
-              auto_archive_on_done: true,
+              auto_archive_on_done: false,
             });
 
             if (hasPrompt) {

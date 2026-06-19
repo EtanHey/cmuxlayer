@@ -43,7 +43,6 @@ import {
 import { parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
-  chooseSurfaceClosePolicy,
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
@@ -169,7 +168,6 @@ const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
-const TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS = 30 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
@@ -207,12 +205,6 @@ interface SweepAgentContext {
 }
 
 type TargetStateEvidenceSource = "state" | "transcript" | "screen";
-
-function autoArchiveEnabledByEnv(): boolean {
-  return !["0", "false", "off", "no"].includes(
-    (process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE ?? "").toLowerCase(),
-  );
-}
 
 function tailScreenLines(text: string, lines: number): string {
   return text.split(/\r?\n/).slice(-lines).join("\n");
@@ -294,32 +286,6 @@ export function resolveSweepTiming(
     idleIntervalMs,
     idleAfterSweeps,
   };
-}
-
-function taskDoneAutoArchiveMs(): number {
-  const rawMs = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MS;
-  if (rawMs !== undefined) {
-    const parsed = Number(rawMs);
-    return Number.isFinite(parsed) && parsed >= 0
-      ? parsed
-      : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
-  }
-
-  const rawMinutes = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE_MINUTES;
-  if (rawMinutes === undefined) {
-    return TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
-  }
-  const parsed = Number(rawMinutes);
-  return Number.isFinite(parsed) && parsed >= 0
-    ? parsed * 60_000
-    : TASK_DONE_AUTO_ARCHIVE_DEFAULT_MS;
-}
-
-function idleWorkerCloseMs(): number | null {
-  const rawMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
-  if (rawMs === undefined) return null;
-  const parsed = Number(rawMs);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 interface AgentEngineClient {
@@ -1157,119 +1123,17 @@ export class AgentEngine {
   }
 
   private async maybeArchiveDoneAgent(agent: AgentRecord): Promise<boolean> {
-    if (agent.state !== "done") return false;
-    if (agent.cli !== "codex" || inferRecordRole(agent) !== "worker") {
-      return false;
-    }
-    if (agent.auto_archive_on_done !== true || !autoArchiveEnabledByEnv()) {
-      return false;
-    }
-    if (!agent.task_done_detected_at) return false;
-
-    const detectedAt = Date.parse(agent.task_done_detected_at);
-    if (Number.isNaN(detectedAt)) return false;
-    if (Date.now() - detectedAt < taskDoneAutoArchiveMs()) return false;
-
-    try {
-      await this.client.closeSurface(agent.surface_id, {
-        workspace: agent.workspace_id ?? undefined,
-      });
-      return true;
-    } catch {
-      // Best-effort archive; the next sweep will retry if the surface remains.
-      return false;
-    }
-  }
-
-  private async workerCloseOptions(
-    agent: AgentRecord,
-  ): Promise<{ workspace?: string; collapsePane?: boolean }> {
-    const workspace = agent.workspace_id ?? undefined;
-    const options: { workspace?: string; collapsePane?: boolean } = {
-      workspace,
-    };
-    if (!workspace) return options;
-
-    try {
-      const panes = await this.client.listPanes({ workspace });
-      const rawPaneSurfaces = await Promise.all(
-        panes.panes.map(async (pane) => {
-          const ps = await this.client.listPaneSurfaces({
-            workspace,
-            pane: pane.ref,
-          });
-          return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
-        }),
-      );
-      const paneSurfaces = partitionPaneSurfacesByMembership(
-        panes.panes,
-        rawPaneSurfaces,
-        {
-          workspace_ref: panes.workspace_ref ?? workspace,
-          window_ref: panes.window_ref,
-        },
-      );
-      const workerSurfaceIds = new Set<string>();
-      for (const record of this.registry.list()) {
-        try {
-          if (inferRecordRole(record) === "worker") {
-            workerSurfaceIds.add(record.surface_id);
-          }
-        } catch {
-          // Unknown-role records should not influence worker pane collapse.
-        }
-      }
-      workerSurfaceIds.add(agent.surface_id);
-      const closePolicy = chooseSurfaceClosePolicy(
-        panes.panes,
-        paneSurfaces,
-        workerSurfaceIds,
-        agent.surface_id,
-      );
-      if (closePolicy.collapsePane) {
-        options.collapsePane = true;
-      }
-    } catch {
-      // Pane geometry is advisory; close the worker surface even if it cannot
-      // prove the pane is safe to collapse.
-    }
-
-    return options;
+    void agent;
+    // Sweeps must never close user panes. TASK_DONE marks state only; explicit
+    // close_surface/stop_agent remain available when an orchestrator chooses it.
+    return false;
   }
 
   private async maybeReapIdleWorker(agent: AgentRecord): Promise<boolean> {
-    const closeMs = idleWorkerCloseMs();
-    if (closeMs === null) return false;
-    if (agent.state !== "done" && agent.state !== "idle") return false;
-
-    try {
-      if (inferRecordRole(agent) !== "worker") return false;
-    } catch {
-      return false;
-    }
-    if (
-      agent.cli === "codex" &&
-      agent.auto_archive_on_done === true &&
-      agent.task_done_detected_at &&
-      autoArchiveEnabledByEnv()
-    ) {
-      return false;
-    }
-
-    const updatedAt = Date.parse(agent.updated_at);
-    if (Number.isNaN(updatedAt)) return false;
-    if (Date.now() - updatedAt < closeMs) return false;
-
-    try {
-      await this.client.closeSurface(
-        agent.surface_id,
-        await this.workerCloseOptions(agent),
-      );
-      return true;
-    } catch {
-      // Best-effort reap; the next sweep will retry if the surface remains.
-      return false;
-    }
+    void agent;
+    // The old idle-worker reaper was too destructive for unattended workspaces.
+    // Keep panes visible until an explicit close command is issued.
+    return false;
   }
 
   private isRecoverableCrash(agent: AgentRecord): boolean {
@@ -1546,13 +1410,8 @@ export class AgentEngine {
               await this.client.send(surface_id, "/compact", {});
               await this.client.sendKey(surface_id, "return", {});
             } else {
-              // Non-root: kill and log. No auto-respawn because:
-              // 1. Respawn loses all work-in-progress context (new agent starts from scratch)
-              // 2. The parent orchestrator should decide retry strategy, not the sweep
-              // 3. Each respawn adds a dead child — repeated cycles hit MAX_CHILDREN with corpses
-              await this.stopAgent(agentId, false, { userInitiated: false });
               await this.client.log(
-                `context-limit: killing depth ${agent.spawn_depth} agent ${repo}`,
+                `context-limit: depth ${agent.spawn_depth} agent ${repo} degraded; leaving pane running for orchestrator decision`,
                 { level: "warning", source: "cmux-mcp" },
               );
             }
@@ -1761,14 +1620,8 @@ export class AgentEngine {
       // Best-effort liveness assertion; still attempt surface cleanup below.
     }
 
-    try {
-      await this.client.closeSurface(agent.surface_id, {
-        workspace: agent.workspace_id ?? undefined,
-        collapsePane: true,
-      });
-    } catch {
-      // Best-effort zombie cleanup.
-    }
+    // Do not auto-close the surface here. Liveness failures are evidence for
+    // spawn/layout bugs, and closing the pane can destroy the user's context.
   }
 
   /**

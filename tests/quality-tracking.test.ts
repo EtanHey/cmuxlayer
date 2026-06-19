@@ -1,6 +1,6 @@
 /**
  * TDD tests for Task 19 — Quality Tracking.
- * Tests parseContextPercent, quality field, /compact at 80%, kill for depth>0.
+ * Tests parseContextPercent, quality field, /compact at 80%, warn for depth>0.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
@@ -170,7 +170,7 @@ describe("Quality Tracking (sweep)", () => {
     expect(mockClient.sendKey).toHaveBeenCalledWith("s:1", "return", {});
   });
 
-  it("at 80% context, depth-1 agent is killed", async () => {
+  it("at 80% context, depth-1 agent is warned but not killed", async () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "child1",
@@ -193,9 +193,12 @@ describe("Quality Tracking (sweep)", () => {
 
     await engine.runSweep();
 
-    // Should have been killed (sendKey c-c for graceful stop)
-    expect(mockClient.sendKey).toHaveBeenCalledWith("s:2", "c-c", {});
-    // Should log the context-limit kill
+    expect(mockClient.sendKey).not.toHaveBeenCalledWith("s:2", "c-c", {});
+    expect(engine.getAgentState("child1")).toMatchObject({
+      state: "working",
+      quality: "degraded",
+    });
+    // Should log the context-limit warning
     expect(mockClient.log).toHaveBeenCalledWith(
       expect.stringContaining("context-limit"),
       expect.objectContaining({ level: "warning" }),
@@ -262,11 +265,7 @@ describe("Quality Tracking (sweep)", () => {
     );
   });
 
-  it("depth>0 agent at 80% is killed but NOT respawned (kill-only, no auto-respawn)", async () => {
-    // Kill-only is intentional. Auto-respawn is wrong because:
-    // 1. Respawn loses all work-in-progress context (new agent starts from scratch)
-    // 2. Parent orchestrator should decide retry strategy, not the sweep
-    // 3. Each respawn adds a dead child — repeated cycles hit MAX_CHILDREN with corpses
+  it("depth>0 agent at 80% is degraded but not killed or respawned", async () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "child1",
@@ -289,12 +288,11 @@ describe("Quality Tracking (sweep)", () => {
 
     await engine.runSweep();
 
-    // Agent should be in terminal state (killed)
     const agent = engine.getAgentState("child1");
-    expect(agent!.state).toBe("done");
+    expect(agent!.state).toBe("working");
+    expect(agent!.quality).toBe("degraded");
+    expect(mockClient.sendKey).not.toHaveBeenCalledWith("s:2", "c-c", {});
 
-    // No new agent should have been spawned (newSplit not called for respawn)
-    // newSplit is only called during spawnAgent — 0 calls means no respawn
     expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
 
