@@ -19,11 +19,53 @@
  *   V2 agent controls (2): kill, interact
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
 
+function readVersion(): string {
+  // package.json sits one level above the compiled entrypoint (dist/index.js
+  // → ../package.json, and likewise libexec/dist/index.js → libexec/package.json
+  // for a brew install). Best-effort; never throw from a --version probe.
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      readFileSync(join(here, "..", "package.json"), "utf-8"),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
+
+Usage:
+  cmuxlayer            Start the MCP server on stdio (the normal mode; an MCP
+                       client such as cmux/Claude Code launches it and speaks
+                       JSON-RPC over stdin/stdout).
+  cmuxlayer --version  Print the version and exit.
+  cmuxlayer --help     Print this help and exit.
+
+Environment:
+  CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
+                       (authoritative — never falls through to another instance).
+`;
+
 async function main() {
+  const arg = process.argv[2];
+  if (arg === "--version" || arg === "-v") {
+    process.stdout.write(`cmuxlayer ${readVersion()}\n`);
+    return;
+  }
+  if (arg === "--help" || arg === "-h") {
+    process.stdout.write(HELP_TEXT);
+    return;
+  }
+
   const client = await createCmuxClient();
   const server = createServer({ client });
   const transport = new StdioServerTransport();

@@ -156,6 +156,8 @@ const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 /** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
 const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = 60_000;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
+/** Agent states that are safe to close without `force`: the task is over. */
+const TERMINAL_AGENT_STATES = new Set<AgentState>(["done", "error"]);
 const READY_PATTERN_CLIS: CliType[] = [
   "claude",
   "codex",
@@ -2929,14 +2931,66 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close a surface (terminal or browser pane)",
+    "Close a surface (terminal or browser pane). SAFETY: if the surface still backs a live agent (not done/error), the close is REFUSED unless force:true, and the response includes a fresh read of the pane so you can confirm for yourself whether it is really finished before destroying it. Browser panes and surfaces with no tracked agent close normally.",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
+      force: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Close even when the backing agent is still live (not done/error). Without this, a live agent's surface is protected and the response returns the current pane contents instead of closing.",
+        ),
     },
     ANNOTATIONS.destructive,
     async (args) => {
       try {
+        // Liveness guard: never destroy a pane whose agent is still live unless
+        // the caller explicitly forces it. This is the safety net for the
+        // "stale list said it was gone but it was actually alive" failure — on
+        // refusal we hand back a fresh pane read so the caller assesses the
+        // real screen, not a possibly-stale state record.
+        if (!args.force) {
+          // Fail-safe across records: a surface can transiently back more than
+          // one state record (crash-resume collisions before canonicalization).
+          // Match the first record that is still LIVE rather than an arbitrary
+          // first hit, so a stale terminal record can never let us tear down a
+          // surface that another, live record still owns.
+          const backingAgent = stateMgr
+            .listStates()
+            .find(
+              (record) =>
+                record.surface_id === args.surface &&
+                !TERMINAL_AGENT_STATES.has(record.state),
+            );
+          if (backingAgent) {
+            let screenText = "(unable to read pane)";
+            try {
+              const screen = await client.readScreen(args.surface, {
+                workspace: args.workspace,
+                lines: 40,
+              });
+              screenText = screen.text;
+            } catch {
+              // Best-effort read; refuse regardless so a live agent is never
+              // torn down without an explicit force.
+            }
+            return err(
+              new Error(
+                `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live). Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
+              ),
+              {
+                refused: true,
+                surface: args.surface,
+                agent_id: backingAgent.agent_id,
+                state: backingAgent.state,
+                screen: screenText,
+              },
+            );
+          }
+        }
+
         let closePolicy:
           | ReturnType<typeof chooseSurfaceClosePolicy>
           | undefined;
@@ -2982,13 +3036,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Layout hints are best-effort only; the close itself must still run.
         }
 
+        const collapsePane = closePolicy?.collapsePane ?? false;
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
+          collapsePane,
         });
         const data = {
           surface: args.surface,
           pane: closePolicy?.pane ?? undefined,
-          collapse_pane: closePolicy?.collapsePane ?? false,
+          collapse_pane: collapsePane,
         };
         return okFormatted(formatOk("close_surface", data), data);
       } catch (e) {

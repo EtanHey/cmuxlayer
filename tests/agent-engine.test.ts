@@ -154,8 +154,7 @@ describe("AgentEngine", () => {
   let previousTaskDoneAutoArchive: string | undefined;
 
   beforeEach(() => {
-    previousTaskDoneAutoArchive =
-      process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
+    previousTaskDoneAutoArchive = process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
     delete process.env.CMUXLAYER_TASK_DONE_AUTO_ARCHIVE;
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -529,6 +528,79 @@ describe("AgentEngine", () => {
         workspace: "workspace:voice",
         type: "terminal",
       });
+    });
+
+    it("pins a worker to the parent orchestrator's workspace even when its cwd is a worktree that does not match by name", async () => {
+      // Parent orchestrator lives in workspace:parent. listWorkspaces has NO
+      // directory matching the repo, so WITHOUT parent-workspace inheritance the
+      // worker would resolve to undefined and land in cmux's focused workspace
+      // (or a brand-new one) — the "opened a worker in a new workspace instead
+      // of on its right" bug. Parent inheritance must split it right, in-place.
+      const parent = makeRecord({
+        agent_id: "parent-claude",
+        surface_id: "surface:parent",
+        workspace_id: "workspace:parent",
+        state: "ready",
+        role: "orchestrator",
+        cli: "claude",
+        repo: "brainlayer",
+        parent_agent_id: null,
+      });
+      engine.getRegistry().set(parent.agent_id, parent);
+      liveSurfaces = [makeSurface("surface:parent")];
+
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
+        { workspaces: [] },
+      );
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:parent",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:parent",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:parent"],
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "workspace:parent",
+        window_ref: "window:1",
+        pane_ref: "pane:parent",
+        surfaces: [makeSurface("surface:parent")],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:parent",
+        surface: "surface:worker",
+        pane: "pane:worker",
+        title: "",
+        type: "terminal",
+      });
+
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix the watcher",
+        parent_agent_id: "parent-claude",
+        cwd: "/Users/etanheyman/Gits/brainlayer.wt/watcher-fix",
+      });
+
+      expect(result.workspace_id).toBe("workspace:parent");
+      expect(mockClient.selectWorkspace).toHaveBeenCalledWith(
+        "workspace:parent",
+      );
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:parent",
+        workspace: "workspace:parent",
+        type: "terminal",
+      });
+      // The parent pin short-circuits repo-name resolution entirely.
+      expect(mockClient.listWorkspaces).not.toHaveBeenCalled();
     });
 
     it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {
@@ -1158,9 +1230,9 @@ describe("AgentEngine", () => {
         expect(
           engine.getAgentState("worker-archived-before-status"),
         ).toMatchObject({ state: "done" });
-        expect(stateMgr.readState("worker-archived-before-status")).toMatchObject(
-          { state: "done" },
-        );
+        expect(
+          stateMgr.readState("worker-archived-before-status"),
+        ).toMatchObject({ state: "done" });
 
         (mockClient.setStatus as ReturnType<typeof vi.fn>).mockClear();
         await engine.runSweep();
@@ -1338,12 +1410,12 @@ describe("AgentEngine", () => {
         await engine.runSweep();
 
         expect(mockClient.closeSurface).not.toHaveBeenCalled();
-        expect(engine.getAgentState("codex-worker-pending-archive")).toMatchObject(
-          {
-            state: "done",
-            task_done_detected_at: doneAt.toISOString(),
-          },
-        );
+        expect(
+          engine.getAgentState("codex-worker-pending-archive"),
+        ).toMatchObject({
+          state: "done",
+          task_done_detected_at: doneAt.toISOString(),
+        });
       } finally {
         if (previousIdleCloseMs === undefined) {
           delete process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
@@ -1849,12 +1921,7 @@ To continue this session, run codex resume ${sessionId}`,
     it("uses the saved launch cwd when capturing worktree transcript sessions", async () => {
       vi.setSystemTime(new Date("2026-06-19T05:00:30.000Z"));
       const home = join(TEST_DIR, "home");
-      const worktreeCwd = join(
-        TEST_DIR,
-        "Gits",
-        "cmuxlayer.wt",
-        "skill-eval",
-      );
+      const worktreeCwd = join(TEST_DIR, "Gits", "cmuxlayer.wt", "skill-eval");
       const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
       const sessionDir = join(home, ".codex", "sessions", "2026", "06", "19");
       const sessionPath = join(sessionDir, "rollout-worktree.jsonl");
@@ -2553,7 +2620,8 @@ To continue this session, run codex resume ${sessionId}`,
           state: "booting",
           surface_id: "surface:recovered",
           cli: "codex",
-          error: "Post-spawn liveness failed: surface surface:recovered is not live",
+          error:
+            "Post-spawn liveness failed: surface surface:recovered is not live",
           quality: "degraded",
         }),
       );

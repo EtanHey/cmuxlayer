@@ -26,6 +26,14 @@ export interface CreateCmuxClientOptions {
 }
 
 /**
+ * Bound on the probe `system.ping`. A wedged cmux can ACCEPT the socket connect
+ * but never answer (the Surface.deinit deadlock), and probing every candidate
+ * would otherwise inherit the 10s request timeout and stall startup ~10s per
+ * hung instance. The probe only needs a liveness yes/no, so cap it short.
+ */
+const PROBE_PING_TIMEOUT_MS = 2000;
+
+/**
  * Probe whether a Unix socket is listening.
  * Connects, immediately disconnects. Returns true if connect succeeds.
  */
@@ -62,12 +70,26 @@ async function resolveSocketPath(
   return null;
 }
 
+function instancePin(
+  opts?: Pick<CreateCmuxClientOptions, "socketPath">,
+): string | undefined {
+  if (opts?.socketPath) return opts.socketPath;
+  const fromEnv = (process.env.CMUX_SOCKET_PATH ?? "").trim();
+  return fromEnv.length > 0 ? fromEnv : undefined;
+}
+
 function candidateSocketPaths(
   opts?: Pick<CreateCmuxClientOptions, "socketPath" | "socketStateDir">,
 ): string[] {
-  return opts?.socketPath
-    ? [opts.socketPath]
-    : cmuxSocketPathCandidates({ stateDir: opts?.socketStateDir });
+  // An explicit socketPath or CMUX_SOCKET_PATH is AUTHORITATIVE: cmux sets
+  // CMUX_SOCKET_PATH in each agent's env to point at the instance that spawned
+  // it, so when it is present we bind to that one instance only and never fall
+  // through to another cmux's socket (which is how panes ended up in a
+  // different / nightly app). Only when nothing is pinned do we probe the
+  // ordered candidate list.
+  const pinned = instancePin(opts);
+  if (pinned) return [pinned];
+  return cmuxSocketPathCandidates({ stateDir: opts?.socketStateDir });
 }
 
 async function probeUsableSocket(
@@ -80,7 +102,13 @@ async function probeUsableSocket(
 
   const transport = new CmuxPersistentSocket({
     socketPath,
-    timeoutMs: opts?.timeoutMs,
+    // Cap the probe ping so a hung-but-accepting candidate can't stall the
+    // probe-all loop by the full request timeout. A caller-supplied timeout
+    // (tests) still wins when smaller.
+    timeoutMs: Math.min(
+      opts?.timeoutMs ?? PROBE_PING_TIMEOUT_MS,
+      PROBE_PING_TIMEOUT_MS,
+    ),
   });
 
   try {
@@ -106,11 +134,21 @@ export async function createCmuxClient(
   const logger = opts?.logger ?? console;
   const cliFallback = new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
 
-  for (const socketPath of candidateSocketPaths(opts)) {
-    if (!(await probeUsableSocket(socketPath, opts))) {
-      continue;
-    }
+  const candidates = candidateSocketPaths(opts);
+  const pinned = instancePin(opts) !== undefined;
 
+  // Probe every candidate up front. Dead candidates fail instantly (the socket
+  // path does not exist → ENOENT), so this stays cheap, and it lets us detect
+  // when more than one cmux instance is actually LIVE — the real "which app?"
+  // ambiguity — rather than warning on every multi-path candidate list.
+  const usable: string[] = [];
+  for (const socketPath of candidates) {
+    if (await probeUsableSocket(socketPath, opts)) {
+      usable.push(socketPath);
+    }
+  }
+
+  for (const socketPath of usable) {
     const client = new CmuxSocketClient({
       socketPath,
       timeoutMs: opts?.timeoutMs,
@@ -122,10 +160,21 @@ export async function createCmuxClient(
     try {
       await client.ping();
       logger.error("[cmuxlayer] transport selected: socket");
+      if (!pinned && usable.length > 1) {
+        // Multiple cmux instances are live and nothing pins us to one: surface
+        // which we bound to so a wrong-app/window placement is diagnosable and
+        // the operator can pin it explicitly.
+        logger.error(
+          `[cmuxlayer] ${usable.length} live cmux sockets found and CMUX_SOCKET_PATH ` +
+            `is not set; bound to ${socketPath} by probe order. If new panes open in the ` +
+            `wrong cmux app/window, set CMUX_SOCKET_PATH to pin this MCP to the instance ` +
+            `you are using.`,
+        );
+      }
       return client;
     } catch {
       // Socket reachable but not usable (auth required, protocol mismatch, etc.)
-      // Try the next candidate before falling through to CLI.
+      // Try the next usable candidate before falling through to CLI.
     }
   }
 
