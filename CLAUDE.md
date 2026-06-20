@@ -60,6 +60,15 @@ actually using.
   refuses to destroy a surface backing a still-live agent unless `force: true`, and returns a
   fresh pane read on refusal so callers verify the real screen rather than a stale state record.
 
+### Distribution & releases
+The fleet runs the **brew-pinned** binary, not a working tree:
+`~/.golems/config.yaml` (`mcpServers.cmux`) → `~/.golems/bin/cmuxlayer-mcp` (launcher)
+→ `brew --prefix`/opt/cmuxlayer/bin/cmuxlayer. Set `CMUXLAYER_DEV=1` to run your
+live source instead. Cut a release with `scripts/release.sh <X.Y.Z>` (bumps
+package.json → tags → bumps the `EtanHey/homebrew-layers` formula → pushes).
+Dogfood latest main with `brew install --HEAD etanhey/layers/cmuxlayer`.
+Full guide: [docs/releases-and-brew.md](docs/releases-and-brew.md).
+
 ### Mode Policy
 Two axes per surface:
 - **control**: `autonomous` (full access) or `manual` (read-only for mutating tools)

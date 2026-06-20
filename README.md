@@ -14,10 +14,15 @@
 ## Quick Start
 
 ```bash
-npm install -g cmuxlayer
+brew install etanhey/layers/cmuxlayer       # stable, pinned release
+brew install --HEAD etanhey/layers/cmuxlayer # or: dogfood the latest main
 ```
 
-Requires [cmux](https://github.com/manaflow-ai/cmux) to be running.
+This installs the `cmuxlayer` command (plus `cmuxlayer-app-server` /
+`cmuxlayer-proxy`). Requires [cmux](https://github.com/manaflow-ai/cmux) to be
+running. For how the golem fleet wires, versions, and dogfoods it — and the
+`CMUX_SOCKET_PATH` instance pin — see
+[docs/releases-and-brew.md](docs/releases-and-brew.md).
 
 Add to your MCP config:
 
