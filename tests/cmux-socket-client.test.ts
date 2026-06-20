@@ -22,7 +22,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
-import { CmuxClient } from "../src/cmux-client.js";
+import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
@@ -947,6 +947,48 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     const result = await client.newSplit("right", { workspace: "workspace:1" });
     expect(cliCalls).toHaveLength(0);
     expect(result.surface).toBe("surface:2"); // from MOCK_RESPONSES
+  });
+
+  it("re-pins the shared CLI fallback to its own socket before pasting (collab O2 #8)", async () => {
+    // Reproduce the live failure: one CmuxClient is shared as cliFallback by
+    // BOTH socket clients (exactly what createCmuxClient does). A long paste to
+    // the nightly-pinned client must carry CMUX_SOCKET_PATH=nightly even though
+    // the prod-pinned client synced the shared fallback last.
+    const execEnvs: (NodeJS.ProcessEnv | undefined)[] = [];
+    const exec: ExecFn = vi.fn(async (_cmd, _args, env) => {
+      execEnvs.push(env);
+      return { stdout: "{}", stderr: "" };
+    });
+    const sharedCli = new CmuxClient({ exec });
+
+    const nightly = "/tmp/cmux-nightly.sock";
+    const prod = "/tmp/cmux-prod.sock";
+
+    // Nightly client constructed first (syncs fallback env -> nightly)...
+    const nightlyClient = new CmuxSocketClient({
+      socketPath: nightly,
+      cliFallback: sharedCli,
+    });
+    // ...then a prod client constructed and used, which last-synced the SHARED
+    // fallback env -> prod. Without a per-delegation re-sync, the nightly paste
+    // below would inherit prod.
+    const prodClient = new CmuxSocketClient({
+      socketPath: prod,
+      cliFallback: sharedCli,
+    });
+    await prodClient.pasteText("surface:p", "prod text", {
+      workspace: "workspace:1",
+    });
+
+    execEnvs.length = 0;
+    await nightlyClient.pasteText("surface:n", "nightly text", {
+      workspace: "workspace:1",
+    });
+
+    expect(execEnvs.length).toBeGreaterThan(0);
+    for (const env of execEnvs) {
+      expect(env?.CMUX_SOCKET_PATH).toBe(nightly);
+    }
   });
 });
 

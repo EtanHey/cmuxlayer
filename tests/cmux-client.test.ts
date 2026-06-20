@@ -486,6 +486,40 @@ describe("CmuxClient.pasteText", () => {
   });
 });
 
+describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
+  it("forwards CMUX_SOCKET_PATH to an injected exec when env is set", async () => {
+    const exec = mockExec({});
+    const client = new CmuxClient({ exec });
+    client.setEnv({ ...process.env, CMUX_SOCKET_PATH: "/tmp/nightly.sock" });
+
+    await client.pasteText("surface:1", "hello", { workspace: "workspace:1" });
+
+    // Every exec call (set-buffer AND paste-buffer) must carry the pinned
+    // socket path, otherwise the CLI inherits the ambient env and can hit a
+    // different cmux instance (e.g. prod) — collab O2 #8.
+    expect(exec).toHaveBeenCalledTimes(2);
+    for (const call of (exec as ReturnType<typeof vi.fn>).mock.calls) {
+      const env = call[2] as NodeJS.ProcessEnv | undefined;
+      expect(env?.CMUX_SOCKET_PATH).toBe("/tmp/nightly.sock");
+    }
+  });
+
+  it("does not pass an env argument to an injected exec when env is unset", async () => {
+    const exec = mockExec({});
+    const client = new CmuxClient({ exec });
+
+    await client.selectWorkspace("workspace:1");
+
+    // Backwards-compatible: no env set => 2-arg invocation as before.
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "select-workspace",
+      "--workspace",
+      "workspace:1",
+    ]);
+  });
+});
+
 describe("CmuxClient.sendKey", () => {
   it("calls cmux send-key with surface and key", async () => {
     const { client, exec } = mockClient({});
