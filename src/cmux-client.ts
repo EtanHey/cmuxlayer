@@ -23,7 +23,11 @@ import { normalizeKeyName } from "./key-names.js";
 const execFileAsync = promisify(execFile);
 
 export interface ExecFn {
-  (cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
+  (
+    cmd: string,
+    args: string[],
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{ stdout: string; stderr: string }>;
 }
 
 interface CmuxIdentifyResult {
@@ -56,10 +60,20 @@ export class CmuxClient {
 
   private async run(args: string[]): Promise<string> {
     try {
+      // Pin every CLI-fallback exec to the instance env (CMUX_SOCKET_PATH) so
+      // the `cmux` subprocess cannot inherit an ambient socket path pointing at
+      // a DIFFERENT instance (e.g. prod) and silently target the wrong one.
+      // The env is forwarded on BOTH the injected-exec path and the real
+      // execFile path; dropping it on either is collab O2 #8.
+      const env = this.env;
       const { stdout } = this.exec
-        ? await this.exec(this.bin, ["--json", ...args])
+        ? await this.exec(
+            this.bin,
+            ["--json", ...args],
+            ...(env ? ([env] as const) : ([] as const)),
+          )
         : await execFileAsync(this.bin, ["--json", ...args], {
-            ...(this.env ? { env: this.env } : {}),
+            ...(env ? { env } : {}),
           });
       return stdout;
     } catch (error) {

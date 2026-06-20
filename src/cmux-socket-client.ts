@@ -207,6 +207,21 @@ export class CmuxSocketClient {
     }
   }
 
+  /**
+   * Return the CLI fallback re-pinned to THIS client's current socket path.
+   *
+   * The fallback CmuxClient is shared across every CmuxSocketClient the factory
+   * creates, so its env is whatever the last constructor/reconnect synced — not
+   * necessarily this client's instance. Re-syncing immediately before each
+   * delegation guarantees the `cmux` subprocess carries CMUX_SOCKET_PATH =
+   * this.socketPath and cannot leak onto another live instance (collab O2 #8).
+   */
+  private cliFallbackPinned(): CmuxClient | undefined {
+    if (!this.cliFallback) return undefined;
+    this.syncCliFallbackSocketEnv();
+    return this.cliFallback;
+  }
+
   private async reconnectTransport(originalError: unknown): Promise<void> {
     if (!this.reconnecting) {
       this.reconnecting = (async () => {
@@ -243,7 +258,7 @@ export class CmuxSocketClient {
       await this.call("workspace.select", { workspace_id: workspace });
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallback.selectWorkspace(workspace);
+        return this.cliFallbackPinned()!.selectWorkspace(workspace);
       }
       throw e;
     }
@@ -259,12 +274,14 @@ export class CmuxSocketClient {
       );
       return {
         workspace:
-          (result.workspace_ref as string) ?? (result.workspace as string) ?? "",
+          (result.workspace_ref as string) ??
+          (result.workspace as string) ??
+          "",
         title: (result.title as string) ?? title,
       };
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallback.createWorkspace(title);
+        return this.cliFallbackPinned()!.createWorkspace(title);
       }
       throw e;
     }
@@ -308,7 +325,9 @@ export class CmuxSocketClient {
       pane: opts.pane,
     });
     const surfaces = paneSurfaces.surfaces ?? [];
-    return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
+    return (
+      surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref
+    );
   }
 
   private async resolveSelectedSurface(opts?: {
@@ -318,7 +337,9 @@ export class CmuxSocketClient {
       workspace: opts?.workspace,
     });
     const surfaces = paneSurfaces.surfaces ?? [];
-    return surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref;
+    return (
+      surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref
+    );
   }
 
   async newSplit(
@@ -361,7 +382,7 @@ export class CmuxSocketClient {
         return this.mapSplitResult(result, "browser");
       } catch (e) {
         if (this.isMethodNotFound(e) && this.cliFallback) {
-          return this.cliFallback.newSplit(direction, opts);
+          return this.cliFallbackPinned()!.newSplit(direction, opts);
         }
         throw e;
       }
@@ -394,7 +415,7 @@ export class CmuxSocketClient {
       return this.mapSplitResult(result, "terminal");
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallback.newSplit(direction, opts);
+        return this.cliFallbackPinned()!.newSplit(direction, opts);
       }
       throw e;
     }
@@ -412,7 +433,7 @@ export class CmuxSocketClient {
         "new-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallback.newSurface(opts);
+    return this.cliFallbackPinned()!.newSurface(opts);
   }
 
   async moveSurface(opts: {
@@ -429,7 +450,7 @@ export class CmuxSocketClient {
         "move-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallback.moveSurface(opts);
+    return this.cliFallbackPinned()!.moveSurface(opts);
   }
 
   async reorderSurface(opts: {
@@ -443,7 +464,7 @@ export class CmuxSocketClient {
         "reorder-surface is only available through the CLI fallback",
       );
     }
-    return this.cliFallback.reorderSurface(opts);
+    return this.cliFallbackPinned()!.reorderSurface(opts);
   }
 
   async send(
@@ -472,7 +493,7 @@ export class CmuxSocketClient {
         "method_not_found",
       );
     }
-    await this.cliFallback.pasteText(surface, text, opts);
+    await this.cliFallbackPinned()!.pasteText(surface, text, opts);
   }
 
   async sendKey(
@@ -647,7 +668,7 @@ export class CmuxSocketClient {
       await this.call("surface.close", params);
     } catch (e) {
       if (this.isMethodNotFound(e) && this.cliFallback) {
-        return this.cliFallback.closeSurface(surface, opts);
+        return this.cliFallbackPinned()!.closeSurface(surface, opts);
       }
       throw e;
     }
