@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
+import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 
 function readVersion(): string {
   // package.json sits one level above the compiled entrypoint (dist/index.js
@@ -49,6 +50,10 @@ Usage:
                        JSON-RPC over stdin/stdout).
   cmuxlayer --version  Print the version and exit.
   cmuxlayer --help     Print this help and exit.
+  cmuxlayer doctor     Run non-interactive health checks (Robust Brew Layer
+                       standard §0/§1/§3/§6) and exit. Read-only; no mutation.
+                       Add --json for machine-readable output. Exits 0 when
+                       healthy.
 
 Environment:
   CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
@@ -63,6 +68,18 @@ async function main() {
   }
   if (arg === "--help" || arg === "-h") {
     process.stdout.write(HELP_TEXT);
+    return;
+  }
+  if (arg === "doctor") {
+    // Non-interactive, read-only health check (Robust Brew Layer standard).
+    // Best-effort brew probes; exits 0 when healthy, 1 otherwise — so a runbook
+    // can branch on the code. No bare sudo; never prompts.
+    const json = process.argv.includes("--json");
+    const report = await runDoctor({ version: readVersion() });
+    process.stdout.write(
+      (json ? renderDoctorJson(report) : renderDoctorText(report)) + "\n",
+    );
+    process.exitCode = report.healthy ? 0 : 1;
     return;
   }
 
