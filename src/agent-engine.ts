@@ -52,7 +52,10 @@ import {
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import { matchReadyPattern } from "./pattern-registry.js";
-import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import {
+  reposEquivalent,
+  resolveWorkspaceRefForRepo,
+} from "./repo-workspace.js";
 import { SpawnGuard } from "./spawn-guard.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
@@ -412,7 +415,9 @@ export function buildLaunchCommand(
     allowModelOverride: opts?.allowModelOverride,
   });
   const formattedModelFlag = modelFlag ? formatModelArg(modelFlag) : null;
-  const launcherModelArgs = formattedModelFlag ? ` -m ${formattedModelFlag}` : "";
+  const launcherModelArgs = formattedModelFlag
+    ? ` -m ${formattedModelFlag}`
+    : "";
   const rawModelArgs = formattedModelFlag
     ? ` --model ${formattedModelFlag}`
     : "";
@@ -738,7 +743,27 @@ export class AgentEngine {
       repo?: string;
     },
   ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
-    workspace = await this.resolveWorkspaceForRepo(workspace, context?.repo);
+    // Pin a child worker to the parent orchestrator's ACTUAL workspace before
+    // falling back to repo-name resolution. Without this a worker re-resolves
+    // its workspace purely from the repo directory name, which fails for
+    // worktree workers (cwd basename is "<repo>.wt/<name>", not "<repo>"): the
+    // match returns undefined, listPanes() then runs against cmux's focused
+    // workspace where the parent's pane is absent, and the split lands in the
+    // wrong/new workspace instead of to the right of the parent. An explicit
+    // `workspace` arg still wins ("unless the user asks for a different one").
+    // Inherit only for a SAME-repo child so a cross-repo spawn still resolves
+    // to its own repo's workspace.
+    const parentWorkspace =
+      context?.parentAgent &&
+      context.parentAgent.repo &&
+      context?.repo &&
+      reposEquivalent(context.parentAgent.repo, context.repo)
+        ? (context.parentAgent.workspace_id ?? undefined)
+        : undefined;
+    workspace = await this.resolveWorkspaceForRepo(
+      workspace ?? parentWorkspace,
+      context?.repo,
+    );
     if (workspace) {
       try {
         await this.client.selectWorkspace(workspace);
@@ -932,7 +957,8 @@ export class AgentEngine {
         this.registry.rename(previousAgentId, collisionAgentId, updated);
         return updated;
       }
-      const sessionPath = identity.path ?? existingFinal.cli_session_path ?? null;
+      const sessionPath =
+        identity.path ?? existingFinal.cli_session_path ?? null;
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
         existingFinal.cli_session_path === sessionPath
@@ -1666,7 +1692,9 @@ export class AgentEngine {
     if (spawnParams.parent_agent_id) {
       const parent = this.registry.get(spawnParams.parent_agent_id);
       if (!parent) {
-        throw new Error(`Parent agent not found: ${spawnParams.parent_agent_id}`);
+        throw new Error(
+          `Parent agent not found: ${spawnParams.parent_agent_id}`,
+        );
       }
       if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
         throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);

@@ -1835,9 +1835,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:1",
             text:
-              reads === 1
-                ? "Gemini CLI\nbooting\n>"
-                : "Gemini CLI\nready\n>",
+              reads === 1 ? "Gemini CLI\nbooting\n>" : "Gemini CLI\nready\n>",
             lines: 20,
             scrollback_used: false,
           }),
@@ -4195,18 +4193,149 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["close_surface"];
 
+    // A "working" agent backs this surface, so closing it now requires force;
+    // force:true exercises the collapse-policy forwarding path.
     const result = await tool.handler(
-      { surface: "surface:worker-1" },
+      { surface: "surface:worker-1", force: true },
       {} as any,
     );
 
     expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:worker-1", {
       workspace: undefined,
+      collapsePane: true,
     });
     expect(result.structuredContent).toMatchObject({
       surface: "surface:worker-1",
       pane: "pane:right",
       collapse_pane: true,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface refuses a live agent without force and returns a pane read", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-guard");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-live",
+      surface_id: "surface:worker-live",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "mid task",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:worker-live",
+        text: "running tests... 115 passed",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-live" },
+      {} as any,
+    );
+
+    // The live surface is protected: cmux is never told to close it, and the
+    // caller gets the real pane contents to assess instead of a stale state.
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    expect(mockClient.readScreen).toHaveBeenCalledWith("surface:worker-live", {
+      workspace: undefined,
+      lines: 40,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      refused: true,
+      surface: "surface:worker-live",
+      agent_id: "worker-live",
+      state: "working",
+      screen: "running tests... 115 passed",
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface guard is fail-safe when a stale terminal record shares the surface with a live one", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-collision");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    const base = {
+      surface_id: "surface:shared",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex" as const,
+      cli_session_id: null,
+      task_summary: "",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown" as const,
+      max_cost_per_agent: null,
+    };
+    // A stale terminal record AND a live record both point at one surface
+    // (crash-resume collision before canonicalization). The guard must key off
+    // the LIVE one and refuse, regardless of directory iteration order.
+    stateMgr.writeState({ ...base, agent_id: "aaa-stale", state: "done" });
+    stateMgr.writeState({ ...base, agent_id: "zzz-live", state: "working" });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:shared",
+        text: "still working",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler({ surface: "surface:shared" }, {} as any);
+
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      refused: true,
+      agent_id: "zzz-live",
+      state: "working",
     });
 
     rmSync(stateDir, { recursive: true, force: true });

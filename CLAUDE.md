@@ -43,6 +43,23 @@ bun run typecheck    # Type checking only
 Socket client connects to cmux via Unix socket at the path provided by `cmux socket-path`.
 Auto-reconnects on disconnect. Falls back to CLI subprocess if socket unavailable.
 
+**Instance pinning (`CMUX_SOCKET_PATH`).** cmux exports `CMUX_SOCKET_PATH` into each agent's
+environment, pointing at the instance that spawned it. When set (or `socketPath` is passed),
+cmuxlayer binds to **that one instance only** and never falls through to another live cmux's
+socket — this is what keeps a worker from opening in a *different* cmux app/window (e.g. stable
+vs nightly). When it is unset and more than one cmux socket answers, the factory logs which one
+it bound to and how to pin it. Set `CMUX_SOCKET_PATH` to force the MCP onto the instance you are
+actually using.
+
+### Placement & teardown invariants
+- **Same workspace by default.** A spawned worker inherits its parent orchestrator's
+  `workspace_id` before any repo-name resolution, so co-working agents land in the same
+  workspace (split to the right) instead of a new one — even for worktree workers whose cwd
+  (`~/Gits/<repo>.wt/<name>`) does not match the repo name. An explicit `workspace` arg still wins.
+- **Panes are protected.** Automatic/idle pane closing is disabled (#170). `close_surface`
+  refuses to destroy a surface backing a still-live agent unless `force: true`, and returns a
+  fresh pane read on refusal so callers verify the real screen rather than a stale state record.
+
 ### Mode Policy
 Two axes per surface:
 - **control**: `autonomous` (full access) or `manual` (read-only for mutating tools)
