@@ -61,10 +61,11 @@ actually using.
   fresh pane read on refusal so callers verify the real screen rather than a stale state record.
 
 ### Distribution & releases
-The fleet runs the **brew-pinned** binary, not a working tree:
-`~/.golems/config.yaml` (`mcpServers.cmux`) → `~/.golems/bin/cmuxlayer-mcp` (launcher)
-→ `brew --prefix`/opt/cmuxlayer/bin/cmuxlayer. Set `CMUXLAYER_DEV=1` to run your
-live source instead. Cut a release with `scripts/release.sh <X.Y.Z>` (bumps
+The fleet runs the **brew-pinned** binary, not a working tree. Source of truth is
+`~/.golems/config.yaml` (`mcpServers.cmux`); `golems/scripts/sync-config.sh --enforce`
+regenerates each repo's `~/Gits/<repo>/.mcp.json` (generated — don't hand-edit),
+which points at `~/.golems/bin/cmuxlayer-mcp` (launcher) → `brew --prefix`/opt/cmuxlayer/bin/cmuxlayer.
+Set `CMUXLAYER_DEV=1` to run your live source instead. Cut a release with `scripts/release.sh <X.Y.Z>` (bumps
 package.json → tags → bumps the `EtanHey/homebrew-layers` formula → pushes).
 Dogfood latest main with `brew install --HEAD etanhey/layers/cmuxlayer`.
 Full guide: [docs/releases-and-brew.md](docs/releases-and-brew.md).

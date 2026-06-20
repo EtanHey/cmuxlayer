@@ -30,11 +30,27 @@ it and speaks JSON-RPC over stdin/stdout. It is *not* a daemon; there is no
 The launch chain:
 
 ```
-~/.golems/config.yaml          mcpServers.cmux.command →
-~/.golems/bin/cmuxlayer-mcp     (launcher) →
-/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer   (brew, default)
+~/.golems/config.yaml                 mcpServers.cmux  (SOURCE OF TRUTH)
+   │  scripts/sync-config.sh --enforce  (regenerates per-repo configs)
+   ▼
+~/Gits/<repo>/.mcp.json               mcpServers.cmux.command  (GENERATED; do not hand-edit)
+   ▼
+~/.golems/bin/cmuxlayer-mcp           (launcher)
+   ▼
+brew --prefix/opt/cmuxlayer/bin/cmuxlayer   (brew, default)
    └─ or ~/Gits/cmuxlayer/src/index.ts via bun, when CMUXLAYER_DEV=1
 ```
+
+**Editing the launch command:** change `mcpServers.cmux` in `~/.golems/config.yaml`
+(the source), then propagate to every profiled repo's generated `.mcp.json`:
+
+```bash
+~/Gits/golems/scripts/sync-config.sh --diff      # preview
+~/Gits/golems/scripts/sync-config.sh --enforce   # write
+```
+
+The `.mcp.json` files are generated artifacts — never hand-edit them; they get
+overwritten. Only newly-spawned sessions / `/mcp` reconnects pick up the change.
 
 The launcher (`~/.golems/bin/cmuxlayer-mcp`):
 - runs the brew bin by default;
