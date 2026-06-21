@@ -26,7 +26,7 @@ export const metadata: Metadata = {
   alternates: { canonical: "/" },
   title: "cmuxLayer — Terminal MCP for AI Agents",
   description:
-    "MCP server that gives AI agents programmatic control over terminal panes. 29 tools. Split, read, send, automate. One Unix socket.",
+    "MCP server that gives AI agents programmatic control over terminal panes. 35 tools. Split, read, send, automate. One Unix socket.",
   openGraph: {
     title: "cmuxLayer — Terminal MCP for AI Agents",
     description:

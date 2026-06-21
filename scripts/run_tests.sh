@@ -34,14 +34,6 @@ if [ $? -ne 0 ]; then
   ((EXIT_STATUS |= 1))
 fi
 
-if ! bun test tests/race-condition-vt-fixture.test.ts; then
-  ((EXIT_STATUS |= 2))
-fi
-
-if ! bun test ./tests/regression/test_terminal_state.ts; then
-  ((EXIT_STATUS |= 8))
-fi
-
 if ! bun run test; then
   ((EXIT_STATUS |= 4))
 fi

@@ -158,6 +158,17 @@ export class CmuxPersistentSocket {
             "connection_closed",
           ),
         );
+        // Also settle the connect promise if still pending
+        if (!settled) {
+          settled = true;
+          this.connectPromise = null;
+          reject(
+            new CmuxSocketError(
+              "Socket closed before connection established",
+              "connection_closed",
+            ),
+          );
+        }
       });
     });
 
@@ -211,7 +222,19 @@ export class CmuxPersistentSocket {
           clearTimeout(entry.timer);
           this.pending.delete(parsed.id);
           entry.resolve(parsed as V2Response);
-        } else if (this.pendingV1.length > 0) {
+        } else if (
+          typeof parsed.id === "string" &&
+          !this.pending.has(parsed.id) &&
+          this.pendingV1.length > 0
+        ) {
+          // V2 response with unknown id — do NOT forward to V1 queue
+          // This prevents protocol corruption from server push notifications
+          // or responses to already-timed-out V2 requests leaking into V1.
+        } else if (
+          typeof parsed.id !== "string" &&
+          this.pendingV1.length > 0
+        ) {
+          // Non-V2 line (no "id" field) — safe to forward to V1
           this.resolveNextV1(line);
         }
       } catch {
@@ -290,8 +313,10 @@ export class CmuxPersistentSocket {
     this.assertInFlightCapacity();
     await this.ensureConnected();
 
+    // Strip embedded newlines to prevent protocol injection
+    const sanitized = command.replace(/[\r\n]/g, " ");
     const shouldWriteNow = this.pendingV1.length === 0;
-    const payload = command + "\n";
+    const payload = sanitized + "\n";
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -6,7 +6,7 @@
 
 <!-- How was this tested? -->
 
-- [ ] Tests pass (`bun test`)
+- [ ] Tests pass (`npm test`)
 - [ ] Manual testing (if applicable)
 
 ## Vouched By

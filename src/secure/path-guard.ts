@@ -155,13 +155,17 @@ export async function assertReadableProjectPath(
 export function matchesGlob(filePath: string, pattern: string): boolean {
   const normalisedFile = filePath.split(path.sep).join("/");
 
+  // Normalize pattern: strip trailing slashes and collapse to meaningful parts
+  const normalisedPattern = pattern.replace(/\/+$/, "");
+  if (!normalisedPattern) return false;
+
   // Pattern without slash: match against basename only
-  if (!pattern.includes("/")) {
-    return matchSegment(path.basename(normalisedFile), pattern);
+  if (!normalisedPattern.includes("/")) {
+    return matchSegment(path.basename(normalisedFile), normalisedPattern);
   }
 
   const fileParts = normalisedFile.split("/");
-  const patParts = pattern.split("/");
+  const patParts = normalisedPattern.split("/");
 
   return matchGlobParts(fileParts, patParts, 0, 0);
 }
@@ -190,6 +194,9 @@ async function safeRealpath(inputPath: string): Promise<string> {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
+      // For non-existent paths, use path.resolve to get the absolute path
+      // without resolving symlinks. This maintains the expected behavior
+      // for paths that don't exist yet (e.g., when creating new files).
       return path.resolve(inputPath);
     }
     throw err;

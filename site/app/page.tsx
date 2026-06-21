@@ -20,7 +20,7 @@ export default function Home() {
           { label: "Setup", href: "#setup" },
           {
             label: "Docs",
-            href: "https://github.com/EtanHey/cmuxlayer#readme",
+            href: "https://github.com/Danissimode/ChatGPTMCPcmux#readme",
           },
         ]}
       />

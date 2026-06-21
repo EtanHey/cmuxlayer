@@ -3,6 +3,11 @@
 # DO NOT BYPASS with --no-verify. DO NOT SILENCE failures.
 # Failures = real bugs, not friction. Treat as CRITICAL REVIEW TIME.
 
+if ! command -v bash &>/dev/null; then
+  echo "Error: bash is required but not found in PATH"
+  exit 1
+fi
+
 set -uo pipefail
 
 [ ! -f scripts/run_tests.sh ] && { echo "⚠️  no scripts/run_tests.sh"; exit 0; }

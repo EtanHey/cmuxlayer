@@ -47,22 +47,11 @@ surfaces:
 
 tools:
   allow:
-    - "system.health"
-    - "system.version"
-    - "system.policy"
-    - "project.info"
-    - "project.tree"
-    - "project.read_file"
-    - "project.search"
-    - "project.git_status"
-    - "project.git_diff"
-    - "cmux.list_surfaces"
-    - "cmux.read_screen"
-    - "agent.list"
-    - "agent.status"
-    - "agent.read"
-    - "agent.extract_errors"
-    - "audit.recent"
+    - "system.*"
+    - "project.*"
+    - "cmux.*"
+    - "agent.*"
+    - "audit.*"
   require_confirmation:
     - "agent.send_task"
     - "agent.continue"

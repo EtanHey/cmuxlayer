@@ -111,28 +111,23 @@ if [[ "$HAVE_JQ" == true ]]; then
     echo "  Tools request: $TOOLS_REQUEST"
 
     if [[ -f "$REPO_PATH/dist/index.js" && -f "$POLICY_PATH" ]]; then
-        # Send initialize request and capture response
+        # Send initialize, initialized notification, and tools/list in a single session
         set +e
-        INIT_RESPONSE=$(echo "$INIT_REQUEST" | timeout 5 node "$REPO_PATH/dist/index.js" stdio --config "$POLICY_PATH" 2>/dev/null || true)
+        MCP_RESPONSES=$(printf '%s\n%s\n%s\n' \
+            "$INIT_REQUEST" \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            "$TOOLS_REQUEST" \
+            | timeout 10 node "$REPO_PATH/dist/index.js" stdio --config "$POLICY_PATH" 2>/dev/null || true)
         set -e
 
-        if [[ -n "$INIT_RESPONSE" ]]; then
-            check_pass "MCP server responded to initialize request"
-            echo "  Response: $INIT_RESPONSE"
-
-            # Send tools/list request
-            set +e
-            TOOLS_RESPONSE=$(echo "$TOOLS_REQUEST" | timeout 5 node "$REPO_PATH/dist/index.js" stdio --config "$POLICY_PATH" 2>/dev/null || true)
-            set -e
-
-            if [[ -n "$TOOLS_RESPONSE" ]]; then
-                check_pass "MCP server responded to tools/list request"
-                echo "  Response: $TOOLS_RESPONSE"
-            else
-                check_fail "MCP server did not respond to tools/list request"
-            fi
+        if [[ -n "$MCP_RESPONSES" ]]; then
+            check_pass "MCP server responded to initialize + tools/list in single session"
+            echo "  Responses:"
+            echo "$MCP_RESPONSES" | while IFS= read -r line; do
+                echo "    $line"
+            done
         else
-            check_fail "MCP server did not respond to initialize request"
+            check_fail "MCP server did not respond to session requests"
         fi
     else
         echo "  Skipping JSON-RPC test (missing dist/index.js or policy file)"

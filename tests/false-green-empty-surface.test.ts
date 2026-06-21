@@ -51,7 +51,7 @@ describe("false-green empty surface protection", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Timed out");
+    expect(parsed.error).toContain("Enter submit could not be verified");
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),

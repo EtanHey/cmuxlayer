@@ -17,7 +17,7 @@
  */
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -108,9 +108,44 @@ export function createAuditLogger(policy: Policy): AuditLogger {
     async recent(count: number): Promise<AuditEvent[]> {
       if (count <= 0) return [];
 
-      let content: string;
+      // Read only the tail of the file to avoid OOM on large audit logs
       try {
-        content = await readFile(filePath, "utf-8");
+        const stat = statSync(filePath, { throwIfNoEntry: false });
+        if (!stat) return [];
+
+        const READ_CHUNK = 64 * 1024; // 64KB chunks
+        const fd = await import("node:fs/promises").then((m) =>
+          m.open(filePath, "r"),
+        );
+        try {
+          const fileSize = stat.size;
+          const readSize = Math.min(fileSize, READ_CHUNK * Math.max(count, 10));
+          const buffer = Buffer.alloc(readSize);
+          const { bytesRead } = await fd.read(
+            buffer,
+            0,
+            readSize,
+            Math.max(0, fileSize - readSize),
+          );
+          const content = buffer.toString("utf-8", 0, bytesRead);
+          const lines = content
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+
+          const lastLines = lines.slice(-count);
+          const events: AuditEvent[] = [];
+          for (const line of lastLines) {
+            try {
+              events.push(JSON.parse(line) as AuditEvent);
+            } catch {
+              // Skip malformed lines
+            }
+          }
+          return events;
+        } finally {
+          await fd.close();
+        }
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ENOENT") {
@@ -118,24 +153,6 @@ export function createAuditLogger(policy: Policy): AuditLogger {
         }
         throw err;
       }
-
-      const lines = content
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-
-      const lastLines = lines.slice(-count);
-
-      const events: AuditEvent[] = [];
-      for (const line of lastLines) {
-        try {
-          events.push(JSON.parse(line) as AuditEvent);
-        } catch {
-          // Skip malformed lines — don't let one bad line break the query.
-        }
-      }
-
-      return events;
     },
 
     /**
@@ -158,9 +175,13 @@ export function createAuditLogger(policy: Policy): AuditLogger {
  * Expand a leading `~` in a path to the user's home directory.
  */
 function expandHomeDir(filePath: string): string {
-  if (filePath.startsWith("~/") || filePath === "~") {
+  if (filePath === "~") {
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
-    return path.join(home, filePath.slice(1));
+    return home;
+  }
+  if (filePath.startsWith("~/")) {
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
+    return path.join(home, filePath.slice(2));
   }
   return filePath;
 }

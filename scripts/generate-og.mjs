@@ -77,5 +77,6 @@ try {
 }
 
 // Clean up SVG
-execSync("rm -f site/public/og.svg");
+import { unlinkSync } from "node:fs";
+try { unlinkSync("site/public/og.svg"); } catch {}
 console.log("Generated site/public/og.png (1200x630)");

@@ -208,7 +208,9 @@ function parseClaude(events: Record<string, unknown>[]): HarnessSessionState {
       const cacheRead = asNumber(usage.cache_read_input_tokens) ?? 0;
       const cacheCreate = asNumber(usage.cache_creation_input_tokens) ?? 0;
       const output = asNumber(usage.output_tokens) ?? 0;
-      tokensUsed = input + cacheRead + cacheCreate + output;
+      // input_tokens already includes cache_read and cache_creation tokens
+      // in Anthropic's API — do not double-count
+      tokensUsed = input + output;
     }
   }
   const window = modelContextWindow(model);

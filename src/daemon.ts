@@ -357,24 +357,30 @@ export class CmuxLayerDaemon {
     }
     if (!this.contextPromise) {
       this.contextPromise = (async () => {
-        const client =
-          this.opts.client ??
-          (this.opts.createClient
-            ? await this.opts.createClient()
-            : this.opts.exec || this.opts.bin
-              ? undefined
-              : await createCmuxClient());
-        this.context = createServerContext({
-          exec: this.opts.exec,
-          bin: this.opts.bin,
-          client,
-          stateDir: this.opts.stateDir,
-          skipAgentLifecycle: this.opts.skipAgentLifecycle,
-          enableClaudeChannels: this.opts.enableClaudeChannels,
-          spawnPreflight: this.opts.spawnPreflight,
-          disableSpawnPreflight: this.opts.disableSpawnPreflight,
-        });
-        return this.context;
+        try {
+          const client =
+            this.opts.client ??
+            (this.opts.createClient
+              ? await this.opts.createClient()
+              : this.opts.exec || this.opts.bin
+                ? undefined
+                : await createCmuxClient());
+          this.context = createServerContext({
+            exec: this.opts.exec,
+            bin: this.opts.bin,
+            client,
+            stateDir: this.opts.stateDir,
+            skipAgentLifecycle: this.opts.skipAgentLifecycle,
+            enableClaudeChannels: this.opts.enableClaudeChannels,
+            spawnPreflight: this.opts.spawnPreflight,
+            disableSpawnPreflight: this.opts.disableSpawnPreflight,
+          });
+          return this.context;
+        } catch (error) {
+          // Reset so subsequent calls can retry
+          this.contextPromise = null;
+          throw error;
+        }
       })();
     }
     return this.contextPromise;

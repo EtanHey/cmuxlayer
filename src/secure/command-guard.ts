@@ -179,6 +179,7 @@ const ALWAYS_DENIED_COMMANDS: string[] = [
   "cat ~/.ssh/",
   "cat /root/.ssh/",
   "cat /home/",
+  "cat /Users/",
   "cat .env",
   "cat *.pem",
   "cat *.key",
@@ -207,6 +208,11 @@ const ALWAYS_DENIED_COMMANDS: string[] = [
   ":(){ :|:& };:",
   "chmod -R 777 /",
   "chown -R",
+  "set ",
+  "python -c",
+  "python3 -c",
+  "perl -e",
+  "ruby -e",
 ];
 
 /**
@@ -377,9 +383,35 @@ function looksLikeDirectCommand(text: string): boolean {
 }
 
 /**
- * Convert a wildcard pattern (`*` = any chars) to a case-insensitive RegExp.
+ * Convert a pattern to a case-insensitive RegExp.
+ *
+ * Patterns are classified as either **regex** or **wildcard**:
+ * - If the pattern contains regex metacharacters that are NOT wildcard
+ *   characters (`*`, `?`), it is treated as a raw regex pattern and
+ *   compiled directly.
+ * - Otherwise, wildcard characters are expanded: `*` → `.*`, `?` → `.`
+ *   and regex metacharacters are escaped.
+ *
+ * This preserves backward compatibility with existing wildcard patterns
+ * while supporting regex patterns like `rm\s+-rf` in deny_patterns.
  */
 function wildcardToRegex(pattern: string): RegExp {
+  // If the pattern contains regex-specific syntax (backslash, groups,
+  // character classes, anchors, alternation, quantifiers), treat it as
+  // a regex. This allows policies to use patterns like `rm\s+-rf` or
+  // `curl.*\|.*sh` directly.
+  const hasRegexSyntax =
+    /[\[\]\\(){}|^$+]/.test(pattern) ||
+    (pattern.includes("\\") && /[dswDSWbB]/.test(pattern));
+  if (hasRegexSyntax) {
+    try {
+      return new RegExp(pattern, "i");
+    } catch {
+      // Fall through to wildcard handling if the regex is invalid
+    }
+  }
+
+  // Wildcard mode: escape regex metacharacters, expand * and ?
   let escaped = "";
   for (const ch of pattern) {
     if (ch === "*") {

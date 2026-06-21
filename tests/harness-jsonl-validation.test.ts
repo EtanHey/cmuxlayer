@@ -181,8 +181,8 @@ describe("CMUXLAYER_HARNESS_JSONL=1 validation (real windows from JSONL)", () =>
   it("Claude: table window (opus-4-8 → 1M) from JSONL usage tail", async () => {
     const p = await callParsed("surface:2");
     expect(p.context_window).toBe(1_000_000);
-    expect(p.token_count).toBe(82000);
-    expect(p.context_pct).toBe(8);
+    expect(p.token_count).toBe(42000);
+    expect(p.context_pct).toBe(4);
   });
 
   it("Cursor: clean TUI-strip fallback (JSONL has no tokens/window)", async () => {

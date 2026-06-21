@@ -954,13 +954,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     }
     for (const [surfaceId, override] of roleSurfaceOverrides) {
-      if (liveSurfaceIds && !liveSurfaceIds.has(surfaceId)) {
-        if (workspace && override.workspace === workspace) {
-          roleSurfaceOverrides.delete(surfaceId);
-        }
+      if (!liveSurfaceIds || !liveSurfaceIds.has(surfaceId)) {
+        // Clean up stale overrides for surfaces that no longer exist,
+        // regardless of workspace filter
+        roleSurfaceOverrides.delete(surfaceId);
         continue;
       }
-      ids[override.role].add(surfaceId);
+      if (workspace && override.workspace === workspace) {
+        ids[override.role].add(surfaceId);
+      } else if (!workspace) {
+        // When no workspace filter, include all valid overrides
+        ids[override.role].add(surfaceId);
+      }
     }
     return ids;
   };
@@ -2570,7 +2575,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "send_command",
-            verify_submit: sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD,
+            verify_submit: true,
           }),
         );
 
@@ -2954,17 +2959,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (!args.force) {
           // Fail-safe across records: a surface can transiently back more than
           // one state record (crash-resume collisions before canonicalization).
-          // Match the first record that is still LIVE rather than an arbitrary
-          // first hit, so a stale terminal record can never let us tear down a
-          // surface that another, live record still owns.
-          const backingAgent = stateMgr
+          // Check ALL live agents backing this surface, not just the first.
+          const backingAgents = stateMgr
             .listStates()
-            .find(
+            .filter(
               (record) =>
                 record.surface_id === args.surface &&
                 !TERMINAL_AGENT_STATES.has(record.state),
             );
-          if (backingAgent) {
+          if (backingAgents.length > 0) {
             let screenText = "(unable to read pane)";
             try {
               const screen = await client.readScreen(args.surface, {
@@ -2976,15 +2979,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // Best-effort read; refuse regardless so a live agent is never
               // torn down without an explicit force.
             }
+            const agentList = backingAgents
+              .map((a) => `${a.agent_id} ("${a.state}")`)
+              .join(", ");
             return err(
               new Error(
-                `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live). Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
+                `Refused to close ${args.surface}: ${backingAgents.length} live agent(s) back this surface: ${agentList}. Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
               ),
               {
                 refused: true,
                 surface: args.surface,
-                agent_id: backingAgent.agent_id,
-                state: backingAgent.state,
+                agent_ids: backingAgents.map((a) => a.agent_id),
+                states: backingAgents.map((a) => a.state),
                 screen: screenText,
               },
             );
@@ -3177,6 +3183,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ),
       task: z.string().describe("The dispatch payload / instruction"),
       from: z.string().optional().default("orc").describe("Sender id"),
+      to: z
+        .string()
+        .optional()
+        .describe(
+          "Target recipient id within the agent's triage (defaults to agent_id). Use 'orc' to flag the orchestrator.",
+        ),
       tag: z
         .string()
         .optional()
@@ -3204,7 +3216,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.agent_id,
           {
             from: args.from,
-            to: args.agent_id,
+            to: args.to ?? args.agent_id,
             tag: args.tag,
             task: args.task,
             persist: args.persist,
@@ -4072,29 +4084,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
 
             if (hasPrompt) {
-              const bootPromptDelivery = await deliverBootPrompt({
-                surface: result.surface_id,
-                workspace,
-                cli: agent.cli,
-                prompt: agent.prompt,
-                timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
-              });
+              try {
+                const bootPromptDelivery = await deliverBootPrompt({
+                  surface: result.surface_id,
+                  workspace,
+                  cli: agent.cli,
+                  prompt: agent.prompt,
+                  timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
+                });
 
-              canonicalizeSpawnResult(result);
-              const updated = stateMgr.updateRecord(result.agent_id, {
-                task_summary:
-                  bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
-                boot_prompt_pending: false,
-              });
-              registry.set(result.agent_id, updated);
+                canonicalizeSpawnResult(result);
+                const updated = stateMgr.updateRecord(result.agent_id, {
+                  task_summary:
+                    bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
+                  boot_prompt_pending: false,
+                });
+                registry.set(result.agent_id, updated);
 
-              const current = engine.getAgentState(result.agent_id);
-              if (current?.state === "booting") {
-                const ready = stateMgr.transition(result.agent_id, "ready");
-                registry.set(result.agent_id, ready);
-                result.state = "ready";
-              } else if (current?.state === "ready") {
-                result.state = "ready";
+                const current = engine.getAgentState(result.agent_id);
+                if (current?.state === "booting") {
+                  const ready = stateMgr.transition(result.agent_id, "ready");
+                  registry.set(result.agent_id, ready);
+                  result.state = "ready";
+                } else if (current?.state === "ready") {
+                  result.state = "ready";
+                }
+              } catch (bootError) {
+                // Boot prompt delivery failed — clean up the spawned agent
+                // to prevent orphaned surfaces
+                try {
+                  await engine.stopAgent(result.agent_id, false);
+                  stateMgr.removeState(result.agent_id);
+                } catch {
+                  // Best-effort cleanup
+                }
+                throw bootError;
               }
             }
 
@@ -4802,14 +4826,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agents.map(async (agent) => {
               let screenData: ParsedScreenResult | null = null;
               try {
-                const screen = await Promise.race([
-                  client.readScreen(agent.surface_id, { lines: 20 }),
-                  new Promise<never>((_, reject) =>
-                    setTimeout(
-                      () => reject(new Error("timeout")),
-                      SCREEN_TIMEOUT,
-                    ),
+                const readScreenPromise = client.readScreen(agent.surface_id, { lines: 20 });
+                const timeoutPromise = new Promise<never>((_, reject) =>
+                  setTimeout(
+                    () => reject(new Error("timeout")),
+                    SCREEN_TIMEOUT,
                   ),
+                );
+                // Catch the losing promise to prevent unhandled rejection
+                readScreenPromise.catch(() => {});
+                timeoutPromise.catch(() => {});
+                const screen = await Promise.race([
+                  readScreenPromise,
+                  timeoutPromise,
                 ]);
                 screenData = applyHarnessState(
                   enrichParsedScreen(

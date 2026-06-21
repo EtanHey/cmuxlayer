@@ -548,8 +548,13 @@ export async function resolveLauncherName(
 ): Promise<string> {
   const candidates = launcherNameCandidates(repo, suffix);
   for (const candidate of candidates) {
-    if (await probe(candidate)) {
-      return candidate;
+    try {
+      if (await probe(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Probe failed for this candidate — continue to next
+      continue;
     }
   }
   throw new Error(
@@ -764,12 +769,13 @@ export class AgentEngine {
       workspace ?? parentWorkspace,
       context?.repo,
     );
-    if (workspace) {
+    if (workspace && typeof this.client.selectWorkspace === "function") {
       try {
         await this.client.selectWorkspace(workspace);
-      } catch {
-        // Best-effort: the workspace may already be focused, or the client may
-        // be an older test/fallback implementation.
+      } catch (selectError) {
+        throw new Error(
+          `Failed to select workspace "${workspace}": ${selectError instanceof Error ? selectError.message : String(selectError)}`,
+        );
       }
     }
 
@@ -1624,7 +1630,13 @@ export class AgentEngine {
   private schedulePostSpawnLivenessAssertion(agentId: string): void {
     const timer = setTimeout(() => {
       this.postSpawnLivenessTimers.delete(timer);
-      void this.assertPostSpawnLiveness(agentId);
+      this.assertPostSpawnLiveness(agentId).catch((error) => {
+        // Prevent unhandled rejection from crashing the process
+        console.error(
+          `[agent-engine] post-spawn liveness assertion failed for ${agentId}:`,
+          error,
+        );
+      });
     }, this.postSpawnLivenessMs);
     this.postSpawnLivenessTimers.add(timer);
   }
@@ -1875,12 +1887,11 @@ export class AgentEngine {
       };
     }
 
-    // Polling sweep loop
+    // Polling sweep loop using setTimeout to avoid overlapping iterations
     return new Promise<WaitResult>((resolve) => {
-      const checkInterval = setInterval(async () => {
+      const poll = async () => {
         const elapsed = Date.now() - start;
         if (elapsed >= timeoutMs) {
-          clearInterval(checkInterval);
           const current = this.registry.get(agentId);
           resolve({
             matched: false,
@@ -1897,7 +1908,6 @@ export class AgentEngine {
         await this.registry.reconcile();
         let current = this.registry.get(agentId);
         if (!current) {
-          clearInterval(checkInterval);
           resolve({
             matched: false,
             state: "error",
@@ -1916,7 +1926,6 @@ export class AgentEngine {
           targetState,
         );
         if (evidenceSource) {
-          clearInterval(checkInterval);
           resolve({
             matched: true,
             state: current.state,
@@ -1932,7 +1941,6 @@ export class AgentEngine {
           TERMINAL_STATES.has(current.state) &&
           current.state !== targetState
         ) {
-          clearInterval(checkInterval);
           resolve({
             matched: false,
             state: current.state,
@@ -1942,8 +1950,15 @@ export class AgentEngine {
             error:
               current.error ?? `Agent entered terminal state: ${current.state}`,
           });
+          return;
         }
-      }, WAIT_FOR_SWEEP_INTERVAL_MS);
+
+        // Schedule next poll
+        setTimeout(poll, WAIT_FOR_SWEEP_INTERVAL_MS);
+      };
+
+      // Start first poll immediately
+      setTimeout(poll, WAIT_FOR_SWEEP_INTERVAL_MS);
     });
   }
 
@@ -2042,8 +2057,24 @@ export class AgentEngine {
     if (force && agent.pid) {
       try {
         process.kill(agent.pid, "SIGKILL");
-      } catch {
-        // Process may already be dead — that's fine
+      } catch (killError) {
+        const errno = (killError as NodeJS.ErrnoException).code;
+        // ESRCH = process doesn't exist (already dead) — fine
+        // EPERM = we don't have permission — agent is still alive but uncontrollable
+        if (errno === "ESRCH") {
+          // Process already exited — that's fine
+        } else if (errno === "EPERM") {
+          // We can't kill it but it's still running — mark as error
+          try {
+            const updated = this.stateMgr.transition(canonicalAgentId, "error", {
+              error: "Cannot kill process: permission denied",
+            });
+            this.registry.set(canonicalAgentId, updated);
+          } catch {
+            // State may already be terminal
+          }
+          return;
+        }
       }
     } else {
       // Graceful: send Ctrl+C

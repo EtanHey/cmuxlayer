@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import type { SecureToolContext, ToolDecision, AuditEvent } from "./policy-schema.js";
 import { checkToolAccess, isAllowedPrefix } from "./tool-policy.js";
 import { truncateOutput, hashInput } from "./limits.js";
@@ -102,29 +103,60 @@ function extractTargetFromArgs(toolName: string, args: unknown): string | undefi
   return undefined;
 }
 
+function extractWorkspaceFromArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  if (typeof record.workspace === "string") return record.workspace;
+  return undefined;
+}
+
 function checkPrefixAllowlist(
   toolName: string,
   args: unknown,
   policy: SecureToolContext["policy"],
 ): { allowed: true } | { allowed: false; reason: string } {
-  const prefixes = policy.surfaces?.allowed_name_prefixes ?? [];
-  if (prefixes.length === 0) {
-    return { allowed: true };
-  }
-
   const target = extractTargetFromArgs(toolName, args);
   if (!target) {
     return { allowed: true };
   }
 
-  if (isAllowedPrefix(target, prefixes)) {
-    return { allowed: true };
+  // Check surface prefixes
+  if (SURFACE_PREFIX_TOOLS.has(toolName)) {
+    const surfacePrefixes = policy.surfaces?.allowed_name_prefixes ?? [];
+    if (surfacePrefixes.length > 0 && !isAllowedPrefix(target, surfacePrefixes)) {
+      return {
+        allowed: false,
+        reason: `Target "${target}" does not match allowed surface prefixes: ${surfacePrefixes.join(", ")}`,
+      };
+    }
   }
 
-  return {
-    allowed: false,
-    reason: `Target "${target}" does not match allowed surface prefixes: ${prefixes.join(", ")}`,
-  };
+  // Check agent prefixes
+  if (AGENT_PREFIX_TOOLS.has(toolName)) {
+    const agentPrefixes = policy.agents?.allowed_prefixes ?? [];
+    if (agentPrefixes.length > 0 && !isAllowedPrefix(target, agentPrefixes)) {
+      return {
+        allowed: false,
+        reason: `Target "${target}" does not match allowed agent prefixes: ${agentPrefixes.join(", ")}`,
+      };
+    }
+  }
+
+  // Check workspace prefixes for workspace-targeted tools
+  if (toolName === "cmux.list_surfaces") {
+    const workspacePrefixes = policy.workspaces?.allowed_prefixes ?? [];
+    if (workspacePrefixes.length > 0) {
+      const workspaceTarget = extractWorkspaceFromArgs(args);
+      if (workspaceTarget && !isAllowedPrefix(workspaceTarget, workspacePrefixes)) {
+        return {
+          allowed: false,
+          reason: `Workspace "${workspaceTarget}" does not match allowed workspace prefixes: ${workspacePrefixes.join(", ")}`,
+        };
+      }
+    }
+  }
+
+  return { allowed: true };
 }
 
 function needsTextGuard(toolName: string): boolean {
@@ -164,15 +196,29 @@ function truncateResult(result: WrappedToolResult, context: SecureToolContext): 
   const maxLines = context.policy.limits?.max_output_lines ?? 500;
   const maxChars = context.policy.limits?.max_screen_chars ?? 50000;
 
+  // Apply limits globally across all text blocks combined, not per-block
+  let totalChars = 0;
+  let totalLines = 0;
   const truncated = result.content.map((item) => {
     if (item.type === "text") {
-      return {
-        type: "text" as const,
-        text: truncateOutput(item.text, maxLines, maxChars),
-      };
+      totalChars += item.text.length;
+      totalLines += (item.text.match(/\n/g) ?? []).length + 1;
     }
     return item;
   });
+
+  // If total exceeds limits, concatenate and truncate
+  if (totalChars > maxChars || totalLines > maxLines) {
+    const combined = result.content
+      .filter((item) => item.type === "text")
+      .map((item) => (item.type === "text" ? item.text : ""))
+      .join("\n");
+    const truncatedText = truncateOutput(combined, maxLines, maxChars);
+    return {
+      content: [{ type: "text", text: truncatedText }],
+      isError: result.isError,
+    };
+  }
 
   return {
     content: truncated,
@@ -367,7 +413,45 @@ export function wrapTool<TInput>(
         }
       }
 
-      // 7-11. Execute handler, redact, truncate, audit — wrapped in safety
+      // 7. Enforce max_file_read_bytes for file-read tools
+      if (options.toolName === "project.read_file") {
+        const filePath = (args as Record<string, unknown>)?.path;
+        if (typeof filePath === "string") {
+          const { assertReadableProjectPath } = await import("./path-guard.js");
+          try {
+            const resolved = await assertReadableProjectPath(
+              filePath,
+              callContext.policy,
+            );
+            const fileStat = await stat(resolved).catch(() => null);
+            if (fileStat) {
+              const maxSize =
+                callContext.policy.project.max_file_read_bytes ?? 200_000;
+              if (fileStat.size > maxSize) {
+                decision = "denied";
+                result = errorResponse(
+                  options.toolName,
+                  `File size (${fileStat.size} bytes) exceeds maximum allowed (${maxSize} bytes)`,
+                );
+                await writeAuditEvent(
+                  options,
+                  callContext,
+                  args,
+                  decision,
+                  result,
+                  Date.now() - startMs,
+                  target,
+                );
+                return result;
+              }
+            }
+          } catch {
+            // Path validation errors will be caught by the handler
+          }
+        }
+      }
+
+      // 8-12. Execute handler, redact, truncate, audit — wrapped in safety
       // try-catch so that any unexpected failure in post-processing never
       // leaks raw error details to the client.
       try {

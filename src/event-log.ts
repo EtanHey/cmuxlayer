@@ -43,9 +43,15 @@ export class EventLog {
     if (!existsSync(this.filePath)) return [];
     const content = readFileSync(this.filePath, "utf-8").trim();
     if (!content) return [];
-    return content
-      .split("\n")
-      .map((line) => JSON.parse(line) as EventLogEntry);
+    const entries: EventLogEntry[] = [];
+    for (const line of content.split("\n")) {
+      try {
+        entries.push(JSON.parse(line) as EventLogEntry);
+      } catch {
+        // Skip malformed JSONL lines instead of failing entirely
+      }
+    }
+    return entries;
   }
 
   readForAgent(agentId: string): StateTransition[] {

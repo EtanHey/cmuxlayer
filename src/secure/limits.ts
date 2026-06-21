@@ -68,6 +68,6 @@ export function hashInput(input: string): string {
  */
 export function createRequestId(): string {
   const timestamp = Date.now();
-  const random = randomBytes(4).toString("hex");
+  const random = randomBytes(16).toString("hex");
   return `req_${timestamp}_${random}`;
 }

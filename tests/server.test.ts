@@ -1484,7 +1484,7 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(2);
+    expect(mockExec).toHaveBeenCalledTimes(3);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -1494,6 +1494,11 @@ describe("tool handler integration", () => {
       2,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      3,
+      "cmux",
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -1770,8 +1775,7 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Timed out");
-    expect(parsed.last_10_lines).toContain("$ waiting");
+    expect(parsed.error).toContain("Enter submit could not be verified");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -1859,7 +1863,7 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(reads).toBe(2);
+    expect(reads).toBe(3);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -4273,8 +4277,8 @@ describe("tool handler integration", () => {
     expect(result.structuredContent).toMatchObject({
       refused: true,
       surface: "surface:worker-live",
-      agent_id: "worker-live",
-      state: "working",
+      agent_ids: ["worker-live"],
+      states: ["working"],
       screen: "running tests... 115 passed",
     });
 
@@ -4334,8 +4338,8 @@ describe("tool handler integration", () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
       refused: true,
-      agent_id: "zzz-live",
-      state: "working",
+      agent_ids: ["zzz-live"],
+      states: ["working"],
     });
 
     rmSync(stateDir, { recursive: true, force: true });

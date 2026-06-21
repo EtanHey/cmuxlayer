@@ -79,7 +79,7 @@ export function Hero() {
             Get started
           </a>
           <a
-            href="https://github.com/EtanHey/cmuxlayer"
+            href="https://github.com/Danissimode/ChatGPTMCPcmux"
             className="inline-flex items-center gap-2 px-6 py-3 rounded-full text-sm font-medium no-underline cursor-pointer bg-transparent text-text-secondary border border-border hover:text-text hover:border-border-hover hover:scale-[1.03] active:scale-[0.98] transition-all duration-150 max-[480px]:w-full max-[480px]:justify-center"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">

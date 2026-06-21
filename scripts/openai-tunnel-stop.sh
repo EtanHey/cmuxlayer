@@ -41,7 +41,7 @@ echo "Found tunnel-client process(es): $PIDS"
 pkill -f "tunnel-client.*$PROFILE" 2>/dev/null || true
 
 # Brief wait then verify
-sleep 0.5
+sleep 2
 REMAINING=$(pgrep -f "tunnel-client.*$PROFILE" 2>/dev/null || true)
 
 if [[ -z "$REMAINING" ]]; then

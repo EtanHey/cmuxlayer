@@ -51,10 +51,10 @@ describe("parseHarnessSession", () => {
     const s = parseHarnessSession("claude", read("claude.jsonl"));
     expect(s.harness).toBe("claude");
     expect(s.model).toBe("claude-opus-4-8");
-    // 40000 input + 30000 cache_read + 10000 cache_creation + 2000 output
-    expect(s.tokens_used).toBe(82000);
+    // 40000 input (includes cache tokens) + 2000 output = 42000
+    expect(s.tokens_used).toBe(42000);
     expect(s.context_window).toBe(1_000_000); // opus-4-8 = 1M (from table)
-    expect(s.context_pct).toBe(8); // 82000/1_000_000
+    expect(s.context_pct).toBe(4); // 42000/1_000_000 = 4.2% → 4
     expect(s.last_text).toBe("latest reply here");
     expect(s.last_tool).toBe("Read");
   });

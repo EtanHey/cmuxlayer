@@ -760,9 +760,14 @@ export class CmuxSocketClient {
 
     const { workspaces } = await this.listWorkspaces();
     for (const ws of workspaces) {
-      const surfaces = await this.listPaneSurfaces({ workspace: ws.ref });
-      if (surfaces.surfaces.some((s) => s.ref === surface)) {
-        return ws.ref;
+      try {
+        const surfaces = await this.listPaneSurfaces({ workspace: ws.ref });
+        if (surfaces.surfaces.some((s) => s.ref === surface)) {
+          return ws.ref;
+        }
+      } catch {
+        // Skip workspaces that fail to list surfaces (may not exist, permissions, etc.)
+        continue;
       }
     }
     throw new CmuxSocketError(

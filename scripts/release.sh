@@ -16,7 +16,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAP_DIR="${CMUXLAYER_TAP_DIR:-$HOME/Gits/homebrew-layers}"
 FORMULA="$TAP_DIR/Formula/cmuxlayer.rb"
-TARBALL_URL_BASE="https://github.com/EtanHey/cmuxlayer/archive/refs/tags"
+TARBALL_URL_BASE="https://github.com/Danissimode/ChatGPTMCPcmux/archive/refs/tags"
 
 VERSION="${1:-}"
 YES=0
@@ -56,7 +56,7 @@ CURRENT="$(grep -E '^  "version":' package.json | head -1 | sed -E 's/.*"version
 echo "release: $CURRENT → $VERSION"
 
 if [ "$YES" -ne 1 ] && [ "$DRY" -ne 1 ]; then
-  read -r -p "Release $TAG and push to cmuxlayer + homebrew-layers? [y/N] " ans
+  read -r -p "Release $TAG and push to ChatGPTMCPcmux + homebrew-layers? [y/N] " ans
   [ "$ans" = "y" ] || [ "$ans" = "Y" ] || die "aborted"
 fi
 

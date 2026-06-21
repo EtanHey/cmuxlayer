@@ -378,6 +378,9 @@ export class StateManager {
     const agentDir = join(this.baseDir, dirName);
     const current = this.readStateFromDir(dirName);
 
+    // Remove directory first to prevent orphaned files if eventLog.append fails
+    rmSync(agentDir, { recursive: true, force: true });
+
     this.eventLog.append({
       ts: new Date().toISOString(),
       agent_id: agentId,
@@ -388,8 +391,6 @@ export class StateManager {
       source: "removeState",
       error: null,
     });
-
-    rmSync(agentDir, { recursive: true, force: true });
   }
 
   ensureAutoRecord(agentId: string, discovered: DiscoveredAgent): AgentRecord {

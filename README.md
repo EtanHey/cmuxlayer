@@ -9,7 +9,7 @@ Based on cmuxLayer by [@EtanHey](https://github.com/EtanHey).
 
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20chatgpt--mcp--cmux-22c55e)](https://github.com/Danissimode/ChatGPTMCPcmux#quick-start-secure-mode)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-27%20secure%20tools-green.svg)](https://modelcontextprotocol.io)
+[![MCP Tools](https://img.shields.io/badge/MCP-28%20secure%20tools-green.svg)](https://modelcontextprotocol.io)
 
 ## What is this?
 
@@ -90,7 +90,7 @@ node dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml
 cmuxlayer
 ```
 
-### Secure Tools (27 exposed when policy enabled)
+### Secure Tools (28 exposed when policy enabled)
 
 | Category | Tools |
 |----------|-------|

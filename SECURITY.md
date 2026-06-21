@@ -13,7 +13,7 @@ Only the `main` branch is currently receiving security updates for the Secure Mo
 
 If you discover a security vulnerability within ChatGPTMCPcmux, particularly regarding the **Secure Mode Policy Engine**, **Command Filter**, or **Secret Redactor**, please DO NOT create a public issue.
 
-Please report it directly via GitHub Security Advisories or by emailing [maintainer email/contact if known, otherwise: open a private security advisory on GitHub].
+Please report it directly via [GitHub Security Advisories](https://github.com/Danissimode/ChatGPTMCPcmux/security/advisories/new).
 
 ## Scope of Secure Mode
 
