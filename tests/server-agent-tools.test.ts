@@ -270,7 +270,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.model).toBe("opus-4-8[1m]");
+    expect(parsed.model).toBe("claude-opus-4-8[1m]");
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
@@ -284,7 +284,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-    expect(persisted.model).toBe("opus-4-8[1m]");
+    expect(persisted.model).toBe("claude-opus-4-8[1m]");
   });
 
   it("spawn_agent accepts explicit role and returns persisted role", async () => {

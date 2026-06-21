@@ -72,7 +72,7 @@ export const MODEL_POLICY_CONTRACT: {
       },
     },
     claude: {
-      defaultModel: "opus-4-8[1m]",
+      defaultModel: "claude-opus-4-8[1m]",
       allowModelOverrideByDefault: true,
       forbiddenModelPatterns: [],
       modelAliases: {

@@ -14,7 +14,7 @@ describe("model policy contract", () => {
     });
     expect(MODEL_POLICY_CONTRACT.cli.gemini.defaultModel).toBe("pro");
     expect(MODEL_POLICY_CONTRACT.cli.claude.defaultModel).toBe(
-      "opus-4-8[1m]",
+      "claude-opus-4-8[1m]",
     );
     expect(MODEL_POLICY_CONTRACT.cli.codex.defaultModel).toBe("codex");
   });
@@ -43,7 +43,7 @@ describe("model policy contract", () => {
       "auto",
     );
     expect(resolveSpawnModelPolicy("claude", undefined, {}).effective_model).toBe(
-      "opus-4-8[1m]",
+      "claude-opus-4-8[1m]",
     );
     expect(resolveSpawnModelPolicy("gemini", undefined, {}).effective_model).toBe(
       "pro",

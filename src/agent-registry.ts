@@ -506,6 +506,9 @@ export class AgentRegistry {
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }
+      if (agent.role === "orchestrator" || agent.role === "ic") {
+        continue;
+      }
       if (
         TERMINAL_STATES.has(agent.state) &&
         !liveSurfaceRefs.has(agent.surface_id)
