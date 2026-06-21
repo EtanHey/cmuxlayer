@@ -6,7 +6,7 @@
   <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
 </p>
 
-[![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
+[![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/Danissimode/ChatGPTMCPcmux#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-798%20passing-brightgreen.svg)](#testing)
@@ -306,4 +306,5 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-Part of the [Golems](https://github.com/EtanHey/golems) AI agent ecosystem. [cmuxlayer.etanheyman.com](https://cmuxlayer.etanheyman.com) | Built by [@EtanHey](https://github.com/EtanHey).
+Part of the [Golems](https://github.com/EtanHey/golems) AI agent ecosystem. Original by [@EtanHey](https://github.com/EtanHey).
+**Hardened, reworked, and securely deployed for ChatGPT by [@Danissimode](https://github.com/Danissimode).**
