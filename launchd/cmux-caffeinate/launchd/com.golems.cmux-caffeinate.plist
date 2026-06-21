@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.golems.cmux-caffeinate</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/etanheyman/Gits/cmuxlayer/launchd/cmux-caffeinate/bin/cmux-caffeinate.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/etanheyman/.local/state/cmux/cmux-caffeinate.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/etanheyman/.local/state/cmux/cmux-caffeinate.stderr.log</string>
+</dict>
+</plist>
