@@ -61,6 +61,99 @@ Tell your AI agent things like:
 
 Under the hood, cmuxLayer exposes 35 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
+---
+
+## ChatGPTMCPcmux — Secure Remote Mode
+
+This fork adds a **security-hardened layer** for connecting ChatGPT to your local cmux agents via **OpenAI Secure MCP Tunnel**. When enabled with `--config`, only policy-approved tools are exposed — with audit logging, secret redaction, path guards, and command filtering.
+
+### Why Secure Mode?
+
+ChatGPT gets **orchestration access**, not an unrestricted remote shell:
+
+- **Read** allowed project files only (no `~/.ssh`, no `.env`, no Keychain)
+- **Inspect** git status/diff
+- **View** allowed cmux/agent sessions (filtered by prefix: `petpals-`, `cao-`, `chatgpt-`)
+- **Send tasks** to allowed agents (with command guard)
+- **Audit** every tool call is logged to `~/.local/share/chatgpt-mcp-cmux/audit.jsonl`
+
+### Quick Start (Secure Mode)
+
+```bash
+# 1. Build the project
+npm install && npm run build
+
+# 2. Create your policy config
+cp config/policy.example.yaml ~/.config/chatgpt-mcp-cmux/policy.yaml
+# Edit: set project.root, adjust allowed prefixes
+
+# 3. Initialize OpenAI tunnel
+export CONTROL_PLANE_API_KEY="your-api-key"
+export CONTROL_PLANE_TUNNEL_ID="your-tunnel-id"
+scripts/openai-tunnel-init-stdio.sh
+
+# 4. Run the tunnel
+scripts/openai-tunnel-run.sh
+
+# 5. Connect from ChatGPT app — the tunnel appears as a local MCP server
+```
+
+### Architecture
+
+```text
+ChatGPT (iPhone/Web)
+  |
+  v
+OpenAI Secure MCP Tunnel (cloud)
+  |
+  v
+tunnel-client (MacBook)
+  |
+  v
+ChatGPTMCPcmux stdio --config policy.yaml
+  |
+  +-- Policy engine (allow/deny/confirm)
+  +-- Path guard (project-root only)
+  +-- Command guard (dangerous pattern filter)
+  +-- Secret redactor
+  +-- Audit logger (JSONL)
+  |
+  v
+cmux / local CLI agents
+```
+
+### Documentation
+
+- [`docs/openai-secure-mcp-tunnel.md`](docs/openai-secure-mcp-tunnel.md) — Tunnel setup and operation
+- [`docs/chatgpt-connector.md`](docs/chatgpt-connector.md) — Connecting from ChatGPT
+- [`docs/security-model.md`](docs/security-model.md) — Security architecture and threat model
+- [`docs/mcpkit-reference-audit.md`](docs/mcpkit-reference-audit.md) — MCPKit pattern analysis
+- [`docs/implementation-closeout.md`](docs/implementation-closeout.md) — Closeout checklist
+
+### Secure Mode Command
+
+```bash
+# Stdio with security policy
+node dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml
+
+# Without --config: standard upstream mode (backward compatible)
+cmuxlayer
+```
+
+### Secure Tools (27 exposed when policy enabled)
+
+| Category | Tools |
+|----------|-------|
+| `system.*` | health, version, policy, cmux_health, memory_usage |
+| `project.*` | info, tree, read_file, search, grep, git_status, git_diff, git_log_recent |
+| `cmux.*` | list_surfaces, read_screen, read_output, read_recent_activity, get_agent_metadata |
+| `agent.*` | list, status, read, send_task, continue, extract_summary, extract_errors, extract_next_actions |
+| `audit.*` | recent, search |
+
+See [`docs/security-model.md`](docs/security-model.md) for full policy reference.
+
+---
+
 ## Agent Routing Workflow
 
 For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. Raw surface tools such as `send_input`, `send_command`, and `send_key` are still available for shells, launch/resume commands, stuck-pane recovery, and explicit terminal UI operations.

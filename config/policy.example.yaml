@@ -1,0 +1,90 @@
+# ChatGPTMCPcmux security policy example
+# Copy to ~/.config/chatgpt-mcp-cmux/policy.yaml and adjust for your project.
+
+project:
+  root: ~/my-project
+  max_file_read_bytes: 200000
+  max_search_results: 100
+  deny:
+    - "*.pem"
+    - "*.key"
+    - ".env*"
+    - "id_rsa*"
+    - "id_ed25519*"
+    - "known_hosts"
+    - ".ssh/"
+    - "node_modules/"
+    - ".git/"
+
+workspaces:
+  allowed_prefixes:
+    - "ws-"
+    - "project-"
+    - "dev-"
+
+agents:
+  allowed_prefixes:
+    - "agent-"
+    - "claude-"
+    - "gpt-"
+    - "dev-"
+    - "task-"
+
+surfaces:
+  allowed_name_prefixes:
+    - "main"
+    - "dev"
+    - "chat"
+    - "preview-"
+    - "task-"
+
+tools:
+  allow:
+    - "system.*"
+    - "project.*"
+    - "cmux.*"
+    - "agent.*"
+    - "audit.*"
+  require_confirmation:
+    - "agent.send_task"
+    - "agent.continue"
+    - "project.git_diff"
+  deny:
+    - "system.memory_usage"
+
+commands:
+  # Use single-quoted strings for regex patterns so backslashes are
+  # preserved literally by the minimal YAML parser.
+  deny_patterns:
+    - 'rm\s+-rf'
+    - '>\s*/dev/null'
+    - 'curl.*\|.*sh'
+    - 'wget.*\|.*sh'
+    - '\bsudo\b'
+    - '\bmkfs\b'
+    - 'dd\s+if='
+    - ':\(\)\{\s*:\s*\|.*;\s*\}'
+    - '\beval\b'
+    - 'base64\s+--decode'
+    - '~/.ssh'
+    - '/etc/shadow'
+    - '/etc/passwd'
+  require_confirmation_patterns:
+    - 'git\s+push'
+    - 'git\s+.*force'
+    - 'npm\s+publish'
+    - '\bdocker\b'
+    - '\bkubectl\b'
+
+audit:
+  path: ~/.local/share/chatgpt-mcp-cmux/audit.jsonl
+  redact_secrets: true
+  log_full_inputs: false
+  log_input_preview_chars: 300
+
+limits:
+  max_output_lines: 500
+  max_screen_chars: 50000
+  max_request_body_bytes: 100000
+  tool_timeout_ms: 30000
+  max_concurrent_requests: 5

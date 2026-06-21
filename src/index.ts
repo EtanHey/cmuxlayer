@@ -24,6 +24,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
+import { createSecureServer } from "./server-secure.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 
@@ -48,6 +49,7 @@ Usage:
   cmuxlayer            Start the MCP server on stdio (the normal mode; an MCP
                        client such as cmux/Claude Code launches it and speaks
                        JSON-RPC over stdin/stdout).
+  cmuxlayer stdio      Same as above, with optional --config for secure mode.
   cmuxlayer --version  Print the version and exit.
   cmuxlayer --help     Print this help and exit.
   cmuxlayer doctor     Run non-interactive health checks (Robust Brew Layer
@@ -58,10 +60,25 @@ Usage:
 Environment:
   CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
                        (authoritative — never falls through to another instance).
+
+Secure mode (for ChatGPT via OpenAI Secure MCP Tunnel):
+  --config PATH        Load security policy YAML. When provided, only policy-
+                       allowed tools are exposed with audit/redaction guards.
+                       Example: cmuxlayer stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml
 `;
 
+function parseConfigFlag(): string | undefined {
+  const configIdx = process.argv.indexOf("--config");
+  if (configIdx !== -1 && process.argv[configIdx + 1]) {
+    return process.argv[configIdx + 1];
+  }
+  return undefined;
+}
+
 async function main() {
-  const arg = process.argv[2];
+  const args = process.argv.slice(2);
+  const arg = args[0];
+
   if (arg === "--version" || arg === "-v") {
     process.stdout.write(`cmuxlayer ${readVersion()}\n`);
     return;
@@ -83,10 +100,20 @@ async function main() {
     return;
   }
 
+  const configPath = parseConfigFlag();
   const client = await createCmuxClient();
-  const server = createServer({ client });
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+
+  if (configPath) {
+    // Secure mode: policy-enforced tool exposure for ChatGPT remote access
+    const server = await createSecureServer({ client, policyPath: configPath });
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  } else {
+    // Standard mode: all upstream tools (backward compatible)
+    const server = createServer({ client });
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
 }
 
 main().catch((error) => {
