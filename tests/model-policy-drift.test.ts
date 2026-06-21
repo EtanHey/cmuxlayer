@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   MODEL_OVERRIDE_ENV,
   MODEL_POLICY_CONTRACT,
@@ -77,7 +77,13 @@ const dispatchPath = join(
 const golemsAbsent = !existsSync(dispatchPath);
 
 describe.skipIf(golemsAbsent)("model-policy parity with golem-dispatch", () => {
-  const dispatchText = readFileSync(dispatchPath, "utf8");
+  // Read lazily in beforeAll, not at describe-body collection time: a skipped
+  // suite (golems absent, e.g. CI) still evaluates the describe body, so a
+  // top-level readFileSync would throw ENOENT before the skip takes effect.
+  let dispatchText: string;
+  beforeAll(() => {
+    dispatchText = readFileSync(dispatchPath, "utf8");
+  });
 
   it("shares the explicit model override escape hatch", () => {
     expect(dispatchText).toContain(MODEL_OVERRIDE_ENV);
