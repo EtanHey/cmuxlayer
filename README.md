@@ -1,73 +1,19 @@
-# cmuxLayer
+# ChatGPTMCPcmux
 
-**Your AI agents can't see each other's terminals.** One runs in tab 1, another in tab 2 — and you're the clipboard between them. cmuxLayer fixes that: 35 MCP tools that give AI agents programmatic control over terminal workspaces.
+**Secure ChatGPT → local cmux agents gateway over OpenAI Secure MCP Tunnel.**
+Based on cmuxLayer by [@EtanHey](https://github.com/EtanHey).
 
 <p align="center">
-  <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="cmuxLayer" width="96" height="96" />
+  <img src="./assets/cmuxlayer-logo-split-pane-grid.svg" alt="ChatGPTMCPcmux" width="96" height="96" />
 </p>
 
-[![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/Danissimode/ChatGPTMCPcmux#quick-start)
+[![install](https://img.shields.io/badge/install-npm%20install%20--g%20chatgpt--mcp--cmux-22c55e)](https://github.com/Danissimode/ChatGPTMCPcmux#quick-start-secure-mode)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-798%20passing-brightgreen.svg)](#testing)
+[![MCP Tools](https://img.shields.io/badge/MCP-27%20secure%20tools-green.svg)](https://modelcontextprotocol.io)
 
-## Quick Start
+## What is this?
 
-```bash
-brew install etanhey/layers/cmuxlayer       # stable, pinned release
-brew install --HEAD etanhey/layers/cmuxlayer # or: dogfood the latest main
-```
-
-This installs the `cmuxlayer` command (plus `cmuxlayer-app-server` /
-`cmuxlayer-proxy`). Requires [cmux](https://github.com/manaflow-ai/cmux) to be
-running. For how the golem fleet wires, versions, and dogfoods it — and the
-`CMUX_SOCKET_PATH` instance pin — see
-[docs/releases-and-brew.md](docs/releases-and-brew.md).
-
-Add to your MCP config:
-
-**Codex CLI / T3 Code**
-
-T3 Code inherits MCP servers from the Codex CLI config file at `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
-
-```toml
-[mcp_servers.cmux]
-command = "cmuxlayer"
-```
-
-**Claude Code, Cursor, VS Code, Claude Desktop**
-
-```json
-{
-  "mcpServers": {
-    "cmux": {
-      "command": "cmuxlayer"
-    }
-  }
-}
-```
-
-> **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
-
-## What You Can Do
-
-Tell your AI agent things like:
-
-- *"Split a pane to the right and run my test suite there"*
-- *"Spawn a Claude Code agent in a new pane to refactor auth.ts"*
-- *"Read the screen of surface:2 and tell me if the build passed"*
-- *"Wait for all agents to finish, then read their output"*
-- *"Set the sidebar status to show our deploy progress"*
-
-Under the hood, cmuxLayer exposes 35 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
-
----
-
-## ChatGPTMCPcmux — Secure Remote Mode
-
-This fork adds a **security-hardened layer** for connecting ChatGPT to your local cmux agents via **OpenAI Secure MCP Tunnel**. When enabled with `--config`, only policy-approved tools are exposed — with audit logging, secret redaction, path guards, and command filtering.
-
-### Why Secure Mode?
+This fork adds a **security-hardened layer** for connecting ChatGPT to your local cmux agents via the **OpenAI Secure MCP Tunnel**. When enabled with `--config`, only policy-approved tools are exposed — with audit logging, secret redaction, path guards, and command filtering.
 
 ChatGPT gets **orchestration access**, not an unrestricted remote shell:
 
@@ -76,6 +22,10 @@ ChatGPT gets **orchestration access**, not an unrestricted remote shell:
 - **View** allowed cmux/agent sessions (filtered by prefix: `petpals-`, `cao-`, `chatgpt-`)
 - **Send tasks** to allowed agents (with command guard)
 - **Audit** every tool call is logged to `~/.local/share/chatgpt-mcp-cmux/audit.jsonl`
+
+> **IMPORTANT:** Secure ChatGPT mode does NOT expose the original 35-tool cmuxLayer surface. The original 35 tools (like `kill`, `spawn`, `close_surface`) are available only in standard upstream mode. Secure mode exposes only a filtered, policy-controlled toolset.
+
+
 
 ### Quick Start (Secure Mode)
 
@@ -154,13 +104,20 @@ See [`docs/security-model.md`](docs/security-model.md) for full policy reference
 
 ---
 
-## Agent Routing Workflow
+## Upstream cmuxLayer Compatibility
 
-For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. Raw surface tools such as `send_input`, `send_command`, and `send_key` are still available for shells, launch/resume commands, stuck-pane recovery, and explicit terminal UI operations.
+For local agents (Cursor, Claude Code, etc.), you can still run the server in standard upstream mode without the `--config` flag to get all 35 terminal control tools.
 
-See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
+```bash
+# Standard mode (no security policy)
+cmuxlayer
+```
 
-## MCP Tools (35)
+See [Upstream cmuxLayer Compatibility details](#mcp-tools-35-standard-mode-only) below.
+
+## MCP Tools (35) - Standard Mode Only
+
+> **WARNING:** These tools are only available when running without a `--config` policy. They are NEVER exposed to remote ChatGPT connections.
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
@@ -173,7 +130,7 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 **Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
 <details>
-<summary>Full tool reference (35 tools)</summary>
+<summary>Full standard tool reference (35 tools)</summary>
 
 ### Read-only (8)
 
@@ -270,11 +227,19 @@ Restart Claude Code after adding the MCP config. Run `claude mcp list` to verify
 **Socket connection failed**
 cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/cmux/cmux.sock`). Override with `CMUX_SOCKET_PATH` if needed.
 
+## Known Limitations
+
+- **Tunnel Client Restart**: The `tunnel-client` and `chatgpt-mcp-cmux` processes must remain running locally. If the tunnel disconnects, you may need to restart the process and reconnect from the ChatGPT app.
+- **Manual Authentication**: The current E2E workflow relies on manually obtaining the `CONTROL_PLANE_API_KEY` and `CONTROL_PLANE_TUNNEL_ID` from the OpenAI developer portal.
+- **Agent Send Command**: Directly sending interactive commands via `send_command` is explicitly denied in secure mode. You must use `send_task` to dispatch natural language tasks to the AI agent's inbox instead.
+- **File Reading Depth**: `project.tree` and `project.read_file` are strictly limited by `max_file_read_bytes` and depth. Very large repositories may truncate results to protect ChatGPT token context.
+
 ## Testing
 
 ```bash
-bun run test        # 798 tests via vitest
-npm run typecheck   # Type checking
+npm run build
+npm run typecheck
+npm run test        # 800+ tests via vitest
 ```
 
 ## Git hooks

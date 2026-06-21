@@ -1,0 +1,15 @@
+name: Security Vulnerability
+description: Report a security vulnerability
+title: "[Security]: "
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **STOP!** If you have discovered a security vulnerability, please do NOT open a public issue.
+        Instead, please review our [Security Policy](../../SECURITY.md) and report the issue privately.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description (If you are sure this is not sensitive)
+      description: Describe the security-related issue (only if it does not leak a live exploit).

@@ -1,8 +1,9 @@
-# ChatGPTMCPcmux security policy example
-# Copy to ~/.config/chatgpt-mcp-cmux/policy.yaml and adjust for your project.
+# PetPals Supervisor Policy
+# This policy is tailored for a ChatGPT connection acting as a CAO (Chief AI Officer) supervisor
+# for the PetPals ecosystem.
 
 project:
-  root: ~/my-project
+  root: ~/Documents/GitHub/PetPalsCursor
   max_file_read_bytes: 200000
   max_search_results: 100
   deny:
@@ -25,25 +26,20 @@ project:
 
 workspaces:
   allowed_prefixes:
-    - "ws-"
-    - "project-"
-    - "dev-"
+    - "petpals-"
 
 agents:
   allowed_prefixes:
-    - "agent-"
-    - "claude-"
-    - "gpt-"
-    - "dev-"
-    - "task-"
+    - "cursor-"
+    - "codex-"
+    - "gemini-"
+    - "qwen-"
 
 surfaces:
   allowed_name_prefixes:
     - "main"
     - "dev"
-    - "chat"
-    - "preview-"
-    - "task-"
+    - "test"
 
 tools:
   allow:
@@ -70,8 +66,6 @@ tools:
     - "system.memory_usage"
 
 commands:
-  # Use single-quoted strings for regex patterns so backslashes are
-  # preserved literally by the minimal YAML parser.
   deny_patterns:
     - 'rm\s+-rf'
     - '>\s*/dev/null'

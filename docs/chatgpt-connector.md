@@ -78,7 +78,8 @@ Follow these steps in order. Do not skip steps.
 ### Step 1: Build the project
 
 ```bash
-cd /mnt/agents/ChatGPTMCPcmux
+export CHATGPT_MCP_CMUX_REPO="$HOME/Documents/GitHub/ChatGPTMCPcmux"
+cd "$CHATGPT_MCP_CMUX_REPO"
 npm install
 npm run build
 ```
@@ -90,7 +91,7 @@ npm run build
 mkdir -p ~/.config/chatgpt-mcp-cmux
 
 # Copy and edit the example policy
-cp /mnt/agents/ChatGPTMCPcmux/config/policy.example.yaml \
+cp "$CHATGPT_MCP_CMUX_REPO/config/policy.example.yaml" \
    ~/.config/chatgpt-mcp-cmux/policy.yaml
 
 # Edit the policy — at minimum, set project.root
@@ -133,7 +134,7 @@ Or manually:
 ```bash
 tunnel-client create-profile \
   --name chatgpt-mcp-cmux \
-  --command "node /mnt/agents/ChatGPTMCPcmux/dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml"
+  --command "node \"$CHATGPT_MCP_CMUX_REPO/dist/index.js\" stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml"
 ```
 
 ### Step 5: Run tunnel-client doctor

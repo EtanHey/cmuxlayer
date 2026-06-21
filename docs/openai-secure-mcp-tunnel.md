@@ -49,8 +49,8 @@ which tunnel-client
  tunnel-client --version
 
 # Verify environment variables
-echo "$CONTROL_PLANE_API_KEY"   # Should print your key (masked)
-echo "$CONTROL_PLANE_TUNNEL_ID"  # Should print your tunnel ID
+test -n "$CONTROL_PLANE_API_KEY" && echo "[OK] CONTROL_PLANE_API_KEY is set"
+test -n "$CONTROL_PLANE_TUNNEL_ID" && echo "[OK] CONTROL_PLANE_TUNNEL_ID is set"
 
 # Check cmux is running
 cmux --json list-sessions
@@ -64,7 +64,8 @@ Build the ChatGPTMCPcmux project from source:
 
 ```bash
 # 1. Navigate to the project directory
-cd /mnt/agents/ChatGPTMCPcmux
+export CHATGPT_MCP_CMUX_REPO="$HOME/Documents/GitHub/ChatGPTMCPcmux"
+cd "$CHATGPT_MCP_CMUX_REPO"
 
 # 2. Install dependencies
 npm install
@@ -124,7 +125,7 @@ This script:
 1. Creates a tunnel profile named `chatgpt-mcp-cmux` (or similar)
 2. Configures the stdio command to launch ChatGPTMCPcmux:
    ```
-   node /mnt/agents/ChatGPTMCPcmux/dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml
+   node "$CHATGPT_MCP_CMUX_REPO/dist/index.js" stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml
    ```
 3. Stores the profile in the tunnel-client configuration directory
 
@@ -137,13 +138,13 @@ After running the init script, verify the profile was created:
 # You should see "chatgpt-mcp-cmux" (or the name used by the script)
 ```
 
-### Manual profile creation (if the script fails)
+### Manual profile creation (Unverified Legacy)
 
 ```bash
-# Create the profile manually
+# Create the profile manually (Note: officially the init flow is preferred)
  tunnel-client create-profile \
   --name chatgpt-mcp-cmux \
-  --command "node /mnt/agents/ChatGPTMCPcmux/dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml" \
+  --command "node \"$CHATGPT_MCP_CMUX_REPO/dist/index.js\" stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml" \
   --env CONTROL_PLANE_API_KEY="$CONTROL_PLANE_API_KEY" \
   --env CONTROL_PLANE_TUNNEL_ID="$CONTROL_PLANE_TUNNEL_ID"
 ```
@@ -215,7 +216,7 @@ You should see output like:
  tunnel-client run \
   --tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
   --api-key "$CONTROL_PLANE_API_KEY" \
-  --command "node /mnt/agents/ChatGPTMCPcmux/dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml"
+  --command "node \"$CHATGPT_MCP_CMUX_REPO/dist/index.js\" stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml"
 ```
 
 ## Stop Tunnel
@@ -302,7 +303,7 @@ ping tunnel.openai.com
 ```bash
 # Create the directory and copy the example
 mkdir -p ~/.config/chatgpt-mcp-cmux
-cp /mnt/agents/ChatGPTMCPcmux/config/policy.example.yaml ~/.config/chatgpt-mcp-cmux/policy.yaml
+cp "$CHATGPT_MCP_CMUX_REPO/config/policy.example.yaml" ~/.config/chatgpt-mcp-cmux/policy.yaml
 
 # Edit to set your project root
 sed -i 's|root: ~/my-project|root: '$(echo ~)'/your-actual-project|' ~/.config/chatgpt-mcp-cmux/policy.yaml

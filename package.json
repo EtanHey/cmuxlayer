@@ -1,7 +1,7 @@
 {
   "name": "cmuxlayer",
   "version": "0.2.1",
-  "description": "Terminal multiplexer MCP server for AI agent workspace orchestration",
+  "description": "Secure ChatGPT MCP gateway for local cmux agent orchestration over OpenAI Secure MCP Tunnel",
   "type": "module",
   "main": "./dist/lib.js",
   "module": "./dist/lib.js",
@@ -14,10 +14,11 @@
   },
   "bin": {
     "cmuxlayer": "./dist/index.js",
+    "chatgpt-mcp-cmux": "./dist/index.js",
     "cmuxlayer-app-server": "./dist/app-server-index.js",
     "cmuxlayer-proxy": "./dist/proxy.js"
   },
-  "author": "Etan Heyman",
+  "author": "Etan Heyman; hardened fork by Danissimode",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,11 +27,11 @@
   "homepage": "https://cmuxlayer.etanheyman.com",
   "keywords": [
     "mcp",
+    "chatgpt",
+    "cmux",
     "terminal",
-    "multiplexer",
-    "ai-agent",
-    "claude",
-    "orchestration"
+    "secure-mcp-tunnel",
+    "ai-agents"
   ],
   "engines": {
     "node": ">=20"
@@ -48,7 +49,11 @@
     "proxy": "node dist/proxy.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "secure:stdio": "node dist/index.js stdio --config ~/.config/chatgpt-mcp-cmux/policy.yaml",
+    "tunnel:init": "./scripts/openai-tunnel-init-stdio.sh",
+    "tunnel:doctor": "./scripts/openai-tunnel-doctor.sh",
+    "tunnel:run": "./scripts/openai-tunnel-run.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
