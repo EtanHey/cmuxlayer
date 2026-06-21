@@ -16,6 +16,10 @@
     <string>20</string>
     <key>CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB</key>
     <string>2</string>
+    <key>CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT</key>
+    <string>12</string>
+    <key>CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS</key>
+    <string>600</string>
     <key>CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES</key>
     <string>30</string>
   </dict>

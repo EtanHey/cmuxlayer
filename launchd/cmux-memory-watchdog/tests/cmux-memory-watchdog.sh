@@ -24,6 +24,12 @@ assert_file_not_contains() {
   fi
 }
 
+assert_eq() {
+  local expected="$1"
+  local actual="$2"
+  [[ "$expected" == "$actual" ]] || fail "expected '$expected', got '$actual'"
+}
+
 seed_fake_commands() {
   local root_dir="$1"
   local log_dir="$2"
@@ -34,6 +40,13 @@ set -euo pipefail
 printf '%s\n' "\$*" >>"$log_dir/curl.log"
 EOF
   chmod +x "$root_dir/bin/curl"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "$root_dir/bin/nc"
 
   cat >"$root_dir/bin/socat" <<EOF
 #!/usr/bin/env bash
@@ -107,6 +120,13 @@ set -euo pipefail
 printf '%s\n' "\$*" >>"$log_dir/curl.log"
 EOF
   chmod +x "$root_dir/bin/curl"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "$root_dir/bin/nc"
 
   cat >"$root_dir/bin/socat" <<EOF
 #!/usr/bin/env bash
@@ -209,37 +229,96 @@ run_case() {
 run_case "no breach when both below threshold" \
   0 "" \
   $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
-  $'Pages occupied by compressor: 1048576.\n' \
+  $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 1048576.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "breach when footprint above threshold" \
   1 "footprint" \
   $'4242 phys_footprint: 9.5 GB (peak 25 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
-  $'Pages occupied by compressor: 1048576.\n' \
+  $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 1048576.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "breach when compressor above threshold" \
   1 "compressor" \
   $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
-  $'Pages occupied by compressor: 3145729.\n' \
+  $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 3145729.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "breach when both above threshold" \
   1 "footprint,compressor" \
   $'4242 phys_footprint: 3 GB (peak 4 GB)\n5001 phys_footprint: 3 GB (peak 4 GB)\n' \
-  $'Pages occupied by compressor: 4194305.\n' \
+  $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 4194305.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "no cmux pid exits cleanly" \
   0 "" \
   $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 1024 MB (peak 2 GB)\n' \
-  $'Pages occupied by compressor: 4194305.\n' \
+  $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 4194305.\n' \
   "" \
   ""
+
+run_vmstat_page_size_case() {
+  local root_dir compressor_bytes
+  root_dir="$(mktemp -d)"
+  mkdir -p "$root_dir/fixtures"
+
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages occupied by compressor: 262144.
+EOF
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  compressor_bytes="$(vmstat_compressor_bytes)"
+  assert_eq "4294967296" "$compressor_bytes"
+
+  printf 'PASS: watchdog derives compressor bytes from vm_stat page size\n'
+  rm -rf "$root_dir"
+}
+run_vmstat_page_size_case
+
+run_notify_skip_case() {
+  local root_dir log_dir stderr_log
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  stderr_log="$root_dir/stderr.log"
+  mkdir -p "$root_dir/bin" "$log_dir"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://localhost:3847/notify"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  notify_breach 4242 footprint 1073741824 4294967296 "$log_dir/snapshot.log" 2>"$stderr_log"
+  assert_file_contains "$stderr_log" "notify listener unavailable"
+  assert_file_not_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+
+  printf 'PASS: watchdog skips notification loudly when listener is down\n'
+  rm -rf "$root_dir"
+}
+run_notify_skip_case
 
 # Matcher coverage regression guard (2026-06-09): the PID matcher must catch
 # BOTH cmux bundles — stable "cmux.app" AND nightly "cmux NIGHTLY.app". The old
@@ -284,6 +363,7 @@ run_ps_fallback_case() {
 4242 phys_footprint: 6 GB (peak 8 GB)
 EOF
   cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 4096 bytes)
 Pages occupied by compressor: 1048576.
 EOF
 
@@ -309,3 +389,50 @@ EOF
 }
 
 run_ps_fallback_case
+
+run_top_rss_offenders_case() {
+  local root_dir log_dir snapshot
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
+  seed_fake_commands "$root_dir" "$log_dir"
+
+  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
+4242 phys_footprint: 6 GB (peak 8 GB)
+EOF
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 4096 bytes)
+Pages occupied by compressor: 1048576.
+EOF
+  cat >"$root_dir/fixtures/top-ps.fixture" <<'EOF'
+  PID   RSS COMM
+ 9001 2097152 python3.11
+ 9002 1048576 ugrep
+ 4242  262144 /Applications/cmux.app/Contents/MacOS/cmux
+EOF
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB=5
+  export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
+  export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
+  export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
+  export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+  export CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE="$root_dir/fixtures/top-ps.fixture"
+  export CMUX_MEM_WATCHDOG_PGREP_CMUX=$'4242\n'
+  export CMUX_MEM_WATCHDOG_PGREP_CMUXPIDS=$'4242\n'
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  run_once
+
+  snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
+  assert_file_contains "$snapshot" "[top_rss_offenders]"
+  assert_file_contains "$snapshot" "command=python3.11"
+  assert_file_contains "$snapshot" "command=ugrep"
+
+  printf 'PASS: watchdog breach snapshot includes process-agnostic top RSS offenders\n'
+  rm -rf "$root_dir"
+}
+run_top_rss_offenders_case

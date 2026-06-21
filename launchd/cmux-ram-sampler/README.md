@@ -35,6 +35,8 @@ Defaults:
 
 - danger footprint: `20` GB
 - danger swap free: `2` GB
+- danger free RAM: `12` percent
+- stale sample warning: `600` seconds
 - warning lead time: `30` minutes
 - regression window: `12` samples
 
@@ -52,6 +54,8 @@ Notification failures are non-fatal.
 - `CMUX_RAM_SAMPLER_SAMPLE_FILE`
 - `CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB`
 - `CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB`
+- `CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT`
+- `CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS`
 - `CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES`
 - `CMUX_RAM_SAMPLER_WINDOW_SAMPLES`
 - `CMUX_RAM_SAMPLER_NOTIFY_URL`
@@ -63,7 +67,8 @@ Notification failures are non-fatal.
 Do not arm this from automation. Etan-gated arm command:
 
 ```bash
-launchctl load /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist
+launchctl bootout gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) /Users/etanheyman/Gits/cmuxlayer/launchd/cmux-ram-sampler/launchd/com.golems.cmux-ram-sampler.plist
 ```
 
 ## Test
