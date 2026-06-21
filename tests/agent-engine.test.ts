@@ -1385,6 +1385,48 @@ describe("AgentEngine", () => {
       }
     });
 
+    it("does not reap an idle orchestrator pane after the idle close timeout", async () => {
+      const previousIdleCloseMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+      process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = "1000";
+      vi.useFakeTimers();
+      try {
+        const idleAt = new Date("2026-05-25T12:00:00.000Z");
+        vi.setSystemTime(new Date(idleAt.getTime() + 1_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "lead-idle",
+            state: "idle",
+            surface_id: "surface:lead-idle",
+            workspace_id: "ws:1",
+            cli: "claude",
+            role: "orchestrator",
+            updated_at: idleAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:lead-idle")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(mockClient.closeSurface).not.toHaveBeenCalled();
+        expect(engine.getAgentState("lead-idle")).toMatchObject({
+          state: "idle",
+          role: "orchestrator",
+        });
+        expect(stateMgr.readState("lead-idle")).toMatchObject({
+          state: "idle",
+          role: "orchestrator",
+        });
+      } finally {
+        if (previousIdleCloseMs === undefined) {
+          delete process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
+        } else {
+          process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = previousIdleCloseMs;
+        }
+        vi.useRealTimers();
+      }
+    });
+
     it("does not let idle worker reap bypass the Codex TASK_DONE archive delay", async () => {
       const previousIdleCloseMs = process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS;
       process.env.CMUXLAYER_IDLE_WORKER_CLOSE_MS = "1000";

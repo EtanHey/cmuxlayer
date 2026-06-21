@@ -313,6 +313,50 @@ describe("AgentRegistry", () => {
   });
 
   describe("purgeTerminal", () => {
+    it("keeps absent terminal lead roles while purging absent terminal workers", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "orchestrator-terminal",
+          state: "done",
+          surface_id: "surface:missing-orchestrator",
+          role: "orchestrator",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ic-terminal",
+          state: "error",
+          surface_id: "surface:missing-ic",
+          role: "ic",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "worker-terminal",
+          state: "done",
+          surface_id: "surface:missing-worker",
+          role: "worker",
+        }),
+      );
+
+      const surfaceProvider = async () => [] as CmuxSurface[];
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+
+      const purged = await registry.purgeTerminal();
+
+      expect(purged).toBe(1);
+      expect(registry.get("orchestrator-terminal")).toMatchObject({
+        agent_id: "orchestrator-terminal",
+        role: "orchestrator",
+      });
+      expect(registry.get("ic-terminal")).toMatchObject({
+        agent_id: "ic-terminal",
+        role: "ic",
+      });
+      expect(registry.get("worker-terminal")).toBeNull();
+    });
+
     it("purges crash_recover errors that are no longer recoverable", async () => {
       stateMgr.writeState(
         makeRecord({

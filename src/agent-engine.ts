@@ -209,6 +209,21 @@ interface SweepAgentContext {
 
 type TargetStateEvidenceSource = "state" | "transcript" | "screen";
 
+// AIDEV-NOTE: Cursor has no distinct "done" lifecycle state — it settles to
+// "idle" when a task completes. A wait_for(target="done") on a Cursor agent
+// would otherwise hang the full timeout (R-038: "300s hang on a done Cursor").
+// Treat a Cursor that has reached idle as satisfying a done wait. Narrowly
+// scoped to cli==="cursor" so Claude/Codex idle (awaiting input ≠ done) is
+// unaffected.
+function isCursorTerminalIdleTarget(
+  agent: AgentRecord,
+  targetState: AgentState,
+): boolean {
+  return (
+    targetState === "done" && agent.cli === "cursor" && agent.state === "idle"
+  );
+}
+
 function tailScreenLines(text: string, lines: number): string {
   return text.split(/\r?\n/).slice(-lines).join("\n");
 }
@@ -717,6 +732,7 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
   ): Promise<TargetStateEvidenceSource | null> {
+    if (isCursorTerminalIdleTarget(agent, targetState)) return "state";
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (this.hasGroundTruthDone(agent)) return "transcript";
