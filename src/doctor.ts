@@ -28,6 +28,8 @@ const execFileAsync = promisify(execFile);
 
 export const TAP_NAME = "etanhey/layers";
 export const FORMULA_NAME = "etanhey/layers/cmuxlayer";
+export const SLEEP_GUARD_LABEL = "com.golems.cmux-caffeinate";
+export const SLEEP_GUARD_README = "launchd/cmux-caffeinate/README.md";
 
 /** Result of a single best-effort `brew <args>` invocation. */
 export interface BrewResult {
@@ -40,6 +42,19 @@ export interface BrewResult {
 
 /** Runs `brew <args>`; never throws — failures are reported in the result. */
 export type BrewRunner = (args: string[]) => Promise<BrewResult>;
+
+export interface CommandResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  notFound?: boolean;
+}
+
+/** Runs `pmset -g assertions`; never throws — failures are reported in the result. */
+export type PmsetRunner = () => Promise<CommandResult>;
+
+/** Runs `launchctl print gui/<uid>/com.golems.cmux-caffeinate`; never throws. */
+export type LaunchctlRunner = () => Promise<CommandResult>;
 
 export interface DoctorReport {
   /** Overall health. brew/tap gaps do NOT make the doctor unhealthy. */
@@ -58,6 +73,13 @@ export interface DoctorReport {
   };
   /** CMUX_SOCKET_PATH pin (auto-discover when unset). */
   socketPath: { set: boolean; value: string | null; note: string };
+  /** Durable sleep-survival guard: pmset assertion plus launchd KeepAlive job. */
+  sleepGuard: {
+    systemSleepPrevented: boolean;
+    keepAliveLoaded: boolean;
+    durable: boolean;
+    note: string;
+  };
 }
 
 export interface RunDoctorOptions {
@@ -67,6 +89,10 @@ export interface RunDoctorOptions {
   env?: NodeJS.ProcessEnv;
   /** Injectable brew runner; defaults to the real `brew` via execFile. */
   brew?: BrewRunner;
+  /** Injectable pmset runner; defaults to the real `pmset -g assertions`. */
+  pmset?: PmsetRunner;
+  /** Injectable launchctl runner; defaults to the real launchd service probe. */
+  launchctl?: LaunchctlRunner;
 }
 
 /**
@@ -86,6 +112,61 @@ export const realBrewRunner: BrewRunner = async (args) => {
       },
       timeout: 20_000,
     });
+    return { ok: true, stdout: stdout ?? "", stderr: stderr ?? "" };
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException & {
+      stdout?: string;
+      stderr?: string;
+    };
+    if (e.code === "ENOENT") {
+      return { ok: false, stdout: "", stderr: "", notFound: true };
+    }
+    return {
+      ok: false,
+      stdout: e.stdout ?? "",
+      stderr:
+        e.stderr ?? (error instanceof Error ? error.message : String(error)),
+    };
+  }
+};
+
+export const realPmsetRunner: PmsetRunner = async () => {
+  try {
+    const { stdout, stderr } = await execFileAsync("pmset", ["-g", "assertions"], {
+      timeout: 10_000,
+    });
+    return { ok: true, stdout: stdout ?? "", stderr: stderr ?? "" };
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException & {
+      stdout?: string;
+      stderr?: string;
+    };
+    if (e.code === "ENOENT") {
+      return { ok: false, stdout: "", stderr: "", notFound: true };
+    }
+    return {
+      ok: false,
+      stdout: e.stdout ?? "",
+      stderr:
+        e.stderr ?? (error instanceof Error ? error.message : String(error)),
+    };
+  }
+};
+
+function currentUid(): string {
+  if (typeof process.getuid === "function") {
+    return String(process.getuid());
+  }
+  return process.env.UID ?? "501";
+}
+
+export const realLaunchctlRunner: LaunchctlRunner = async () => {
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "launchctl",
+      ["print", `gui/${currentUid()}/${SLEEP_GUARD_LABEL}`],
+      { timeout: 10_000 },
+    );
     return { ok: true, stdout: stdout ?? "", stderr: stderr ?? "" };
   } catch (error) {
     const e = error as NodeJS.ErrnoException & {
@@ -136,9 +217,43 @@ async function checkTap(brew: BrewRunner): Promise<DoctorReport["tap"]> {
   };
 }
 
+export function parseSystemSleepPrevented(
+  pmsetAssertionsStdout: string,
+): boolean {
+  return pmsetAssertionsStdout.split("\n").some((line) => {
+    const match = line.match(/^\s*PreventUserIdleSystemSleep\s+([01])\s*$/);
+    return match?.[1] === "1";
+  });
+}
+
+async function checkSleepGuard(
+  pmset: PmsetRunner,
+  launchctl: LaunchctlRunner,
+): Promise<DoctorReport["sleepGuard"]> {
+  const pmsetResult = await pmset();
+  const launchctlResult = await launchctl();
+
+  const systemSleepPrevented = pmsetResult.ok
+    ? parseSystemSleepPrevented(pmsetResult.stdout)
+    : false;
+  const keepAliveLoaded = launchctlResult.ok;
+  const durable = systemSleepPrevented && keepAliveLoaded;
+
+  return {
+    systemSleepPrevented,
+    keepAliveLoaded,
+    durable,
+    note: durable
+      ? "durable: pmset assertion active and launchd KeepAlive guard loaded"
+      : `not durable; install ${SLEEP_GUARD_README}`,
+  };
+}
+
 export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   const env = opts.env ?? process.env;
   const brew = opts.brew ?? realBrewRunner;
+  const pmset = opts.pmset ?? realPmsetRunner;
+  const launchctl = opts.launchctl ?? realLaunchctlRunner;
 
   const versionOk = opts.version !== "unknown" && opts.version.length > 0;
 
@@ -146,6 +261,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   const socketSet = typeof socketRaw === "string" && socketRaw.length > 0;
 
   const tap = await checkTap(brew);
+  const sleepGuard = await checkSleepGuard(pmset, launchctl);
 
   // Health: only the version must resolve. Brew/tap gaps are reported but, per
   // the standard's "brew best-effort" rule, must NOT make the doctor unhealthy
@@ -167,6 +283,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     socketPath: socketSet
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
       : { set: false, value: null, note: "unset (auto-discover)" },
+    sleepGuard,
   };
 }
 
@@ -213,6 +330,10 @@ export function renderDoctorText(report: DoctorReport): string {
     `│ — CMUX_SOCKET_PATH: ${
       report.socketPath.set ? report.socketPath.value : report.socketPath.note
     }`,
+  );
+
+  lines.push(
+    `│ ${mark(report.sleepGuard.durable)} sleep guard: ${report.sleepGuard.note}`,
   );
 
   lines.push("└─");

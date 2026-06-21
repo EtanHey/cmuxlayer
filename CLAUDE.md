@@ -59,6 +59,8 @@ actually using.
 - **Panes are protected.** Automatic/idle pane closing is disabled (#170). `close_surface`
   refuses to destroy a surface backing a still-live agent unless `force: true`, and returns a
   fresh pane read on refusal so callers verify the real screen rather than a stale state record.
+- **Sleep survival is launchd-backed.** The durable guard lives in `launchd/cmux-caffeinate/`;
+  see [docs/sleep-survival.md](docs/sleep-survival.md) before changing sleep assertions.
 
 ### Distribution & releases
 The fleet runs the **brew-pinned** binary, not a working tree. Source of truth is
