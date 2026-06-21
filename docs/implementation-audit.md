@@ -38,7 +38,7 @@ All tools registered in `src/server.ts` via `server.tool(name, description, sche
 
 ## 7. Tools Exported (35 total)
 
-### Read-Only (13 tools):
+### Read-Only (11 tools listed):
 | # | Tool Name | Annotation |
 |---|-----------|------------|
 | 1 | list_surfaces | readOnly |
@@ -53,7 +53,7 @@ All tools registered in `src/server.ts` via `server.tool(name, description, sche
 | 10 | resync_agents | readOnly |
 | 11 | dispatch_to_agent | mutating (writes to inbox file) |
 
-### Mutating (15 tools):
+### Mutating (20 tools listed):
 | # | Tool Name | Annotation |
 |---|-----------|------------|
 | 12 | select_workspace | mutating |
@@ -70,7 +70,7 @@ All tools registered in `src/server.ts` via `server.tool(name, description, sche
 | 23 | set_status | mutating |
 | 24 | set_progress | mutating |
 
-### Destructive (7 tools):
+### Destructive (4 tools listed):
 | # | Tool Name | Annotation |
 |---|-----------|------------|
 | 25 | close_surface | destructive |

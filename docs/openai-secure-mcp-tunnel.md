@@ -305,8 +305,9 @@ ping tunnel.openai.com
 mkdir -p ~/.config/chatgpt-mcp-cmux
 cp "$CHATGPT_MCP_CMUX_REPO/config/policy.example.yaml" ~/.config/chatgpt-mcp-cmux/policy.yaml
 
-# Edit to set your project root
-sed -i 's|root: ~/my-project|root: '$(echo ~)'/your-actual-project|' ~/.config/chatgpt-mcp-cmux/policy.yaml
+# Edit to set your project root (cross-platform)
+# macOS: sed -i '' 's|root: ~/my-project|root: '$(echo ~)'/your-actual-project|' ~/.config/chatgpt-mcp-cmux/policy.yaml
+# Linux: sed -i    's|root: ~/my-project|root: '$(echo ~)'/your-actual-project|' ~/.config/chatgpt-mcp-cmux/policy.yaml
 ```
 
 ### cmux not running

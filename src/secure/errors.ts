@@ -10,7 +10,6 @@ export class SecurityError extends Error {
     super(message);
     this.code = code;
     this.name = "SecurityError";
-    Object.setPrototypeOf(this, SecurityError.prototype);
   }
 }
 
@@ -26,7 +25,6 @@ export class ToolDeniedError extends SecurityError {
     this.tool = tool;
     this.reason = reason;
     this.name = "ToolDeniedError";
-    Object.setPrototypeOf(this, ToolDeniedError.prototype);
   }
 }
 
@@ -40,7 +38,6 @@ export class PathDeniedError extends SecurityError {
     super("PATH_DENIED", `Path "${path}" is denied by security policy`);
     this.path = path;
     this.name = "PathDeniedError";
-    Object.setPrototypeOf(this, PathDeniedError.prototype);
   }
 }
 
@@ -57,7 +54,6 @@ export class ConfirmationRequiredError extends SecurityError {
     );
     this.tool = tool;
     this.name = "ConfirmationRequiredError";
-    Object.setPrototypeOf(this, ConfirmationRequiredError.prototype);
   }
 }
 
@@ -74,7 +70,6 @@ export class CommandDeniedError extends SecurityError {
     );
     this.pattern = pattern;
     this.name = "CommandDeniedError";
-    Object.setPrototypeOf(this, CommandDeniedError.prototype);
   }
 }
 
@@ -90,6 +85,5 @@ export class PolicyLoadError extends SecurityError {
     this.filepath = filepath;
     this.causeError = causeError;
     this.name = "PolicyLoadError";
-    Object.setPrototypeOf(this, PolicyLoadError.prototype);
   }
 }

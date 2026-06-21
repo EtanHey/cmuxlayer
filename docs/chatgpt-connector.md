@@ -64,11 +64,16 @@ export CONTROL_PLANE_API_KEY="sk-proj-..."      # Your OpenAI API key
 export CONTROL_PLANE_TUNNEL_ID="tun_..."         # Your tunnel ID from OpenAI dashboard
 ```
 
-Add them to your shell profile (`~/.zshrc` or `~/.bash_profile`) to persist across restarts:
+Add them to your shell profile (`~/.zshenv` or `~/.bash_profile`) to persist across restarts. **Warning:** `~/.zshrc` is often world-readable (644). Use `chmod 600` on your profile file or store secrets in a dedicated env file loaded by your profile:
 
 ```bash
-echo 'export CONTROL_PLANE_API_KEY="sk-proj-..."' >> ~/.zshrc
-echo 'export CONTROL_PLANE_TUNNEL_ID="tun_..."' >> ~/.zshrc
+# Option A: Append to a restricted env file
+echo 'export CONTROL_PLANE_API_KEY="sk-proj-..."' >> ~/.config/chatgpt-mcp-cmux/env
+echo 'export CONTROL_PLANE_TUNNEL_ID="tun_..."' >> ~/.config/chatgpt-mcp-cmux/env
+chmod 600 ~/.config/chatgpt-mcp-cmux/env
+
+# Then source it in your shell profile (e.g. ~/.zshrc):
+# source ~/.config/chatgpt-mcp-cmux/env
 ```
 
 ## Step-by-Step Setup

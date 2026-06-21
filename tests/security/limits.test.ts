@@ -148,13 +148,14 @@ describe("limits", () => {
     });
 
     it("should include a timestamp after req_ prefix", () => {
+      const before = Date.now();
       const result = createRequestId();
+      const after = Date.now();
       const parts = result.split("_");
       expect(parts.length).toBe(3);
-      // parts[1] should be the timestamp
       const timestamp = parseInt(parts[1], 10);
-      expect(timestamp).toBeGreaterThan(0);
-      expect(timestamp).toBeLessThanOrEqual(Date.now());
+      expect(timestamp).toBeGreaterThanOrEqual(before);
+      expect(timestamp).toBeLessThanOrEqual(after);
     });
 
     it("should include a random hex suffix", () => {

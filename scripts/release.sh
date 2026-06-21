@@ -61,7 +61,7 @@ if [ "$YES" -ne 1 ] && [ "$DRY" -ne 1 ]; then
 fi
 
 # --- bump + commit + tag (cmuxlayer) --------------------------------------
-run "sed -i '' -E 's/^(  \"version\": \")[^\"]+(\",)\$/\\1$VERSION\\2/' package.json"
+run "sed -i.bak -E 's/^(  \"version\": \")[^\"]+(\",)\$/\\1$VERSION\\2/' package.json && rm -f package.json.bak"
 run "git commit -aqm 'chore: release $TAG'"
 run "git push origin main"
 run "git tag -a '$TAG' -m 'cmuxlayer $TAG'"
@@ -86,9 +86,9 @@ fi
 echo "release: $TAG sha256 = $SHA"
 
 # --- bump formula (homebrew-layers) ---------------------------------------
-run "sed -i '' -E 's|archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|archive/refs/tags/$TAG.tar.gz|' '$FORMULA'"
-run "sed -i '' -E 's|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$SHA\"|' '$FORMULA'"
-run "brew audit etanhey/layers/cmuxlayer || true"
+run "sed -i.bak -E 's|archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz|archive/refs/tags/$TAG.tar.gz|' '$FORMULA' && rm -f '$FORMULA'.bak"
+run "sed -i.bak -E 's|^  sha256 \"[0-9a-f]{64}\"|  sha256 \"$SHA\"|' '$FORMULA' && rm -f '$FORMULA'.bak"
+run "brew audit danissimode/layers/cmuxlayer || true"
 run "git -C '$TAP_DIR' commit -aqm 'cmuxlayer $TAG'"
 run "git -C '$TAP_DIR' push origin main"
 

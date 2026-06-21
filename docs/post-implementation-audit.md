@@ -54,9 +54,9 @@ All checks performed against commit state as of 2026-06-21.
 | `tests/security/command-guard.test.ts` | 27 | PASS |
 | `tests/security/tool-policy.test.ts` | 35 | PASS |
 | `tests/security/limits.test.ts` | 23 | PASS |
-| **New security subtotal** | **190** | **ALL PASS** |
-| Existing upstream tests | 889 | PASS (no regressions) |
-| **Grand total** | **1079** | **ALL PASS** |
+| **New security subtotal** | **215** | **ALL PASS** |
+| Existing upstream tests | 890 | PASS (no regressions) |
+| **Grand total** | **1105** | **ALL PASS** |
 
 ---
 
