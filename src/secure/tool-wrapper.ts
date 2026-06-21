@@ -31,9 +31,65 @@ export interface ToolWrapOptions {
 }
 
 /**
- * Tools whose input should be checked by command-guard.
- * These tools accept free-form text that could contain shell commands.
+ * Simple async semaphore for limiting concurrent tool executions.
+ * Fair FIFO queue; timed-out waiters are removed.
  */
+class AsyncSemaphore {
+  private current = 0;
+  private queue: Array<{
+    id: number;
+    resolve: (release: () => void) => void;
+    reject: (err: Error) => void;
+  }> = [];
+  private nextId = 0;
+
+  constructor(private max: number) {}
+
+  async acquire(timeoutMs: number): Promise<() => void> {
+    return new Promise((resolve, reject) => {
+      if (this.current < this.max) {
+        this.current++;
+        resolve(() => this.release());
+        return;
+      }
+
+      const id = this.nextId++;
+      const timer = setTimeout(() => {
+        const idx = this.queue.findIndex((q) => q.id === id);
+        if (idx >= 0) this.queue.splice(idx, 1);
+        reject(
+          new Error(
+            `Too many concurrent requests: limit is ${this.max}. ` +
+              `Wait for other requests to complete and retry.`,
+          ),
+        );
+      }, timeoutMs);
+
+      this.queue.push({
+        id,
+        resolve: (release) => {
+          clearTimeout(timer);
+          resolve(release);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
+    });
+  }
+
+  private release() {
+    this.current--;
+    const next = this.queue.shift();
+    if (next) {
+      this.current++;
+      next.resolve(() => this.release());
+    }
+  }
+}
+
+export { AsyncSemaphore };
 const TEXT_INPUT_TOOLS: string[] = [
   "agent.send_task",
   "agent.continue",
@@ -451,7 +507,33 @@ export function wrapTool<TInput>(
         }
       }
 
-      // 8-12. Execute handler, redact, truncate, audit — wrapped in safety
+      // 8. Acquire concurrency slot (if semaphore is configured)
+      let release: (() => void) | undefined;
+      if (callContext.semaphore) {
+        const timeoutMs = callContext.policy.limits?.tool_timeout_ms ?? 30_000;
+        try {
+          release = await callContext.semaphore.acquire(timeoutMs);
+        } catch (semaphoreError) {
+          decision = "denied";
+          const message =
+            semaphoreError instanceof Error
+              ? semaphoreError.message
+              : String(semaphoreError);
+          result = errorResponse(options.toolName, message);
+          await writeAuditEvent(
+            options,
+            callContext,
+            args,
+            decision,
+            result,
+            Date.now() - startMs,
+            target,
+          );
+          return result;
+        }
+      }
+
+      // 9-13. Execute handler, redact, truncate, audit — wrapped in safety
       // try-catch so that any unexpected failure in post-processing never
       // leaks raw error details to the client.
       try {
@@ -459,10 +541,10 @@ export function wrapTool<TInput>(
         decision = "allowed";
         target = extractTargetFromArgs(options.toolName, args);
 
-        // 8. Redact the output
+        // 9. Redact the output
         result = redactResult(result, callContext);
 
-        // 9. Truncate output to limits
+        // 10. Truncate output to limits
         result = truncateResult(result, callContext);
       } catch (postError) {
         // Handler or post-processing failed — return a safe redacted error
@@ -472,9 +554,11 @@ export function wrapTool<TInput>(
         const safeMsg = callContext.redactor.redact(rawMsg);
         result = errorResponse(options.toolName, safeMsg);
         target = extractTargetFromArgs(options.toolName, args);
+      } finally {
+        release?.();
       }
 
-      // 10. Write audit event (always attempted, failures swallowed by logger)
+      // 11. Write audit event (always attempted, failures swallowed by logger)
       await writeAuditEvent(
         options,
         callContext,
@@ -485,7 +569,7 @@ export function wrapTool<TInput>(
         target,
       );
 
-      // 11. Return safe response
+      // 12. Return safe response
       return result;
     },
   };

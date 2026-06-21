@@ -17,7 +17,7 @@ import { createServerContext, type CreateServerOptions, type CmuxServerContext }
 import { loadPolicy } from "./secure/policy.js";
 import { createAuditLogger, type AuditLogger } from "./secure/audit.js";
 import { createDefaultRedactor, type Redactor } from "./secure/redactor.js";
-import { wrapTool, type WrappedToolResult } from "./secure/tool-wrapper.js";
+import { wrapTool, type WrappedToolResult, AsyncSemaphore } from "./secure/tool-wrapper.js";
 import type { SecureToolContext, Policy } from "./secure/policy-schema.js";
 import { createRequestId } from "./secure/limits.js";
 
@@ -99,13 +99,16 @@ export async function createSecureServer(
     },
   );
 
-  // 5. Create the shared secure context
+  // 5. Create the shared secure context (with concurrency semaphore)
+  const maxConcurrent = policy.limits?.max_concurrent_requests ?? 5;
+  const semaphore = new AsyncSemaphore(maxConcurrent);
   const secureContext: SecureToolContext = {
     policy,
     auditLogger,
     redactor,
     requestId: createRequestId(),
     mode: "stdio-secure",
+    semaphore,
   };
 
   // 6. Create factory-based tools

@@ -155,6 +155,10 @@ export interface SecureToolContext {
   requestId: string;
   /** Server mode string. */
   mode: string;
+  /** Optional async semaphore for limiting concurrent requests. */
+  semaphore?: {
+    acquire(timeoutMs: number): Promise<() => void>;
+  };
 }
 
 // ---------------------------------------------------------------------------
