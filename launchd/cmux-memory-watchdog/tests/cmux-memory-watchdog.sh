@@ -320,6 +320,54 @@ EOF
 }
 run_notify_skip_case
 
+run_notify_reprobe_after_post_failure_case() {
+  local root_dir log_dir stderr_log
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  stderr_log="$root_dir/stderr.log"
+  mkdir -p "$root_dir/bin" "$log_dir"
+
+  cat >"$root_dir/bin/nc" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+count_file="$log_dir/nc-count"
+count=0
+if [[ -f "\$count_file" ]]; then
+  count="\$(cat "\$count_file")"
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"\$count_file"
+if [[ "\$count" == "1" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+exit 7
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
+  export CMUX_MEM_WATCHDOG_NOTIFY_URL="http://localhost:3847/notify"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  notify_breach 4242 footprint 1073741824 4294967296 "$log_dir/snapshot.log" 2>"$stderr_log"
+  assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+  assert_file_contains "$stderr_log" "notify listener unavailable at localhost:3847; skipping notification"
+  assert_file_not_contains "$stderr_log" "notify post failed at http://localhost:3847/notify"
+
+  printf 'PASS: watchdog re-probes and skip-logs when listener drops after notify probe\n'
+  rm -rf "$root_dir"
+}
+run_notify_reprobe_after_post_failure_case
+
 # Matcher coverage regression guard (2026-06-09): the PID matcher must catch
 # BOTH cmux bundles — stable "cmux.app" AND nightly "cmux NIGHTLY.app". The old
 # `cmux\.app` pattern silently skipped nightly, so a nightly-only fleet (the

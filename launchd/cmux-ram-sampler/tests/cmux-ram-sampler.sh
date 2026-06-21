@@ -322,6 +322,199 @@ EOF
   rm -rf "$root_dir"
 }
 
+run_notify_skip_all_sampler_paths_case() {
+  local root_dir log_dir warning_stderr stale_stderr
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  warning_stderr="$root_dir/warning.stderr.log"
+  stale_stderr="$root_dir/stale.stderr.log"
+  mkdir -p "$root_dir/bin" "$log_dir"
+
+  cat >"$root_dir/bin/nc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  printf '{"ts":"2026-06-09T10:00:00+0000","instance":"stable"}\n' >"$log_dir/samples.jsonl"
+
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
+  export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
+  export CMUX_RAM_SAMPLER_SAMPLE_MTIME_EPOCH=1000
+  export CMUX_RAM_SAMPLER_NOW_EPOCH=2200
+  export CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS=600
+  export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  notify_warning stable 4242 1024 unknown 4096 12 2>"$warning_stderr"
+  check_sample_freshness 2>"$stale_stderr"
+
+  assert_file_contains "$warning_stderr" "notify listener unavailable at localhost:3847; skipping notification"
+  assert_file_contains "$stale_stderr" "notify listener unavailable at localhost:3847; skipping notification"
+  assert_file_not_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+
+  printf 'PASS: sampler skips curl posts on every notify path when listener is down\n'
+  rm -rf "$root_dir"
+}
+
+run_notify_reprobe_after_post_failure_case() {
+  local root_dir log_dir stderr_log
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  stderr_log="$root_dir/stderr.log"
+  mkdir -p "$root_dir/bin" "$log_dir"
+
+  cat >"$root_dir/bin/nc" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+count_file="$log_dir/nc-count"
+count=0
+if [[ -f "\$count_file" ]]; then
+  count="\$(cat "\$count_file")"
+fi
+count=\$((count + 1))
+printf '%s\n' "\$count" >"\$count_file"
+if [[ "\$count" == "1" ]]; then
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$root_dir/bin/nc"
+
+  cat >"$root_dir/bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$log_dir/curl.log"
+exit 7
+EOF
+  chmod +x "$root_dir/bin/curl"
+
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  notify_warning stable 4242 1024 unknown 4096 12 2>"$stderr_log"
+  assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
+  assert_file_contains "$stderr_log" "notify listener unavailable at localhost:3847; skipping notification"
+  assert_file_not_contains "$stderr_log" "notify post failed at http://localhost:3847/notify"
+
+  printf 'PASS: sampler re-probes and skip-logs when listener drops after notify probe\n'
+  rm -rf "$root_dir"
+}
+
+run_free_ram_unknown_on_parse_failure_case() {
+  local root_dir log_dir stderr_log pct
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  stderr_log="$root_dir/stderr.log"
+  mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
+  seed_fake_commands "$root_dir" "$log_dir"
+
+  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
+4242 phys_footprint: 1024 MB (peak 2048 MB)
+5151 phys_footprint: 2048 MB (peak 4096 MB)
+EOF
+  cat >"$root_dir/fixtures/swap.fixture" <<'EOF'
+vm.swapusage: total = 8192.00M  used = 1024.00M  free = 4096.00M  (encrypted)
+EOF
+  cat >"$root_dir/fixtures/memsize.fixture" <<'EOF'
+hw.memsize:
+EOF
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages inactive: 100.
+Pages occupied by compressor: 0.
+EOF
+
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
+  export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
+  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_SWAP_FIXTURE="$root_dir/fixtures/swap.fixture"
+  export CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE="$root_dir/fixtures/memsize.fixture"
+  export CMUX_RAM_SAMPLER_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+  export PATH="$root_dir/bin:$PATH"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  pct="$(free_ram_pct 2>"$stderr_log")"
+  assert_eq "unknown" "$pct"
+  assert_file_contains "$stderr_log" "free_ram_pct unknown: invalid hw.memsize"
+  run_once 2>>"$stderr_log"
+  assert_file_contains "$log_dir/samples.jsonl" '"free_ram_pct":null'
+  assert_file_contains "$stderr_log" "free_ram_pct unavailable; skipping free-RAM trigger"
+
+  : >"$stderr_log"
+  cat >"$root_dir/fixtures/memsize.fixture" <<'EOF'
+hw.memsize: 1638400
+EOF
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+garbage
+Pages occupied by compressor: 0.
+EOF
+
+  pct="$(free_ram_pct 2>"$stderr_log")"
+  assert_eq "unknown" "$pct"
+  assert_file_contains "$stderr_log" "free_ram_pct unknown: missing vm_stat free/inactive pages"
+
+  : >"$stderr_log"
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 100.
+Pages occupied by compressor: 0.
+EOF
+
+  pct="$(free_ram_pct 2>"$stderr_log")"
+  assert_eq "unknown" "$pct"
+  assert_file_contains "$stderr_log" "free_ram_pct unknown: missing vm_stat free/inactive pages"
+
+  printf 'PASS: sampler reports unknown instead of false-safe free_ram_pct on parse failures\n'
+  rm -rf "$root_dir"
+}
+
+run_free_ram_midrange_case() {
+  local root_dir pct
+  root_dir="$(mktemp -d)"
+  mkdir -p "$root_dir/fixtures"
+
+  cat >"$root_dir/fixtures/memsize.fixture" <<'EOF'
+hw.memsize: 3276800
+EOF
+  cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 40.
+Pages inactive: 40.
+Pages occupied by compressor: 0.
+EOF
+
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE="$root_dir/fixtures/memsize.fixture"
+  export CMUX_RAM_SAMPLER_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
+
+  # shellcheck disable=SC1090
+  source "$SCRIPT_PATH"
+  pct="$(free_ram_pct)"
+  assert_eq "40" "$pct"
+
+  printf 'PASS: sampler computes mid-range free_ram_pct from valid vm_stat and memsize\n'
+  rm -rf "$root_dir"
+}
+
 run_sample_freshness_case() {
   local root_dir log_dir stderr_log
   root_dir="$(mktemp -d)"
@@ -369,6 +562,8 @@ run_plist_case() {
     || fail "plist missing free RAM threshold env"
   /usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS' "$plist" | grep -Fx '600' >/dev/null \
     || fail "plist missing sample freshness env"
+  /usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:CMUX_RAM_SAMPLER_NOTIFY_URL' "$plist" | grep -Fx 'http://127.0.0.1:3847/notify' >/dev/null \
+    || fail "plist missing pinned notify URL env"
 
   printf 'PASS: sampler launchd plist is armable with expected structure\n'
 }
@@ -376,6 +571,10 @@ run_plist_case() {
 run_vmstat_page_size_case
 run_free_ram_threshold_case
 run_notify_skip_case
+run_notify_skip_all_sampler_paths_case
+run_notify_reprobe_after_post_failure_case
+run_free_ram_unknown_on_parse_failure_case
+run_free_ram_midrange_case
 run_sample_freshness_case
 run_plist_case
 run_prediction_case

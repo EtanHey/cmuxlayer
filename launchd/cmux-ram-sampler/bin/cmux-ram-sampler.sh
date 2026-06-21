@@ -237,22 +237,27 @@ free_ram_pct() {
   page_size="$(vmstat_page_size_bytes "$output")"
   free_pages="$(vmstat_pages_for_label "$output" "Pages free:")"
   inactive_pages="$(vmstat_pages_for_label "$output" "Pages inactive:")"
-  if [[ -z "$free_pages" && -z "$inactive_pages" ]]; then
-    echo 100
+  if [[ -z "$free_pages" || -z "$inactive_pages" ]]; then
+    log "free_ram_pct unknown: missing vm_stat free/inactive pages"
+    echo unknown
     return
   fi
   total_bytes="$(memsize_bytes)"
   free_pages="${free_pages:-0}"
   inactive_pages="${inactive_pages:-0}"
   total_bytes="${total_bytes:-0}"
+  if [[ ! "$total_bytes" =~ ^[0-9]+$ || "$total_bytes" -le 0 ]]; then
+    log "free_ram_pct unknown: invalid hw.memsize"
+    echo unknown
+    return
+  fi
 
   awk \
     -v pages="$((free_pages + inactive_pages))" \
     -v page_size="$page_size" \
     -v total_bytes="$total_bytes" \
     'BEGIN {
-      if (total_bytes <= 0) print 100
-      else printf "%.0f\n", int((pages * page_size / total_bytes) * 100)
+      printf "%.0f\n", int((pages * page_size / total_bytes) * 100)
     }'
 }
 
@@ -333,6 +338,13 @@ append_sample() {
   local swap_free="$7"
   local compressor="$8"
   local free_ram_pct_value="$9"
+  local free_ram_pct_json
+
+  if [[ "$free_ram_pct_value" =~ ^[0-9]+$ ]]; then
+    free_ram_pct_json="$free_ram_pct_value"
+  else
+    free_ram_pct_json="null"
+  fi
 
   mkdir -p "$CMUX_RAM_SAMPLER_LOG_DIR"
   jq -cn \
@@ -344,7 +356,7 @@ append_sample() {
     --argjson swap_used "$swap_used" \
     --argjson swap_free "$swap_free" \
     --argjson compressor "$compressor" \
-    --argjson free_ram_pct "$free_ram_pct_value" \
+    --argjson free_ram_pct "$free_ram_pct_json" \
     '{ts:$ts,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,phys_footprint_peak_mb:$peak,swap_used_mb:$swap_used,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct}' \
     >>"$CMUX_RAM_SAMPLER_SAMPLE_FILE"
 }
@@ -403,7 +415,13 @@ post_notification() {
     '{title:$title,body:$body,source:$source,priority:$priority}' \
     | curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_RAM_SAMPLER_NOTIFY_URL" \
       -H 'Content-Type: application/json' \
-      --data-binary @- >/dev/null 2>&1 || log "notify post failed at $CMUX_RAM_SAMPLER_NOTIFY_URL"
+      --data-binary @- >/dev/null 2>&1 || {
+        if ! notify_listener_available "$CMUX_RAM_SAMPLER_NOTIFY_URL"; then
+          log "notify listener unavailable at $host:$port; skipping notification"
+        else
+          log "notify post failed at $CMUX_RAM_SAMPLER_NOTIFY_URL"
+        fi
+      }
 }
 
 notify_warning() {
@@ -497,6 +515,9 @@ run_once() {
   swap_free="$(swap_free_mb)"
   compressor="$(vmstat_compressor_mb)"
   free_ram_pct_value="$(free_ram_pct)"
+  if [[ ! "$free_ram_pct_value" =~ ^[0-9]+$ ]]; then
+    log "free_ram_pct unavailable; skipping free-RAM trigger"
+  fi
   danger_footprint_mb="$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB")"
 
   sample_instance stable "$CMUX_RAM_SAMPLER_STABLE_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_footprint_mb"

@@ -22,6 +22,8 @@
     <string>600</string>
     <key>CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES</key>
     <string>30</string>
+    <key>CMUX_RAM_SAMPLER_NOTIFY_URL</key>
+    <string>http://127.0.0.1:3847/notify</string>
   </dict>
 
   <key>RunAtLoad</key>

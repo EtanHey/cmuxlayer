@@ -318,7 +318,13 @@ notify_breach() {
     '{title:$title,body:$body,source:$source,priority:$priority}' \
     | curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
       -H 'Content-Type: application/json' \
-      --data-binary @- >/dev/null 2>&1 || log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL"
+      --data-binary @- >/dev/null 2>&1 || {
+        if ! notify_listener_available "$CMUX_MEM_WATCHDOG_NOTIFY_URL"; then
+          log "notify listener unavailable at $host:$port; skipping notification"
+        else
+          log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL"
+        fi
+      }
 }
 
 terminate_cmux() {
