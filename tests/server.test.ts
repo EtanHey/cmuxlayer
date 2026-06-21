@@ -1502,8 +1502,15 @@ describe("tool handler integration", () => {
   });
 
   it("send_input background reads 'delivering' (not FAILED) while in flight (F8)", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input-background");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
-    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
     const tool = (server as any)._registeredTools["send_input"];
     const result = await tool.handler(
       { surface: "surface:7", text: "hi", background: true },
@@ -1514,6 +1521,7 @@ describe("tool handler integration", () => {
     expect(typeof data.delivery_id).toBe("string");
     expect(result.content[0].text).toContain("delivering to surface:7");
     expect(result.content[0].text).not.toContain("FAILED");
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
@@ -4092,9 +4100,16 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface handler calls cmux close-surface", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-basic");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
-    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["close_surface"];
 
@@ -4104,6 +4119,7 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["close-surface"]),
     );
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("close_surface reports pane collapse when closing the last dedicated worker tab", async () => {
