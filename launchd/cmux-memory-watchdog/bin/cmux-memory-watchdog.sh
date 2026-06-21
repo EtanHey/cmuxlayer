@@ -10,6 +10,7 @@ CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS="${CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS:-10
 CMUX_MEM_WATCHDOG_SOURCE="${CMUX_MEM_WATCHDOG_SOURCE:-alerts}"
 CMUX_MEM_WATCHDOG_PRIORITY="${CMUX_MEM_WATCHDOG_PRIORITY:-high}"
 CMUX_MEM_WATCHDOG_KILL_BIN="${CMUX_MEM_WATCHDOG_KILL_BIN:-kill}"
+CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT="${CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT:-5}"
 
 log() {
   printf '[cmux-watchdog] %s\n' "$*" >&2
@@ -142,7 +143,7 @@ aggregate_cmux_footprint_bytes() {
 }
 
 vmstat_compressor_bytes() {
-  local pages
+  local pages page_size
   local vmstat_output
 
   if [[ -n "${CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE:-}" ]]; then
@@ -151,9 +152,44 @@ vmstat_compressor_bytes() {
     vmstat_output="$(vm_stat)"
   fi
 
+  page_size="$(printf '%s\n' "$vmstat_output" | awk '
+    BEGIN { page_size = 16384 }
+    /page size of [0-9][0-9]* bytes/ {
+      line = $0
+      sub(/^.*page size of /, "", line)
+      sub(/ bytes.*$/, "", line)
+      page_size = line
+      exit
+    }
+    END { print page_size }')"
   pages="$(printf '%s\n' "$vmstat_output" | awk '/Pages occupied by compressor/ {gsub(/\./,"",$NF); print $NF}')"
   pages="${pages:-0}"
-  echo $((pages * 4096))
+  echo $((pages * page_size))
+}
+
+top_rss_offenders() {
+  local limit="$CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT"
+  local ps_output
+
+  if [[ -n "${CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE:-}" ]]; then
+    ps_output="$(cat "$CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE")"
+  else
+    ps_output="$(ps -axo pid,rss,comm 2>/dev/null || true)"
+  fi
+
+  printf '%s\n' "$ps_output" | awk '
+    NR == 1 && $1 == "PID" { next }
+    NF >= 3 {
+      pid = $1
+      rss = $2
+      $1 = ""
+      $2 = ""
+      sub(/^[[:space:]]+/, "")
+      print rss "\t" pid "\t" $0
+    }' \
+    | sort -rn \
+    | head -n "$limit" \
+    | awk -F '\t' '{ printf "pid=%s rss_mb=%.0f command=%s\n", $2, $1 / 1024, $3 }'
 }
 
 snapshot_path() {
@@ -189,6 +225,8 @@ capture_process_snapshot() {
     ps -o pid,ppid,rss,vsz,%cpu,etime,command -p "$pid" || true
     printf '\n[pgrep]\n'
     pgrep -lf cmux || true
+    printf '\n[top_rss_offenders]\n'
+    top_rss_offenders || true
   } >"$path"
 }
 
@@ -218,6 +256,37 @@ brain_store_breach() {
     | socat - UNIX-CONNECT:"$CMUX_MEM_WATCHDOG_BRAINBAR_SOCK" >/dev/null
 }
 
+notify_url_host_port() {
+  local url="$1"
+  local scheme host port
+  if [[ "$url" =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]]; then
+    scheme="${BASH_REMATCH[1]}"
+    host="${BASH_REMATCH[2]}"
+    port="${BASH_REMATCH[4]}"
+    if [[ -z "$port" ]]; then
+      if [[ "$scheme" == "https" ]]; then
+        port="443"
+      else
+        port="80"
+      fi
+    fi
+    printf '%s %s\n' "$host" "$port"
+    return 0
+  fi
+  return 1
+}
+
+notify_listener_available() {
+  local url="$1"
+  local host port
+  read -r host port < <(notify_url_host_port "$url") || return 1
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -G 1 "$host" "$port" >/dev/null 2>&1 || nc -z -w 1 "$host" "$port" >/dev/null 2>&1
+    return
+  fi
+  (: >"/dev/tcp/$host/$port") >/dev/null 2>&1
+}
+
 notify_breach() {
   local pid="$1"
   local tripped="$2"
@@ -230,15 +299,26 @@ notify_breach() {
   cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
 
+  local host port
+  if ! read -r host port < <(notify_url_host_port "$CMUX_MEM_WATCHDOG_NOTIFY_URL"); then
+    log "notify URL malformed ($CMUX_MEM_WATCHDOG_NOTIFY_URL); skipping notification"
+    return 0
+  fi
+
+  if ! notify_listener_available "$CMUX_MEM_WATCHDOG_NOTIFY_URL"; then
+    log "notify listener unavailable at $host:$port; skipping notification"
+    return 0
+  fi
+
   jq -cn \
     --arg title "cmux watchdog" \
     --arg body "cmux hit $cmux_footprint_gb GB phys_footprint / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Terminating." \
     --arg source "$CMUX_MEM_WATCHDOG_SOURCE" \
     --arg priority "$CMUX_MEM_WATCHDOG_PRIORITY" \
     '{title:$title,body:$body,source:$source,priority:$priority}' \
-    | curl -sS -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
+    | curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_MEM_WATCHDOG_NOTIFY_URL" \
       -H 'Content-Type: application/json' \
-      --data-binary @- >/dev/null
+      --data-binary @- >/dev/null 2>&1 || log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL"
 }
 
 terminate_cmux() {
@@ -262,7 +342,7 @@ handle_breach() {
 
   snapshot="$(snapshot_path)"
   capture_process_snapshot "$pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$tripped" "$snapshot"
-  processes="$(pgrep -lf cmux | tr '\n' ';' | sed 's/;$/\n/' || true)"
+  processes="$(top_rss_offenders | tr '\n' ';' | sed 's/;$/\n/' || true)"
   brain_store_breach "$pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot" "$processes" "$tripped"
   notify_breach "$pid" "$tripped" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot"
   terminate_cmux "$pid"

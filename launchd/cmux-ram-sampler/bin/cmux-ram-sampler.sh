@@ -5,6 +5,8 @@ CMUX_RAM_SAMPLER_LOG_DIR="${CMUX_RAM_SAMPLER_LOG_DIR:-$HOME/Library/Logs/cmux-ra
 CMUX_RAM_SAMPLER_SAMPLE_FILE="${CMUX_RAM_SAMPLER_SAMPLE_FILE:-$CMUX_RAM_SAMPLER_LOG_DIR/samples.jsonl}"
 CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB="${CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB:-20}"
 CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB="${CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB:-2}"
+CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT="${CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT:-12}"
+CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS="${CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS:-600}"
 CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES="${CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES:-30}"
 CMUX_RAM_SAMPLER_WINDOW_SAMPLES="${CMUX_RAM_SAMPLER_WINDOW_SAMPLES:-12}"
 CMUX_RAM_SAMPLER_NOTIFY_URL="${CMUX_RAM_SAMPLER_NOTIFY_URL:-http://localhost:3847/notify}"
@@ -171,16 +173,87 @@ swap_free_mb() {
     }' | while read -r value; do bytes_to_mb "$(bytes_from_human "$value")"; done
 }
 
-vmstat_compressor_mb() {
-  local output pages
+vmstat_output() {
   if [[ -n "${CMUX_RAM_SAMPLER_VMSTAT_FIXTURE:-}" ]]; then
-    output="$(cat "$CMUX_RAM_SAMPLER_VMSTAT_FIXTURE")"
+    cat "$CMUX_RAM_SAMPLER_VMSTAT_FIXTURE"
   else
-    output="$(vm_stat 2>/dev/null || true)"
+    vm_stat 2>/dev/null || true
   fi
-  pages="$(printf '%s\n' "$output" | awk '/Pages occupied by compressor/ {gsub(/\./,"",$NF); print $NF}')"
+}
+
+vmstat_page_size_bytes() {
+  local output="$1"
+  printf '%s\n' "$output" | awk '
+    BEGIN { page_size = 16384 }
+    /page size of [0-9][0-9]* bytes/ {
+      line = $0
+      sub(/^.*page size of /, "", line)
+      sub(/ bytes.*$/, "", line)
+      page_size = line
+      exit
+    }
+    END { print page_size }'
+}
+
+vmstat_pages_for_label() {
+  local output="$1"
+  local label="$2"
+  printf '%s\n' "$output" | awk -v label="$label" '
+    index($0, label) == 1 {
+      value = $NF
+      gsub(/[.]/, "", value)
+      gsub(/[^0-9]/, "", value)
+      print value
+      exit
+    }'
+}
+
+memsize_bytes() {
+  if [[ -n "${CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE:-}" && -f "$CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE" ]]; then
+    cat "$CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE"
+  else
+    sysctl hw.memsize 2>/dev/null || true
+  fi | awk '
+    {
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^[0-9]+$/) value = $i
+    }
+    }
+    END { if (value != "") print value; else print 0 }'
+}
+
+vmstat_compressor_mb() {
+  local output page_size pages
+  output="$(vmstat_output)"
+  page_size="$(vmstat_page_size_bytes "$output")"
+  pages="$(vmstat_pages_for_label "$output" "Pages occupied by compressor:")"
   pages="${pages:-0}"
-  bytes_to_mb "$((pages * 4096))"
+  bytes_to_mb "$((pages * page_size))"
+}
+
+free_ram_pct() {
+  local output page_size free_pages inactive_pages total_bytes
+  output="$(vmstat_output)"
+  page_size="$(vmstat_page_size_bytes "$output")"
+  free_pages="$(vmstat_pages_for_label "$output" "Pages free:")"
+  inactive_pages="$(vmstat_pages_for_label "$output" "Pages inactive:")"
+  if [[ -z "$free_pages" && -z "$inactive_pages" ]]; then
+    echo 100
+    return
+  fi
+  total_bytes="$(memsize_bytes)"
+  free_pages="${free_pages:-0}"
+  inactive_pages="${inactive_pages:-0}"
+  total_bytes="${total_bytes:-0}"
+
+  awk \
+    -v pages="$((free_pages + inactive_pages))" \
+    -v page_size="$page_size" \
+    -v total_bytes="$total_bytes" \
+    'BEGIN {
+      if (total_bytes <= 0) print 100
+      else printf "%.0f\n", int((pages * page_size / total_bytes) * 100)
+    }'
 }
 
 json_number_field() {
@@ -259,6 +332,7 @@ append_sample() {
   local swap_used="$6"
   local swap_free="$7"
   local compressor="$8"
+  local free_ram_pct_value="$9"
 
   mkdir -p "$CMUX_RAM_SAMPLER_LOG_DIR"
   jq -cn \
@@ -270,8 +344,66 @@ append_sample() {
     --argjson swap_used "$swap_used" \
     --argjson swap_free "$swap_free" \
     --argjson compressor "$compressor" \
-    '{ts:$ts,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,phys_footprint_peak_mb:$peak,swap_used_mb:$swap_used,swap_free_mb:$swap_free,compressor_mb:$compressor}' \
+    --argjson free_ram_pct "$free_ram_pct_value" \
+    '{ts:$ts,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,phys_footprint_peak_mb:$peak,swap_used_mb:$swap_used,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct}' \
     >>"$CMUX_RAM_SAMPLER_SAMPLE_FILE"
+}
+
+notify_url_host_port() {
+  local url="$1"
+  local scheme host port
+  if [[ "$url" =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]]; then
+    scheme="${BASH_REMATCH[1]}"
+    host="${BASH_REMATCH[2]}"
+    port="${BASH_REMATCH[4]}"
+    if [[ -z "$port" ]]; then
+      if [[ "$scheme" == "https" ]]; then
+        port="443"
+      else
+        port="80"
+      fi
+    fi
+    printf '%s %s\n' "$host" "$port"
+    return 0
+  fi
+  return 1
+}
+
+notify_listener_available() {
+  local url="$1"
+  local host port
+  read -r host port < <(notify_url_host_port "$url") || return 1
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -G 1 "$host" "$port" >/dev/null 2>&1 || nc -z -w 1 "$host" "$port" >/dev/null 2>&1
+    return
+  fi
+  (: >"/dev/tcp/$host/$port") >/dev/null 2>&1
+}
+
+post_notification() {
+  local title="$1"
+  local body="$2"
+  local host port
+
+  if ! read -r host port < <(notify_url_host_port "$CMUX_RAM_SAMPLER_NOTIFY_URL"); then
+    log "notify URL malformed ($CMUX_RAM_SAMPLER_NOTIFY_URL); skipping notification"
+    return 0
+  fi
+
+  if ! notify_listener_available "$CMUX_RAM_SAMPLER_NOTIFY_URL"; then
+    log "notify listener unavailable at $host:$port; skipping notification"
+    return 0
+  fi
+
+  jq -cn \
+    --arg title "$title" \
+    --arg body "$body" \
+    --arg source "$CMUX_RAM_SAMPLER_SOURCE" \
+    --arg priority "$CMUX_RAM_SAMPLER_PRIORITY" \
+    '{title:$title,body:$body,source:$source,priority:$priority}' \
+    | curl -sS --connect-timeout 1 --max-time 3 -X POST "$CMUX_RAM_SAMPLER_NOTIFY_URL" \
+      -H 'Content-Type: application/json' \
+      --data-binary @- >/dev/null 2>&1 || log "notify post failed at $CMUX_RAM_SAMPLER_NOTIFY_URL"
 }
 
 notify_warning() {
@@ -280,16 +412,46 @@ notify_warning() {
   local footprint_mb="$3"
   local eta_minutes="$4"
   local swap_free="$5"
+  local free_ram_pct_value="${6:-unknown}"
 
-  jq -cn \
-    --arg title "cmux RAM sampler" \
-    --arg body "$instance pid $pid phys_footprint=${footprint_mb} MB; projected danger ETA=${eta_minutes} min; swap_free=${swap_free} MB" \
-    --arg source "$CMUX_RAM_SAMPLER_SOURCE" \
-    --arg priority "$CMUX_RAM_SAMPLER_PRIORITY" \
-    '{title:$title,body:$body,source:$source,priority:$priority}' \
-    | curl -sS -X POST "$CMUX_RAM_SAMPLER_NOTIFY_URL" \
-      -H 'Content-Type: application/json' \
-      --data-binary @- >/dev/null 2>&1 || true
+  post_notification \
+    "cmux RAM sampler" \
+    "$instance pid $pid phys_footprint=${footprint_mb} MB; projected danger ETA=${eta_minutes} min; swap_free=${swap_free} MB; free_ram_pct=${free_ram_pct_value}"
+}
+
+sample_file_mtime_epoch() {
+  if [[ -n "${CMUX_RAM_SAMPLER_SAMPLE_MTIME_EPOCH:-}" ]]; then
+    printf '%s\n' "$CMUX_RAM_SAMPLER_SAMPLE_MTIME_EPOCH"
+    return
+  fi
+  stat -f '%m' "$CMUX_RAM_SAMPLER_SAMPLE_FILE" 2>/dev/null || stat -c '%Y' "$CMUX_RAM_SAMPLER_SAMPLE_FILE" 2>/dev/null || echo 0
+}
+
+now_epoch() {
+  if [[ -n "${CMUX_RAM_SAMPLER_NOW_EPOCH:-}" ]]; then
+    printf '%s\n' "$CMUX_RAM_SAMPLER_NOW_EPOCH"
+  else
+    date '+%s'
+  fi
+}
+
+check_sample_freshness() {
+  local mtime now age
+  [[ -s "$CMUX_RAM_SAMPLER_SAMPLE_FILE" ]] || return 0
+
+  mtime="$(sample_file_mtime_epoch)"
+  now="$(now_epoch)"
+  if [[ -z "$mtime" || "$mtime" == "0" || "$now" -le "$mtime" ]]; then
+    return 0
+  fi
+
+  age=$((now - mtime))
+  if (( age > CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS )); then
+    log "samples.jsonl stale: age=${age}s threshold=${CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS}s path=$CMUX_RAM_SAMPLER_SAMPLE_FILE"
+    post_notification \
+      "cmux RAM sampler stale" \
+      "samples.jsonl stale for ${age}s (threshold ${CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS}s): $CMUX_RAM_SAMPLER_SAMPLE_FILE"
+  fi
 }
 
 sample_instance() {
@@ -299,7 +461,8 @@ sample_instance() {
   local swap_used="$4"
   local swap_free="$5"
   local compressor="$6"
-  local danger_footprint_mb="$7"
+  local free_ram_pct_value="$7"
+  local danger_footprint_mb="$8"
   local pid output footprint_mb peak_mb eta_minutes=""
 
   pid="$(pid_for_path "$app_path")"
@@ -311,28 +474,33 @@ sample_instance() {
   output="$(footprint_output_for_pid "$pid")"
   footprint_mb="$(parse_footprint_mb "$output")"
   peak_mb="$(parse_footprint_peak_mb "$output")"
-  append_sample "$ts" "$instance" "$pid" "$footprint_mb" "$peak_mb" "$swap_used" "$swap_free" "$compressor"
+  append_sample "$ts" "$instance" "$pid" "$footprint_mb" "$peak_mb" "$swap_used" "$swap_free" "$compressor" "$free_ram_pct_value"
 
   eta_minutes="$(predict_eta_minutes "$CMUX_RAM_SAMPLER_SAMPLE_FILE" "$instance" "$danger_footprint_mb" "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" || true)"
   if [[ -n "$eta_minutes" && "$eta_minutes" -lt "$CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES" ]]; then
     log "$instance pid $pid projected to reach $CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB GB phys_footprint in ${eta_minutes}m"
-    notify_warning "$instance" "$pid" "$footprint_mb" "$eta_minutes" "$swap_free"
+    notify_warning "$instance" "$pid" "$footprint_mb" "$eta_minutes" "$swap_free" "$free_ram_pct_value"
+  elif [[ "$free_ram_pct_value" =~ ^[0-9]+$ && "$free_ram_pct_value" -le "$CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT" ]]; then
+    log "$instance pid $pid sampled with low free_ram_pct=${free_ram_pct_value}%"
+    notify_warning "$instance" "$pid" "$footprint_mb" "${eta_minutes:-unknown}" "$swap_free" "$free_ram_pct_value"
   elif [[ "$swap_free" -lt "$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB")" ]]; then
     log "$instance pid $pid sampled with low swap_free=${swap_free}MB"
-    notify_warning "$instance" "$pid" "$footprint_mb" "${eta_minutes:-unknown}" "$swap_free"
+    notify_warning "$instance" "$pid" "$footprint_mb" "${eta_minutes:-unknown}" "$swap_free" "$free_ram_pct_value"
   fi
 }
 
 run_once() {
-  local ts swap_used swap_free compressor danger_footprint_mb
+  local ts swap_used swap_free compressor free_ram_pct_value danger_footprint_mb
   ts="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  check_sample_freshness
   swap_used="$(swap_used_mb)"
   swap_free="$(swap_free_mb)"
   compressor="$(vmstat_compressor_mb)"
+  free_ram_pct_value="$(free_ram_pct)"
   danger_footprint_mb="$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB")"
 
-  sample_instance stable "$CMUX_RAM_SAMPLER_STABLE_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$danger_footprint_mb"
-  sample_instance nightly "$CMUX_RAM_SAMPLER_NIGHTLY_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$danger_footprint_mb"
+  sample_instance stable "$CMUX_RAM_SAMPLER_STABLE_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_footprint_mb"
+  sample_instance nightly "$CMUX_RAM_SAMPLER_NIGHTLY_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_footprint_mb"
 }
 
 if [[ "${CMUX_RAM_SAMPLER_SOURCE_ONLY:-0}" != "1" ]]; then
