@@ -56,6 +56,32 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.status).toBe("working");
   });
 
+  it("treats a Claude ready composer with bypass-permissions footer as idle", () => {
+    const parsed = parseScreen(`
+                                                                                    0 tokens
+─────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────
+  ⎇ main | 🔧 17
+  🤖 Opus 4.8 (1M context) | 💰 $0.00 | ⏱️  0m | 📚 88%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+  });
+
+  it("treats a Claude working line with esc-to-interrupt as working", () => {
+    const parsed = parseScreen(`
+✻ Working (1m 2s • esc to interrupt)
+  Reading src/server.ts
+  🤖 Opus 4.8 (1M context) | 💰 $0.00 | ⏱️  1m | 📚 88%
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+  });
+
   it("recognizes Claude permission approval dialogs as Claude", () => {
     const parsed = parseScreen(`
 Do you want to allow this command?

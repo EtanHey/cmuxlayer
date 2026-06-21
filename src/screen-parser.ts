@@ -390,8 +390,7 @@ function hasCursorComposerAfterDoneSignal(
 
 function isComposerLine(line: string): boolean {
   return (
-    /^\s*(?:→|>|[│┃║])\s+/.test(line) ||
-    /^\s*(?:╭|╰|┌|└|├|┬|┴|┼)/.test(line)
+    /^\s*(?:→|>|[│┃║])\s+/.test(line) || /^\s*(?:╭|╰|┌|└|├|┬|┴|┼)/.test(line)
   );
 }
 
@@ -693,11 +692,12 @@ function inferStatus(
     return "working";
   }
 
-  const workingMarkers = [
-    " /loop",
-    "bypass permissions on",
-    "esc to interrupt",
-  ];
+  // AIDEV-NOTE: do NOT add "bypass permissions on" here — it is a PERSISTENT
+  // status-bar footer shown in both ready AND working states, so it made a
+  // ready claude composer parse as "working", wedging spawn_agent at "booting"
+  // until wait_for(ready) timed out (~15s). "esc to interrupt" + the
+  // CLAUDE_WORKING_LINE_RE above are the real working signals.
+  const workingMarkers = [" /loop", "esc to interrupt"];
   if (
     workingMarkers.some((marker) =>
       joined.toLowerCase().includes(marker.toLowerCase()),
