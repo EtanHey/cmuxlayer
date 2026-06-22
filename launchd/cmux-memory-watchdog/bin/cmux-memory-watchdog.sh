@@ -6,10 +6,8 @@ CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB="${CMUX_MEM_WATCHDOG_COMPRESSOR_THRESH
 CMUX_MEM_WATCHDOG_LOG_DIR="${CMUX_MEM_WATCHDOG_LOG_DIR:-$HOME/Library/Logs/cmux-watchdog}"
 CMUX_MEM_WATCHDOG_NOTIFY_URL="${CMUX_MEM_WATCHDOG_NOTIFY_URL:-http://localhost:3847/notify}"
 CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="${CMUX_MEM_WATCHDOG_BRAINBAR_SOCK:-/tmp/brainbar.sock}"
-CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS="${CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS:-10}"
 CMUX_MEM_WATCHDOG_SOURCE="${CMUX_MEM_WATCHDOG_SOURCE:-alerts}"
 CMUX_MEM_WATCHDOG_PRIORITY="${CMUX_MEM_WATCHDOG_PRIORITY:-high}"
-CMUX_MEM_WATCHDOG_KILL_BIN="${CMUX_MEM_WATCHDOG_KILL_BIN:-kill}"
 CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT="${CMUX_MEM_WATCHDOG_TOP_RSS_LIMIT:-5}"
 
 log() {
@@ -312,7 +310,7 @@ notify_breach() {
 
   jq -cn \
     --arg title "cmux watchdog" \
-    --arg body "cmux hit $cmux_footprint_gb GB phys_footprint / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Terminating." \
+    --arg body "cmux hit $cmux_footprint_gb GB phys_footprint / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Warning only; cmux was not terminated." \
     --arg source "$CMUX_MEM_WATCHDOG_SOURCE" \
     --arg priority "$CMUX_MEM_WATCHDOG_PRIORITY" \
     '{title:$title,body:$body,source:$source,priority:$priority}' \
@@ -325,15 +323,6 @@ notify_breach() {
           log "notify post failed at $CMUX_MEM_WATCHDOG_NOTIFY_URL"
         fi
       }
-}
-
-terminate_cmux() {
-  local pid="$1"
-  "$CMUX_MEM_WATCHDOG_KILL_BIN" -TERM "$pid" || true
-  sleep "$CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS"
-  if "$CMUX_MEM_WATCHDOG_KILL_BIN" -0 "$pid" 2>/dev/null; then
-    "$CMUX_MEM_WATCHDOG_KILL_BIN" -KILL "$pid" || true
-  fi
 }
 
 handle_breach() {
@@ -351,7 +340,7 @@ handle_breach() {
   processes="$(top_rss_offenders | tr '\n' ';' | sed 's/;$/\n/' || true)"
   brain_store_breach "$pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot" "$processes" "$tripped"
   notify_breach "$pid" "$tripped" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot"
-  terminate_cmux "$pid"
+  log "cmux process $pid left running after memory breach (warn-only default)"
 }
 
 run_once() {

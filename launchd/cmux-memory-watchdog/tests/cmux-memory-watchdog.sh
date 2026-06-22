@@ -24,10 +24,23 @@ assert_file_not_contains() {
   fi
 }
 
+assert_file_missing_or_empty() {
+  local file="$1"
+  if [[ -f "$file" && -s "$file" ]]; then
+    fail "expected $file to be missing or empty"
+  fi
+}
+
 assert_eq() {
   local expected="$1"
   local actual="$2"
   [[ "$expected" == "$actual" ]] || fail "expected '$expected', got '$actual'"
+}
+
+stop_brainbar_socket() {
+  local pid="$1"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
 }
 
 seed_fake_commands() {
@@ -185,11 +198,18 @@ run_case() {
   local pgrep_cmux="$6"
   local pgrep_pids="$7"
 
-  local root_dir log_dir snapshot
+  local root_dir log_dir snapshot brainbar_sock brainbar_pid
   root_dir="$(mktemp -d)"
   log_dir="$root_dir/logs"
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
+  brainbar_sock="$root_dir/brainbar.sock"
+  /usr/bin/nc -Ul "$brainbar_sock" >/dev/null &
+  brainbar_pid="$!"
+  for _ in 1 2 3 4 5; do
+    [[ -S "$brainbar_sock" ]] && break
+    sleep 0.1
+  done
 
   printf '%s' "$footprint_fixture" >"$root_dir/fixtures/footprint.fixture"
   printf '%s' "$vmstat_fixture" >"$root_dir/fixtures/vmstat.fixture"
@@ -198,6 +218,7 @@ run_case() {
   export CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB=5
   export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
   export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
+  export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
   export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
   export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
   export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
@@ -207,12 +228,13 @@ run_case() {
 
   # shellcheck disable=SC1090
   source "$SCRIPT_PATH"
-  run_once
+  run_once 2>"$log_dir/stderr.log"
 
   if [[ "$expect_breach" == "1" ]]; then
     assert_file_contains "$log_dir/curl.log" "http://localhost:3847/notify"
-    assert_file_contains "$log_dir/kill.log" "-TERM 4242"
-    assert_file_contains "$log_dir/kill.log" "-KILL 4242"
+    assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
+    assert_file_contains "$log_dir/stderr.log" "breached memory thresholds"
+    assert_file_missing_or_empty "$log_dir/kill.log"
     snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
     if [[ -n "$expected_signals" ]]; then
       assert_file_contains "$snapshot" "breached_signals=$expected_signals"
@@ -223,6 +245,7 @@ run_case() {
   fi
 
   printf 'PASS: %s\n' "$name"
+  stop_brainbar_socket "$brainbar_pid"
   rm -rf "$root_dir"
 }
 
@@ -401,11 +424,18 @@ run_matcher_coverage() {
 run_matcher_coverage
 
 run_ps_fallback_case() {
-  local root_dir log_dir snapshot
+  local root_dir log_dir snapshot brainbar_sock brainbar_pid
   root_dir="$(mktemp -d)"
   log_dir="$root_dir/logs"
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_ps_fallback_commands "$root_dir" "$log_dir"
+  brainbar_sock="$root_dir/brainbar.sock"
+  /usr/bin/nc -Ul "$brainbar_sock" >/dev/null &
+  brainbar_pid="$!"
+  for _ in 1 2 3 4 5; do
+    [[ -S "$brainbar_sock" ]] && break
+    sleep 0.1
+  done
 
   cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
 4242 phys_footprint: 6 GB (peak 8 GB)
@@ -419,6 +449,7 @@ EOF
   export CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB=5
   export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
   export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
+  export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
   export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
   export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
   export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
@@ -428,11 +459,13 @@ EOF
   source "$SCRIPT_PATH"
   run_once
 
-  assert_file_contains "$log_dir/kill.log" "-TERM 4242"
+  assert_file_missing_or_empty "$log_dir/kill.log"
+  assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
   snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "breached_signals=footprint"
 
   printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
+  stop_brainbar_socket "$brainbar_pid"
   rm -rf "$root_dir"
 }
 
@@ -475,6 +508,7 @@ EOF
   source "$SCRIPT_PATH"
   run_once
 
+  assert_file_missing_or_empty "$log_dir/kill.log"
   snapshot="$(find "$log_dir" -maxdepth 1 -type f -name '20*.log' | head -n 1)"
   assert_file_contains "$snapshot" "[top_rss_offenders]"
   assert_file_contains "$snapshot" "command=python3.11"
