@@ -12,6 +12,12 @@ CMUX_RAM_SAMPLER_WINDOW_SAMPLES="${CMUX_RAM_SAMPLER_WINDOW_SAMPLES:-12}"
 CMUX_RAM_SAMPLER_NOTIFY_URL="${CMUX_RAM_SAMPLER_NOTIFY_URL:-http://localhost:3847/notify}"
 CMUX_RAM_SAMPLER_SOURCE="${CMUX_RAM_SAMPLER_SOURCE:-alerts}"
 CMUX_RAM_SAMPLER_PRIORITY="${CMUX_RAM_SAMPLER_PRIORITY:-high}"
+CMUX_RAM_SAMPLER_NEARCRASH_FREE_RAM_PCT="${CMUX_RAM_SAMPLER_NEARCRASH_FREE_RAM_PCT:-4}"
+CMUX_RAM_SAMPLER_NEARCRASH_COMPRESSOR_FRAC="${CMUX_RAM_SAMPLER_NEARCRASH_COMPRESSOR_FRAC:-0.80}"
+CMUX_RAM_SAMPLER_NEARCRASH_STATE_DIR="${CMUX_RAM_SAMPLER_NEARCRASH_STATE_DIR:-${CMUX_RAM_SAMPLER_BREACH_STATE_DIR:-$CMUX_RAM_SAMPLER_LOG_DIR/nearcrash-state}}"
+CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE="${CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE:-$CMUX_RAM_SAMPLER_LOG_DIR/routed-alerts.jsonl}"
+CMUX_RAM_SAMPLER_ALERT_ROUTE="${CMUX_RAM_SAMPLER_ALERT_ROUTE:-orchestrator/cmux-LEAD}"
+CMUX_RAM_SAMPLER_TOP_RSS_LIMIT="${CMUX_RAM_SAMPLER_TOP_RSS_LIMIT:-8}"
 
 CMUX_RAM_SAMPLER_STABLE_PATH="${CMUX_RAM_SAMPLER_STABLE_PATH:-/Applications/cmux.app/Contents/MacOS/cmux}"
 CMUX_RAM_SAMPLER_NIGHTLY_PATH="${CMUX_RAM_SAMPLER_NIGHTLY_PATH:-/Applications/cmux NIGHTLY.app/Contents/MacOS/cmux}"
@@ -437,6 +443,127 @@ notify_warning() {
     "$instance pid $pid phys_footprint=${footprint_mb} MB; projected danger ETA=${eta_minutes} min; swap_free=${swap_free} MB; free_ram_pct=${free_ram_pct_value}"
 }
 
+nearcrash_state_file() {
+  local instance="$1"
+  local safe_instance
+  safe_instance="$(printf '%s' "$instance" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '%s/%s\n' "$CMUX_RAM_SAMPLER_NEARCRASH_STATE_DIR" "$safe_instance"
+}
+
+previous_nearcrash_state() {
+  local instance="$1"
+  local state_file
+  state_file="$(nearcrash_state_file "$instance")"
+  if [[ -f "$state_file" ]]; then
+    head -n 1 "$state_file"
+  else
+    printf 'clear\n'
+  fi
+}
+
+write_nearcrash_state() {
+  local instance="$1"
+  local state="$2"
+  local state_file tmp_file
+  state_file="$(nearcrash_state_file "$instance")"
+  mkdir -p "$CMUX_RAM_SAMPLER_NEARCRASH_STATE_DIR"
+  tmp_file="${state_file}.$$"
+  printf '%s\n' "$state" >"$tmp_file"
+  mv "$tmp_file" "$state_file"
+}
+
+nearcrash_reason() {
+  local free_ram_pct_value="$1"
+  local compressor="$2"
+  local total_mb compressor_frac
+
+  if [[ "$free_ram_pct_value" =~ ^[0-9]+$ && "$free_ram_pct_value" -le "$CMUX_RAM_SAMPLER_NEARCRASH_FREE_RAM_PCT" ]]; then
+    printf 'near-crash free_ram_pct=%s%%\n' "$free_ram_pct_value"
+    return 0
+  fi
+
+  total_mb="$(bytes_to_mb "$(memsize_bytes)")"
+  if [[ "$compressor" =~ ^[0-9]+$ && "$total_mb" =~ ^[0-9]+$ && "$total_mb" -gt 0 ]]; then
+    compressor_frac="$(awk -v compressor="$compressor" -v total_mb="$total_mb" 'BEGIN { printf "%.4f\n", compressor / total_mb }')"
+    if awk -v value="$compressor_frac" -v threshold="$CMUX_RAM_SAMPLER_NEARCRASH_COMPRESSOR_FRAC" \
+      'BEGIN { exit !(value >= threshold) }'; then
+      printf 'near-crash compressor_frac=%s\n' "$compressor_frac"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+top_rss_offenders_json() {
+  ps -axo pid=,rss=,command= 2>/dev/null | awk -v limit="$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT" '
+    NF >= 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      pid = $1
+      rss = $2
+      $1 = ""
+      $2 = ""
+      sub(/^[[:space:]]+/, "", $0)
+      printf "%s\t%s\t%s\n", rss, pid, $0
+    }' | sort -rn | head -n "$CMUX_RAM_SAMPLER_TOP_RSS_LIMIT" | jq -Rs '
+      split("\n")[:-1]
+      | map(split("\t") | {pid:(.[1]|tonumber),rss_mb:((.[0]|tonumber / 1024)|floor),command:.[2]})'
+}
+
+emit_nearcrash_alert() {
+  local instance="$1"
+  local pid="$2"
+  local footprint_mb="$3"
+  local swap_free="$4"
+  local compressor="$5"
+  local free_ram_pct_value="$6"
+  local reason="$7"
+  local offenders_json free_ram_pct_json
+
+  offenders_json="$(top_rss_offenders_json)"
+  if [[ -z "$offenders_json" ]]; then
+    offenders_json="[]"
+  fi
+  if [[ "$free_ram_pct_value" =~ ^[0-9]+$ ]]; then
+    free_ram_pct_json="$free_ram_pct_value"
+  else
+    free_ram_pct_json="null"
+  fi
+
+  mkdir -p "$(dirname "$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE")"
+  jq -cn \
+    --arg type "near_crash" \
+    --arg priority "critical" \
+    --arg route "$CMUX_RAM_SAMPLER_ALERT_ROUTE" \
+    --arg instance "$instance" \
+    --arg reason "$reason" \
+    --argjson pid "$pid" \
+    --argjson footprint "$footprint_mb" \
+    --argjson swap_free "$swap_free" \
+    --argjson compressor "$compressor" \
+    --argjson free_ram_pct "$free_ram_pct_json" \
+    --argjson offenders "$offenders_json" \
+    '{type:$type,priority:$priority,route:$route,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct,reason:$reason,offenders:$offenders}' \
+    >>"$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE"
+}
+
+route_on_nearcrash_transition() {
+  local instance="$1"
+  local pid="$2"
+  local footprint_mb="$3"
+  local swap_free="$4"
+  local compressor="$5"
+  local free_ram_pct_value="$6"
+  local reason="$7"
+  local previous_state
+
+  previous_state="$(previous_nearcrash_state "$instance")"
+  write_nearcrash_state "$instance" nearcrash
+  log "$instance pid $pid sampled with $reason"
+  if [[ "$previous_state" != "nearcrash" ]]; then
+    emit_nearcrash_alert "$instance" "$pid" "$footprint_mb" "$swap_free" "$compressor" "$free_ram_pct_value" "$reason"
+  fi
+}
+
 sample_file_mtime_epoch() {
   if [[ -n "${CMUX_RAM_SAMPLER_SAMPLE_MTIME_EPOCH:-}" ]]; then
     printf '%s\n' "$CMUX_RAM_SAMPLER_SAMPLE_MTIME_EPOCH"
@@ -481,7 +608,7 @@ sample_instance() {
   local compressor="$6"
   local free_ram_pct_value="$7"
   local danger_footprint_mb="$8"
-  local pid output footprint_mb peak_mb eta_minutes=""
+  local pid output footprint_mb peak_mb eta_minutes="" nearcrash=""
 
   pid="$(pid_for_path "$app_path")"
   if [[ -z "$pid" ]]; then
@@ -495,15 +622,14 @@ sample_instance() {
   append_sample "$ts" "$instance" "$pid" "$footprint_mb" "$peak_mb" "$swap_used" "$swap_free" "$compressor" "$free_ram_pct_value"
 
   eta_minutes="$(predict_eta_minutes "$CMUX_RAM_SAMPLER_SAMPLE_FILE" "$instance" "$danger_footprint_mb" "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" || true)"
-  if [[ -n "$eta_minutes" && "$eta_minutes" -lt "$CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES" ]]; then
+  if nearcrash="$(nearcrash_reason "$free_ram_pct_value" "$compressor")"; then
+    route_on_nearcrash_transition "$instance" "$pid" "$footprint_mb" "$swap_free" "$compressor" "$free_ram_pct_value" "$nearcrash"
+  else
+    write_nearcrash_state "$instance" clear
+  fi
+
+  if [[ -z "$nearcrash" && -n "$eta_minutes" && "$eta_minutes" -lt "$CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES" ]]; then
     log "$instance pid $pid projected to reach $CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB GB phys_footprint in ${eta_minutes}m"
-    notify_warning "$instance" "$pid" "$footprint_mb" "$eta_minutes" "$swap_free" "$free_ram_pct_value"
-  elif [[ "$free_ram_pct_value" =~ ^[0-9]+$ && "$free_ram_pct_value" -le "$CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT" ]]; then
-    log "$instance pid $pid sampled with low free_ram_pct=${free_ram_pct_value}%"
-    notify_warning "$instance" "$pid" "$footprint_mb" "${eta_minutes:-unknown}" "$swap_free" "$free_ram_pct_value"
-  elif [[ "$swap_free" -lt "$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB")" ]]; then
-    log "$instance pid $pid sampled with low swap_free=${swap_free}MB"
-    notify_warning "$instance" "$pid" "$footprint_mb" "${eta_minutes:-unknown}" "$swap_free" "$free_ram_pct_value"
   fi
 }
 

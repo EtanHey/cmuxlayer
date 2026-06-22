@@ -18,6 +18,14 @@
     <string>2</string>
     <key>CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT</key>
     <string>12</string>
+    <key>CMUX_RAM_SAMPLER_NEARCRASH_FREE_RAM_PCT</key>
+    <string>4</string>
+    <key>CMUX_RAM_SAMPLER_NEARCRASH_COMPRESSOR_FRAC</key>
+    <string>0.80</string>
+    <key>CMUX_RAM_SAMPLER_ALERT_ROUTE</key>
+    <string>orchestrator/cmux-LEAD</string>
+    <key>CMUX_RAM_SAMPLER_TOP_RSS_LIMIT</key>
+    <string>8</string>
     <key>CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS</key>
     <string>600</string>
     <key>CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES</key>
@@ -30,7 +38,7 @@
   <true/>
 
   <key>StartInterval</key>
-  <integer>300</integer>
+  <integer>1800</integer>
 
   <key>StandardOutPath</key>
   <string>/Users/etanheyman/Library/Logs/cmux-ram-sampler/launchd.stdout.log</string>
