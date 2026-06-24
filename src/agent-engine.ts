@@ -43,6 +43,7 @@ import {
 import { parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
+  chooseSurfaceClosePolicy,
   collectRoleSurfaceIds,
   inferAgentRole,
   inferRecordRole,
@@ -219,6 +220,11 @@ interface StopPostConditionResult {
   surfaceGone: boolean;
   paneGone: boolean;
   paneRef: string | null;
+}
+
+interface StopSurfaceClosePolicy {
+  paneRef: string | null;
+  collapsePane: boolean;
 }
 
 type TargetStateEvidenceSource = "state" | "transcript" | "screen";
@@ -2220,6 +2226,53 @@ export class AgentEngine {
     return null;
   }
 
+  private async resolveStopSurfaceClosePolicy(
+    surfaceId: string,
+    workspaceId?: string | null,
+  ): Promise<StopSurfaceClosePolicy> {
+    try {
+      const opts = workspaceId ? { workspace: workspaceId } : undefined;
+      const panes = await this.client.listPanes(opts);
+      const rawPaneSurfaces = await Promise.all(
+        panes.panes.map(async (pane) => {
+          const paneSurfaces = await this.client.listPaneSurfaces({
+            ...(opts ?? {}),
+            pane: pane.ref,
+          });
+          return paneSurfaces.pane_ref
+            ? paneSurfaces
+            : { ...paneSurfaces, pane_ref: pane.ref };
+        }),
+      );
+      const paneSurfaces = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawPaneSurfaces,
+        {
+          workspace_ref: panes.workspace_ref ?? workspaceId ?? undefined,
+          window_ref: panes.window_ref,
+        },
+      );
+      const workerSurfaceIds = new Set(
+        this.registry.list().map((record) => record.surface_id),
+      );
+      const policy = chooseSurfaceClosePolicy(
+        panes.panes,
+        paneSurfaces,
+        workerSurfaceIds,
+        surfaceId,
+      );
+      return {
+        paneRef: policy.pane,
+        collapsePane: policy.collapsePane,
+      };
+    } catch {
+      return {
+        paneRef: await this.resolvePaneForSurface(surfaceId, workspaceId),
+        collapsePane: false,
+      };
+    }
+  }
+
   private isProcessGone(pid: number | null | undefined): boolean {
     if (!pid) return true;
     try {
@@ -2276,11 +2329,16 @@ export class AgentEngine {
   private async waitForStopPostCondition(
     agent: AgentRecord,
     paneRef: string | null,
+    expectPaneGone: boolean,
   ): Promise<StopPostConditionResult> {
     const deadline = Date.now() + this.stopPostConditionTimeoutMs;
     let result = await this.readStopPostCondition(agent, paneRef);
     while (
-      !(result.processGone && result.surfaceGone && result.paneGone) &&
+      !(
+        result.processGone &&
+        result.surfaceGone &&
+        (!expectPaneGone || result.paneGone)
+      ) &&
       Date.now() < deadline
     ) {
       await new Promise((resolve) =>
@@ -2294,11 +2352,14 @@ export class AgentEngine {
   private formatStopPostConditionError(
     agent: AgentRecord,
     result: StopPostConditionResult,
+    expectPaneGone: boolean,
+    closeError: string | null,
   ): string {
     const failed = [
       result.processGone ? null : "process still alive",
       result.surfaceGone ? null : "surface still live",
-      result.paneGone ? null : "pane still open",
+      expectPaneGone && !result.paneGone ? "pane still open" : null,
+      closeError ? `close failed: ${closeError}` : null,
     ].filter((part): part is string => part !== null);
     return [
       `Stop post-condition failed for ${agent.agent_id}: ${failed.join(", ")}`,
@@ -2338,7 +2399,7 @@ export class AgentEngine {
       return; // Already stopped
     }
 
-    const stopPaneRef = await this.resolvePaneForSurface(
+    const stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
       route.surface_id,
       route.workspace_id,
     );
@@ -2356,18 +2417,32 @@ export class AgentEngine {
       });
     }
 
-    await this.client.closeSurface(route.surface_id, {
-      workspace: route.workspace_id ?? undefined,
-      collapsePane: true,
-    });
+    let closeError: string | null = null;
+    try {
+      await this.client.closeSurface(route.surface_id, {
+        workspace: route.workspace_id ?? undefined,
+        collapsePane: stopClosePolicy.collapsePane,
+      });
+    } catch (error) {
+      closeError = error instanceof Error ? error.message : String(error);
+    }
 
-    const stopResult = await this.waitForStopPostCondition(agent, stopPaneRef);
+    const stopResult = await this.waitForStopPostCondition(
+      agent,
+      stopClosePolicy.paneRef,
+      stopClosePolicy.collapsePane,
+    );
     if (
       !stopResult.processGone ||
       !stopResult.surfaceGone ||
-      !stopResult.paneGone
+      (stopClosePolicy.collapsePane && !stopResult.paneGone)
     ) {
-      const error = this.formatStopPostConditionError(agent, stopResult);
+      const error = this.formatStopPostConditionError(
+        agent,
+        stopResult,
+        stopClosePolicy.collapsePane,
+        closeError,
+      );
       try {
         const updated = this.stateMgr.updateRecord(canonicalAgentId, {
           error,

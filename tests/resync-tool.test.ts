@@ -481,6 +481,26 @@ describe("resync_agents tool", () => {
     expect(parsed.count).toBe(0);
   });
 
+  it("resync_agents reports agent-less terminal surfaces as orphaned instead of clean", async () => {
+    const server = createServer({
+      exec: makeShellPromptExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.added).toEqual([]);
+    expect(parsed.diff.evicted).toEqual([]);
+    expect(parsed.diff.mismatches).toEqual([]);
+    expect(parsed.diff.orphaned).toEqual(["surface:999"]);
+    expect(parsed.count).toBe(0);
+  });
+
   it("resync_agents evicts registry-only phantom agents instead of failing", async () => {
     const server = createServer({
       exec: makeDiscoveryExec(),

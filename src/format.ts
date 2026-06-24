@@ -268,9 +268,11 @@ export function formatResync(diff: {
   added: string[];
   evicted: string[];
   mismatches: string[];
+  orphaned?: string[];
 }): string {
   const added = diff.added.length;
   const evicted = diff.evicted.length;
   const mismatches = diff.mismatches.length;
-  return `✔ resync_agents — added: ${added}  evicted: ${evicted}  mismatches: ${mismatches}`;
+  const orphaned = diff.orphaned?.length ?? 0;
+  return `✔ resync_agents — added: ${added}  evicted: ${evicted}  mismatches: ${mismatches}  orphaned: ${orphaned}`;
 }

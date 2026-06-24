@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { StateManager } from "../src/state-manager.js";
+import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-v2");
 
@@ -109,6 +111,117 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       stderr: "",
     };
   });
+}
+
+function makeSharedPaneExec(): ExecFn {
+  const liveSurfaces = new Set(["surface:dying", "surface:other"]);
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("close-surface")) {
+      const surface = String(args[args.indexOf("--surface") + 1] ?? "");
+      liveSurfaces.delete(surface);
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("send")) {
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+    if (args.includes("list-panes")) {
+      const surfaces = [...liveSurfaces];
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes:
+            surfaces.length > 0
+              ? [
+                  {
+                    ref: "pane:shared",
+                    index: 0,
+                    focused: true,
+                    surface_count: surfaces.length,
+                    surface_refs: surfaces,
+                    selected_surface_ref: surfaces[0],
+                  },
+                ]
+              : [],
+        }),
+        stderr: "",
+      };
+    }
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:shared",
+          surfaces: [...liveSurfaces].map((ref, index) => ({
+            ref,
+            title: "agent-pane",
+            type: "terminal",
+            index,
+            selected: index === 0,
+          })),
+        }),
+        stderr: "",
+      };
+    }
+    if (args.includes("read-screen")) {
+      const surface = String(args[args.indexOf("--surface") + 1] ?? "");
+      return {
+        stdout: JSON.stringify({
+          surface,
+          text: "$ ",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+    return { stdout: JSON.stringify({}), stderr: "" };
+  });
+}
+
+function makeAgentRecord(overrides: Partial<AgentRecord>): AgentRecord {
+  return {
+    agent_id: "agent",
+    surface_id: "surface:agent",
+    workspace_id: "workspace:1",
+    state: "working",
+    repo: "brainlayer",
+    model: "sonnet",
+    cli: "claude",
+    cli_session_id: null,
+    task_summary: "test agent",
+    pid: null,
+    version: 1,
+    created_at: "2026-04-19T20:00:00.000Z",
+    updated_at: "2026-04-19T20:00:00.000Z",
+    error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
+    crash_recover: false,
+    respawn_attempts: 0,
+    user_killed: false,
+    ...overrides,
+  };
 }
 
 function createV2Server(exec: ExecFn) {
@@ -341,6 +454,48 @@ describe("kill — scoped targets", () => {
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.killed).toContain(agentId);
+  });
+
+  it("kill closes a shared-pane target without collapsing another live agent", async () => {
+    mockExec = makeSharedPaneExec();
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "agent-dying",
+        surface_id: "surface:dying",
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "agent-other",
+        surface_id: "surface:other",
+      }),
+    );
+    server = createV2Server(mockExec);
+    await callTool(server, "list_agents", {});
+
+    const result = await callTool(server, "kill", {
+      target: "agent-dying",
+    });
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.killed).toContain("agent-dying");
+    const closeCalls = (mockExec as any).mock.calls.filter(([, args]: any[]) =>
+      args.includes("close-surface"),
+    );
+    expect(closeCalls).toHaveLength(1);
+    const closeCall = closeCalls[0];
+    expect(closeCall?.[1]).toEqual(
+      expect.arrayContaining([
+        "close-surface",
+        "--surface",
+        "surface:dying",
+        "--workspace",
+        "workspace:1",
+      ]),
+    );
+    expect(closeCall?.[1]).not.toContain("--collapse-pane");
   });
 
   it("kill returns an error when the target remains interactable", async () => {
