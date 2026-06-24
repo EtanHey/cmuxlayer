@@ -111,3 +111,7 @@ export function screenHasReadyAgentIdentity(
       return false;
   }
 }
+
+export function readyPatternRequiresAgentIdentity(cli: CliType): boolean {
+  return cli !== "gemini" && cli !== "kiro";
+}

@@ -2085,6 +2085,141 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("captures the boot session before waitFor marks a ready screen", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-03-14T03:40:10.000Z"));
+        const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+        const provisionalAgentId = "brainlayerClaude-pending-wait";
+        const finalAgentId = "brainlayerClaude-019d9aa5";
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: provisionalAgentId,
+            repo: "brainlayer",
+            model: "claude-sonnet-4.5",
+            cli: "claude",
+            state: "booting",
+            surface_id: "surface:claude-screen-session",
+            workspace_id: "ws:screen-session",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-session")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-session",
+          text: [
+            `Session ID: ${sessionId}`,
+            "Claude Code",
+            "What can I help you with?",
+            "❯ ",
+          ].join("\n"),
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(provisionalAgentId, "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.agent?.agent_id).toBe(finalAgentId);
+        expect(result.agent?.session_id).toBe(sessionId);
+        expect(engine.getAgentState(finalAgentId)).toMatchObject({
+          agent_id: finalAgentId,
+          state: "ready",
+          cli_session_id: sessionId,
+        });
+        expect(engine.getAgentState(provisionalAgentId)).toMatchObject({
+          agent_id: finalAgentId,
+          state: "ready",
+          cli_session_id: sessionId,
+        });
+        expect(stateMgr.readState(provisionalAgentId)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves Gemini ready from consecutive screen-truth prompts", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-screen-ready",
+            state: "booting",
+            surface_id: "surface:gemini-screen-ready",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-screen-ready",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("gemini-screen-ready", "ready", 2_500);
+        await vi.advanceTimersByTimeAsync(3_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(engine.getAgentState("gemini-screen-ready")?.state).toBe(
+          "ready",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("clears waitFor prompt progress when a ready wait times out", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "kiro-wait-timeout",
+            state: "booting",
+            surface_id: "surface:kiro-wait-timeout",
+            cli: "kiro",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:kiro-wait-timeout")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:kiro-wait-timeout",
+          text: "kiro> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const firstWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(await firstWait).toMatchObject({
+          matched: false,
+          source: "timeout",
+        });
+
+        const secondWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const secondResult = await secondWait;
+
+        expect(secondResult.matched).toBe(false);
+        expect(secondResult.source).toBe("timeout");
+        expect(engine.getAgentState("kiro-wait-timeout")?.state).toBe(
+          "booting",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not resolve ready from a prompt-looking active Claude screen", async () => {
       vi.useFakeTimers();
       try {

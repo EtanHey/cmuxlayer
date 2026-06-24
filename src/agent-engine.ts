@@ -53,6 +53,7 @@ import {
 } from "./layout-policy.js";
 import {
   matchReadyPattern,
+  readyPatternRequiresAgentIdentity,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
@@ -622,9 +623,6 @@ export class AgentEngine {
   private loggedEvents = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
-  /** agentId → waitFor-local consecutive ready-prompt matches */
-  private waitForReadyPatternMatches = new Map<string, number>();
-
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -754,12 +752,17 @@ export class AgentEngine {
   private async refreshTargetStateEvidence(
     agent: AgentRecord,
     targetState: AgentState,
+    waitForReadyPatternMatches: Map<string, number>,
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
   }> {
     if (targetState === "ready" || targetState === "idle") {
-      return this.refreshInteractiveTargetStateEvidence(agent, targetState);
+      return this.refreshInteractiveTargetStateEvidence(
+        agent,
+        targetState,
+        waitForReadyPatternMatches,
+      );
     }
     if (!this.requiresOutputDoneEvidence(targetState)) return { agent };
     if (TERMINAL_STATES.has(agent.state)) return { agent };
@@ -769,6 +772,7 @@ export class AgentEngine {
   private async refreshInteractiveTargetStateEvidence(
     agent: AgentRecord,
     targetState: "ready" | "idle",
+    waitForReadyPatternMatches: Map<string, number>,
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
@@ -778,11 +782,11 @@ export class AgentEngine {
         ? agent.state === "booting"
         : agent.state === "working";
     if (!canTransition || TERMINAL_STATES.has(agent.state)) {
-      this.waitForReadyPatternMatches.delete(agent.agent_id);
+      waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
     if (agent.boot_prompt_pending) {
-      this.waitForReadyPatternMatches.delete(agent.agent_id);
+      waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
 
@@ -791,43 +795,55 @@ export class AgentEngine {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
       const match = matchReadyPattern(agent.cli, screen.text);
-      const ready =
-        match.matched &&
+      const hasReadyIdentity =
+        !readyPatternRequiresAgentIdentity(agent.cli) ||
         screenHasReadyAgentIdentity(
           agent.cli,
           screen.text,
           parseScreen(screen.text),
         );
+      const ready = match.matched && hasReadyIdentity;
       if (!ready) {
-        this.waitForReadyPatternMatches.delete(agent.agent_id);
+        waitForReadyPatternMatches.delete(agent.agent_id);
         return { agent };
       }
 
       const count =
-        (this.waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
-      this.waitForReadyPatternMatches.set(agent.agent_id, count);
+        (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      waitForReadyPatternMatches.set(agent.agent_id, count);
       if (count < Math.max(1, match.consecutive)) {
         return { agent };
       }
 
-      let updated = this.stateMgr.transition(agent.agent_id, targetState, {
-        error:
-          targetState === "ready" &&
-          agent.error?.startsWith("Post-spawn liveness failed:")
-            ? null
-            : agent.error,
-      });
+      const transitionAgent =
+        targetState === "ready"
+          ? await this.maybeCaptureBootSessionId(agent, {
+              screen: Promise.resolve(screen),
+            })
+          : agent;
+      let updated = this.stateMgr.transition(
+        transitionAgent.agent_id,
+        targetState,
+        {
+          error:
+            targetState === "ready" &&
+            transitionAgent.error?.startsWith("Post-spawn liveness failed:")
+              ? null
+              : transitionAgent.error,
+        },
+      );
       if (
         targetState === "ready" &&
         updated.quality === "degraded" &&
-        agent.error?.startsWith("Post-spawn liveness failed:")
+        transitionAgent.error?.startsWith("Post-spawn liveness failed:")
       ) {
-        updated = this.stateMgr.updateRecord(agent.agent_id, {
+        updated = this.stateMgr.updateRecord(transitionAgent.agent_id, {
           quality: "unknown",
         });
       }
-      this.registry.set(agent.agent_id, updated);
-      this.waitForReadyPatternMatches.delete(agent.agent_id);
+      this.registry.set(transitionAgent.agent_id, updated);
+      waitForReadyPatternMatches.delete(agent.agent_id);
+      waitForReadyPatternMatches.delete(transitionAgent.agent_id);
       return { agent: updated, source: "screen" };
     } catch {
       return { agent };
@@ -1974,14 +1990,21 @@ export class AgentEngine {
       };
     }
 
+    const waitForReadyPatternMatches = new Map<string, number>();
+
     // Polling sweep loop
     return new Promise<WaitResult>((resolve) => {
+      const finish = (result: WaitResult) => {
+        waitForReadyPatternMatches.clear();
+        resolve(result);
+      };
+
       const checkInterval = setInterval(async () => {
         const elapsed = Date.now() - start;
         if (elapsed >= timeoutMs) {
           clearInterval(checkInterval);
           const current = this.registry.get(agentId);
-          resolve({
+          finish({
             matched: false,
             state: current?.state ?? "error",
             elapsed,
@@ -1997,7 +2020,7 @@ export class AgentEngine {
         let current = this.registry.get(agentId);
         if (!current) {
           clearInterval(checkInterval);
-          resolve({
+          finish({
             matched: false,
             state: "error",
             elapsed,
@@ -2011,6 +2034,7 @@ export class AgentEngine {
         const refreshed = await this.refreshTargetStateEvidence(
           current,
           targetState,
+          waitForReadyPatternMatches,
         );
         current = refreshed.agent;
 
@@ -2020,7 +2044,7 @@ export class AgentEngine {
         );
         if (evidenceSource) {
           clearInterval(checkInterval);
-          resolve({
+          finish({
             matched: true,
             state: current.state,
             elapsed,
@@ -2038,7 +2062,7 @@ export class AgentEngine {
           current.state !== targetState
         ) {
           clearInterval(checkInterval);
-          resolve({
+          finish({
             matched: false,
             state: current.state,
             elapsed,
