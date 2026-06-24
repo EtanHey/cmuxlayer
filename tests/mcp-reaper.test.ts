@@ -196,6 +196,36 @@ describe("signalProcessBatch", () => {
       { ok: true, pid: 403, signal: "SIGTERM" },
     ]);
   });
+
+  it.each(["SIGTERM", "SIGKILL"] as const)(
+    "marks %s failed when the pid remains alive after signaling",
+    (signal) => {
+      const processes: ProcessInfo[] = [
+        { pid: 501, ppid: 1, etimes: 1200, command: "node live-mcp/index.js" },
+      ];
+      const signaled: Array<[number, NodeJS.Signals]> = [];
+
+      const attempts = signalProcessBatch(
+        processes,
+        signal,
+        (pid, attemptedSignal) => {
+          signaled.push([pid, attemptedSignal]);
+        },
+        () => true,
+      );
+
+      expect(signaled).toEqual([[501, signal]]);
+      expect(attempts).toEqual([
+        {
+          errorCode: "STILL_ALIVE",
+          errorMessage: `pid 501 still alive after ${signal}`,
+          ok: false,
+          pid: 501,
+          signal,
+        },
+      ]);
+    },
+  );
 });
 
 describe("parseCliOptions", () => {

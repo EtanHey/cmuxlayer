@@ -66,6 +66,7 @@ export interface SignalAttempt {
 }
 
 export type KillProcess = (pid: number, signal: NodeJS.Signals) => void;
+export type IsProcessAlive = (pid: number) => boolean;
 
 export const PROCESS_TABLE_PS_ARGS = [
   "-ww",
@@ -192,10 +193,20 @@ export function signalProcessBatch(
   processes: readonly ProcessInfo[],
   signal: NodeJS.Signals,
   killProcess: KillProcess = process.kill,
+  isProcessAlive: IsProcessAlive = () => false,
 ): SignalAttempt[] {
   return processes.map((proc) => {
     try {
       killProcess(proc.pid, signal);
+      if (isProcessAlive(proc.pid)) {
+        return {
+          ok: false,
+          pid: proc.pid,
+          signal,
+          errorCode: "STILL_ALIVE",
+          errorMessage: `pid ${proc.pid} still alive after ${signal}`,
+        };
+      }
       return { ok: true, pid: proc.pid, signal };
     } catch (error) {
       return {
@@ -208,6 +219,23 @@ export function signalProcessBatch(
       };
     }
   });
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ESRCH"
+    ) {
+      return false;
+    }
+    return true;
+  }
 }
 
 function signalErrorCode(error: unknown): string {
@@ -439,7 +467,7 @@ async function runReaper(opts: CliOptions): Promise<void> {
   }
   await logSignalFailures(
     opts.logFile,
-    signalProcessBatch(killable, "SIGKILL"),
+    signalProcessBatch(killable, "SIGKILL", process.kill, processAlive),
   );
 }
 

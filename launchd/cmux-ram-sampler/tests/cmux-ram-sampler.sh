@@ -55,6 +55,32 @@ assert_no_kill_invoked() {
   fi
 }
 
+install_kill_traps() {
+  local log_file="$1"
+  export CMUX_TEST_KILL_TRAP_LOG="$log_file"
+  kill() {
+    printf 'kill %s\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+    return 0
+  }
+  pkill() {
+    printf 'pkill %s\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+    return 0
+  }
+  killall() {
+    printf 'killall %s\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+    return 0
+  }
+  osascript() {
+    printf 'osascript %s\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+    return 0
+  }
+  launchctl() {
+    printf 'launchctl %s\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+    return 0
+  }
+  export -f kill pkill killall osascript launchctl
+}
+
 source_sampler() {
   if [[ -n "${CMUX_RAM_SAMPLER_LOG_DIR:-}" ]]; then
     case "${CMUX_RAM_SAMPLER_NEARCRASH_STATE_DIR:-}" in
@@ -351,12 +377,7 @@ printf '4242 200000 /Applications/cmux.app/Contents/MacOS/cmux\n'
 EOF
   chmod +x "$root_dir/bin/ps"
 
-  cat >"$root_dir/bin/kill" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "\$*" >>"$log_dir/kill.log"
-EOF
-  chmod +x "$root_dir/bin/kill"
+  install_kill_traps "$log_dir/kill.log"
 
   cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
 4242 phys_footprint: 1024 MB (peak 2048 MB)
@@ -405,12 +426,7 @@ printf '4242 200000 /Applications/cmux.app/Contents/MacOS/cmux\n'
 EOF
   chmod +x "$root_dir/bin/ps"
 
-  cat >"$root_dir/bin/kill" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "\$*" >>"$log_dir/kill.log"
-EOF
-  chmod +x "$root_dir/bin/kill"
+  install_kill_traps "$log_dir/kill.log"
 
   cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
 4242 phys_footprint: 1024 MB (peak 2048 MB)
@@ -434,6 +450,21 @@ EOF
   assert_no_kill_invoked "$log_dir/kill.log"
 
   printf 'PASS: sampler re-routes after near-crash recovery and later cross\n'
+  rm -rf "$root_dir"
+}
+
+run_kill_trap_builtin_case() {
+  local root_dir log_dir
+  root_dir="$(mktemp -d)"
+  log_dir="$root_dir/logs"
+  mkdir -p "$log_dir"
+
+  install_kill_traps "$log_dir/kill.log"
+  kill -9 4242
+
+  assert_file_contains "$log_dir/kill.log" "kill -9 4242"
+
+  printf 'PASS: sampler kill trap catches shell builtin kill\n'
   rm -rf "$root_dir"
 }
 
@@ -753,6 +784,7 @@ run_vmstat_page_size_case
 run_routine_high_records_without_alert_case
 run_nearcrash_routed_alert_edge_case
 run_nearcrash_recovery_reroute_case
+run_kill_trap_builtin_case
 run_never_nearcrash_alert_case
 run_notify_skip_case
 run_notify_skip_all_sampler_paths_case

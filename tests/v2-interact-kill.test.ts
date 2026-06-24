@@ -28,9 +28,17 @@ function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
-function makeSpawnReadyExec(): ExecFn {
+function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let launchSent = false;
+  let surfaceLive = true;
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split") || args.includes("new-surface")) {
+      surfaceLive = true;
+    }
+    if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
+      surfaceLive = false;
+      return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send")) {
       launchSent = true;
     }
@@ -38,7 +46,46 @@ function makeSpawnReadyExec(): ExecFn {
       return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
     }
     if (args.includes("list-panes")) {
-      return { stdout: JSON.stringify({ panes: [] }), stderr: "" };
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          panes: surfaceLive
+            ? [
+                {
+                  ref: "pane:1",
+                  index: 0,
+                  focused: true,
+                  surface_count: 1,
+                  surface_refs: ["surface:new"],
+                  selected_surface_ref: "surface:new",
+                },
+              ]
+            : [],
+        }),
+        stderr: "",
+      };
+    }
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: surfaceLive
+            ? [
+                {
+                  ref: "surface:new",
+                  title: "agent-pane",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [],
+        }),
+        stderr: "",
+      };
     }
     if (args.includes("read-screen")) {
       return {
@@ -294,6 +341,26 @@ describe("kill — scoped targets", () => {
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.killed).toContain(agentId);
+  });
+
+  it("kill returns an error when the target remains interactable", async () => {
+    mockExec = makeSpawnReadyExec({ closeKeepsSurface: true });
+    server = createV2Server(mockExec);
+    const spawn = await callTool(server, "spawn_agent", {
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+    });
+    const agentId = parseResult(spawn).agent_id;
+
+    const result = await callTool(server, "kill", {
+      target: agentId,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/post-condition/i);
   });
 
   it("kill resolves a finalized agent through its pending alias", async () => {
