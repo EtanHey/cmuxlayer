@@ -1591,7 +1591,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           onChunkDelivered: (count) => {
             sentChunks = count;
           },
-          verify_submit: sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD,
+          verify_submit: true,
         }),
       );
       return { ...delivery, prompt_text: rawPrompt };
@@ -1606,6 +1606,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
   };
+
+  const isBootPromptDelivered = (
+    delivery: Awaited<ReturnType<typeof deliverBootPrompt>> | undefined,
+  ): boolean => delivery?.submit_verified === true;
 
   // ── Auto-focus discipline for split/pane creation ──────────────────
   // cmux attaches a new split to the *currently focused* workspace. When a
@@ -2203,7 +2207,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data.role = inferredRole;
         }
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered = true;
+          data.boot_prompt_delivered = isBootPromptDelivered(
+            bootPromptDelivery,
+          );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
         }
         return okFormatted(
@@ -2214,7 +2220,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             type: args.type,
             title: result.title,
             role: inferredRole ?? undefined,
-            boot_prompt_delivered: Boolean(bootPromptDelivery),
+            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           }),
           data,
         );
@@ -2304,7 +2310,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const data: Record<string, unknown> = { ...result };
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered = true;
+          data.boot_prompt_delivered = isBootPromptDelivered(
+            bootPromptDelivery,
+          );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
         }
         return okFormatted(
@@ -2313,7 +2321,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface: result.surface,
             type: result.type,
             title: result.title,
-            boot_prompt_delivered: Boolean(bootPromptDelivery),
+            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           }),
           data,
         );
@@ -2594,7 +2602,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivered: true,
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
-          boot_prompt_delivered: Boolean(bootPromptDelivery),
+          boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
         };
         return okFormatted(
@@ -3884,7 +3892,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface: result.surface_id,
               role,
               monitor_boot: monitorBoot,
-              boot_prompt_delivered: Boolean(bootPromptDelivery),
+              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
             }),
             {
               ...result,
@@ -3892,7 +3900,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               mcp_profile: worktree.mcpProfileLabel,
               role,
               monitor_boot: monitorBoot,
-              boot_prompt_delivered: Boolean(bootPromptDelivery),
+              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },
           );
@@ -3996,7 +4004,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: "worker",
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
-              boot_prompt_delivered: Boolean(bootPromptDelivery),
+              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
             },
           );

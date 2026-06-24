@@ -1836,6 +1836,7 @@ describe("tool handler integration", () => {
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
     let reads = 0;
+    let readsWhenBootPromptSent: number | null = null;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
         reads += 1;
@@ -1849,6 +1850,12 @@ describe("tool handler integration", () => {
           }),
           stderr: "",
         };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        readsWhenBootPromptSent = reads;
       }
       return { stdout: "{}", stderr: "" };
     });
@@ -1867,7 +1874,8 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(reads).toBe(2);
+    expect(readsWhenBootPromptSent).toBe(2);
+    expect(reads).toBe(3);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -3756,6 +3764,197 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.surface).toBe("surface:2");
     expect(parsed.last_10_lines).toContain("$ waiting");
+  });
+
+  it("new_split fails loudly when a short boot prompt stays pending after submit retry", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-short-dropped-return.md");
+    const prompt = "short boot prompt";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let returnPresses = 0;
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        promptSent = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text:
+              promptSent && returnPresses > 0
+                ? `codex> ${prompt}`
+                : "codex> ",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.boot_prompt_delivered).not.toBe(true);
+    expect(returnPresses).toBe(2);
+  }, 10_000);
+
+  it("new_split reports a short boot prompt delivered after submit verification succeeds", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-short-submitted.md");
+    const prompt = "short boot prompt";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let returnPresses = 0;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text: "codex> ",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(returnPresses).toBe(1);
+  });
+
+  it("new_split keeps verifying long boot prompts and retries a missed submit", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-long-retry.md");
+    const prompt = "long boot prompt ".repeat(40);
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let returnPresses = 0;
+    let typedText = "";
+    const sendCalls: string[] = [];
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send") || args.includes("set-buffer")) {
+        const chunk = String(args.at(-1) ?? "");
+        sendCalls.push(chunk);
+        typedText += chunk;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text:
+              returnPresses === 1
+                ? `codex> ${typedText.slice(-100)}`
+                : "codex> ",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(sendCalls.length).toBeGreaterThan(1);
+    expect(returnPresses).toBe(2);
   });
 
   it("new_split renames the new surface when a title is provided", async () => {
