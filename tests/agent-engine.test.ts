@@ -3486,6 +3486,59 @@ To continue this session, run codex resume ${sessionId}`,
       expect(stateMgr.readState("agent-respawned-pane")?.state).not.toBe("done");
     });
 
+    it("closes only the stopped agent surface when another live agent shares the pane", async () => {
+      const pane = {
+        ref: "pane:shared",
+        index: 0,
+        focused: true,
+        surface_count: 2,
+        surface_refs: ["surface:dying", "surface:other"],
+        selected_surface_ref: "surface:dying",
+      };
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        panes: [pane],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: "pane:shared",
+        surfaces: [
+          makeSurface("surface:dying"),
+          makeSurface("surface:other"),
+        ],
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-dying",
+          state: "working",
+          surface_id: "surface:dying",
+          workspace_id: "ws:1",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-other",
+          state: "working",
+          surface_id: "surface:other",
+          workspace_id: "ws:1",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dying"), makeSurface("surface:other")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.stopAgent("agent-dying");
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:dying", {
+        workspace: "ws:1",
+        collapsePane: false,
+      });
+      expect(mockClient.closeSurface).toHaveBeenCalledTimes(1);
+      expect(stateMgr.readState("agent-dying")?.state).toBe("done");
+      expect(stateMgr.readState("agent-other")?.state).toBe("working");
+    });
+
     it("resolves provisional agent aliases before stopping", async () => {
       stateMgr.writeState(
         makeRecord({

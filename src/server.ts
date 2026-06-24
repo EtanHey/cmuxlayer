@@ -4289,6 +4289,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           discovery.invalidate();
           const after = await registry.listMerged(discovery, { force: true });
+          const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
           const diff = {
             added: [...afterIds].filter((id) => !beforeIds.has(id)),
@@ -4296,6 +4297,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             mismatches: after
               .filter((agent) => agent.parsed_cli_mismatch)
               .map((agent) => agent.agent_id),
+            orphaned: discovered
+              .filter((surface) => !surface.has_agent && !surface.read_error)
+              .map((surface) => surface.surface_id),
           };
 
           return okFormatted(formatResync(diff), {
