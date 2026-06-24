@@ -43,6 +43,33 @@ function fileMissingOrEmpty(path: string) {
   return !existsSync(path) || statSync(path).size === 0;
 }
 
+function samplerKillTrap(logDir: string) {
+  return `
+export CMUX_TEST_KILL_TRAP_LOG=${JSON.stringify(join(logDir, "kill.log"))}
+kill() {
+  printf 'kill %s\\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+  return 0
+}
+pkill() {
+  printf 'pkill %s\\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+  return 0
+}
+killall() {
+  printf 'killall %s\\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+  return 0
+}
+osascript() {
+  printf 'osascript %s\\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+  return 0
+}
+launchctl() {
+  printf 'launchctl %s\\n' "$*" >>"$CMUX_TEST_KILL_TRAP_LOG"
+  return 0
+}
+export -f kill pkill killall osascript launchctl
+`;
+}
+
 function runBash(script: string, env: NodeJS.ProcessEnv) {
   return spawnSync("/bin/bash", ["--noprofile", "--norc", "-c", script], {
     cwd: repoRoot,
@@ -145,13 +172,6 @@ while IFS= read -r line; do
 done
 `,
   );
-  writeExecutable(
-    join(root, "bin/kill"),
-    `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' "$*" >>"${logDir}/kill.log"
-`,
-  );
   writeFileSync(join(root, "fixtures/footprint.fixture"), "4242 phys_footprint: 1024 MB (peak 2048 MB)\n");
   writeFileSync(join(root, "fixtures/memsize.fixture"), "1048576\n");
 }
@@ -204,7 +224,8 @@ run_once`,
     );
 
     const result = runBash(
-      `source "${ramSamplerScript}"
+      `${samplerKillTrap(logDir)}
+source "${ramSamplerScript}"
 run_once`,
       {
         PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
@@ -243,7 +264,8 @@ run_once`,
     );
 
     const result = runBash(
-      `source "${ramSamplerScript}"
+      `${samplerKillTrap(logDir)}
+source "${ramSamplerScript}"
 run_once`,
       {
         PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
@@ -268,5 +290,25 @@ run_once`,
     expect(alert).toContain("cmux.app");
     expect(fileMissingOrEmpty(join(logDir, "kill.log"))).toBe(true);
     expect(readIfExists(join(logDir, "kill.log"))).not.toMatch(/-(TERM|KILL)\s+4242/);
+  });
+
+  it("records injected shell kill builtin attempts in the sampler no-kill guard", () => {
+    const root = makeRoot("cmux-sampler-killtrap-vitest-");
+    const logDir = join(root, "logs");
+    seedSamplerCommands(root);
+
+    const result = runBash(
+      `${samplerKillTrap(logDir)}
+source "${ramSamplerScript}"
+kill -9 4242 || true`,
+      {
+        PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
+        CMUX_RAM_SAMPLER_SOURCE_ONLY: "1",
+        CMUX_RAM_SAMPLER_LOG_DIR: logDir,
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readIfExists(join(logDir, "kill.log"))).toContain("-9 4242");
   });
 });

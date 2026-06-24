@@ -3348,6 +3348,14 @@ To continue this session, run codex resume ${sessionId}`,
   });
 
   describe("stopAgent", () => {
+    beforeEach(() => {
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => {
+          liveSurfaces = liveSurfaces.filter((item) => item.ref !== surface);
+        },
+      );
+    });
+
     it("sends Ctrl+C for graceful stop", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -3383,6 +3391,99 @@ To continue this session, run codex resume ${sessionId}`,
 
       const state = stateMgr.readState("agent-stop");
       expect(state!.state).toBe("done");
+    });
+
+    it("rejects graceful stop when the agent surface remains live", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-still-live",
+          state: "working",
+          surface_id: "surface:still-live",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:still-live")];
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockResolvedValue(
+        undefined,
+      );
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.stopAgent("agent-still-live")).rejects.toThrow(
+        /post-condition/i,
+      );
+      expect(stateMgr.readState("agent-still-live")?.state).not.toBe("done");
+    });
+
+    it("rejects graceful stop when the pane respawns a fresh idle surface", async () => {
+      const pane = {
+        ref: "pane:agent",
+        index: 0,
+        focused: true,
+        surface_count: 1,
+        surface_refs: ["surface:old-agent"],
+        selected_surface_ref: "surface:old-agent",
+      };
+      mockClient = makeMockClient({
+        listPanes: vi
+          .fn()
+          .mockResolvedValueOnce({
+            workspace_ref: "ws:1",
+            window_ref: "window:1",
+            panes: [pane],
+          })
+          .mockResolvedValue({
+            workspace_ref: "ws:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ...pane,
+                surface_refs: ["surface:fresh-idle"],
+                selected_surface_ref: "surface:fresh-idle",
+              },
+            ],
+          }),
+        listPaneSurfaces: vi
+          .fn()
+          .mockResolvedValueOnce({
+            workspace_ref: "ws:1",
+            window_ref: "window:1",
+            pane_ref: "pane:agent",
+            surfaces: [makeSurface("surface:old-agent")],
+          })
+          .mockResolvedValue({
+            workspace_ref: "ws:1",
+            window_ref: "window:1",
+            pane_ref: "pane:agent",
+            surfaces: [
+              {
+                ...makeSurface("surface:fresh-idle"),
+                title: "What can I help you with?",
+              },
+            ],
+          }),
+        closeSurface: vi.fn().mockImplementation(async () => {
+          liveSurfaces = [makeSurface("surface:fresh-idle")];
+        }),
+      });
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-respawned-pane",
+          state: "working",
+          surface_id: "surface:old-agent",
+          workspace_id: "ws:1",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:old-agent")];
+      await engine.getRegistry().reconstitute();
+
+      await expect(engine.stopAgent("agent-respawned-pane")).rejects.toThrow(
+        /post-condition/i,
+      );
+      expect(stateMgr.readState("agent-respawned-pane")?.state).not.toBe("done");
     });
 
     it("resolves provisional agent aliases before stopping", async () => {
@@ -3473,6 +3574,38 @@ To continue this session, run codex resume ${sessionId}`,
 
       const state = stateMgr.readState("agent-force");
       expect(["done", "error"]).toContain(state!.state);
+    });
+
+    it("rejects force stop when the pid remains alive after SIGKILL", async () => {
+      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          killCalls.push([pid, signal ?? 0]);
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-force-live",
+            state: "working",
+            surface_id: "surface:force-live",
+            pid: 12345,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:force-live")];
+        await engine.getRegistry().reconstitute();
+
+        await expect(engine.stopAgent("agent-force-live", true)).rejects.toThrow(
+          /post-condition/i,
+        );
+        expect(killCalls).toContainEqual([12345, "SIGKILL"]);
+        expect(killCalls).toContainEqual([12345, 0]);
+        expect(stateMgr.readState("agent-force-live")?.state).not.toBe("done");
+      } finally {
+        killSpy.mockRestore();
+      }
     });
 
     it("does not mark naturally completed agents as user-killed", async () => {
@@ -3881,6 +4014,46 @@ describe("assertLauncherAvailable", () => {
     await expect(
       assertLauncherAvailable("skill-creator", "Cursor"),
     ).rejects.toThrow(/skill-creatorCursor.*skillcreatorCursor.*cli="kiro"/s);
+  });
+
+  it("waits for the launcher probe process to exit after SIGTERM timeout", async () => {
+    vi.useFakeTimers();
+    let exitCallback: ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | null = null;
+    const child = {
+      kill: vi.fn(),
+      once: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
+        if (event === "exit") {
+          exitCallback = callback as typeof exitCallback;
+        }
+        return child;
+      }),
+    };
+    spawnMock.mockImplementation(() => child);
+
+    try {
+      const probe = assertLauncherAvailable("brainlayer", "Cursor");
+      let settled = false;
+      probe.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.resolve();
+
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(settled).toBe(false);
+
+      exitCallback?.(null, "SIGTERM");
+      await expect(probe).rejects.toThrow(/Launcher not found/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

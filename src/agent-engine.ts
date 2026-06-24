@@ -151,6 +151,7 @@ export interface AgentEngineOptions {
   ) => Promise<SpawnPreflightResult | void>;
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
+  stopPostConditionTimeoutMs?: number;
   sessionIdentityResolver?: SessionIdentityResolver;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
@@ -173,6 +174,8 @@ const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
+const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
+const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
@@ -209,6 +212,13 @@ type SweepTimingInput = number | Partial<SweepTimingOptions>;
 
 interface SweepAgentContext {
   screen?: Promise<CmuxReadScreenResult>;
+}
+
+interface StopPostConditionResult {
+  processGone: boolean;
+  surfaceGone: boolean;
+  paneGone: boolean;
+  paneRef: string | null;
 }
 
 type TargetStateEvidenceSource = "state" | "transcript" | "screen";
@@ -534,22 +544,50 @@ function runDetachedShellProbe(shell: string, probe: string): Promise<void> {
       stdio: "ignore",
       windowsHide: true,
     });
+    let timedOut = false;
+    let settled = false;
+    let postTermTimer: ReturnType<typeof setTimeout> | null = null;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
-      reject(new Error("launcher probe timed out"));
+      postTermTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finishReject(
+          new Error("launcher probe failed to terminate after SIGTERM"),
+        );
+      }, 1_000);
     }, 5_000);
 
-    child.once("error", (error) => {
+    const cleanup = () => {
       clearTimeout(timer);
+      if (postTermTimer) clearTimeout(postTermTimer);
+    };
+    const finishResolve = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const finishReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(error);
+    };
+
+    child.once("error", (error) => {
+      finishReject(error);
     });
     child.once("exit", (code, signal) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve();
+      if (timedOut) {
+        finishReject(new Error("launcher probe timed out"));
         return;
       }
-      reject(
+      if (code === 0) {
+        finishResolve();
+        return;
+      }
+      finishReject(
         new Error(
           `launcher probe exited with ${code ?? `signal ${signal ?? "unknown"}`}`,
         ),
@@ -604,6 +642,7 @@ export class AgentEngine {
   ) => Promise<SpawnPreflightResult | void>;
   private spawnGuard: SpawnGuard;
   private postSpawnLivenessMs: number;
+  private stopPostConditionTimeoutMs: number;
   private roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -643,6 +682,12 @@ export class AgentEngine {
       parseNonNegativeInteger(
         process.env.CMUXLAYER_POST_SPAWN_LIVENESS_MS,
         DEFAULT_POST_SPAWN_LIVENESS_MS,
+      );
+    this.stopPostConditionTimeoutMs =
+      opts?.stopPostConditionTimeoutMs ??
+      parseNonNegativeInteger(
+        process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS,
+        DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS,
       );
     this.spawnPreflight =
       opts?.spawnPreflight ??
@@ -2137,6 +2182,128 @@ export class AgentEngine {
     };
   }
 
+  private async resolvePaneForSurface(
+    surfaceId: string,
+    workspaceId?: string | null,
+  ): Promise<string | null> {
+    try {
+      const opts = workspaceId ? { workspace: workspaceId } : undefined;
+      const panes = await this.client.listPanes(opts);
+      for (const pane of panes.panes) {
+        if (
+          pane.surface_refs.includes(surfaceId) ||
+          pane.selected_surface_ref === surfaceId
+        ) {
+          return pane.ref;
+        }
+      }
+
+      for (const pane of panes.panes) {
+        try {
+          const paneSurfaces = await this.client.listPaneSurfaces({
+            ...(workspaceId ? { workspace: workspaceId } : {}),
+            pane: pane.ref,
+          });
+          if (paneSurfaces.surfaces.some((surface) => surface.ref === surfaceId)) {
+            return paneSurfaces.pane_ref || pane.ref;
+          }
+        } catch {
+          // Keep scanning panes; a stale pane ref should not hide a later match.
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  private isProcessGone(pid: number | null | undefined): boolean {
+    if (!pid) return true;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "ESRCH"
+      ) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  private async isSurfaceGone(surfaceId: string): Promise<boolean> {
+    try {
+      return !(await this.registry.hasLiveSurface(surfaceId));
+    } catch {
+      return false;
+    }
+  }
+
+  private async isPaneGone(
+    paneRef: string | null,
+    workspaceId?: string | null,
+  ): Promise<boolean> {
+    if (!paneRef) return true;
+    try {
+      const panes = await this.client.listPanes(
+        workspaceId ? { workspace: workspaceId } : undefined,
+      );
+      return !panes.panes.some((pane) => pane.ref === paneRef);
+    } catch {
+      return false;
+    }
+  }
+
+  private async readStopPostCondition(
+    agent: AgentRecord,
+    paneRef: string | null,
+  ): Promise<StopPostConditionResult> {
+    const processGone = this.isProcessGone(agent.pid);
+    const [surfaceGone, paneGone] = await Promise.all([
+      this.isSurfaceGone(agent.surface_id),
+      this.isPaneGone(paneRef, agent.workspace_id),
+    ]);
+    return { processGone, surfaceGone, paneGone, paneRef };
+  }
+
+  private async waitForStopPostCondition(
+    agent: AgentRecord,
+    paneRef: string | null,
+  ): Promise<StopPostConditionResult> {
+    const deadline = Date.now() + this.stopPostConditionTimeoutMs;
+    let result = await this.readStopPostCondition(agent, paneRef);
+    while (
+      !(result.processGone && result.surfaceGone && result.paneGone) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, STOP_POST_CONDITION_POLL_MS),
+      );
+      result = await this.readStopPostCondition(agent, paneRef);
+    }
+    return result;
+  }
+
+  private formatStopPostConditionError(
+    agent: AgentRecord,
+    result: StopPostConditionResult,
+  ): string {
+    const failed = [
+      result.processGone ? null : "process still alive",
+      result.surfaceGone ? null : "surface still live",
+      result.paneGone ? null : "pane still open",
+    ].filter((part): part is string => part !== null);
+    return [
+      `Stop post-condition failed for ${agent.agent_id}: ${failed.join(", ")}`,
+      `(pid=${agent.pid ?? "unknown"} surface=${agent.surface_id}`,
+      `pane=${result.paneRef ?? "unknown"})`,
+    ].join(" ");
+  }
+
   /**
    * Stop an agent gracefully (Ctrl+C) or forcefully (kill PID).
    */
@@ -2168,6 +2335,11 @@ export class AgentEngine {
       return; // Already stopped
     }
 
+    const stopPaneRef = await this.resolvePaneForSurface(
+      route.surface_id,
+      route.workspace_id,
+    );
+
     if (force && agent.pid) {
       try {
         process.kill(agent.pid, "SIGKILL");
@@ -2179,6 +2351,30 @@ export class AgentEngine {
       await this.client.sendKey(route.surface_id, "c-c", {
         workspace: route.workspace_id ?? undefined,
       });
+    }
+
+    await this.client.closeSurface(route.surface_id, {
+      workspace: route.workspace_id ?? undefined,
+      collapsePane: true,
+    });
+
+    const stopResult = await this.waitForStopPostCondition(agent, stopPaneRef);
+    if (
+      !stopResult.processGone ||
+      !stopResult.surfaceGone ||
+      !stopResult.paneGone
+    ) {
+      const error = this.formatStopPostConditionError(agent, stopResult);
+      try {
+        const updated = this.stateMgr.updateRecord(canonicalAgentId, {
+          error,
+          quality: "degraded",
+        });
+        this.registry.set(canonicalAgentId, updated);
+      } catch {
+        // Preserve the post-condition error for the caller.
+      }
+      throw new Error(error);
     }
 
     const current = this.registry.get(canonicalAgentId) ?? agent;

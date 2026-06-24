@@ -35,9 +35,17 @@ const AGENT_TOOLS = [
   "my_agents",
 ] as const;
 
-function makeLifecycleExec(): ExecFn {
+function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let readyText = "What can I help you with?\n>";
+  let surfaceLive = true;
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split") || args.includes("new-surface")) {
+      surfaceLive = true;
+    }
+    if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
+      surfaceLive = false;
+      return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send")) {
       const text = String(args[args.length - 1] ?? "");
       if (text.includes("Codex")) readyText = "codex> ";
@@ -67,16 +75,18 @@ function makeLifecycleExec(): ExecFn {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
-          panes: [
-            {
-              ref: "pane:1",
-              index: 0,
-              focused: true,
-              surface_count: 1,
-              surface_refs: ["surface:new"],
-              selected_surface_ref: "surface:new",
-            },
-          ],
+          panes: surfaceLive
+            ? [
+                {
+                  ref: "pane:1",
+                  index: 0,
+                  focused: true,
+                  surface_count: 1,
+                  surface_refs: ["surface:new"],
+                  selected_surface_ref: "surface:new",
+                },
+              ]
+            : [],
         }),
         stderr: "",
       };
@@ -88,15 +98,17 @@ function makeLifecycleExec(): ExecFn {
           workspace_ref: "workspace:1",
           window_ref: "window:1",
           pane_ref: "pane:1",
-          surfaces: [
-            {
-              ref: "surface:new",
-              title: "agent-pane",
-              type: "terminal",
-              index: 0,
-              selected: true,
-            },
-          ],
+          surfaces: surfaceLive
+            ? [
+                {
+                  ref: "surface:new",
+                  title: "agent-pane",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [],
         }),
         stderr: "",
       };
@@ -564,6 +576,36 @@ describe("agent lifecycle tool handlers", () => {
       stopResult.structuredContent ?? JSON.parse(stopResult.content[0].text);
     expect(stopped.ok).toBe(true);
     expect(stopped.state).toBe("done");
+  });
+
+  it("stop_agent returns an error when the stopped pane remains live", async () => {
+    mockExec = makeLifecycleExec({ closeKeepsSurface: true });
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const stop = (server as any)._registeredTools["stop_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "idle after stop",
+      },
+      {} as any,
+    );
+    const spawned =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    const stopResult = await stop.handler(
+      { agent_id: spawned.agent_id },
+      {} as any,
+    );
+    const stopped =
+      stopResult.structuredContent ?? JSON.parse(stopResult.content[0].text);
+
+    expect(stopResult.isError).toBe(true);
+    expect(stopped.ok).toBe(false);
+    expect(stopped.error).toMatch(/post-condition/i);
   });
 
   it("spawn_agent sends boot_prompt_path contents after readiness", async () => {
