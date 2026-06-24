@@ -622,6 +622,8 @@ export class AgentEngine {
   private loggedEvents = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
+  /** agentId → waitFor-local consecutive ready-prompt matches */
+  private waitForReadyPatternMatches = new Map<string, number>();
 
   constructor(
     stateMgr: StateManager,
@@ -776,11 +778,11 @@ export class AgentEngine {
         ? agent.state === "booting"
         : agent.state === "working";
     if (!canTransition || TERMINAL_STATES.has(agent.state)) {
-      this.readyPatternMatches.delete(agent.agent_id);
+      this.waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
     if (agent.boot_prompt_pending) {
-      this.readyPatternMatches.delete(agent.agent_id);
+      this.waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
 
@@ -797,12 +799,13 @@ export class AgentEngine {
           parseScreen(screen.text),
         );
       if (!ready) {
-        this.readyPatternMatches.delete(agent.agent_id);
+        this.waitForReadyPatternMatches.delete(agent.agent_id);
         return { agent };
       }
 
-      const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
-      this.readyPatternMatches.set(agent.agent_id, count);
+      const count =
+        (this.waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      this.waitForReadyPatternMatches.set(agent.agent_id, count);
       if (count < Math.max(1, match.consecutive)) {
         return { agent };
       }
@@ -824,7 +827,7 @@ export class AgentEngine {
         });
       }
       this.registry.set(agent.agent_id, updated);
-      this.readyPatternMatches.delete(agent.agent_id);
+      this.waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent: updated, source: "screen" };
     } catch {
       return { agent };

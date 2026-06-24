@@ -2161,6 +2161,63 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("does not clear sweep ready-prompt progress when waitFor polls a non-ready screen", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-sweep-progress",
+            state: "booting",
+            surface_id: "surface:gemini-sweep-progress",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-sweep-progress")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+        expect(engine.getAgentState("gemini-sweep-progress")?.state).toBe(
+          "booting",
+        );
+
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "still booting\n",
+          lines: 80,
+          scrollback_used: false,
+        });
+        const pending = engine.waitFor(
+          "gemini-sweep-progress",
+          "ready",
+          1_500,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const waitResult = await pending;
+        expect(waitResult.matched).toBe(false);
+
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.runSweep();
+
+        expect(engine.getAgentState("gemini-sweep-progress")?.state).toBe(
+          "ready",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not resolve done for a Codex worker from registry state without TASK_DONE output", async () => {
       vi.useFakeTimers();
       try {
