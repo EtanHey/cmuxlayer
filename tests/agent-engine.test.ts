@@ -78,6 +78,12 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     renameTab: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),
+    moveSurface: vi.fn().mockResolvedValue({
+      ok: true,
+      workspace: "ws:1",
+      surface: "surface:new",
+      pane: "pane:1",
+    }),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
@@ -2037,6 +2043,122 @@ To continue this session, run codex resume ${sessionId}`,
       expect(result.agent?.agent_id).toBe("agent-ready");
       expect(result.agent?.state).toBe("ready");
       expect(result.agent?.session_id).toBeNull();
+    });
+
+    it("resolves ready from screen truth when registry still says booting", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-screen-ready",
+            state: "booting",
+            surface_id: "surface:claude-screen-ready",
+            workspace_id: "ws:screen-ready",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-ready",
+          text: ["Claude Code", "What can I help you with?", "❯ "].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-screen-ready", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(engine.getAgentState("claude-screen-ready")?.state).toBe("ready");
+        expect(mockClient.moveSurface).not.toHaveBeenCalled();
+        expect(mockClient.readScreen).toHaveBeenCalledWith(
+          "surface:claude-screen-ready",
+          { lines: 80 },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve ready from a prompt-looking active Claude screen", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-screen-active",
+            state: "booting",
+            surface_id: "surface:claude-screen-active",
+            workspace_id: "ws:screen-active",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-active")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-active",
+          text: ["Claude Code", "✻ Thinking", "❯ "].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-screen-active", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("booting");
+        expect(engine.getAgentState("claude-screen-active")?.state).toBe(
+          "booting",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves idle from Cursor screen truth when registry still says working", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cursor-screen-idle",
+            state: "working",
+            surface_id: "surface:cursor-screen-idle",
+            workspace_id: "ws:cursor-idle",
+            cli: "cursor",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:cursor-screen-idle")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:cursor-screen-idle",
+          text: [
+            "Cursor Agent",
+            "⬡ Idle  1.2k tokens",
+            "/ commands · @ files · ! shell · ctrl+r to review edits",
+          ].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("cursor-screen-idle", "idle", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("idle");
+        expect(engine.getAgentState("cursor-screen-idle")?.state).toBe("idle");
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("does not resolve done for a Codex worker from registry state without TASK_DONE output", async () => {

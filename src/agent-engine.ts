@@ -51,7 +51,10 @@ import {
   launcherNameForCli,
   type RoleSurfaceIds,
 } from "./layout-policy.js";
-import { matchReadyPattern } from "./pattern-registry.js";
+import {
+  matchReadyPattern,
+  screenHasReadyAgentIdentity,
+} from "./pattern-registry.js";
 import {
   reposEquivalent,
   resolveWorkspaceRefForRepo,
@@ -208,6 +211,10 @@ interface SweepAgentContext {
 }
 
 type TargetStateEvidenceSource = "state" | "transcript" | "screen";
+type RefreshedTargetStateEvidenceSource = Exclude<
+  TargetStateEvidenceSource,
+  "state"
+>;
 
 // AIDEV-NOTE: Cursor has no distinct "done" lifecycle state — it settles to
 // "idle" when a task completes. A wait_for(target="done") on a Cursor agent
@@ -745,10 +752,83 @@ export class AgentEngine {
   private async refreshTargetStateEvidence(
     agent: AgentRecord,
     targetState: AgentState,
-  ): Promise<AgentRecord> {
-    if (!this.requiresOutputDoneEvidence(targetState)) return agent;
-    if (TERMINAL_STATES.has(agent.state)) return agent;
-    return (await this.maybeMarkTaskDone(agent, {})).agent;
+  ): Promise<{
+    agent: AgentRecord;
+    source?: RefreshedTargetStateEvidenceSource;
+  }> {
+    if (targetState === "ready" || targetState === "idle") {
+      return this.refreshInteractiveTargetStateEvidence(agent, targetState);
+    }
+    if (!this.requiresOutputDoneEvidence(targetState)) return { agent };
+    if (TERMINAL_STATES.has(agent.state)) return { agent };
+    return { agent: (await this.maybeMarkTaskDone(agent, {})).agent };
+  }
+
+  private async refreshInteractiveTargetStateEvidence(
+    agent: AgentRecord,
+    targetState: "ready" | "idle",
+  ): Promise<{
+    agent: AgentRecord;
+    source?: RefreshedTargetStateEvidenceSource;
+  }> {
+    const canTransition =
+      targetState === "ready"
+        ? agent.state === "booting"
+        : agent.state === "working";
+    if (!canTransition || TERMINAL_STATES.has(agent.state)) {
+      this.readyPatternMatches.delete(agent.agent_id);
+      return { agent };
+    }
+    if (agent.boot_prompt_pending) {
+      this.readyPatternMatches.delete(agent.agent_id);
+      return { agent };
+    }
+
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      const match = matchReadyPattern(agent.cli, screen.text);
+      const ready =
+        match.matched &&
+        screenHasReadyAgentIdentity(
+          agent.cli,
+          screen.text,
+          parseScreen(screen.text),
+        );
+      if (!ready) {
+        this.readyPatternMatches.delete(agent.agent_id);
+        return { agent };
+      }
+
+      const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      this.readyPatternMatches.set(agent.agent_id, count);
+      if (count < Math.max(1, match.consecutive)) {
+        return { agent };
+      }
+
+      let updated = this.stateMgr.transition(agent.agent_id, targetState, {
+        error:
+          targetState === "ready" &&
+          agent.error?.startsWith("Post-spawn liveness failed:")
+            ? null
+            : agent.error,
+      });
+      if (
+        targetState === "ready" &&
+        updated.quality === "degraded" &&
+        agent.error?.startsWith("Post-spawn liveness failed:")
+      ) {
+        updated = this.stateMgr.updateRecord(agent.agent_id, {
+          quality: "unknown",
+        });
+      }
+      this.registry.set(agent.agent_id, updated);
+      this.readyPatternMatches.delete(agent.agent_id);
+      return { agent: updated, source: "screen" };
+    } catch {
+      return { agent };
+    }
   }
 
   private async createAgentSurface(
@@ -1925,7 +2005,11 @@ export class AgentEngine {
           return;
         }
 
-        current = await this.refreshTargetStateEvidence(current, targetState);
+        const refreshed = await this.refreshTargetStateEvidence(
+          current,
+          targetState,
+        );
+        current = refreshed.agent;
 
         const evidenceSource = await this.getTargetStateEvidenceSource(
           current,
@@ -1937,7 +2021,9 @@ export class AgentEngine {
             matched: true,
             state: current.state,
             elapsed,
-            source: evidenceSource === "state" ? "sweep" : evidenceSource,
+            source:
+              refreshed.source ??
+              (evidenceSource === "state" ? "sweep" : evidenceSource),
             agent: toPublicAgent(current),
           });
           return;
