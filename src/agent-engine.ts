@@ -229,7 +229,8 @@ type RefreshedTargetStateEvidenceSource = Exclude<
 
 // AIDEV-NOTE: Cursor has no distinct "done" lifecycle state — it settles to
 // "idle" when a task completes. A wait_for(target="done") on a Cursor agent
-// would otherwise hang the full timeout (R-038: "300s hang on a done Cursor").
+// would otherwise hang the full timeout (R-038(cmuxlayer-code: cursor-idle short-circuit): "300s hang on a done Cursor").
+// AIDEV-NOTE: This is distinct from weave-registry R-038 (wait_for(done) transcript ground-truth) and weave-registry R-039 (delta-wave coverage).
 // Treat a Cursor that has reached idle as satisfying a done wait. Narrowly
 // scoped to cli==="cursor" so Claude/Codex idle (awaiting input ≠ done) is
 // unaffected.
@@ -505,6 +506,8 @@ const REPO_LAUNCHER_ALIASES: Record<string, string[]> = {
  *   - the P10 "hyphen-aware verbatim alias" is emitted ONLY for some repos
  *     (`agent-html-hostCursor` exists for `maakaf-home`/`skill-creator` but
  *     NOT for `agent-html-host`).
+ *
+ * AIDEV-NOTE: R-039(cmuxlayer-code: launcher-name resolution) is distinct from weave-registry R-038 (wait_for(done) transcript ground-truth) and weave-registry R-039 (delta-wave coverage).
  *
  * cmuxlayer cannot know which form a given repo registered, so we generate
  * both and probe in order. Candidate #1 preserves today's behavior (verbatim
