@@ -78,6 +78,12 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     renameTab: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),
+    moveSurface: vi.fn().mockResolvedValue({
+      ok: true,
+      workspace: "ws:1",
+      surface: "surface:new",
+      pane: "pane:1",
+    }),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
@@ -2037,6 +2043,314 @@ To continue this session, run codex resume ${sessionId}`,
       expect(result.agent?.agent_id).toBe("agent-ready");
       expect(result.agent?.state).toBe("ready");
       expect(result.agent?.session_id).toBeNull();
+    });
+
+    it("resolves ready from screen truth when registry still says booting", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-screen-ready",
+            state: "booting",
+            surface_id: "surface:claude-screen-ready",
+            workspace_id: "ws:screen-ready",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-ready",
+          text: ["Claude Code", "What can I help you with?", "❯ "].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-screen-ready", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(engine.getAgentState("claude-screen-ready")?.state).toBe("ready");
+        expect(mockClient.moveSurface).not.toHaveBeenCalled();
+        expect(mockClient.readScreen).toHaveBeenCalledWith(
+          "surface:claude-screen-ready",
+          { lines: 80 },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("captures the boot session before waitFor marks a ready screen", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-03-14T03:40:10.000Z"));
+        const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+        const provisionalAgentId = "brainlayerClaude-pending-wait";
+        const finalAgentId = "brainlayerClaude-019d9aa5";
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: provisionalAgentId,
+            repo: "brainlayer",
+            model: "claude-sonnet-4.5",
+            cli: "claude",
+            state: "booting",
+            surface_id: "surface:claude-screen-session",
+            workspace_id: "ws:screen-session",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-session")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-session",
+          text: [
+            `Session ID: ${sessionId}`,
+            "Claude Code",
+            "What can I help you with?",
+            "❯ ",
+          ].join("\n"),
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(provisionalAgentId, "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.agent?.agent_id).toBe(finalAgentId);
+        expect(result.agent?.session_id).toBe(sessionId);
+        expect(engine.getAgentState(finalAgentId)).toMatchObject({
+          agent_id: finalAgentId,
+          state: "ready",
+          cli_session_id: sessionId,
+        });
+        expect(engine.getAgentState(provisionalAgentId)).toMatchObject({
+          agent_id: finalAgentId,
+          state: "ready",
+          cli_session_id: sessionId,
+        });
+        expect(stateMgr.readState(provisionalAgentId)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves Gemini ready from consecutive screen-truth prompts", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-screen-ready",
+            state: "booting",
+            surface_id: "surface:gemini-screen-ready",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-screen-ready",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("gemini-screen-ready", "ready", 2_500);
+        await vi.advanceTimersByTimeAsync(3_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(engine.getAgentState("gemini-screen-ready")?.state).toBe(
+          "ready",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("clears waitFor prompt progress when a ready wait times out", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "kiro-wait-timeout",
+            state: "booting",
+            surface_id: "surface:kiro-wait-timeout",
+            cli: "kiro",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:kiro-wait-timeout")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:kiro-wait-timeout",
+          text: "kiro> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const firstWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(await firstWait).toMatchObject({
+          matched: false,
+          source: "timeout",
+        });
+
+        const secondWait = engine.waitFor("kiro-wait-timeout", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const secondResult = await secondWait;
+
+        expect(secondResult.matched).toBe(false);
+        expect(secondResult.source).toBe("timeout");
+        expect(engine.getAgentState("kiro-wait-timeout")?.state).toBe(
+          "booting",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve ready from a prompt-looking active Claude screen", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "claude-screen-active",
+            state: "booting",
+            surface_id: "surface:claude-screen-active",
+            workspace_id: "ws:screen-active",
+            cli: "claude",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:claude-screen-active")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-screen-active",
+          text: ["Claude Code", "✻ Thinking", "❯ "].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("claude-screen-active", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("booting");
+        expect(engine.getAgentState("claude-screen-active")?.state).toBe(
+          "booting",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves idle from Cursor screen truth when registry still says working", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cursor-screen-idle",
+            state: "working",
+            surface_id: "surface:cursor-screen-idle",
+            workspace_id: "ws:cursor-idle",
+            cli: "cursor",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:cursor-screen-idle")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:cursor-screen-idle",
+          text: [
+            "Cursor Agent",
+            "⬡ Idle  1.2k tokens",
+            "/ commands · @ files · ! shell · ctrl+r to review edits",
+          ].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("cursor-screen-idle", "idle", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("idle");
+        expect(engine.getAgentState("cursor-screen-idle")?.state).toBe("idle");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not clear sweep ready-prompt progress when waitFor polls a non-ready screen", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-sweep-progress",
+            state: "booting",
+            surface_id: "surface:gemini-sweep-progress",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-sweep-progress")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+        expect(engine.getAgentState("gemini-sweep-progress")?.state).toBe(
+          "booting",
+        );
+
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "still booting\n",
+          lines: 80,
+          scrollback_used: false,
+        });
+        const pending = engine.waitFor(
+          "gemini-sweep-progress",
+          "ready",
+          1_500,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const waitResult = await pending;
+        expect(waitResult.matched).toBe(false);
+
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-sweep-progress",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.runSweep();
+
+        expect(engine.getAgentState("gemini-sweep-progress")?.state).toBe(
+          "ready",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("does not resolve done for a Codex worker from registry state without TASK_DONE output", async () => {

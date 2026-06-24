@@ -83,7 +83,10 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
-import { matchReadyPattern } from "./pattern-registry.js";
+import {
+  matchReadyPattern,
+  screenHasReadyAgentIdentity,
+} from "./pattern-registry.js";
 import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
@@ -506,31 +509,6 @@ function screenHasAnyAgentIdentity(
       screenText,
     )
   );
-}
-
-function screenHasReadyAgentIdentity(
-  cli: CliType,
-  screenText: string,
-  parsed: ParsedScreenResult = parseScreen(screenText),
-): boolean {
-  if (parsed.agent_type === cli) {
-    return true;
-  }
-
-  switch (cli) {
-    case "claude":
-      return /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?/i.test(
-        screenText,
-      );
-    case "codex":
-      return /(?:^|\n)\s*codex>\s*$/im.test(screenText);
-    case "cursor":
-      return /(?:^|\n)\s*(?:cursor>|Cursor Agent)\s*$/im.test(screenText);
-    case "kiro":
-      return /(?:^|\n)\s*kiro>\s*$/im.test(screenText);
-    case "gemini":
-      return false;
-  }
 }
 
 function screenShowsPendingInput(
