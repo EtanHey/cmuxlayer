@@ -100,7 +100,7 @@ describe("false-green empty surface protection", () => {
     );
   });
 
-  it("does not verify a cleared long command on a non-agent shell prompt", async () => {
+  it("does not false-fail a cleared long command on a non-agent shell prompt", async () => {
     const longCommand = `echo ${"x".repeat(520)}`;
     const mockExec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
@@ -126,7 +126,7 @@ describe("false-green empty surface protection", () => {
     );
 
     const parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
   });
 });

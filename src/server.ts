@@ -206,6 +206,16 @@ class DeliveryError extends Error {
   }
 }
 
+class SubmitVerificationError extends Error {
+  constructor(
+    message: string,
+    readonly retry_count: number,
+  ) {
+    super(message);
+    this.name = "SubmitVerificationError";
+  }
+}
+
 class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
@@ -751,7 +761,18 @@ function resolveTargetIdentity(
   surfaceRef: string,
 ): TargetIdentity {
   const identity: TargetIdentity = { surface: surfaceRef };
-  const matches = stateMgr
+  const record = resolveLatestSurfaceAgentRecord(stateMgr, surfaceRef);
+  if (record?.task_summary) identity.title = record.task_summary;
+  if (record?.model) identity.model = record.model;
+  if (record?.cli) identity.agent_type = record.cli;
+  return identity;
+}
+
+function resolveLatestSurfaceAgentRecord(
+  stateMgr: StateManager,
+  surfaceRef: string,
+): AgentRecord | undefined {
+  return stateMgr
     .listStates()
     .filter((record) => record.surface_id === surfaceRef)
     .sort((a, b) => {
@@ -759,12 +780,7 @@ function resolveTargetIdentity(
       return (
         new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
       );
-    });
-  const record = matches[0];
-  if (record?.task_summary) identity.title = record.task_summary;
-  if (record?.model) identity.model = record.model;
-  if (record?.cli) identity.agent_type = record.cli;
-  return identity;
+    })[0];
 }
 
 function enrichParsedScreen(
@@ -1370,6 +1386,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_event: DeliveryEventType;
     source_agent?: string | null;
     verify_submit: boolean;
+    allow_non_agent_clear?: boolean;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -1395,13 +1412,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return { submit_verified: true, retry_count: retryCount };
       }
 
+      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
       if (
-        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
-        !screenShowsPendingInput(snapshot.text, opts.text)
+        (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) ||
+          opts.allow_non_agent_clear === true) &&
+        !hasPendingInput
       ) {
         // The submitted text is no longer echoed in the input box: the terminal
-        // accepted it and cleared the prompt on a parsed agent surface, even if
-        // the agent has already settled back to idle.
+        // accepted it and cleared the prompt. For agent surfaces this catches
+        // the common idle-after-submit case; raw shell clears are only accepted
+        // when the caller explicitly allows non-agent verification.
         return { submit_verified: true, retry_count: retryCount };
       }
 
@@ -1442,6 +1462,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_event?: DeliveryEventType;
     source_agent?: string | null;
     verify_submit?: boolean;
+    allow_non_agent_clear?: boolean;
   }): Promise<{
     bytes: number;
     retry_count: number;
@@ -1491,6 +1512,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_event: opts.source_event ?? "send_command",
         source_agent: opts.source_agent,
         verify_submit: opts.verify_submit ?? false,
+        allow_non_agent_clear: opts.allow_non_agent_clear,
       });
       submit_verified = verification.submit_verified;
       retry_count = verification.retry_count;
@@ -1515,8 +1537,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     if (submit_verified === false) {
-      throw new Error(
+      throw new SubmitVerificationError(
         `Enter submit could not be verified for ${opts.surface} within ${SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS}ms`,
+        retry_count,
       );
     }
 
@@ -2646,8 +2669,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
-        await withSurfaceWrite(args.surface, async () => {
-          await deliverInputChunks({
+        const targetRecord = resolveLatestSurfaceAgentRecord(
+          stateMgr,
+          args.surface,
+        );
+        const shouldVerifySubmit =
+          args.press_enter &&
+          (!targetRecord || INTERACTIVE_AGENT_STATES.has(targetRecord.state));
+        const delivery = await withSurfaceWrite(args.surface, async () => {
+          return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
             chunks,
@@ -2655,16 +2685,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
             rename_to_task: args.rename_to_task,
+            source_event: "send_input",
+            verify_submit: shouldVerifySubmit,
+            allow_non_agent_clear: !targetRecord,
           });
         });
 
         const identity = resolveTargetIdentity(stateMgr, args.surface);
-        const data = { ...identity, delivered: true };
+        const data = {
+          ...identity,
+          delivered: true,
+          retry_count: delivery.retry_count,
+          submit_verified: delivery.submit_verified,
+        };
         return okFormatted(
-          formatDelivery("send_input", { ...identity, delivered: true }),
+          formatDelivery("send_input", {
+            ...identity,
+            delivered: true,
+            submit_verified: delivery.submit_verified,
+          }),
           data,
         );
       } catch (e) {
+        if (e instanceof SubmitVerificationError) {
+          return err(e, {
+            submit_verified: false,
+            retry_count: e.retry_count,
+          });
+        }
         if (e instanceof DeliveryError) {
           return err(e, { failed_chunk: e.failed_chunk ?? null });
         }
@@ -2719,6 +2767,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
             ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
             : [sanitizedCommand];
+        const targetRecord = resolveLatestSurfaceAgentRecord(
+          stateMgr,
+          args.surface,
+        );
+        const shouldVerifySubmit =
+          !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
         const delivery = await withSurfaceWrite(args.surface, async () =>
           deliverInputChunks({
@@ -2729,7 +2783,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "send_command",
-            verify_submit: sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD,
+            verify_submit: shouldVerifySubmit,
           }),
         );
 
@@ -2765,6 +2819,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof SubmitVerificationError) {
+          return err(e, {
+            submit_verified: false,
+            retry_count: e.retry_count,
+          });
+        }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, { last_10_lines: e.last_10_lines });
         }
