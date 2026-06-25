@@ -119,6 +119,118 @@ describe("worktree helpers", () => {
     ).rejects.toThrow(/must be inside/);
   });
 
+  it("resolves the repo root from the workspace cwd via git top-level", async () => {
+    const repoRoot = join(TEST_ROOT, "dev", "esalon-admin");
+    mkdirSync(repoRoot, { recursive: true });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("--show-toplevel")) {
+        return { stdout: `${repoRoot}\n`, stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "esalon-admin",
+      workspaceCwd: join(repoRoot, "src"),
+      worktree: { name: "feature" },
+      exec,
+    });
+
+    expect(result.path).toBe(join(TEST_ROOT, "dev", "esalon-admin.wt", "feature"));
+    expect(result.created).toBe(true);
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      join(repoRoot, "src"),
+      "rev-parse",
+      "--show-toplevel",
+    ]);
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "add",
+      "-b",
+      "cmuxlayer/feature",
+      join(TEST_ROOT, "dev", "esalon-admin.wt", "feature"),
+      "HEAD",
+    ]);
+  });
+
+  it("resolves the repo root from a configured search root outside ~/Gits", async () => {
+    const root = join(TEST_ROOT, "code");
+    const repoRoot = join(root, "myrepo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    const result = await prepareWorktree({
+      repo: "myrepo",
+      repoRoots: [join(TEST_ROOT, "does-not-exist"), root],
+      worktree: { name: "x" },
+      exec,
+    });
+
+    expect(result.path).toBe(join(root, "myrepo.wt", "x"));
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "add",
+      "-b",
+      "cmuxlayer/x",
+      join(root, "myrepo.wt", "x"),
+      "HEAD",
+    ]);
+  });
+
+  it("honors an explicit repoRoot and places the worktree beside it", async () => {
+    const repoRoot = join(TEST_ROOT, "anywhere", "proj");
+    mkdirSync(repoRoot, { recursive: true });
+    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    const result = await prepareWorktree({
+      repo: "proj",
+      repoRoot,
+      worktree: { name: "w" },
+      exec,
+    });
+
+    expect(result.path).toBe(join(TEST_ROOT, "anywhere", "proj.wt", "w"));
+  });
+
+  it("falls back to repoRoots when the workspace cwd is not a git work tree", async () => {
+    const root = join(TEST_ROOT, "roots");
+    const repoRoot = join(root, "fallrepo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("--show-toplevel")) {
+        throw new Error("fatal: not a work tree");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "fallrepo",
+      workspaceCwd: "/tmp/not-a-repo",
+      repoRoots: [root],
+      worktree: { name: "x" },
+      exec,
+    });
+
+    expect(result.path).toBe(join(root, "fallrepo.wt", "x"));
+  });
+
+  it("throws an actionable error when the repo cannot be resolved", async () => {
+    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    await expect(
+      prepareWorktree({
+        repo: "ghost",
+        repoRoots: [join(TEST_ROOT, "empty")],
+        worktree: { name: "x" },
+        exec,
+      }),
+    ).rejects.toThrow(/Could not resolve a git repository/);
+  });
+
   it("formats MCP profile env hints without raw config passing", () => {
     expect(formatMcpProfileEnv(undefined)).toBe(
       "CMUXLAYER_MCP_PROFILE=inherit",
