@@ -171,6 +171,107 @@ class FakeClaudeSurfaceClient {
   }
 }
 
+class FakeShellSurfaceClient {
+  readonly workspace = "workspace:1";
+  readonly pane = "pane:1";
+  readonly surface = "surface:shell";
+  readonly title = "zsh";
+  readonly sendCalls: string[] = [];
+  readonly sendKeyCalls: string[] = [];
+  readonly renameTabCalls: string[] = [];
+  private pendingText = "";
+
+  async listWorkspaces() {
+    return {
+      workspaces: [
+        {
+          ref: this.workspace,
+          title: "Main",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    };
+  }
+
+  async listPanes() {
+    return {
+      workspace_ref: this.workspace,
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: this.pane,
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: [this.surface],
+          selected_surface_ref: this.surface,
+        },
+      ],
+    };
+  }
+
+  async listPaneSurfaces() {
+    return {
+      workspace_ref: this.workspace,
+      window_ref: "window:1",
+      pane_ref: this.pane,
+      surfaces: [
+        {
+          ref: this.surface,
+          title: this.title,
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+    };
+  }
+
+  async send(surface: string, text: string) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    this.sendCalls.push(text);
+    this.pendingText += text;
+  }
+
+  async pasteText(surface: string, text: string) {
+    await this.send(surface, text);
+  }
+
+  async sendKey(surface: string, key: string) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    this.sendKeyCalls.push(key);
+    if (key === "return") {
+      this.pendingText = "";
+    }
+  }
+
+  async readScreen(surface: string, opts?: { lines?: number }) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    const prompt = this.pendingText ? `$ ${this.pendingText}` : "$";
+    return {
+      surface,
+      text: `${prompt}\n`,
+      lines: opts?.lines ?? 30,
+      scrollback_used: false,
+    };
+  }
+
+  async renameTab(_surface: string, title: string) {
+    this.renameTabCalls.push(title);
+  }
+}
+
 function createReliabilityServer(client: FakeClaudeSurfaceClient) {
   return createServer({
     client: client as any,
@@ -312,6 +413,7 @@ describe("enter reliability", () => {
   it("retries Enter for send_command on a Claude surface", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
+    registerAgent(server);
 
     const result = await callTool(server, "send_command", {
       surface: client.surface,
@@ -332,6 +434,117 @@ describe("enter reliability", () => {
           event.retry_count === 1,
       ),
     ).toBe(true);
+  });
+
+  it("reports a failed short send_command submit after retry leaves Claude idle", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_command", {
+      surface: client.surface,
+      command: "ping",
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog();
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      2,
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === "send_command" &&
+          event.submit_verified === false &&
+          event.retry_count === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("reports a failed short send_input submit after retry leaves Claude idle", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_input", {
+      surface: client.surface,
+      text: "ping",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog();
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      2,
+    );
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === "send_input" &&
+          event.submit_verified === false &&
+          event.retry_count === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not false-fail send_input to a busy cached agent surface", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "working" });
+
+    const result = await callTool(server, "send_input", {
+      surface: client.surface,
+      text: "interrupt",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_input",
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBeNull();
+  });
+
+  it("verifies send_input to an uncached shell when the prompt clears", async () => {
+    const client = new FakeShellSurfaceClient();
+    server = createReliabilityServer(client as any);
+
+    const result = await callTool(server, "send_input", {
+      surface: client.surface,
+      text: "printf ok",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_input",
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBe(true);
   });
 
   it("uses the verified send path for interact(action=send)", async () => {

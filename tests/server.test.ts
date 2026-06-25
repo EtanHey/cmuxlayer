@@ -1562,8 +1562,8 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should have called send and then send-key
-    expect(mockExec).toHaveBeenCalledTimes(2);
+    // Should have called send, then send-key, then the submit verification read.
+    expect(mockExec).toHaveBeenCalledTimes(3);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -1573,6 +1573,11 @@ describe("tool handler integration", () => {
       2,
       "cmux",
       expect.arrayContaining(["send-key"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      3,
+      "cmux",
+      expect.arrayContaining(["read-screen"]),
     );
   });
 
