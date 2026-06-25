@@ -27,6 +27,8 @@ function makeExec(
   screenText = "What can I help you with?\n>",
   surfaceTitle = "agent-pane",
 ): ExecFn {
+  let promptPending = false;
+  let currentScreenText = screenText;
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
       return {
@@ -86,12 +88,28 @@ function makeExec(
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: screenText,
+          text: currentScreenText,
           lines: 20,
           scrollback_used: false,
         }),
         stderr: "",
       };
+    }
+    if (args.includes("send-key") && args.includes("return")) {
+      if (promptPending) {
+        currentScreenText = "Claude Code\n✻ Working\n";
+        promptPending = false;
+      }
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("send")) {
+      const text = String(args.at(-1) ?? "");
+      if (
+        text.trim() &&
+        !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
+      ) {
+        promptPending = true;
+      }
     }
     return {
       stdout: JSON.stringify({

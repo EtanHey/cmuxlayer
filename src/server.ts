@@ -17,6 +17,7 @@ import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
   AgentEngine,
+  buildLaunchCommand,
   resolveSweepTiming,
   type AgentLifecycleEvent,
   type SessionIdentityResolver,
@@ -154,6 +155,15 @@ const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
+const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
+const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
+
+function bootPromptUpdateMaxMs(): number {
+  const raw = Number(process.env.CMUXLAYER_BOOT_PROMPT_UPDATE_MAX_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? Math.floor(raw)
+    : BOOT_PROMPT_UPDATE_MAX_MS;
+}
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
@@ -598,18 +608,44 @@ function inferLauncherCli(command: string): CliType | null {
   return match[1].toLowerCase() as CliType;
 }
 
-function inferRepoFromLauncherTitle(title?: string): string | null {
+function inferLauncherFromTitle(
+  title?: string,
+): { repo: string; cli: CliType; launcherName: string } | null {
   if (!title) return null;
   const launcherTitle = extractPrefix(title);
   const match = launcherTitle.match(
-    /^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i,
+    /^(.+?)(Claude|Codex|Cursor|Gemini|Kiro)$/i,
   );
-  const repo = match?.[1]?.trim();
-  return repo && repo !== "." && repo !== ".." ? repo : null;
+  if (!match) {
+    return null;
+  }
+  const repo = match[1].trim();
+  if (!repo || repo === "." || repo === "..") {
+    return null;
+  }
+  return {
+    repo,
+    cli: match[2].toLowerCase() as CliType,
+    launcherName: launcherTitle,
+  };
+}
+
+function inferRepoFromLauncherTitle(title?: string): string | null {
+  return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
 function matchesShellPrompt(text: string): boolean {
   return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
+}
+
+function matchesCliUpdateMarker(text: string): boolean {
+  return /(?:^|\n)[^\n]*Updating\s+.+\s+via\s+.+/i.test(text);
+}
+
+function matchesCliUpdateContinuationMarker(text: string): boolean {
+  return /(?:^|\n)[^\n]*(?:Update ran successfully|Please restart)[^\n]*/i.test(
+    text,
+  );
 }
 
 function readyPatternCandidates(cli?: CliType): CliType[] {
@@ -1387,6 +1423,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_agent?: string | null;
     verify_submit: boolean;
     allow_non_agent_clear?: boolean;
+    require_working_status?: boolean;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -1413,6 +1450,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+      if (opts.require_working_status) {
+        if (!retried) {
+          await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+          retryCount += 1;
+          appendDeliveryEvent({
+            event_type: "press_enter",
+            source_agent: opts.source_agent ?? null,
+            target_surface: opts.surface,
+            bytes: opts.bytes,
+            press_enter: true,
+            submit_verified: null,
+            retry_count: retryCount,
+          });
+          retried = true;
+          continue;
+        }
+
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
+      }
+
       if (
         (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) ||
           opts.allow_non_agent_clear === true) &&
@@ -1513,6 +1572,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_agent: opts.source_agent,
         verify_submit: opts.verify_submit ?? false,
         allow_non_agent_clear: opts.allow_non_agent_clear,
+        require_working_status: opts.source_event === "boot_prompt",
       });
       submit_verified = verification.submit_verified;
       retry_count = verification.retry_count;
@@ -1551,13 +1611,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string;
     cli?: CliType;
     timeout_ms: number;
+    onUpdateShellRelaunch?: () => Promise<void>;
   }): Promise<void> => {
-    const start = Date.now();
+    let deadline = Date.now() + opts.timeout_ms;
     let lastText = "";
     const consecutiveMatches = new Map<CliType, number>();
     const candidates = readyPatternCandidates(opts.cli);
+    let updateStartedAt: number | null = null;
+    let updateElapsedMs = 0;
+    let updateWasSeen = false;
+    let updateShellRelaunches = 0;
+    const updateMaxMs = bootPromptUpdateMaxMs();
 
-    while (Date.now() - start < opts.timeout_ms) {
+    while (Date.now() < deadline || updateStartedAt !== null) {
       try {
         const screen = await client.readScreen(opts.surface, {
           workspace: opts.workspace,
@@ -1566,6 +1632,57 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
+        const now = Date.now();
+        const updateMarker =
+          matchesCliUpdateMarker(screen.text) ||
+          (updateStartedAt !== null &&
+            matchesCliUpdateContinuationMarker(screen.text) &&
+            !matchesShellPrompt(screen.text));
+
+        if (updateMarker) {
+          updateWasSeen = true;
+          updateStartedAt ??= now;
+          updateElapsedMs = Math.max(
+            updateElapsedMs + BOOT_PROMPT_READY_POLL_MS,
+            updateStartedAt === null ? 0 : now - updateStartedAt,
+          );
+          if (updateElapsedMs >= updateMaxMs) {
+            throw new BootPromptTimeoutError(
+              `Timed out waiting for boot prompt readiness on ${opts.surface}: CLI update marker persisted for ${updateMaxMs}ms`,
+              tailLines(lastText, 10),
+            );
+          }
+          await delay(BOOT_PROMPT_READY_POLL_MS);
+          continue;
+        }
+
+        if (updateStartedAt !== null) {
+          deadline += Math.max(now - updateStartedAt, updateElapsedMs);
+          updateStartedAt = null;
+          updateElapsedMs = 0;
+        }
+
+        if (
+          updateWasSeen &&
+          opts.onUpdateShellRelaunch &&
+          matchesShellPrompt(screen.text) &&
+          !candidates.some((candidate) =>
+            matchReadyPattern(candidate, screen.text).matched,
+          )
+        ) {
+          if (updateShellRelaunches >= BOOT_PROMPT_UPDATE_RELAUNCH_MAX) {
+            throw new BootPromptTimeoutError(
+              `Timed out waiting for boot prompt readiness on ${opts.surface}: CLI returned to shell after ${updateShellRelaunches} post-update relaunch attempts`,
+              tailLines(lastText, 10),
+            );
+          }
+          updateShellRelaunches += 1;
+          consecutiveMatches.clear();
+          const relaunchStartedAt = Date.now();
+          await opts.onUpdateShellRelaunch();
+          deadline += Date.now() - relaunchStartedAt;
+          continue;
+        }
 
         for (const candidate of candidates) {
           const match = matchReadyPattern(candidate, screen.text);
@@ -1581,10 +1698,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       } catch (error) {
+        if (error instanceof BootPromptTimeoutError) {
+          throw error;
+        }
         lastText = error instanceof Error ? error.message : String(error);
       }
 
-      const remaining = opts.timeout_ms - (Date.now() - start);
+      const remaining = deadline - Date.now();
       if (remaining <= 0) {
         break;
       }
@@ -1680,6 +1800,48 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
+  const sendLauncherCommandToSurface = async (opts: {
+    surface: string;
+    workspace?: string;
+    command: string;
+  }): Promise<void> => {
+    const sanitizedCommand = sanitizeTerminalInput(opts.command);
+    const chunks =
+      sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
+        ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
+        : [sanitizedCommand];
+
+    await waitForLaunchShellReady({
+      surface: opts.surface,
+      workspace: opts.workspace,
+    });
+    await withSurfaceWrite(opts.surface, async () => {
+      try {
+        await deliverInputChunks({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          chunks,
+          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+          press_enter: true,
+          source_event: "spawn_agent",
+          verify_submit: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/Enter submit could not be verified/.test(message)) {
+          throw error;
+        }
+        // The command can remain visible in shell history while the launcher is
+        // already booting. Readiness detection is the authoritative launch check.
+        await waitForAgentLaunchReady({
+          surface: opts.surface,
+          workspace: opts.workspace,
+        });
+      }
+    });
+  };
+
   const deliverBootPrompt = async (opts: {
     surface: string;
     workspace?: string;
@@ -1687,6 +1849,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     prompt?: string;
     boot_prompt_path?: string | null;
     timeout_ms?: number;
+    onUpdateShellRelaunch?: () => Promise<void>;
   }): Promise<{
     bytes: number;
     retry_count: number;
@@ -1709,6 +1872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace: opts.workspace,
       cli: opts.cli,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+      onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
     });
 
     const rawPrompt = bootPromptPath
@@ -1730,6 +1894,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
           chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
           press_enter: true,
+          source_event: "boot_prompt",
           onChunkDelivered: (count) => {
             sentChunks = count;
           },
@@ -2362,11 +2527,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           | Awaited<ReturnType<typeof deliverBootPrompt>>
           | undefined;
         if (bootPromptPath) {
+          const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
             workspace: result.workspace || targetWorkspace,
+            cli: launcher?.cli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
+            onUpdateShellRelaunch: launcher
+              ? () =>
+                  sendLauncherCommandToSurface({
+                    surface: result!.surface,
+                    workspace: result!.workspace || targetWorkspace,
+                    command: buildLaunchCommand(
+                      launcher.cli,
+                      launcher.repo,
+                      undefined,
+                      launcher.launcherName,
+                    ),
+                  })
+              : undefined,
           });
         }
         await restoreFocusAfterRender(
@@ -2385,6 +2565,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             bootPromptDelivery,
           );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
+          data.boot_prompt_submit_verified =
+            bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_split", {
@@ -2475,11 +2657,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           | Awaited<ReturnType<typeof deliverBootPrompt>>
           | undefined;
         if (bootPromptPath) {
+          const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
             workspace: result.workspace || args.workspace,
+            cli: launcher?.cli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
+            onUpdateShellRelaunch: launcher
+              ? () =>
+                  sendLauncherCommandToSurface({
+                    surface: result!.surface,
+                    workspace: result!.workspace || args.workspace,
+                    command: buildLaunchCommand(
+                      launcher.cli,
+                      launcher.repo,
+                      undefined,
+                      launcher.launcherName,
+                    ),
+                  })
+              : undefined,
           });
         }
         const data: Record<string, unknown> = { ...result };
@@ -2488,6 +2685,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             bootPromptDelivery,
           );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
+          data.boot_prompt_submit_verified =
+            bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_surface", {
@@ -2797,6 +2996,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: launcherCli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
+            onUpdateShellRelaunch: () =>
+              sendLauncherCommandToSurface({
+                surface: args.surface,
+                workspace: args.workspace,
+                command: sanitizedCommand,
+              }),
           });
         }
 
@@ -2809,6 +3014,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: delivery.submit_verified,
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
+          boot_prompt_submit_verified: bootPromptDelivery?.submit_verified ?? null,
         };
         return okFormatted(
           formatDelivery("send_command", {
@@ -3645,40 +3851,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sessionIdentityResolver: context.sessionIdentityResolver,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           launchCommandSender: async ({ surface, workspace, command }) => {
-            const sanitizedCommand = sanitizeTerminalInput(command);
-            const chunks =
-              sanitizedCommand.length > SEND_INPUT_CHUNK_THRESHOLD
-                ? chunkTerminalInput(
-                    sanitizedCommand,
-                    SEND_INPUT_CHUNK_THRESHOLD,
-                  )
-                : [sanitizedCommand];
-
-            await waitForLaunchShellReady({ surface, workspace });
-            await withSurfaceWrite(surface, async () => {
-              try {
-                await deliverInputChunks({
-                  surface,
-                  workspace,
-                  chunks,
-                  chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-                  chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-                  press_enter: true,
-                  source_event: "spawn_agent",
-                  verify_submit: true,
-                });
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : String(error);
-                if (!/Enter submit could not be verified/.test(message)) {
-                  throw error;
-                }
-                // The command can remain visible in shell history while the
-                // launcher is already booting. Verification still retried Enter;
-                // agent readiness detection is the authoritative launch check.
-                await waitForAgentLaunchReady({ surface, workspace });
-              }
-            });
+            await sendLauncherCommandToSurface({ surface, workspace, command });
           },
         },
       );
@@ -3708,6 +3881,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         registry.set(agentId, registryDirect);
       }
       return registryDirect;
+    };
+
+    const relaunchSpawnAgentAfterUpdate = async (opts: {
+      agentId: string;
+      surface: string;
+      workspace?: string;
+      model?: string | null;
+      mcpEnv?: string;
+    }): Promise<void> => {
+      const record = resolveSpawnRecord(opts.agentId, opts.surface);
+      if (!record) {
+        throw new Error(
+          `Cannot relaunch ${opts.agentId} after CLI update: agent record not found`,
+        );
+      }
+
+      const launchCwd = record.launch_cwd?.trim() || undefined;
+      const launcherName = record.launcher_name?.trim() || undefined;
+      const command = buildLaunchCommand(
+        record.cli,
+        record.repo,
+        record.model ?? opts.model ?? undefined,
+        launcherName,
+        {
+          cwd: launchCwd,
+          envPrefix: opts.mcpEnv,
+          allowModelOverride: true,
+        },
+      );
+      await sendLauncherCommandToSurface({
+        surface: opts.surface,
+        workspace: record.workspace_id ?? opts.workspace,
+        command,
+      });
     };
 
     const canonicalizeSpawnResult = <
@@ -4019,6 +4226,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,
                 timeout_ms: args.boot_prompt_timeout_ms,
+                onUpdateShellRelaunch: () =>
+                  relaunchSpawnAgentAfterUpdate({
+                    agentId: result.agent_id,
+                    surface: result.surface_id,
+                    workspace: deliveryWorkspace,
+                    model: result.model ?? args.model,
+                    mcpEnv: result.mcp_env,
+                  }),
               });
 
               canonicalizeSpawnResult(result);
@@ -4046,12 +4261,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-            try {
-              canonicalizeSpawnResult(result);
-              let updated = stateMgr.updateRecord(result.agent_id, {
+            const clearBootPromptPending = () => {
+              const record = resolveSpawnRecord(result.agent_id, result.surface_id);
+              const agentId = record?.agent_id ?? result.agent_id;
+              const updated = stateMgr.updateRecord(agentId, {
                 boot_prompt_pending: false,
               });
-              registry.set(result.agent_id, updated);
+              registry.set(agentId, updated);
+              result.agent_id = updated.agent_id;
+              return updated;
+            };
+            try {
+              canonicalizeSpawnResult(result);
+              let updated = clearBootPromptPending();
               if (
                 !(e instanceof BootPromptTimeoutError) &&
                 updated.state !== "done" &&
@@ -4070,6 +4292,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface_id: result.surface_id,
             };
             if (e instanceof BootPromptTimeoutError) {
+              try {
+                clearBootPromptPending();
+              } catch {
+                // Preserve the original timeout response.
+              }
               return err(e, { ...extra, last_10_lines: e.last_10_lines });
             }
             if (e instanceof BootPromptDeliveryError) {
@@ -4113,6 +4340,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               monitor_boot: monitorBoot,
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
+              boot_prompt_submit_verified:
+                bootPromptDelivery?.submit_verified ?? null,
             },
           );
         } catch (e) {
@@ -4188,6 +4417,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               cli: args.cli,
               prompt: args.prompt,
               timeout_ms: args.boot_prompt_timeout_ms,
+              onUpdateShellRelaunch: () =>
+                relaunchSpawnAgentAfterUpdate({
+                  agentId: result.agent_id,
+                  surface: result.surface_id,
+                  workspace: result.workspace_id ?? args.workspace,
+                  model: result.model ?? args.model,
+                  mcpEnv: result.mcp_env,
+                }),
             });
             canonicalizeSpawnResult(result);
             const updated = stateMgr.updateRecord(result.agent_id, {
@@ -4217,6 +4454,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
+              boot_prompt_submit_verified:
+                bootPromptDelivery?.submit_verified ?? null,
             },
           );
         } catch (e) {
@@ -4275,6 +4514,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: CliType;
             role: AgentRole;
             monitor_boot?: MonitorBootResult;
+            boot_prompt_delivered?: boolean;
+            boot_prompt_submit_verified?: boolean | null;
           }> = [];
 
           for (const agent of args.agents) {
@@ -4289,14 +4530,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: agent.role,
               auto_archive_on_done: false,
             });
+            let bootPromptDelivery:
+              | Awaited<ReturnType<typeof deliverBootPrompt>>
+              | undefined;
 
             if (hasPrompt) {
-              const bootPromptDelivery = await deliverBootPrompt({
+              bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace,
                 cli: agent.cli,
                 prompt: agent.prompt,
                 timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
+                onUpdateShellRelaunch: () =>
+                  relaunchSpawnAgentAfterUpdate({
+                    agentId: result.agent_id,
+                    surface: result.surface_id,
+                    workspace,
+                    model: result.model ?? agent.model,
+                    mcpEnv: result.mcp_env,
+                  }),
               });
 
               canonicalizeSpawnResult(result);
@@ -4336,6 +4588,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               cli: agent.cli,
               role,
               monitor_boot: monitorBoot,
+              boot_prompt_delivered: hasPrompt
+                ? isBootPromptDelivered(bootPromptDelivery)
+                : undefined,
+              boot_prompt_submit_verified: hasPrompt
+                ? (bootPromptDelivery?.submit_verified ?? null)
+                : undefined,
             });
           }
 

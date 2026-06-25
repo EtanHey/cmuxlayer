@@ -136,6 +136,7 @@ export interface StateTransition {
 }
 
 export type DeliveryEventType =
+  | "boot_prompt"
   | "spawn_agent"
   | "send_input"
   | "send_command"
