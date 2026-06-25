@@ -185,6 +185,19 @@ function renameOnlyAgentStateToSession(sessionId: string): string {
   return finalAgentId;
 }
 
+function resolveCurrentTestAgentId(
+  stateMgr: { readState(agentId: string): AgentRecord | null },
+  agentId: string,
+): string {
+  if (stateMgr.readState(agentId)) return agentId;
+  const entries = readdirSync(TEST_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => name !== "events" && !name.startsWith("Gits"));
+  expect(entries).toHaveLength(1);
+  return entries[0]!;
+}
+
 describe("agent lifecycle tool registration", () => {
   it("registers all 13 agent lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
@@ -1227,10 +1240,11 @@ describe("agent lifecycle tool handlers", () => {
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
     const stateMgr = engine["stateMgr"];
-    const updated = stateMgr.updateRecord(agentId, {
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
-    engine.getRegistry().set(agentId, updated);
+    engine.getRegistry().set(currentAgentId, updated);
 
     const result = await list.handler({}, {} as any);
     const parsed =
@@ -1331,12 +1345,16 @@ describe("agent lifecycle tool handlers", () => {
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
     const stateMgr = engine["stateMgr"];
-    const updated = stateMgr.updateRecord(agentId, {
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
-    engine.getRegistry().set(agentId, updated);
+    engine.getRegistry().set(currentAgentId, updated);
 
-    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const result = await getState.handler(
+      { agent_id: currentAgentId },
+      {} as any,
+    );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
@@ -1683,12 +1701,13 @@ describe("agent lifecycle tool handlers", () => {
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const stateMgr = engine["stateMgr"];
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
 
-    if (stateMgr.readState(agentId)?.state === "booting") {
-      stateMgr.transition(agentId, "ready");
+    if (stateMgr.readState(currentAgentId)?.state === "booting") {
+      stateMgr.transition(currentAgentId, "ready");
     }
-    stateMgr.transition(agentId, "done");
-    const doneState = stateMgr.updateRecord(agentId, {
+    stateMgr.transition(currentAgentId, "done");
+    const doneState = stateMgr.updateRecord(currentAgentId, {
       task_done_detected_at: "2026-06-05T17:20:00.000Z",
     });
     if (!doneState) {
@@ -1697,7 +1716,7 @@ describe("agent lifecycle tool handlers", () => {
     engine.getRegistry().set(agentId, doneState);
 
     const result = await waitFor.handler(
-      { agent_id: agentId, timeout_ms: 5000 },
+      { agent_id: currentAgentId, timeout_ms: 5000 },
       {} as any,
     );
     const parsed =
@@ -1917,10 +1936,11 @@ describe("agent lifecycle tool handlers", () => {
     );
     const agentId = spawnResult.structuredContent.agent_id;
     const stateMgr = engine["stateMgr"];
-    const updated = stateMgr.updateRecord(agentId, {
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const updated = stateMgr.updateRecord(currentAgentId, {
       cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
-    engine.getRegistry().set(agentId, updated);
+    engine.getRegistry().set(currentAgentId, updated);
 
     const result = await myAgents.handler({}, {} as any);
     const agent = result.structuredContent.agents[0];

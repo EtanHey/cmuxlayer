@@ -2382,6 +2382,119 @@ To continue this session, run codex resume ${sessionId}`,
         vi.unstubAllEnvs();
       }
     });
+
+    it("does not bind the wrong Claude JSONL when two launcher agents share a cwd", async () => {
+      vi.setSystemTime(new Date("2026-06-25T09:30:30.000Z"));
+      const home = join(TEST_DIR, "home-claude-shared-cwd");
+      const launchCwd = join(TEST_DIR, "Gits", "cmuxlayer");
+      const projectDir = join(
+        home,
+        ".claude",
+        "projects",
+        launchCwd.replaceAll("/", "-"),
+      );
+      const firstSessionId = "019f0004-1111-7222-8333-444455556666";
+      const secondSessionId = "019f0005-aaaa-7bbb-8ccc-ddddeeeeeeee";
+      const firstPrompt = "Fix launcher resumability first Claude agent";
+      const secondPrompt = `${firstPrompt} but for the second Claude agent`;
+      const firstPath = join(projectDir, `${firstSessionId}.jsonl`);
+      const secondPath = join(projectDir, `${secondSessionId}.jsonl`);
+      mkdirSync(projectDir, { recursive: true });
+      for (const [path, prompt, mtime, includeNoise] of [
+        [firstPath, firstPrompt, "2026-06-25T09:30:10.000Z", false],
+        [secondPath, secondPrompt, "2026-06-25T09:30:20.000Z", true],
+      ] as const) {
+        writeFileSync(
+          path,
+          [
+            JSON.stringify({
+              type: "user",
+              message: { content: [{ type: "text", text: prompt }] },
+            }),
+            ...(includeNoise
+              ? [
+                  JSON.stringify({
+                    type: "user",
+                    message: {
+                      content: [
+                        {
+                          type: "tool_result",
+                          content: `Tool output mentions ${firstPrompt}`,
+                        },
+                      ],
+                    },
+                  }),
+                ]
+              : []),
+          ].join("\n"),
+        );
+        const date = new Date(mtime);
+        utimesSync(path, date, date);
+      }
+
+      vi.stubEnv("CMUXLAYER_HARNESS_HOME", home);
+      try {
+        engine.dispose();
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        engine = new AgentEngine(stateMgr, registry, mockClient, {
+          spawnPreflight: async () => {},
+        });
+        liveSurfaces = [
+          makeSurface("surface:claude-first"),
+          makeSurface("surface:claude-second"),
+        ];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:claude-first",
+          text: "What can I help you with?\n>",
+          lines: 80,
+          scrollback_used: true,
+        });
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerClaude-pending-first",
+            repo: "cmuxlayer",
+            model: "sonnet",
+            cli: "claude",
+            surface_id: "surface:claude-first",
+            state: "booting",
+            task_summary: firstPrompt,
+            created_at: "2026-06-25T09:30:00.000Z",
+            updated_at: "2026-06-25T09:30:00.000Z",
+            launch_cwd: launchCwd,
+            worktree_path: launchCwd,
+          }),
+        );
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerClaude-pending-second",
+            repo: "cmuxlayer",
+            model: "sonnet",
+            cli: "claude",
+            surface_id: "surface:claude-second",
+            state: "booting",
+            task_summary: secondPrompt,
+            created_at: "2026-06-25T09:30:00.000Z",
+            updated_at: "2026-06-25T09:30:00.000Z",
+            launch_cwd: launchCwd,
+            worktree_path: launchCwd,
+          }),
+        );
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(engine.getAgentState("cmuxlayerClaude-019f0004")).toMatchObject({
+          cli_session_id: firstSessionId,
+          cli_session_path: firstPath,
+        });
+        expect(engine.getAgentState("cmuxlayerClaude-019f0005")).toMatchObject({
+          cli_session_id: secondSessionId,
+          cli_session_path: secondPath,
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe("waitFor", () => {
