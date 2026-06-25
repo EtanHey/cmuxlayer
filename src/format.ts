@@ -188,6 +188,8 @@ export function formatAgentState(agent: AgentRecord): string {
     lines.push(
       `\u2502 resume: ${buildResumeCommand(agent.cli, agent.repo, agent.cli_session_id, agent.launcher_name)}`,
     );
+  } else {
+    lines.push("\u2502 resumable: false (no cli_session_id)");
   }
   if (agent.cli_session_path) {
     lines.push(`\u2502 transcript: ${agent.cli_session_path}`);

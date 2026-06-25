@@ -19,6 +19,7 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
+  CmuxTerminalMetadata,
 } from "./types.js";
 import { CmuxClient } from "./cmux-client.js";
 import { normalizeKeyName } from "./key-names.js";
@@ -314,6 +315,12 @@ export class CmuxSocketClient {
     const params: Record<string, unknown> = {};
     if (opts?.workspace) params.workspace_id = opts.workspace;
     return this.call("pane.list", params);
+  }
+
+  async listTerminalMetadata(): Promise<{
+    terminals: CmuxTerminalMetadata[];
+  }> {
+    return this.cliFallbackPinned()?.listTerminalMetadata() ?? { terminals: [] };
   }
 
   private async resolvePaneAnchorSurface(opts: {

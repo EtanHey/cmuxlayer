@@ -17,6 +17,7 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
+  CmuxTerminalMetadata,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 
@@ -253,6 +254,17 @@ export class CmuxClient {
     if (opts?.workspace) args.push("--workspace", opts.workspace);
     const raw = await this.run(args);
     return this.parse(raw, "list-panes");
+  }
+
+  async listTerminalMetadata(): Promise<{
+    terminals: CmuxTerminalMetadata[];
+  }> {
+    const raw = await this.run(["debug-terminals"]);
+    const parsed = this.parse<{ terminals?: CmuxTerminalMetadata[] }>(
+      raw,
+      "debug-terminals",
+    );
+    return { terminals: parsed.terminals ?? [] };
   }
 
   private async resolvePaneAnchorSurface(opts: {

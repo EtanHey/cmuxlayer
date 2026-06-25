@@ -73,6 +73,7 @@ export interface PublicAgent {
   model: string;
   state: AgentState;
   session_id: string | null;
+  resumable: boolean;
   resume_command?: string;
 }
 
@@ -82,6 +83,7 @@ export interface AgentRoute {
   workspace_id?: string | null;
   state: AgentState;
   session_id: string | null;
+  resumable: boolean;
   resume_command?: string;
 }
 
