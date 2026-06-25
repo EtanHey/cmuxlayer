@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -13,11 +14,17 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, createServerContext } from "../src/server.js";
+import {
+  createServer,
+  createServerContext,
+  type CmuxServerContext,
+  type CreateServerOptions,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 
-const TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
+let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
+const serverContexts: CmuxServerContext[] = [];
 
 const AGENT_TOOLS = [
   "spawn_agent",
@@ -38,6 +45,17 @@ const AGENT_TOOLS = [
 function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let readyText = "What can I help you with?\n>";
   let surfaceLive = true;
+  let promptPending = false;
+  let activeCli: "claude" | "codex" | "cursor" = "claude";
+  const workingText = () => {
+    if (activeCli === "codex") {
+      return "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)";
+    }
+    if (activeCli === "cursor") {
+      return "cursor> \nWorking (1s • esc to interrupt)";
+    }
+    return "Claude Code\n✻ Working\n";
+  };
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
       surfaceLive = true;
@@ -46,11 +64,33 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       surfaceLive = false;
       return { stdout: "{}", stderr: "" };
     }
+    if (args.includes("send-key") && args.includes("return")) {
+      if (promptPending) {
+        readyText = workingText();
+        promptPending = false;
+      }
+      return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send")) {
       const text = String(args[args.length - 1] ?? "");
-      if (text.includes("Codex")) readyText = "codex> ";
-      if (text.includes("Claude")) readyText = "What can I help you with?\n>";
-      if (text.includes("Cursor")) readyText = "cursor> ";
+      if (text.includes("Codex")) {
+        activeCli = "codex";
+        readyText = "codex> ";
+      }
+      if (text.includes("Claude")) {
+        activeCli = "claude";
+        readyText = "What can I help you with?\n>";
+      }
+      if (text.includes("Cursor")) {
+        activeCli = "cursor";
+        readyText = "cursor> ";
+      }
+      if (
+        text.trim() &&
+        !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
+      ) {
+        promptPending = true;
+      }
     }
 
     if (args.includes("list-workspaces")) {
@@ -139,8 +179,14 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   });
 }
 
+function createTrackedServer(opts: Omit<CreateServerOptions, "context">) {
+  const context = createServerContext(opts);
+  serverContexts.push(context);
+  return createServer({ ...opts, context });
+}
+
 function createLifecycleServer(exec: ExecFn) {
-  return createServer({
+  return createTrackedServer({
     exec,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
@@ -226,12 +272,21 @@ describe("agent lifecycle tool handlers", () => {
   let mockExec: ExecFn;
 
   beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), "cmux-agents-test-server-tools-"));
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     mockExec = makeLifecycleExec();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await Promise.allSettled(
+      serverContexts.map(
+        (context) => context.lifecycleStartPromise ?? Promise.resolve(),
+      ),
+    );
+    for (const context of serverContexts.splice(0)) {
+      context.dispose();
+    }
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -427,7 +482,7 @@ describe("agent lifecycle tool handlers", () => {
       });
       return { stdout: "", stderr: "" };
     });
-    const server = createServer({
+    const server = createTrackedServer({
       exec: mockExec,
       stateDir: TEST_DIR,
       disableSpawnPreflight: true,
@@ -494,7 +549,7 @@ describe("agent lifecycle tool handlers", () => {
       });
       return { stdout: "", stderr: "" };
     });
-    const server = createServer({
+    const server = createTrackedServer({
       exec: mockExec,
       stateDir: TEST_DIR,
       disableSpawnPreflight: true,
@@ -758,7 +813,9 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text:
-              lastSentText === ""
+              lastSentText === "file prompt body"
+                ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
+                : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
                   ? "$ voicelayerCodex -s"
@@ -899,7 +956,12 @@ describe("agent lifecycle tool handlers", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
-            text: lastSentText === "" ? "$ " : "$ voicelayerCodex -s\ncodex> ",
+            text:
+              lastSentText === "file prompt body"
+                ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
+                : lastSentText === ""
+                  ? "$ "
+                  : "$ voicelayerCodex -s\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -1283,6 +1345,7 @@ describe("agent lifecycle tool handlers", () => {
       disableSpawnPreflight: true,
       sessionIdentityResolver: () => null,
     });
+    serverContexts.push(context);
     context.stateMgr.ensureAutoRecord("auto-codex-surface-new", {
       surface_id: "surface:new",
       surface_title: "cmuxlayerCodex",
@@ -1777,7 +1840,7 @@ describe("agent lifecycle tool handlers", () => {
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     await spawn.handler(
-      { repo: "voicelayer", model: "opus", cli: "claude", prompt: "fix tts" },
+      { repo: "voicelayer", model: "opus", cli: "claude" },
       {} as any,
     );
     await spawn.handler(
@@ -1785,7 +1848,6 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
-        prompt: "opt search",
       },
       {} as any,
     );
@@ -1811,7 +1873,6 @@ describe("agent lifecycle tool handlers", () => {
         repo: "orchestrator",
         model: "opus",
         cli: "claude",
-        prompt: "orchestrate",
       },
       {} as any,
     );
@@ -1829,7 +1890,6 @@ describe("agent lifecycle tool handlers", () => {
         repo: "voicelayer",
         model: "sonnet",
         cli: "claude",
-        prompt: "fix",
         parent_agent_id: actualParentId,
       },
       {} as any,

@@ -155,7 +155,15 @@ const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
+const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
 const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
+
+function bootPromptUpdateMaxMs(): number {
+  const raw = Number(process.env.CMUXLAYER_BOOT_PROMPT_UPDATE_MAX_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? Math.floor(raw)
+    : BOOT_PROMPT_UPDATE_MAX_MS;
+}
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
@@ -600,14 +608,30 @@ function inferLauncherCli(command: string): CliType | null {
   return match[1].toLowerCase() as CliType;
 }
 
-function inferRepoFromLauncherTitle(title?: string): string | null {
+function inferLauncherFromTitle(
+  title?: string,
+): { repo: string; cli: CliType; launcherName: string } | null {
   if (!title) return null;
   const launcherTitle = extractPrefix(title);
   const match = launcherTitle.match(
-    /^(.+?)(?:Claude|Codex|Cursor|Gemini|Kiro)$/i,
+    /^(.+?)(Claude|Codex|Cursor|Gemini|Kiro)$/i,
   );
-  const repo = match?.[1]?.trim();
-  return repo && repo !== "." && repo !== ".." ? repo : null;
+  if (!match) {
+    return null;
+  }
+  const repo = match[1].trim();
+  if (!repo || repo === "." || repo === "..") {
+    return null;
+  }
+  return {
+    repo,
+    cli: match[2].toLowerCase() as CliType,
+    launcherName: launcherTitle,
+  };
+}
+
+function inferRepoFromLauncherTitle(title?: string): string | null {
+  return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
 function matchesShellPrompt(text: string): boolean {
@@ -615,7 +639,13 @@ function matchesShellPrompt(text: string): boolean {
 }
 
 function matchesCliUpdateMarker(text: string): boolean {
-  return /Updating .* via|bun install|Please restart/i.test(text);
+  return /(?:^|\n)[^\n]*Updating\s+.+\s+via\s+.+/i.test(text);
+}
+
+function matchesCliUpdateContinuationMarker(text: string): boolean {
+  return /(?:^|\n)[^\n]*(?:Update ran successfully|Please restart)[^\n]*/i.test(
+    text,
+  );
 }
 
 function readyPatternCandidates(cli?: CliType): CliType[] {
@@ -1421,15 +1451,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
       if (opts.require_working_status) {
-        if (
-          retried &&
-          (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) ||
-            opts.allow_non_agent_clear === true) &&
-          !hasPendingInput
-        ) {
-          return { submit_verified: true, retry_count: retryCount };
-        }
-
         if (!retried) {
           await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
           await sendKeyWithRetry(opts.surface, "return", opts.workspace);
@@ -1597,8 +1618,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const consecutiveMatches = new Map<CliType, number>();
     const candidates = readyPatternCandidates(opts.cli);
     let updateStartedAt: number | null = null;
+    let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
+    const updateMaxMs = bootPromptUpdateMaxMs();
 
     while (Date.now() < deadline || updateStartedAt !== null) {
       try {
@@ -1610,18 +1633,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
-        const updateMarker = matchesCliUpdateMarker(screen.text);
+        const updateMarker =
+          matchesCliUpdateMarker(screen.text) ||
+          (updateStartedAt !== null &&
+            matchesCliUpdateContinuationMarker(screen.text) &&
+            !matchesShellPrompt(screen.text));
 
         if (updateMarker) {
           updateWasSeen = true;
           updateStartedAt ??= now;
+          updateElapsedMs = Math.max(
+            updateElapsedMs + BOOT_PROMPT_READY_POLL_MS,
+            updateStartedAt === null ? 0 : now - updateStartedAt,
+          );
+          if (updateElapsedMs >= updateMaxMs) {
+            throw new BootPromptTimeoutError(
+              `Timed out waiting for boot prompt readiness on ${opts.surface}: CLI update marker persisted for ${updateMaxMs}ms`,
+              tailLines(lastText, 10),
+            );
+          }
           await delay(BOOT_PROMPT_READY_POLL_MS);
           continue;
         }
 
         if (updateStartedAt !== null) {
-          deadline += now - updateStartedAt;
+          deadline += Math.max(now - updateStartedAt, updateElapsedMs);
           updateStartedAt = null;
+          updateElapsedMs = 0;
         }
 
         if (
@@ -2489,11 +2527,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           | Awaited<ReturnType<typeof deliverBootPrompt>>
           | undefined;
         if (bootPromptPath) {
+          const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
             workspace: result.workspace || targetWorkspace,
+            cli: launcher?.cli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
+            onUpdateShellRelaunch: launcher
+              ? () =>
+                  sendLauncherCommandToSurface({
+                    surface: result!.surface,
+                    workspace: result!.workspace || targetWorkspace,
+                    command: buildLaunchCommand(
+                      launcher.cli,
+                      launcher.repo,
+                      undefined,
+                      launcher.launcherName,
+                    ),
+                  })
+              : undefined,
           });
         }
         await restoreFocusAfterRender(
@@ -2604,11 +2657,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           | Awaited<ReturnType<typeof deliverBootPrompt>>
           | undefined;
         if (bootPromptPath) {
+          const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
             workspace: result.workspace || args.workspace,
+            cli: launcher?.cli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
+            onUpdateShellRelaunch: launcher
+              ? () =>
+                  sendLauncherCommandToSurface({
+                    surface: result!.surface,
+                    workspace: result!.workspace || args.workspace,
+                    command: buildLaunchCommand(
+                      launcher.cli,
+                      launcher.repo,
+                      undefined,
+                      launcher.launcherName,
+                    ),
+                  })
+              : undefined,
           });
         }
         const data: Record<string, unknown> = { ...result };
