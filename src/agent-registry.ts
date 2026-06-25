@@ -421,11 +421,17 @@ export class AgentRegistry {
     } catch {
       return [];
     }
+    if (surfaces.length === 0) {
+      return [];
+    }
 
     const liveSurfaceRefs = new Set(surfaces.map((surface) => surface.ref));
     const evicted: string[] = [];
 
     for (const [id, agent] of [...this.agents.entries()]) {
+      if (isCrashRecoveryEligible(agent)) {
+        continue;
+      }
       if (liveSurfaceRefs.has(agent.surface_id)) {
         continue;
       }

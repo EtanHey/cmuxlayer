@@ -2299,7 +2299,6 @@ export class AgentEngine {
 
     return (
       agent.user_killed === true ||
-      agent.pid === null ||
       (agent.respawn_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS ||
       isCrashRecoveryExhausted(agent.error)
     );

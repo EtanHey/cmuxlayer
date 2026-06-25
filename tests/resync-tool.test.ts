@@ -414,6 +414,55 @@ function makeMultiWorkspaceExec(): ExecFn {
   });
 }
 
+function makeEmptySurfaceExec(): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({}),
+      stderr: "",
+    };
+  });
+}
+
 describe("resync_agents tool", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -631,7 +680,7 @@ describe("resync_agents tool", () => {
         cli_session_id: "019ec0e6-1111-2222-3333-444455556666",
         role: "orchestrator",
         error: "Surface surface:ghost disappeared",
-        crash_recover: true,
+        crash_recover: false,
       }),
     );
 
@@ -736,6 +785,63 @@ describe("resync_agents tool", () => {
     }
   });
 
+  it("resync_agents does not evict terminal records when surface enumeration is empty", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "lead-agent-during-empty-layout",
+        surface_id: "surface:lead",
+        state: "error",
+        role: "orchestrator",
+        pid: null,
+        error: "temporary layout read",
+      }),
+    );
+
+    const server = createServer({
+      exec: makeEmptySurfaceExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools[
+      "resync_agents"
+    ].handler({}, {} as any);
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain("lead-agent-during-empty-layout");
+    expect(stateMgr.readState("lead-agent-during-empty-layout")).not.toBeNull();
+  });
+
+  it("resync_agents keeps recoverable crash-recovery errors for respawn", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "recoverable-crash-agent",
+        surface_id: "surface:missing-recoverable",
+        state: "error",
+        cli_session_id: "019ec0e6-1111-2222-3333-444455556666",
+        error: "Surface surface:missing-recoverable disappeared",
+        crash_recover: true,
+        user_killed: false,
+      }),
+    );
+
+    const server = createServer({
+      exec: makeDiscoveryExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools[
+      "resync_agents"
+    ].handler({}, {} as any);
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain("recoverable-crash-agent");
+    expect(stateMgr.readState("recoverable-crash-agent")).not.toBeNull();
+  });
+
   it("resync_agents evicts the exact exhausted Cursor ghost even when its stale surface is in a non-active workspace", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
@@ -771,6 +877,35 @@ describe("resync_agents tool", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.evicted).toContain("orchestratorCursor-2ec13c6e");
     expect(stateMgr.readState("orchestratorCursor-2ec13c6e")).toBeNull();
+  });
+
+  it("resync_agents keeps pidless terminal records with live surfaces and no dead evidence", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "inspectable-terminal-agent",
+        surface_id: "surface:287",
+        workspace_id: "workspace:12",
+        state: "done",
+        pid: null,
+        user_killed: false,
+        respawn_attempts: 0,
+      }),
+    );
+
+    const server = createServer({
+      exec: makeMultiWorkspaceExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools[
+      "resync_agents"
+    ].handler({}, {} as any);
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain("inspectable-terminal-agent");
+    expect(stateMgr.readState("inspectable-terminal-agent")).not.toBeNull();
   });
 
   it("resync_agents never evicts a healthy agent whose surface is in a non-active workspace", async () => {
