@@ -1984,7 +1984,7 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(readsWhenBootPromptSent).toBe(2);
-    expect(reads).toBe(3);
+    expect(reads).toBe(4);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -3875,6 +3875,201 @@ describe("tool handler integration", () => {
     expect(parsed.last_10_lines).toContain("$ waiting");
   });
 
+  it("spawn_agent waits out a Codex auto-update, relaunches after bare shell, then delivers the boot prompt", async () => {
+    vi.useRealTimers();
+    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-relaunch-state");
+    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-relaunch.md");
+    const prompt = "boot after update";
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+
+    let launcherSends = 0;
+    let promptSent = false;
+    let returnPresses = 0;
+    let readsAfterFirstLaunch = 0;
+    const sentTexts: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "cmuxlayer",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        sentTexts.push(text);
+        if (text.includes("cmuxlayerCodex")) {
+          launcherSends += 1;
+        } else if (text === prompt) {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        let text = "$ ";
+        if (launcherSends === 1) {
+          readsAfterFirstLaunch += 1;
+          if (readsAfterFirstLaunch === 1) {
+            text = "codex> ";
+          } else if (readsAfterFirstLaunch === 2) {
+            text = "Updating Codex via bun install -g @openai/codex";
+          } else if (readsAfterFirstLaunch === 3) {
+            text = "🎉 Update ran successfully! Please restart Codex";
+          } else {
+            text = "etan@mac % ";
+          }
+        } else if (launcherSends >= 2 && !promptSent) {
+          text = "codex> ";
+        } else if (promptSent) {
+          text =
+            "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)";
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 50,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(launcherSends).toBe(2);
+    expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+    expect(returnPresses).toBeGreaterThanOrEqual(3);
+
+    rmSync(stateDir, { recursive: true, force: true });
+  }, 10_000);
+
+  it("new_split retries Return when the boot prompt clears but the agent does not start working", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-idle-clear-retry.md");
+    const prompt = "short boot prompt";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let returnPresses = 0;
+    let promptSent = false;
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        promptSent = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        const text =
+          promptSent && returnPresses >= 2
+            ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+            : "codex> ";
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(returnPresses).toBe(2);
+  }, 10_000);
+
   it("new_split fails loudly when a short boot prompt stays pending after submit retry", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-short-dropped-return.md");
@@ -3970,7 +4165,10 @@ describe("tool handler integration", () => {
         return {
           stdout: JSON.stringify({
             surface: "surface:2",
-            text: "codex> ",
+            text:
+              returnPresses > 0
+                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                : "codex> ",
             lines: 30,
             scrollback_used: false,
           }),
@@ -4006,6 +4204,7 @@ describe("tool handler integration", () => {
     writeFileSync(promptPath, prompt, "utf8");
     let returnPresses = 0;
     let typedText = "";
+    let promptSent = false;
     const sendCalls: string[] = [];
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("new-split")) {
@@ -4024,6 +4223,7 @@ describe("tool handler integration", () => {
         const chunk = String(args.at(-1) ?? "");
         sendCalls.push(chunk);
         typedText += chunk;
+        promptSent = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send-key") && args.includes("return")) {
@@ -4035,9 +4235,11 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:2",
             text:
-              returnPresses === 1
-                ? `codex> ${typedText.slice(-100)}`
-                : "codex> ",
+              !promptSent
+                ? "codex> "
+                : returnPresses === 1
+                  ? `codex> ${typedText.slice(-100)}`
+                  : "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
             lines: 30,
             scrollback_used: false,
           }),
