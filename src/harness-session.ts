@@ -466,30 +466,43 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function normalizePromptText(value: string): string {
+  return normalizeText(
+    value.replace(/<\/?\s*user_query\s*>/gi, " "),
+  );
+}
+
+function promptTextMatchesExpected(value: string, expectedText: string): boolean {
+  return normalizePromptText(value) === expectedText;
+}
+
 function promptFieldContainsExpectedText(
   value: unknown,
   expectedText: string,
 ): boolean {
   if (typeof value === "string") {
-    return normalizeText(value) === expectedText;
+    return promptTextMatchesExpected(value, expectedText);
   }
   if (Array.isArray(value)) {
-    return value.some((item) => {
+    const textParts = value.flatMap((item) => {
       if (typeof item === "string") {
-        return normalizeText(item) === expectedText;
+        return [item];
       }
       const block = asRecord(item);
-      if (!block) return false;
-      return (
-        block.type === "text" &&
-        typeof block.text === "string" &&
-        normalizeText(block.text) === expectedText
-      );
+      if (block?.type === "text" && typeof block.text === "string") {
+        return [block.text];
+      }
+      return [];
     });
+    return (
+      textParts.some((text) => promptTextMatchesExpected(text, expectedText)) ||
+      (textParts.length > 1 &&
+        promptTextMatchesExpected(textParts.join(" "), expectedText))
+    );
   }
   const block = asRecord(value);
   if (block?.type === "text" && typeof block.text === "string") {
-    return normalizeText(block.text) === expectedText;
+    return promptTextMatchesExpected(block.text, expectedText);
   }
   return false;
 }

@@ -478,6 +478,90 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
       rmSync(localHome, { recursive: true, force: true });
     }
   });
+
+  it("Cursor: matches launch prompts wrapped in user_query tags", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-cursor-tags-"));
+    const cwd = "/Users/etanheyman/Gits/cmuxlayer";
+    const sessionId = "cursor-tagged-prompt";
+    const root = join(
+      localHome,
+      ".cursor",
+      "projects",
+      "Users-etanheyman-Gits-cmuxlayer",
+      "agent-transcripts",
+      sessionId,
+    );
+    mkdirSync(root, { recursive: true });
+    writeFileSync(
+      join(root, `${sessionId}.jsonl`),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "<user_query>resume the launcher session</user_query>",
+            },
+          ],
+        },
+      }),
+    );
+
+    try {
+      const identity = findLatestHarnessSessionIdentity("cursor", cwd, {
+        home: localHome,
+        expectedText: "resume the launcher session",
+      });
+
+      expect(identity).toMatchObject({
+        harness: "cursor",
+        session_id: sessionId,
+      });
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
+  });
+
+  it("Cursor: matches launch prompts split across adjacent text blocks", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-cursor-split-"));
+    const cwd = "/Users/etanheyman/Gits/cmuxlayer";
+    const sessionId = "cursor-split-prompt";
+    const root = join(
+      localHome,
+      ".cursor",
+      "projects",
+      "Users-etanheyman-Gits-cmuxlayer",
+      "agent-transcripts",
+      sessionId,
+    );
+    mkdirSync(root, { recursive: true });
+    writeFileSync(
+      join(root, `${sessionId}.jsonl`),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            { type: "text", text: "resume the " },
+            { type: "text", text: "launcher session" },
+          ],
+        },
+      }),
+    );
+
+    try {
+      const identity = findLatestHarnessSessionIdentity("cursor", cwd, {
+        home: localHome,
+        expectedText: "resume the launcher session",
+      });
+
+      expect(identity).toMatchObject({
+        harness: "cursor",
+        session_id: sessionId,
+      });
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("applyHarnessState (overlay; JSONL wins, screen is fallback)", () => {
