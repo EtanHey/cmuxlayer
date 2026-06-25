@@ -26,22 +26,51 @@ const LAUNCH_SHELL_READY_POLL_MS = 100;
 type CmuxLikeClient = CmuxClient | CmuxSocketClient;
 
 function chunkTerminalInput(text: string, chunkSize: number): string[] {
-  if (!text || text.length <= chunkSize) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
+  const rawChunks: string[] = [];
   let remaining = text;
 
   while (remaining.length > chunkSize) {
     const newlineIndex = remaining.lastIndexOf("\n", chunkSize);
     const splitAt = newlineIndex >= 0 ? newlineIndex + 1 : chunkSize;
-    chunks.push(remaining.slice(0, splitAt));
+    rawChunks.push(remaining.slice(0, splitAt));
     remaining = remaining.slice(splitAt);
   }
 
   if (remaining.length > 0) {
-    chunks.push(remaining);
+    rawChunks.push(remaining);
+  }
+
+  const chunks: string[] = [];
+  let whitespaceCarry = "";
+  for (const chunk of rawChunks) {
+    if (chunk.trim().length === 0) {
+      whitespaceCarry += chunk;
+      continue;
+    }
+
+    if (!whitespaceCarry) {
+      chunks.push(chunk);
+      continue;
+    }
+
+    let candidate = whitespaceCarry + chunk;
+    whitespaceCarry = "";
+    while (candidate.length > chunkSize) {
+      const firstTextIndex = candidate.search(/\S/);
+      const splitAt =
+        firstTextIndex >= chunkSize ? firstTextIndex + 1 : chunkSize;
+      chunks.push(candidate.slice(0, splitAt));
+      candidate = candidate.slice(splitAt);
+    }
+    if (candidate.trim().length === 0) {
+      whitespaceCarry = candidate;
+    } else {
+      chunks.push(candidate);
+    }
+  }
+
+  if (whitespaceCarry && chunks.length > 0) {
+    chunks[chunks.length - 1] += whitespaceCarry;
   }
 
   return chunks;

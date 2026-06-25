@@ -438,6 +438,76 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("spawn_agent delivers inline prompts with blank lines without empty chunks", async () => {
+    const baseExec = makeLifecycleExec();
+    const prompt = `${"a".repeat(500)}\n\n${"b".repeat(600)}`;
+    const buffers = new Map<string, string>();
+    let promptPasted = false;
+    let promptSubmitted = false;
+    mockExec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("set-buffer")) {
+        const chunk = String(args.at(-1) ?? "");
+        if (chunk.trim().length === 0) {
+          throw new Error("set-buffer requires text");
+        }
+        const nameIndex = args.indexOf("--name");
+        const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
+        buffers.set(name, chunk);
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("paste-buffer")) {
+        promptPasted = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (
+        args.includes("send-key") &&
+        args.includes("return") &&
+        promptPasted
+      ) {
+        promptSubmitted = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen") && promptSubmitted) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const chunks = mockExec.mock.calls
+      .filter(([, args]) => Array.isArray(args) && args.includes("set-buffer"))
+      .map(([, args]) => String(args.at(-1) ?? ""));
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.trim().length > 0)).toBe(true);
+    expect(chunks.every((chunk) => chunk.length <= 501)).toBe(true);
+    expect(chunks.join("")).toBe(prompt);
+    expect(chunks.join("")).toContain("\n\n");
+  });
+
   it("spawn_agent canonicalizes the agent id after session capture renames pending state", async () => {
     const sessionId = "019ec0e6-1111-2222-3333-444455556666";
     let finalAgentId: string | null = null;
