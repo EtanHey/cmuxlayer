@@ -12,6 +12,10 @@ import { sanitizeRepoName, shellQuote } from "./agent-command.js";
 
 const execFileAsync = promisify(execFile);
 
+// cmux validates the launch `-w` value (the worktree path cmuxLayer passes) as a
+// worktree name and rejects anything longer than this.
+const MAX_WORKTREE_ARG_LENGTH = 64;
+
 export type WorktreeExec = (
   cmd: string,
   args: string[],
@@ -182,7 +186,11 @@ function normalizeWorktreeRequest(
   Omit<WorktreeRequest, "create" | "reuse" | "base"> & { name: string } {
   const spec: WorktreeRequest =
     request === true || request === false || request === undefined ? {} : request;
-  const name = safeName(spec.name ?? `${repo}-worker-${Date.now()}`);
+  // Default name is intentionally compact: no redundant `<repo>-` prefix (the
+  // worktree already lives under `<repo>.wt/`) and a base36 timestamp instead of
+  // 13 decimal digits. This keeps the full worktree path — which cmux validates
+  // as the `-w` worktree-name argument (≤ 64 chars) — well within budget.
+  const name = safeName(spec.name ?? `worker-${Date.now().toString(36)}`);
   return {
     create: spec.create ?? true,
     reuse: spec.reuse ?? true,
@@ -257,6 +265,26 @@ export async function prepareWorktree(
     ? resolve(spec.path)
     : join(worktreeBase, `${repo}.wt`, spec.name);
   assertInside(worktreeBase, worktreePath);
+
+  // The worktree path becomes cmux's `-w` argument, which it caps at
+  // MAX_WORKTREE_ARG_LENGTH. cmuxLayer picks the location in production (homeGitsDir
+  // unset via workspace/repoRoots resolution), so fail clearly here instead of at
+  // launch. The legacy homeGitsDir branch (embedders/tests) opts out of the cap.
+  if (
+    input.homeGitsDir === undefined &&
+    worktreePath.length > MAX_WORKTREE_ARG_LENGTH
+  ) {
+    const prefixLen = worktreePath.length - spec.name.length;
+    throw new Error(
+      `Worktree path is ${worktreePath.length} characters but cmux limits the launch ` +
+        `worktree argument (-w) to ${MAX_WORKTREE_ARG_LENGTH}: ${worktreePath}. ` +
+        (spec.path
+          ? `Choose a shorter worktree.path.`
+          : `Use a shorter worktree name (current "${spec.name}" = ${spec.name.length} chars; ` +
+            `budget for this location is ${Math.max(0, MAX_WORKTREE_ARG_LENGTH - prefixLen)}).`),
+    );
+  }
+
   if (existsSync(worktreePath)) {
     if (!spec.reuse) {
       throw new Error(`Worktree already exists: ${worktreePath}`);
