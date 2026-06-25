@@ -1072,7 +1072,14 @@ export class AgentEngine {
     const identity = findLatestHarnessSessionIdentity(
       agent.cli as Harness,
       this.harnessCwdForAgent(agent),
-      { sinceMs },
+      {
+        sinceMs,
+        expectedText: agent.task_summary,
+        ...(process.env.CMUXLAYER_HARNESS_HOME
+          ? { home: process.env.CMUXLAYER_HARNESS_HOME }
+          : {}),
+        ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {}),
+      },
     );
     return identity
       ? { session_id: identity.session_id, path: identity.path }

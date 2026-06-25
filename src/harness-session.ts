@@ -351,6 +351,7 @@ export interface HarnessSessionIdentity {
 
 export interface IdentityResolveOpts extends ResolveOpts {
   sinceMs?: number;
+  expectedText?: string | null;
 }
 
 /**
@@ -448,29 +449,125 @@ function afterSince(path: string, sinceMs: number | undefined): boolean {
   return sinceMs === undefined || mtimeMs(path) >= sinceMs;
 }
 
-function newestIdentity(
-  current: HarnessSessionIdentity | null,
-  candidate: HarnessSessionIdentity,
-): HarnessSessionIdentity {
-  return !current || candidate.mtime_ms > current.mtime_ms
-    ? candidate
-    : current;
-}
-
 function sessionIdFromJsonlName(path: string): string | null {
   const name = basename(path);
   return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : null;
 }
 
-function parseCodexSessionMeta(
-  path: string,
-): { session_id: string; cwd: string | null } | null {
-  let content: string;
+function readTextFile(path: string): string | null {
   try {
-    content = readFileSync(path, "utf8");
+    return readFileSync(path, "utf8");
   } catch {
     return null;
   }
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function normalizePromptText(value: string): string {
+  return normalizeText(
+    value.replace(/<\/?\s*user_query\s*>/gi, " "),
+  );
+}
+
+function promptTextMatchesExpected(value: string, expectedText: string): boolean {
+  return normalizePromptText(value) === expectedText;
+}
+
+function promptFieldContainsExpectedText(
+  value: unknown,
+  expectedText: string,
+): boolean {
+  if (typeof value === "string") {
+    return promptTextMatchesExpected(value, expectedText);
+  }
+  if (Array.isArray(value)) {
+    const textParts = value.flatMap((item) => {
+      if (typeof item === "string") {
+        return [item];
+      }
+      const block = asRecord(item);
+      if (block?.type === "text" && typeof block.text === "string") {
+        return [block.text];
+      }
+      return [];
+    });
+    return (
+      textParts.some((text) => promptTextMatchesExpected(text, expectedText)) ||
+      (textParts.length > 1 &&
+        promptTextMatchesExpected(textParts.join(" "), expectedText))
+    );
+  }
+  const block = asRecord(value);
+  if (block?.type === "text" && typeof block.text === "string") {
+    return promptTextMatchesExpected(block.text, expectedText);
+  }
+  return false;
+}
+
+function recordPromptFields(event: Record<string, unknown>): unknown[] {
+  const fields: unknown[] = [];
+  const type = typeof event.type === "string" ? event.type : null;
+  const role = typeof event.role === "string" ? event.role : null;
+  const message = asRecord(event.message);
+  const payload = asRecord(event.payload);
+
+  if (type === "user_message") {
+    fields.push(payload?.message, payload?.text, payload?.input);
+  }
+
+  if (role === "user" || type === "user") {
+    fields.push(
+      message?.content,
+      message?.text,
+      event.content,
+      payload?.message,
+      payload?.text,
+      payload?.input,
+    );
+  }
+
+  const payloadType =
+    typeof payload?.type === "string" ? payload.type : null;
+  if (payloadType === "user_message" || payloadType === "user") {
+    fields.push(payload?.message, payload?.text, payload?.input);
+  }
+
+  return fields;
+}
+
+function jsonlContainsExpectedPromptText(
+  content: string,
+  expectedText: string | null | undefined,
+): boolean {
+  const normalizedExpected = normalizeText(expectedText ?? "");
+  if (!normalizedExpected) return false;
+
+  for (const raw of content.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      const event = asRecord(JSON.parse(line));
+      if (
+        event &&
+        recordPromptFields(event).some((field) =>
+          promptFieldContainsExpectedText(field, normalizedExpected),
+        )
+      ) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+function parseCodexSessionMetaFromContent(
+  content: string,
+): { session_id: string; cwd: string | null } | null {
 
   for (const raw of content.split("\n")) {
     const line = raw.trim();
@@ -493,10 +590,37 @@ function parseCodexSessionMeta(
   return null;
 }
 
+interface HarnessSessionIdentityCandidate extends HarnessSessionIdentity {
+  expected_text_match: boolean;
+}
+
+function chooseIdentityCandidate(
+  candidates: HarnessSessionIdentityCandidate[],
+  expectedText: string | null | undefined,
+): HarnessSessionIdentity | null {
+  if (candidates.length === 0) return null;
+  const hasExpectedText = !!normalizeText(expectedText ?? "");
+  if (candidates.length === 1) {
+    const { expected_text_match, ...identity } = candidates[0]!;
+    return !hasExpectedText || expected_text_match ? identity : null;
+  }
+
+  if (hasExpectedText) {
+    const matches = candidates.filter((candidate) => candidate.expected_text_match);
+    if (matches.length === 1) {
+      const { expected_text_match, ...identity } = matches[0]!;
+      return identity;
+    }
+  }
+
+  return null;
+}
+
 /**
- * Find the newest harness transcript identity for a cwd. This is the bootstrap
+ * Find a precise harness transcript identity for a cwd. This is the bootstrap
  * path for resume: it discovers the real session id before callers already know
- * that id.
+ * that id. When the caller provides expectedText, the candidate must contain it
+ * in a user-origin prompt field; ambiguous or mismatched candidates fail closed.
  */
 export function findLatestHarnessSessionIdentity(
   harness: Harness,
@@ -509,7 +633,7 @@ export function findLatestHarnessSessionIdentity(
   switch (harness) {
     case "claude": {
       const root = join(home, ".claude", "projects", encodeClaudeCwd(cwd));
-      let found: HarnessSessionIdentity | null = null;
+      const candidates: HarnessSessionIdentityCandidate[] = [];
       for (const name of safeReaddir(root)) {
         const path = join(root, name);
         if (!name.endsWith(".jsonl") || !isFile(path) || !afterSince(path, opts.sinceMs)) {
@@ -517,15 +641,20 @@ export function findLatestHarnessSessionIdentity(
         }
         const sessionId = sessionIdFromJsonlName(path);
         if (!sessionId) continue;
-        found = newestIdentity(found, {
+        const content = readTextFile(path) ?? "";
+        candidates.push({
           harness,
           session_id: sessionId,
           cwd,
           path,
           mtime_ms: mtimeMs(path),
+          expected_text_match: jsonlContainsExpectedPromptText(
+            content,
+            opts.expectedText,
+          ),
         });
       }
-      return found;
+      return chooseIdentityCandidate(candidates, opts.expectedText);
     }
     case "cursor": {
       const root = join(
@@ -535,7 +664,7 @@ export function findLatestHarnessSessionIdentity(
         encodeCursorCwd(cwd),
         "agent-transcripts",
       );
-      let found: HarnessSessionIdentity | null = null;
+      const candidates: HarnessSessionIdentityCandidate[] = [];
       for (const dir of safeReaddir(root)) {
         const transcriptDir = join(root, dir);
         if (!isDir(transcriptDir)) continue;
@@ -545,33 +674,44 @@ export function findLatestHarnessSessionIdentity(
             continue;
           }
           const sessionId = sessionIdFromJsonlName(path) ?? dir;
-          found = newestIdentity(found, {
+          const content = readTextFile(path) ?? "";
+          candidates.push({
             harness,
             session_id: sessionId,
             cwd,
             path,
             mtime_ms: mtimeMs(path),
+            expected_text_match: jsonlContainsExpectedPromptText(
+              content,
+              opts.expectedText,
+            ),
           });
         }
       }
-      return found;
+      return chooseIdentityCandidate(candidates, opts.expectedText);
     }
     case "codex": {
       const root = join(opts.codexHome ?? join(home, ".codex"), "sessions");
-      let found: HarnessSessionIdentity | null = null;
+      const candidates: HarnessSessionIdentityCandidate[] = [];
       const walk = (dir: string, depth: number): void => {
         for (const name of safeReaddir(dir)) {
           const child = join(dir, name);
           if (isFile(child) && name.endsWith(".jsonl")) {
             if (!afterSince(child, opts.sinceMs)) continue;
-            const meta = parseCodexSessionMeta(child);
+            const content = readTextFile(child);
+            if (!content) continue;
+            const meta = parseCodexSessionMetaFromContent(content);
             if (!meta || meta.cwd !== cwd) continue;
-            found = newestIdentity(found, {
+            candidates.push({
               harness,
               session_id: meta.session_id,
               cwd: meta.cwd,
               path: child,
               mtime_ms: mtimeMs(child),
+              expected_text_match: jsonlContainsExpectedPromptText(
+                content,
+                opts.expectedText,
+              ),
             });
             continue;
           }
@@ -581,7 +721,7 @@ export function findLatestHarnessSessionIdentity(
         }
       };
       walk(root, 4);
-      return found;
+      return chooseIdentityCandidate(candidates, opts.expectedText);
     }
   }
 }
