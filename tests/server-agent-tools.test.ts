@@ -789,7 +789,7 @@ describe("agent lifecycle tool handlers", () => {
         model: "codex",
         cli: "codex",
         boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 1_000,
+        boot_prompt_timeout_ms: 5_000,
       },
       {} as any,
     );

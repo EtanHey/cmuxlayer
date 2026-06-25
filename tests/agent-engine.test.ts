@@ -1976,13 +1976,19 @@ To continue this session, run codex resume ${sessionId}`,
       mkdirSync(sessionDir, { recursive: true });
       writeFileSync(
         sessionPath,
-        JSON.stringify({
-          type: "session_meta",
-          payload: {
-            id: sessionId,
-            cwd: worktreeCwd,
-          },
-        }),
+        [
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: sessionId,
+              cwd: worktreeCwd,
+            },
+          }),
+          JSON.stringify({
+            type: "user_message",
+            payload: { message: "Fix search gap F" },
+          }),
+        ].join("\n"),
       );
 
       vi.stubEnv("HOME", home);
@@ -2021,6 +2027,356 @@ To continue this session, run codex resume ${sessionId}`,
           agent_id: "cmuxlayerCodex-019e942c",
           cli_session_id: sessionId,
           cli_session_path: sessionPath,
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it.each([
+      {
+        cli: "claude" as const,
+        repo: "cmuxlayer",
+        model: "sonnet",
+        sessionId: "019f0000-1111-7222-8333-444455556666",
+        agentId: "cmuxlayerClaude-019f0000",
+      },
+      {
+        cli: "codex" as const,
+        repo: "cmuxlayer",
+        model: "gpt-5.4",
+        sessionId: "019f0000-aaaa-7bbb-8ccc-ddddeeeeeeee",
+        agentId: "cmuxlayerCodex-019f0000",
+      },
+    ])(
+      "captures launcher-spawned $cli session identity from the real JSONL on boot",
+      async ({ cli, repo, model, sessionId, agentId }) => {
+        vi.setSystemTime(new Date("2026-06-25T08:00:30.000Z"));
+        const home = join(TEST_DIR, `home-${cli}`);
+        const codexHome = join(TEST_DIR, `codex-home-${cli}`);
+        const launchCwd = join(TEST_DIR, "Gits", "cmuxlayer");
+        const prompt = `Fix launcher resumability for ${cli}`;
+        const sessionPath =
+          cli === "claude"
+            ? join(
+                home,
+                ".claude",
+                "projects",
+                launchCwd.replaceAll("/", "-"),
+                `${sessionId}.jsonl`,
+              )
+            : join(
+                codexHome,
+                "sessions",
+                "2026",
+                "06",
+                "25",
+                `rollout-2026-06-25T08-00-01-${sessionId}.jsonl`,
+              );
+        mkdirSync(join(sessionPath, ".."), { recursive: true });
+        writeFileSync(
+          sessionPath,
+          cli === "claude"
+            ? [
+                JSON.stringify({
+                  type: "user",
+                  message: { content: [{ type: "text", text: prompt }] },
+                }),
+                JSON.stringify({
+                  type: "assistant",
+                  message: { model, stop_reason: "end_turn", content: [] },
+                }),
+              ].join("\n")
+            : [
+                JSON.stringify({
+                  type: "session_meta",
+                  payload: { id: sessionId, cwd: launchCwd },
+                }),
+                JSON.stringify({
+                  type: "user_message",
+                  payload: { message: prompt },
+                }),
+              ].join("\n"),
+        );
+
+        vi.stubEnv("CMUXLAYER_HARNESS_HOME", home);
+        vi.stubEnv("CODEX_HOME", codexHome);
+        try {
+          engine.dispose();
+          const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+          engine = new AgentEngine(stateMgr, registry, mockClient, {
+            spawnPreflight: async () => {},
+          });
+          liveSurfaces = [makeSurface("surface:new")];
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+            surface: "surface:new",
+            text: `${cli}> `,
+            lines: 80,
+            scrollback_used: true,
+          });
+          stateMgr.writeState(
+            makeRecord({
+              agent_id: `${repo}${cli}-pending-jsonl`,
+              repo,
+              model,
+              cli,
+              surface_id: "surface:new",
+              state: "booting",
+              task_summary: prompt,
+              created_at: "2026-06-25T08:00:00.000Z",
+              updated_at: "2026-06-25T08:00:00.000Z",
+              launch_cwd: launchCwd,
+              worktree_path: launchCwd,
+            }),
+          );
+          await engine.getRegistry().reconstitute();
+
+          expect(engine.resolveAgentRoute(`${repo}${cli}-pending-jsonl`)).toMatchObject({
+            session_id: null,
+            resumable: false,
+          });
+
+          await engine.runSweep();
+
+          const captured = engine.getAgentState(agentId);
+          expect(captured).toMatchObject({
+            agent_id: agentId,
+            cli_session_id: sessionId,
+            cli_session_path: sessionPath,
+          });
+          expect(engine.resolveAgentRoute(agentId)).toMatchObject({
+            session_id: sessionId,
+            resumable: true,
+          });
+          expect(engine.resolveAgentRoute(agentId).resume_command).toContain(
+            sessionId,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it.each([
+      {
+        cli: "claude" as const,
+        sessionId: "019f0003-1111-7222-8333-444455556666",
+        finalAgentId: "cmuxlayerClaude-019f0003",
+      },
+      {
+        cli: "codex" as const,
+        sessionId: "019f0003-aaaa-7bbb-8ccc-ddddeeeeeeee",
+        finalAgentId: "cmuxlayerCodex-019f0003",
+      },
+    ])(
+      "leaves launcher-spawned $cli unbound when the sole JSONL has a different launch prompt",
+      async ({ cli, sessionId, finalAgentId }) => {
+        vi.setSystemTime(new Date("2026-06-25T08:30:30.000Z"));
+        const home = join(TEST_DIR, `home-mismatch-${cli}`);
+        const codexHome = join(TEST_DIR, `codex-home-mismatch-${cli}`);
+        const launchCwd = join(TEST_DIR, "Gits", "cmuxlayer");
+        const expectedPrompt = `Expected launch prompt for ${cli}`;
+        const otherPrompt = `Different launch prompt for ${cli}`;
+        const pendingAgentId = `cmuxlayer${cli}-pending-mismatch`;
+        const sessionPath =
+          cli === "claude"
+            ? join(
+                home,
+                ".claude",
+                "projects",
+                launchCwd.replaceAll("/", "-"),
+                `${sessionId}.jsonl`,
+              )
+            : join(
+                codexHome,
+                "sessions",
+                "2026",
+                "06",
+                "25",
+                `rollout-2026-06-25T08-30-01-${sessionId}.jsonl`,
+              );
+        mkdirSync(join(sessionPath, ".."), { recursive: true });
+        writeFileSync(
+          sessionPath,
+          cli === "claude"
+            ? [
+                JSON.stringify({
+                  type: "user",
+                  message: { content: [{ type: "text", text: otherPrompt }] },
+                }),
+                JSON.stringify({
+                  type: "user",
+                  message: {
+                    content: [
+                      {
+                        type: "tool_result",
+                        content: expectedPrompt,
+                      },
+                    ],
+                  },
+                }),
+              ].join("\n")
+            : [
+                JSON.stringify({
+                  type: "session_meta",
+                  payload: { id: sessionId, cwd: launchCwd },
+                }),
+                JSON.stringify({
+                  type: "user_message",
+                  payload: { message: otherPrompt },
+                }),
+              ].join("\n"),
+        );
+
+        vi.stubEnv("CMUXLAYER_HARNESS_HOME", home);
+        vi.stubEnv("CODEX_HOME", codexHome);
+        try {
+          engine.dispose();
+          const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+          engine = new AgentEngine(stateMgr, registry, mockClient, {
+            spawnPreflight: async () => {},
+          });
+          liveSurfaces = [makeSurface("surface:mismatch")];
+          (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+            surface: "surface:mismatch",
+            text: `${cli}> `,
+            lines: 80,
+            scrollback_used: true,
+          });
+          stateMgr.writeState(
+            makeRecord({
+              agent_id: pendingAgentId,
+              repo: "cmuxlayer",
+              model: cli === "claude" ? "sonnet" : "gpt-5.4",
+              cli,
+              surface_id: "surface:mismatch",
+              state: "booting",
+              task_summary: expectedPrompt,
+              created_at: "2026-06-25T08:30:00.000Z",
+              updated_at: "2026-06-25T08:30:00.000Z",
+              launch_cwd: launchCwd,
+              worktree_path: launchCwd,
+            }),
+          );
+          await engine.getRegistry().reconstitute();
+
+          await engine.runSweep();
+
+          expect(engine.getAgentState(finalAgentId)).toBeNull();
+          expect(engine.resolveAgentRoute(pendingAgentId)).toMatchObject({
+            session_id: null,
+            resumable: false,
+          });
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it("does not bind the wrong JSONL when two launcher agents share a cwd", async () => {
+      vi.setSystemTime(new Date("2026-06-25T09:00:30.000Z"));
+      const codexHome = join(TEST_DIR, "codex-home-shared-cwd");
+      const launchCwd = join(TEST_DIR, "Gits", "cmuxlayer");
+      const sessionDir = join(codexHome, "sessions", "2026", "06", "25");
+      const firstSessionId = "019f0001-1111-7222-8333-444455556666";
+      const secondSessionId = "019f0002-aaaa-7bbb-8ccc-ddddeeeeeeee";
+      const firstPrompt = "Fix launcher resumability first agent";
+      const secondPrompt = `${firstPrompt} but for the second agent`;
+      const firstPath = join(
+        sessionDir,
+        `rollout-2026-06-25T09-00-01-${firstSessionId}.jsonl`,
+      );
+      const secondPath = join(
+        sessionDir,
+        `rollout-2026-06-25T09-00-02-${secondSessionId}.jsonl`,
+      );
+      mkdirSync(sessionDir, { recursive: true });
+      for (const [path, id, prompt, mtime] of [
+        [firstPath, firstSessionId, firstPrompt, "2026-06-25T09:00:10.000Z"],
+        [secondPath, secondSessionId, secondPrompt, "2026-06-25T09:00:20.000Z"],
+      ] as const) {
+        writeFileSync(
+          path,
+          [
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id, cwd: launchCwd },
+            }),
+            JSON.stringify({
+              type: "user_message",
+              payload: { message: prompt },
+            }),
+            ...(id === secondSessionId
+              ? [
+                  JSON.stringify({
+                    type: "agent_message",
+                    payload: {
+                      message: `Considering earlier work: ${firstPrompt}`,
+                    },
+                  }),
+                ]
+              : []),
+          ].join("\n"),
+        );
+        const date = new Date(mtime);
+        utimesSync(path, date, date);
+      }
+
+      vi.stubEnv("CODEX_HOME", codexHome);
+      try {
+        engine.dispose();
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        engine = new AgentEngine(stateMgr, registry, mockClient, {
+          spawnPreflight: async () => {},
+        });
+        liveSurfaces = [makeSurface("surface:first"), makeSurface("surface:second")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:first",
+          text: "codex> ",
+          lines: 80,
+          scrollback_used: true,
+        });
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-pending-first",
+            repo: "cmuxlayer",
+            model: "gpt-5.4",
+            cli: "codex",
+            surface_id: "surface:first",
+            state: "booting",
+            task_summary: firstPrompt,
+            created_at: "2026-06-25T09:00:00.000Z",
+            updated_at: "2026-06-25T09:00:00.000Z",
+            launch_cwd: launchCwd,
+            worktree_path: launchCwd,
+          }),
+        );
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-pending-second",
+            repo: "cmuxlayer",
+            model: "gpt-5.4",
+            cli: "codex",
+            surface_id: "surface:second",
+            state: "booting",
+            task_summary: secondPrompt,
+            created_at: "2026-06-25T09:00:00.000Z",
+            updated_at: "2026-06-25T09:00:00.000Z",
+            launch_cwd: launchCwd,
+            worktree_path: launchCwd,
+          }),
+        );
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(engine.getAgentState("cmuxlayerCodex-019f0001")).toMatchObject({
+          cli_session_id: firstSessionId,
+          cli_session_path: firstPath,
+        });
+        expect(engine.getAgentState("cmuxlayerCodex-019f0002")).toMatchObject({
+          cli_session_id: secondSessionId,
+          cli_session_path: secondPath,
         });
       } finally {
         vi.unstubAllEnvs();
