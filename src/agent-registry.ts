@@ -403,6 +403,42 @@ export class AgentRegistry {
     this.deleteAgentAndAliases(agentId);
   }
 
+  evict(agentId: string): string | null {
+    const resolved = this.resolveAlias(agentId);
+    if (!this.agents.has(resolved) && this.stateMgr.readState(resolved) === null) {
+      return null;
+    }
+
+    const removedAgentId = this.deleteAgentAndAliases(agentId);
+    this.stateMgr.removeState(removedAgentId);
+    return removedAgentId;
+  }
+
+  async evictSurfaceless(): Promise<string[]> {
+    let surfaces: CmuxSurface[];
+    try {
+      surfaces = await this.surfaceProvider();
+    } catch {
+      return [];
+    }
+
+    const liveSurfaceRefs = new Set(surfaces.map((surface) => surface.ref));
+    const evicted: string[] = [];
+
+    for (const [id, agent] of [...this.agents.entries()]) {
+      if (liveSurfaceRefs.has(agent.surface_id)) {
+        continue;
+      }
+
+      const removedAgentId = this.evict(id);
+      if (removedAgentId) {
+        evicted.push(removedAgentId);
+      }
+    }
+
+    return evicted;
+  }
+
   private evictMissingStateAgent(agentId: string): boolean {
     if (this.getMissingStateSentinel(agentId) === null) {
       return false;

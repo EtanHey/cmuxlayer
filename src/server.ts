@@ -4288,6 +4288,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             registry.list().map((agent) => agent.agent_id),
           );
           discovery.invalidate();
+          await registry.listMerged(discovery, { force: true });
+          await registry.evictSurfaceless();
+          engine.evictDeadProcessAgents();
+          discovery.invalidate();
           const after = await registry.listMerged(discovery, { force: true });
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));

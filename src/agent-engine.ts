@@ -29,6 +29,7 @@ import type {
 import {
   generateAgentId,
   isCrashRecoveryEligible,
+  isCrashRecoveryExhausted,
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   MAX_RESPAWN_ATTEMPTS,
@@ -2291,6 +2292,39 @@ export class AgentEngine {
     }
   }
 
+  private isTerminalDeadRegistryGhost(agent: AgentRecord): boolean {
+    if (!TERMINAL_STATES.has(agent.state)) {
+      return false;
+    }
+
+    return (
+      agent.user_killed === true ||
+      agent.pid === null ||
+      (agent.respawn_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS ||
+      isCrashRecoveryExhausted(agent.error)
+    );
+  }
+
+  evictDeadProcessAgents(): string[] {
+    const evicted: string[] = [];
+
+    for (const agent of this.registry.list()) {
+      if (
+        !this.isTerminalDeadRegistryGhost(agent) &&
+        (!agent.pid || !this.isProcessGone(agent.pid))
+      ) {
+        continue;
+      }
+
+      const removedAgentId = this.registry.evict(agent.agent_id);
+      if (removedAgentId) {
+        evicted.push(removedAgentId);
+      }
+    }
+
+    return evicted;
+  }
+
   private async isSurfaceGone(surfaceId: string): Promise<boolean> {
     try {
       return !(await this.registry.hasLiveSurface(surfaceId));
@@ -2386,6 +2420,10 @@ export class AgentEngine {
     const userInitiated = opts?.userInitiated ?? true;
 
     if (TERMINAL_STATES.has(agent.state)) {
+      if (force) {
+        this.registry.evict(canonicalAgentId);
+        return;
+      }
       if (
         agent.state === "error" &&
         userInitiated &&
@@ -2453,6 +2491,11 @@ export class AgentEngine {
         // Preserve the post-condition error for the caller.
       }
       throw new Error(error);
+    }
+
+    if (force) {
+      this.registry.evict(canonicalAgentId);
+      return;
     }
 
     const current = this.registry.get(canonicalAgentId) ?? agent;

@@ -3610,7 +3610,7 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
-    it("force stop kills the process when pid is available", async () => {
+    it("force stop kills the process and removes the tracked entry", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-force",
@@ -3625,8 +3625,8 @@ To continue this session, run codex resume ${sessionId}`,
       // Force stop — won't actually kill since PID doesn't exist, but should not throw
       await engine.stopAgent("agent-force", true);
 
-      const state = stateMgr.readState("agent-force");
-      expect(["done", "error"]).toContain(state!.state);
+      expect(stateMgr.readState("agent-force")).toBeNull();
+      expect(engine.getAgentState("agent-force")).toBeNull();
     });
 
     it("rejects force stop when the pid remains alive after SIGKILL", async () => {
