@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 
@@ -1267,6 +1267,48 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.cli).toBe("codex");
+    expect(parsed.resume_command).toBeUndefined();
+  });
+
+  it("get_agent_state marks auto-discovered null-session agents unresumable", async () => {
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    context.stateMgr.ensureAutoRecord("auto-codex-surface-new", {
+      surface_id: "surface:new",
+      surface_title: "cmuxlayerCodex",
+      workspace_id: "workspace:1",
+      cli: "codex",
+      parsed_status: "idle",
+      model: null,
+      token_count: null,
+      context_pct: null,
+      has_agent: true,
+      read_error: false,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const result = await getState.handler(
+      { agent_id: "auto-codex-surface-new" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      agent_id: "auto-codex-surface-new",
+      task_summary: "(auto-discovered)",
+      cli_session_id: null,
+      cli_session_path: null,
+      pid: null,
+      resumable: false,
+    });
     expect(parsed.resume_command).toBeUndefined();
   });
 

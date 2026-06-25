@@ -44,6 +44,7 @@ describe("agent facade projections", () => {
       model: "sonnet",
       state: "ready",
       session_id: "session-1",
+      resumable: true,
       resume_command: "brainlayerClaude -s --resume session-1",
     });
     expect((projected as any).surface_id).toBeUndefined();
@@ -58,6 +59,7 @@ describe("agent facade projections", () => {
       model: "sonnet",
       state: "ready",
       session_id: null,
+      resumable: false,
     });
   });
 });
@@ -75,6 +77,7 @@ describe("agent route table", () => {
       workspace_id: "ws:1",
       state: "ready",
       session_id: "session-1",
+      resumable: true,
       resume_command: "brainlayerClaude -s --resume session-1",
     });
     expect(table.get("agent-2")?.surface_id).toBe("surface:2");

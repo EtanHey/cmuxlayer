@@ -558,6 +558,10 @@ describe("tool handler integration", () => {
       column: 0,
       title: "One",
       type: "terminal",
+      current_directory: "/tmp/main",
+      requested_working_directory: "/tmp/main",
+      working_directory_source: "workspace_fallback",
+      working_directory_fallback: true,
     });
     expect(parsed.surfaces[1]).toEqual({
       ref: "surface:2",
@@ -566,6 +570,10 @@ describe("tool handler integration", () => {
       column: 1,
       title: "Two",
       type: "browser",
+      current_directory: "/tmp/main",
+      requested_working_directory: "/tmp/main",
+      working_directory_source: "workspace_fallback",
+      working_directory_fallback: true,
     });
   });
 
@@ -1021,6 +1029,102 @@ describe("tool handler integration", () => {
       workspace_ref: "workspace:1",
       window_ref: "window:1",
       pane_ref: "pane:1",
+    });
+  });
+
+  it("list_surfaces reports terminal metadata cwd instead of workspace fallback cwd", async () => {
+    const workspaceCwd = "/Users/etanheyman/Gits/golems";
+    const realSurfaceCwd =
+      "/Users/etanheyman/Gits/cmuxlayer.wt/adopted-pane-binding";
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "golems",
+                index: 0,
+                selected: true,
+                pinned: false,
+                current_directory: workspaceCwd,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:worker",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:adopted"],
+                selected_surface_ref: "surface:adopted",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:worker",
+            surfaces: [
+              {
+                ref: "surface:adopted",
+                title: "adopted-pane-binding",
+                type: "terminal",
+                index: 0,
+                selected: true,
+                requested_working_directory: workspaceCwd,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("debug-terminals")) {
+        return {
+          stdout: JSON.stringify({
+            terminals: [
+              {
+                surface_ref: "surface:adopted",
+                pane_ref: "pane:worker",
+                workspace_ref: "workspace:1",
+                current_directory: realSurfaceCwd,
+                requested_working_directory: workspaceCwd,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const result = await tool.handler({ verbose: true }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.surfaces[0]).toMatchObject({
+      ref: "surface:adopted",
+      pane_ref: "pane:worker",
+      current_directory: realSurfaceCwd,
+      requested_working_directory: realSurfaceCwd,
+      working_directory_source: "terminal_metadata",
+      working_directory_fallback: false,
     });
   });
 

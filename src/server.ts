@@ -80,6 +80,7 @@ import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
   CmuxSurface,
+  CmuxTerminalMetadata,
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
@@ -348,8 +349,148 @@ function toMinimalSurface(
   if (typeof surface.screen_preview_error === "string") {
     minimal.screen_preview_error = surface.screen_preview_error;
   }
+  if (typeof surface.current_directory === "string") {
+    minimal.current_directory = surface.current_directory;
+  } else if (surface.current_directory === null) {
+    minimal.current_directory = null;
+  }
+  if (typeof surface.requested_working_directory === "string") {
+    minimal.requested_working_directory = surface.requested_working_directory;
+  } else if (surface.requested_working_directory === null) {
+    minimal.requested_working_directory = null;
+  }
+  if (typeof surface.working_directory_source === "string") {
+    minimal.working_directory_source = surface.working_directory_source;
+  }
+  if (typeof surface.working_directory_fallback === "boolean") {
+    minimal.working_directory_fallback = surface.working_directory_fallback;
+  }
 
   return minimal;
+}
+
+type SurfaceWorkingDirectorySource =
+  | "terminal_metadata"
+  | "surface"
+  | "pane"
+  | "workspace_fallback"
+  | "unavailable";
+
+interface SurfaceWorkingDirectory {
+  cwd: string | null;
+  source: SurfaceWorkingDirectorySource;
+}
+
+interface SurfaceWorkingDirectoryMaps {
+  terminalBySurface: Map<string, CmuxTerminalMetadata>;
+  paneByWorkspaceAndRef: Map<string, Record<string, unknown>>;
+  workspaceCwdByRef: Map<string, string>;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function workingDirectoryFromRecord(
+  record: Record<string, unknown> | null | undefined,
+): string | null {
+  return (
+    nonEmptyString(record?.current_directory) ??
+    nonEmptyString(record?.cwd) ??
+    nonEmptyString(record?.working_directory)
+  );
+}
+
+function paneWorkingDirectoryKey(
+  workspaceRef: string,
+  paneRef: string,
+): string {
+  return `${workspaceRef}\0${paneRef}`;
+}
+
+async function loadTerminalMetadataBySurface(
+  client: CmuxLayerClient,
+): Promise<Map<string, CmuxTerminalMetadata>> {
+  const metadataClient = client as CmuxLayerClient & {
+    listTerminalMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
+  };
+  if (typeof metadataClient.listTerminalMetadata !== "function") {
+    return new Map();
+  }
+
+  try {
+    const { terminals } = await metadataClient.listTerminalMetadata();
+    const bySurface = new Map<string, CmuxTerminalMetadata>();
+    for (const terminal of terminals) {
+      const surfaceRef =
+        nonEmptyString(terminal.surface_ref) ??
+        nonEmptyString(terminal.surface_id) ??
+        nonEmptyString(terminal.ref);
+      if (surfaceRef) {
+        bySurface.set(surfaceRef, terminal);
+      }
+    }
+    return bySurface;
+  } catch {
+    return new Map();
+  }
+}
+
+function resolveSurfaceWorkingDirectory(
+  surface: Record<string, unknown>,
+  workspaceRef: string,
+  paneRef: string,
+  maps: SurfaceWorkingDirectoryMaps,
+): SurfaceWorkingDirectory {
+  const surfaceRef = nonEmptyString(surface.ref);
+  const terminal =
+    surfaceRef === null ? undefined : maps.terminalBySurface.get(surfaceRef);
+  const terminalCwd = workingDirectoryFromRecord(
+    terminal ? (terminal as Record<string, unknown>) : null,
+  );
+  if (terminalCwd) {
+    return { cwd: terminalCwd, source: "terminal_metadata" };
+  }
+
+  const surfaceCwd = workingDirectoryFromRecord(surface);
+  if (surfaceCwd) {
+    return { cwd: surfaceCwd, source: "surface" };
+  }
+
+  const pane = maps.paneByWorkspaceAndRef.get(
+    paneWorkingDirectoryKey(workspaceRef, paneRef),
+  );
+  const paneCwd = workingDirectoryFromRecord(pane);
+  if (paneCwd) {
+    return { cwd: paneCwd, source: "pane" };
+  }
+
+  const workspaceCwd = maps.workspaceCwdByRef.get(workspaceRef);
+  if (workspaceCwd) {
+    return { cwd: workspaceCwd, source: "workspace_fallback" };
+  }
+
+  return { cwd: null, source: "unavailable" };
+}
+
+function applySurfaceWorkingDirectory(
+  surface: Record<string, unknown>,
+  workspaceRef: string,
+  paneRef: string,
+  maps: SurfaceWorkingDirectoryMaps,
+): void {
+  const resolved = resolveSurfaceWorkingDirectory(
+    surface,
+    workspaceRef,
+    paneRef,
+    maps,
+  );
+  surface.current_directory = resolved.cwd;
+  surface.requested_working_directory = resolved.cwd;
+  surface.working_directory_source = resolved.source;
+  surface.working_directory_fallback =
+    resolved.source === "workspace_fallback" ||
+    resolved.source === "unavailable";
 }
 
 function chunkTerminalInput(text: string, chunkSize: number): string[] {
@@ -1805,6 +1946,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             panes: await client.listPanes({ workspace: workspaceRef }),
           })),
         );
+        const workspaceCwdByRef = new Map<string, string>();
+        for (const workspace of workspaces.workspaces) {
+          const cwd = nonEmptyString(workspace.current_directory);
+          if (cwd) {
+            workspaceCwdByRef.set(workspace.ref, cwd);
+          }
+        }
+        const paneByWorkspaceAndRef = new Map<string, Record<string, unknown>>();
+        for (const { workspaceRef, panes } of panesByWorkspace) {
+          for (const pane of panes.panes) {
+            paneByWorkspaceAndRef.set(
+              paneWorkingDirectoryKey(workspaceRef, pane.ref),
+              pane as unknown as Record<string, unknown>,
+            );
+          }
+        }
         const columnIndexByWorkspace = new Map<string, Map<string, number>>();
         const columnCountByWorkspace = new Map<string, number>();
         for (const { workspaceRef, panes } of panesByWorkspace) {
@@ -1896,6 +2053,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return enrichedSurface;
           }),
         );
+        const terminalBySurface = await loadTerminalMetadataBySurface(client);
+        const workingDirectoryMaps: SurfaceWorkingDirectoryMaps = {
+          terminalBySurface,
+          paneByWorkspaceAndRef,
+          workspaceCwdByRef,
+        };
+        for (const surface of verboseSurfaces) {
+          const workspaceRef = nonEmptyString(surface.workspace_ref) ?? "";
+          const paneRef = nonEmptyString(surface.pane_ref) ?? "";
+          applySurfaceWorkingDirectory(
+            surface,
+            workspaceRef,
+            paneRef,
+            workingDirectoryMaps,
+          );
+        }
 
         const verboseWorkspaces = workspaces.workspaces as unknown as Array<
           Record<string, unknown>
@@ -4825,6 +4998,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 model: agent.model,
                 cli: agent.cli,
                 session_id: agent.cli_session_id,
+                resumable: !!agent.cli_session_id,
                 ...(resumeCommand ? { resume_command: resumeCommand } : {}),
                 surface_id: agent.surface_id,
                 token_count: screenData?.token_count ?? null,

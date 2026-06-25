@@ -2188,6 +2188,7 @@ export class AgentEngine {
       workspace_id: agent.workspace_id ?? null,
       state: agent.state,
       session_id: agent.cli_session_id,
+      resumable: !!agent.cli_session_id,
       ...(resumeCommand ? { resume_command: resumeCommand } : {}),
     };
   }

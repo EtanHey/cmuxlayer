@@ -28,6 +28,10 @@ export interface CmuxSurface {
   workspace_ref?: string;
   pane_ref?: string;
   pane_id?: string;
+  current_directory?: string | null;
+  cwd?: string | null;
+  working_directory?: string | null;
+  requested_working_directory?: string | null;
 }
 
 export interface CmuxPane {
@@ -39,6 +43,10 @@ export interface CmuxPane {
   surface_refs: string[];
   surface_ids?: string[];
   selected_surface_ref?: string;
+  current_directory?: string | null;
+  cwd?: string | null;
+  working_directory?: string | null;
+  requested_working_directory?: string | null;
   pixel_frame?: {
     x: number;
     y: number;
@@ -52,6 +60,18 @@ export interface CmuxPaneSurfaces {
   window_ref: string;
   pane_ref: string;
   surfaces: CmuxSurface[];
+}
+
+export interface CmuxTerminalMetadata {
+  surface_ref?: string | null;
+  surface_id?: string | null;
+  ref?: string | null;
+  workspace_ref?: string | null;
+  pane_ref?: string | null;
+  current_directory?: string | null;
+  cwd?: string | null;
+  working_directory?: string | null;
+  requested_working_directory?: string | null;
 }
 
 export interface CmuxNewSplitResult {
