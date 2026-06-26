@@ -730,9 +730,13 @@ export class AgentEngine {
     return this.registry;
   }
 
-  private hasOutputDoneEvidence(text: string): boolean {
+  private hasOutputDoneEvidence(cli: CliType, text: string): boolean {
     const parsed = parseScreen(text);
-    return parsed.status === "done" && parsed.done_signal !== null;
+    return (
+      parsed.status === "done" &&
+      parsed.done_signal !== null &&
+      !screenHasActiveAgentMarker(cli, text, parsed)
+    );
   }
 
   private requiresOutputDoneEvidence(targetState: AgentState): boolean {
@@ -801,7 +805,7 @@ export class AgentEngine {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
-      return this.hasOutputDoneEvidence(screen.text);
+      return this.hasOutputDoneEvidence(agent.cli, screen.text);
     } catch {
       return false;
     }
@@ -1349,7 +1353,7 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
-      if (!this.hasOutputDoneEvidence(screen.text)) {
+      if (!this.hasOutputDoneEvidence(agent.cli, screen.text)) {
         if (agent.task_done_candidate_at) {
           const updated = this.stateMgr.updateRecord(agent.agent_id, {
             task_done_candidate_at: null,

@@ -2253,8 +2253,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_workspace_id?: string | null;
       surface_title?: string | null;
       topology?: { column: number | null; column_count: number | null } | null;
+      closure_artifact_verified?: boolean | null;
     },
   ) => {
+    const closureArtifactVerified =
+      overrides?.closure_artifact_verified !== undefined
+        ? overrides.closure_artifact_verified
+        : TERMINAL_AGENT_STATES.has(agent.state) &&
+            (agent.role ?? "worker") !== "orchestrator"
+          ? Boolean(agent.task_done_detected_at)
+          : null;
     const topology =
       overrides?.topology !== undefined
         ? overrides.topology
@@ -2293,6 +2301,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_workspace_id: surfaceWorkspaceId,
       surface_title: overrides?.surface_title,
       topology,
+      closure_artifact_verified: closureArtifactVerified,
     });
   };
 
@@ -3693,6 +3702,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               )
             ) {
               try {
+                const marked = stateMgr.updateRecord(backingAgent.agent_id, {
+                  task_done_candidate_at: null,
+                  task_done_detected_at: new Date().toISOString(),
+                  ...(backingAgent.boot_prompt_pending
+                    ? { boot_prompt_pending: false }
+                    : {}),
+                });
+                context.lifecycleRegistry?.set(backingAgent.agent_id, marked);
                 const done = stateMgr.transition(backingAgent.agent_id, "done");
                 context.lifecycleRegistry?.set(backingAgent.agent_id, done);
                 staleRegistryDoneConsolidated = {
@@ -4552,9 +4569,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.mcp_profile as McpProfile | undefined,
           );
 
+          await refreshManagedMetadataBestEffort(args.parent_agent_id);
+          const parentWorkspace = args.parent_agent_id
+            ? (engine.getAgentState(args.parent_agent_id)?.workspace_id ??
+              undefined)
+            : undefined;
+          const explicitWorkspace = await canonicalWorkspaceRef(args.workspace);
           const spawnWorkspace =
-            (await canonicalWorkspaceRef(args.workspace)) ??
-            (await currentCallerWorkspace());
+            explicitWorkspace ??
+            (args.parent_agent_id ? undefined : await currentCallerWorkspace());
+          const comparisonWorkspace = spawnWorkspace ?? parentWorkspace;
           const requestedRole = inferAgentRole({
             role: args.role,
             cli: args.cli,
@@ -4569,7 +4593,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   (agent) =>
                     (agent.state === "ready" || agent.state === "idle") &&
                     reposEquivalent(agent.repo, args.repo) &&
-                    (agent.workspace_id ?? null) === (spawnWorkspace ?? null) &&
+                    (agent.workspace_id ?? null) ===
+                      (comparisonWorkspace ?? null) &&
                     (agent.role ??
                       inferAgentRole({
                         cli: agent.cli,
@@ -4595,7 +4620,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 }));
           const duplicateSpawnWarning =
             existingSameLaneAgents.length > 0
-              ? `Existing same-lane agent(s) are idle/ready in ${spawnWorkspace ?? "unknown workspace"}; reuse or supersede unless a new lane is intentional. Pass force_new:true to suppress this warning.`
+              ? `Existing same-lane agent(s) are idle/ready in ${comparisonWorkspace ?? "unknown workspace"}; reuse or supersede unless a new lane is intentional. Pass force_new:true to suppress this warning.`
               : undefined;
           const result = await engine.spawnAgent({
             repo: args.repo,
@@ -5470,18 +5495,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allow_busy: args.allow_busy ?? true,
             source_event: "supersede_agent_goal",
           });
-          let updated = stateMgr.updateRecord(args.agent_id, {
+          const canonicalAgentId = current.agent_id;
+          let updated = stateMgr.updateRecord(canonicalAgentId, {
             task_summary: taskSummary,
             goal_file: args.goal_file,
           });
-          registry.set(args.agent_id, updated);
+          registry.set(canonicalAgentId, updated);
           if (updated.state === "ready" || updated.state === "idle") {
-            updated = stateMgr.transition(args.agent_id, "working");
-            registry.set(args.agent_id, updated);
+            updated = stateMgr.transition(canonicalAgentId, "working");
+            registry.set(canonicalAgentId, updated);
           }
-          const evidence = await collectDeliveryEvidence(args.agent_id);
+          const evidence = await collectDeliveryEvidence(canonicalAgentId);
           const data = {
-            agent_id: args.agent_id,
+            agent_id: canonicalAgentId,
             goal_file: args.goal_file,
             task_summary: taskSummary,
             retry_count: delivery.retry_count,

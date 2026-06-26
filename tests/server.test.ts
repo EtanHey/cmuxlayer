@@ -5330,7 +5330,11 @@ describe("tool handler integration", () => {
         collapsePane: false,
       },
     );
-    expect(stateMgr.readState("worker-done-stale")?.state).toBe("done");
+    expect(stateMgr.readState("worker-done-stale")).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+      task_done_candidate_at: null,
+    });
     expect(result.structuredContent).toMatchObject({
       surface: "surface:worker-done-stale",
       stale_registry_done_consolidated: {

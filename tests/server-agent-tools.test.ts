@@ -554,6 +554,68 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("spawn_agent preserves parent workspace inheritance when workspace is omitted", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const parentRecord: AgentRecord = {
+      agent_id: "parent-codex",
+      surface_id: "surface:parent",
+      workspace_id: "workspace:parent",
+      state: "working",
+      repo: "brainlayer",
+      model: "gpt-5.5",
+      cli: "codex",
+      cli_session_id: "019f0001-1111-7222-8333-444455556666",
+      cli_session_path: null,
+      task_summary: "parent mission",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      auto_archive_on_done: false,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      boot_prompt_pending: false,
+      launch_cwd: null,
+      mcp_profile: null,
+      worktree_path: null,
+      worktree_branch: null,
+    };
+    engine.stateMgr.writeState(parentRecord);
+    engine.getRegistry().set(parentRecord.agent_id, parentRecord);
+    mockExec.mockClear();
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parentRecord.agent_id,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const splitCall = mockExec.mock.calls.find(
+      ([, args]) => Array.isArray(args) && args.includes("new-split"),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(splitCall?.[1]).toEqual(
+      expect.arrayContaining(["--workspace", "workspace:parent"]),
+    );
+  });
+
   it("spawn_agent warns when an existing same-lane idle agent can be reused", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -1743,6 +1805,37 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("get_agent_state reports terminal workers without done evidence as closure health failures", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "golems",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const done = engine.stateMgr.transition(agentId, "done");
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining(["closure_without_artifact"]),
+    });
+  });
+
   it("get_agent_state reports recoverable blocker health from parsed screen actions", async () => {
     const blockerScreen = `
 OpenAI Codex
@@ -2350,6 +2443,61 @@ codex>
     const state =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(state.task_summary).toBe("full baseline mission");
+    expect(state.goal_file).toBe(goalPath);
+  });
+
+  it("supersede_agent_goal updates the canonical record when called through an alias", async () => {
+    const goalPath = join(TEST_DIR, "alias-mission.md");
+    writeFileSync(goalPath, "# Mission\n\nUse the canonical state.\n", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const pendingAgentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const currentAgentId = resolveCurrentTestAgentId(
+      engine.stateMgr,
+      pendingAgentId,
+    );
+    const finalAgentId = "brainlayerCodex-019f0001";
+    const renamed = engine.stateMgr.renameState(currentAgentId, finalAgentId);
+    engine.getRegistry().rename(currentAgentId, finalAgentId, renamed);
+    mockExec.mockClear();
+
+    const result = await supersede.handler(
+      {
+        agent_id: pendingAgentId,
+        goal_file: goalPath,
+        summary: "alias mission",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.agent_id).toBe(finalAgentId);
+    expect(parsed.task_summary).toBe("alias mission");
+
+    const stateResult = await getState.handler(
+      { agent_id: finalAgentId },
+      {} as any,
+    );
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.task_summary).toBe("alias mission");
     expect(state.goal_file).toBe(goalPath);
   });
 

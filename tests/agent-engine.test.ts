@@ -3015,6 +3015,54 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("does not resolve done when TASK_DONE appears with a recoverable blocker", async () => {
+      vi.useFakeTimers();
+      try {
+        const candidateAt = new Date("2026-06-26T20:38:00.000Z");
+        vi.setSystemTime(new Date(candidateAt.getTime() + 5_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "incident-recoverable-blocker-done",
+            state: "working",
+            surface_id: "surface:incident-recoverable-blocker-done",
+            cli: "codex",
+            role: "worker",
+            task_done_candidate_at: candidateAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:incident-recoverable-blocker-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:incident-recoverable-blocker-done",
+          text: [
+            "OpenAI Codex",
+            "Model: gpt-5.5",
+            "I cannot commit, push, or open a PR without explicit permission, so I am parked.",
+            "TASK_DONE",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "incident-recoverable-blocker-done",
+          "done",
+          7_000,
+        );
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("incident-recoverable-blocker-done");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not resolve done from a Claude completion banner without an explicit done signal", async () => {
       vi.useFakeTimers();
       try {
