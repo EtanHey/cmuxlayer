@@ -3328,6 +3328,99 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("does not resolve stale transcript done while the live Codex pane is waiting", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:36:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done-waiting-screen.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-waiting-screen",
+            state: "working",
+            surface_id: "surface:worker-transcript-waiting-screen",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-waiting-screen")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-waiting-screen",
+          text: [
+            "gpt-5.5 · 70% left · ~/Gits/voicelayer",
+            "• Waiting for command approval",
+            "TASK_DONE",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-waiting-screen",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-waiting-screen");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve stale transcript done when the current screen cannot be read", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:37:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done-read-failure.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-read-failure",
+            state: "working",
+            surface_id: "surface:worker-transcript-read-failure",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-read-failure")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockRejectedValue(
+          new Error("cmux read failed"),
+        );
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-read-failure",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-read-failure");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("resolves done from stale transcript ground truth with no screen banner", async () => {
       vi.useFakeTimers();
       try {
@@ -3627,6 +3720,35 @@ To continue this session, run codex resume ${sessionId}`,
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-boot-ready")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+        error: null,
+      });
+    });
+
+    it("recovers stale pending Gemini boot prompt without requiring identity parsing", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-gemini-boot-ready",
+          state: "booting",
+          surface_id: "surface:gemini",
+          cli: "gemini",
+          boot_prompt_pending: true,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:gemini")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:gemini",
+        text: "> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-gemini-boot-ready")).toMatchObject({
         state: "ready",
         boot_prompt_pending: false,
         error: null,

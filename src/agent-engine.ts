@@ -56,6 +56,7 @@ import {
 import {
   matchReadyPattern,
   readyPatternRequiresAgentIdentity,
+  screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
@@ -768,9 +769,12 @@ export class AgentEngine {
     return Date.now() - session.mtime_ms >= DONE_QUIESCENCE_MS;
   }
 
-  private screenContradictsTranscriptDone(text: string): boolean {
+  private screenContradictsTranscriptDone(
+    cli: CliType,
+    text: string,
+  ): boolean {
     const parsed = parseScreen(text);
-    return parsed.status === "working" || parsed.status === "thinking";
+    return screenHasActiveAgentMarker(cli, text, parsed);
   }
 
   private async hasGroundTruthDone(
@@ -784,9 +788,9 @@ export class AgentEngine {
         : await this.client.readScreen(agent.surface_id, {
             lines: BOOT_SESSION_CAPTURE_LINES,
           });
-      return !this.screenContradictsTranscriptDone(screen.text);
+      return !this.screenContradictsTranscriptDone(agent.cli, screen.text);
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -1255,7 +1259,8 @@ export class AgentEngine {
         const match = matchReadyPattern(agent.cli, screen.text);
         if (
           match.matched &&
-          screenHasReadyAgentIdentity(agent.cli, screen.text, parsed)
+          (!readyPatternRequiresAgentIdentity(agent.cli) ||
+            screenHasReadyAgentIdentity(agent.cli, screen.text, parsed))
         ) {
           this.stateMgr.updateRecord(agent.agent_id, {
             boot_prompt_pending: false,

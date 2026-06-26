@@ -96,6 +96,31 @@ export function matchReadyPattern(
   };
 }
 
+export function screenHasActiveAgentMarker(
+  cli: CliType,
+  screenText: string,
+  parsed: ParsedScreenResult = parseScreen(screenText),
+): boolean {
+  if (parsed.status === "working" || parsed.status === "thinking") {
+    return true;
+  }
+
+  switch (cli) {
+    case "claude":
+      return CLAUDE_ACTIVE_RE.test(screenText);
+    case "codex":
+      return CODEX_ACTIVE_RE.test(screenText);
+    case "cursor":
+      return CURSOR_ACTIVE_RE.test(screenText);
+    case "gemini":
+      return /(?:^|\n)\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im.test(
+        screenText,
+      );
+    case "kiro":
+      return false;
+  }
+}
+
 export function screenHasReadyAgentIdentity(
   cli: CliType,
   screenText: string,

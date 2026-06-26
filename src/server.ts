@@ -89,6 +89,7 @@ import type {
 import { normalizeKeyName } from "./key-names.js";
 import {
   matchReadyPattern,
+  screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
@@ -3643,7 +3644,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // Best-effort read; refuse regardless so a live agent is never
               // torn down without an explicit force.
             }
-            if (screenParsed?.done_signal) {
+            if (
+              screenParsed?.done_signal &&
+              !screenHasActiveAgentMarker(
+                backingAgent.cli,
+                screenText,
+                screenParsed,
+              )
+            ) {
               try {
                 const done = stateMgr.transition(backingAgent.agent_id, "done");
                 context.lifecycleRegistry?.set(backingAgent.agent_id, done);
@@ -4195,7 +4203,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         {
           cwd: launchCwd,
           envPrefix: opts.mcpEnv,
-          allowModelOverride: true,
+          allowModelOverride: process.env.REPOGOLEM_ALLOW_MODEL === "1",
         },
       );
       await sendLauncherCommandToSurface({
@@ -5369,11 +5377,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           await preflightBootPromptFile(args.goal_file);
           const taskSummary = args.summary?.trim() || args.goal_file;
-          let updated = stateMgr.updateRecord(args.agent_id, {
-            task_summary: taskSummary,
-            goal_file: args.goal_file,
-          });
-          registry.set(args.agent_id, updated);
           const delivery = await deliverAgentInput({
             agent_id: args.agent_id,
             text: `/goal Read and execute this goal file until complete: ${args.goal_file}`,
@@ -5381,6 +5384,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allow_busy: args.allow_busy ?? true,
             source_event: "supersede_agent_goal",
           });
+          let updated = stateMgr.updateRecord(args.agent_id, {
+            task_summary: taskSummary,
+            goal_file: args.goal_file,
+          });
+          registry.set(args.agent_id, updated);
           if (updated.state === "ready" || updated.state === "idle") {
             updated = stateMgr.transition(args.agent_id, "working");
             registry.set(args.agent_id, updated);

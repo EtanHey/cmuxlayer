@@ -263,7 +263,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
 
   if (
     CODEX_HEADER_RE.test(text) ||
-    CODEX_BOOT_PANEL_RE.test(text) ||
+    (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
   ) {

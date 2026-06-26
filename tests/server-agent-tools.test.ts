@@ -2355,6 +2355,60 @@ codex>
     expect(state.goal_file).toBe(goalPath);
   });
 
+  it("supersede_agent_goal does not update registry metadata when delivery fails", async () => {
+    const goalPath = join(TEST_DIR, "undelivered-mission.md");
+    writeFileSync(goalPath, "# Mission\n\nThis should not be recorded.\n", "utf8");
+    const backingExec = makeLifecycleExec();
+    const failingExec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      const text = String(args[args.length - 1] ?? "");
+      if (args.includes("send") && text.startsWith("/goal ")) {
+        throw new Error("send failed");
+      }
+      return backingExec(cmd, args);
+    });
+    const server = createLifecycleServer(failingExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine.stateMgr;
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const registry = engine.getRegistry();
+    const oldState = stateMgr.updateRecord(currentAgentId, {
+      task_summary: "old mission",
+      goal_file: null,
+    });
+    registry.set(currentAgentId, oldState);
+
+    const result = await supersede.handler(
+      {
+        agent_id: currentAgentId,
+        goal_file: goalPath,
+        summary: "new mission",
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatch(/send failed/);
+
+    const state = stateMgr.readState(currentAgentId);
+    expect(state?.task_summary).toBe("old mission");
+    expect(state?.goal_file).toBeNull();
+  });
+
   it("supersede_agent_goal rejects a missing goal file", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
