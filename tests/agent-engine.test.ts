@@ -3890,7 +3890,12 @@ To continue this session, run codex resume ${sessionId}`,
       await engine.getRegistry().reconstitute();
 
       await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini-boot-ready")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
 
+      await engine.runSweep();
       expect(engine.getAgentState("agent-gemini-boot-ready")).toMatchObject({
         state: "ready",
         boot_prompt_pending: false,

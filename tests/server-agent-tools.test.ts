@@ -1849,6 +1849,42 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("get_agent_state does not require closure artifacts for errored workers", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "golems",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    engine
+      .getRegistry()
+      .set(agentId, engine.stateMgr.transition(agentId, "ready"));
+    engine
+      .getRegistry()
+      .set(agentId, engine.stateMgr.transition(agentId, "working"));
+    const errored = engine.stateMgr.transition(agentId, "error", {
+      error: "tool transport closed",
+    });
+    engine.getRegistry().set(agentId, errored);
+
+    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.health.issue_codes).not.toContain("closure_without_artifact");
+  });
+
   it("get_agent_state reports recoverable blocker health from parsed screen actions", async () => {
     const blockerScreen = `
 OpenAI Codex

@@ -1248,12 +1248,12 @@ export class AgentEngine {
       return agent;
     }
     if (agent.boot_prompt_pending) {
-      this.readyPatternMatches.delete(agent.agent_id);
       const since = Date.parse(agent.updated_at);
       if (
         Number.isNaN(since) ||
         Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
       ) {
+        this.readyPatternMatches.delete(agent.agent_id);
         return agent;
       }
 
@@ -1266,6 +1266,12 @@ export class AgentEngine {
           (!readyPatternRequiresAgentIdentity(agent.cli) ||
             screenHasReadyAgentIdentity(agent.cli, screen.text, parsed))
         ) {
+          const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+          this.readyPatternMatches.set(agent.agent_id, count);
+          if (count < Math.max(1, match.consecutive)) {
+            return agent;
+          }
+
           this.stateMgr.updateRecord(agent.agent_id, {
             boot_prompt_pending: false,
           });
@@ -1284,6 +1290,7 @@ export class AgentEngine {
           this.readyPatternMatches.delete(agent.agent_id);
           return ready;
         }
+        this.readyPatternMatches.delete(agent.agent_id);
       } catch {
         // Fall through to the explicit interrupted-delivery error below.
       }

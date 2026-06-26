@@ -2259,7 +2259,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const closureArtifactVerified =
       overrides?.closure_artifact_verified !== undefined
         ? overrides.closure_artifact_verified
-        : TERMINAL_AGENT_STATES.has(agent.state) &&
+        : agent.state === "done" &&
             (agent.role ?? "worker") !== "orchestrator"
           ? Boolean(agent.task_done_detected_at)
           : null;
