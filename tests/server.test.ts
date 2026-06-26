@@ -3892,6 +3892,8 @@ describe("tool handler integration", () => {
 
   it("spawn_agent waits out a Codex auto-update, relaunches after bare shell, then delivers the boot prompt", async () => {
     vi.useRealTimers();
+    const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
+    process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-relaunch-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-relaunch.md");
     const prompt = "boot after update";
@@ -3952,6 +3954,9 @@ describe("tool handler integration", () => {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
         if (text.includes("cmuxlayerCodex")) {
+          if (launcherSends === 0) {
+            delete process.env.REPOGOLEM_ALLOW_MODEL;
+          }
           launcherSends += 1;
         } else if (text === prompt) {
           promptSent = true;
@@ -3997,29 +4002,35 @@ describe("tool handler integration", () => {
     });
     const tool = (server as any)._registeredTools["spawn_agent"];
 
-    const result = await tool.handler(
-      {
-        repo: "cmuxlayer",
-        model: "gpt-5.5",
-        cli: "codex",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 2_000,
-      },
-      {} as any,
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(launcherSends).toBe(2);
-    expect(sentTexts.filter((text) => text.includes("cmuxlayerCodex"))).toEqual([
-      "cmuxlayerCodex -s",
-      "cmuxlayerCodex -s",
-    ]);
-    expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
-    expect(returnPresses).toBeGreaterThanOrEqual(3);
-
-    rmSync(stateDir, { recursive: true, force: true });
+    try {
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(launcherSends).toBe(2);
+      expect(
+        sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
+      ).toEqual(["cmuxlayerCodex -s -m gpt-5.5", "cmuxlayerCodex -s"]);
+      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+      expect(returnPresses).toBeGreaterThanOrEqual(3);
+    } finally {
+      if (previousAllowModel === undefined) {
+        delete process.env.REPOGOLEM_ALLOW_MODEL;
+      } else {
+        process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   }, 10_000);
 
   it("new_split times out when a CLI auto-update marker never clears", async () => {
