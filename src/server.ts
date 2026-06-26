@@ -3733,6 +3733,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   },
                 );
               }
+              const remainingLiveAgent = stateMgr
+                .listStates()
+                .find(
+                  (record) =>
+                    record.surface_id === args.surface &&
+                    !TERMINAL_AGENT_STATES.has(record.state),
+                );
+              if (remainingLiveAgent) {
+                return err(
+                  new Error(
+                    `Refused to close ${args.surface}: agent ${remainingLiveAgent.agent_id} is "${remainingLiveAgent.state}" (still live) after stale registry consolidation. Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
+                  ),
+                  {
+                    refused: true,
+                    surface: args.surface,
+                    agent_id: remainingLiveAgent.agent_id,
+                    state: remainingLiveAgent.state,
+                    screen: screenText,
+                    parsed: screenParsed,
+                    stale_registry_done_consolidated:
+                      staleRegistryDoneConsolidated,
+                  },
+                );
+              }
             } else {
               return err(
                 new Error(
@@ -5501,6 +5525,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             goal_file: args.goal_file,
             task_done_candidate_at: null,
             task_done_detected_at: null,
+            boot_prompt_pending: false,
             error: null,
           };
           let updated =

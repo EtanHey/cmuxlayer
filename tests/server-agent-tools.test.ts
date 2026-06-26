@@ -2550,6 +2550,51 @@ codex>
     expect(state.goal_file).toBe(goalPath);
   });
 
+  it("supersede_agent_goal clears stale boot prompt metadata after delivery", async () => {
+    const goalPath = join(TEST_DIR, "boot-pending-mission.md");
+    writeFileSync(goalPath, "# Mission\n\nReplace boot prompt state.\n", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const current = engine.stateMgr.updateRecord(agentId, {
+      boot_prompt_pending: true,
+    });
+    engine.getRegistry().set(agentId, current);
+    mockExec.mockClear();
+
+    const result = await supersede.handler(
+      {
+        agent_id: agentId,
+        goal_file: goalPath,
+        summary: "boot replacement mission",
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.state).toBe("working");
+    expect(state.boot_prompt_pending).toBe(false);
+    expect(state.task_summary).toBe("boot replacement mission");
+  });
+
   it.each(["done", "error"] as const)(
     "supersede_agent_goal resets stale %s lifecycle metadata after delivery",
     async (terminalState) => {

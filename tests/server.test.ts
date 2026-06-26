@@ -5497,6 +5497,93 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface refuses after stale DONE consolidation when another live agent shares the surface", async () => {
+    const stateDir = join(
+      tmpdir(),
+      "cmuxlayer-close-surface-post-consolidation-live",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    const base = {
+      surface_id: "surface:shared-done",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex" as const,
+      cli_session_id: null,
+      task_summary: "",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown" as const,
+      max_cost_per_agent: null,
+    };
+    stateMgr.writeState({
+      ...base,
+      agent_id: "aaa-live-done",
+      state: "working",
+    });
+    stateMgr.writeState({
+      ...base,
+      agent_id: "zzz-live-shared",
+      state: "working",
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:shared-done",
+        text: "All done.\nTASK_DONE",
+        lines: 2,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:shared-done" },
+      {} as any,
+    );
+
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    const finalStates = [
+      stateMgr.readState("aaa-live-done"),
+      stateMgr.readState("zzz-live-shared"),
+    ];
+    const doneState = finalStates.find((state) => state?.state === "done");
+    const liveState = finalStates.find((state) => state?.state === "working");
+    expect(doneState).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+    });
+    expect(liveState).toMatchObject({ state: "working" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      refused: true,
+      agent_id: liveState?.agent_id,
+      state: "working",
+      stale_registry_done_consolidated: {
+        agent_id: doneState?.agent_id,
+        previous_state: "working",
+        done_signal: "TASK_DONE",
+      },
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("rename_tab handler calls cmux rename-tab", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
