@@ -143,6 +143,103 @@ function makeDiscoveryExec(): ExecFn {
   });
 }
 
+function makeMovedManagedSurfaceExec(): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Collab",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+            {
+              ref: "workspace:5",
+              title: "SkillCreator",
+              index: 1,
+              selected: false,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      const workspace = args.includes("--workspace")
+        ? args[args.indexOf("--workspace") + 1]
+        : "workspace:1";
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: workspace,
+          window_ref: workspace === "workspace:1" ? "window:1" : "window:5",
+          panes:
+            workspace === "workspace:1"
+              ? [
+                  {
+                    ref: "pane:6",
+                    index: 1,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:315"],
+                    selected_surface_ref: "surface:315",
+                  },
+                ]
+              : [],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      const workspace = args.includes("--workspace")
+        ? args[args.indexOf("--workspace") + 1]
+        : "workspace:1";
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: workspace,
+          window_ref: workspace === "workspace:1" ? "window:1" : "window:5",
+          pane_ref: workspace === "workspace:1" ? "pane:6" : null,
+          surfaces:
+            workspace === "workspace:1"
+              ? [
+                  {
+                    ref: "surface:315",
+                    title: "skillcreatorCodex",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ]
+              : [],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:315",
+          text: "gpt-5.5 · 82% left · ~/Gits/skillcreator\nWorking (1m 03s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({}),
+      stderr: "",
+    };
+  });
+}
+
 function makeIdleDiscoveryExec(): ExecFn {
   const base = makeDiscoveryExec();
   return vi.fn().mockImplementation(async (cmd, args) => {
@@ -259,6 +356,65 @@ function makeShellPromptExec(): ExecFn {
       stdout: JSON.stringify({}),
       stderr: "",
     };
+  });
+}
+
+function makeOrphanLeadExec(): ExecFn {
+  const base = makeShellPromptExec();
+  return vi.fn().mockImplementation(async (cmd, args) => {
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [
+            {
+              ref: "surface:325",
+              title: "M1 LEAD VoiceLayerCodex",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:325",
+          text: "$ ",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:325"],
+              selected_surface_ref: "surface:325",
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    return base(cmd, args);
   });
 }
 
@@ -576,6 +732,39 @@ describe("resync_agents tool", () => {
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0].state).toBe("idle");
     expect(stateMgr.readState("auto-claude-surface-1")?.state).toBe("idle");
+  });
+
+  it("resync_agents reconciles managed record workspace_id after a surface move", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "skillcreatorCodex-019fmove",
+        surface_id: "surface:315",
+        workspace_id: "workspace:5",
+        state: "working",
+        repo: "skillcreator",
+        model: "gpt-5.5",
+        cli: "codex",
+        cli_session_id: "019f0001-1111-7222-8333-444455556666",
+        role: "worker",
+      }),
+    );
+
+    const server = createServer({
+      exec: makeMovedManagedSurfaceExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(stateMgr.readState("skillcreatorCodex-019fmove")?.workspace_id).toBe(
+      "workspace:1",
+    );
   });
 
   it("resync_agents keeps existing auto agents when discovery hits read-screen errors", async () => {
@@ -1006,6 +1195,30 @@ describe("resync_agents tool", () => {
     expect(parsed.diff.mismatches).toEqual([]);
     expect(parsed.diff.orphaned).toEqual(["surface:999"]);
     expect(parsed.count).toBe(0);
+  });
+
+  it("resync_agents reports orphan lead surfaces as health failures", async () => {
+    const server = createServer({
+      exec: makeOrphanLeadExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.orphaned).toEqual(["surface:325"]);
+    expect(parsed.diff.health_failures).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:325",
+        surface_title: "M1 LEAD VoiceLayerCodex",
+        status: "unhealthy",
+        issue_codes: ["missing_managed_lead_agent_id"],
+      }),
+    ]);
   });
 
   it("resync_agents evicts registry-only phantom agents instead of failing", async () => {

@@ -32,6 +32,7 @@ const AGENT_TOOLS = [
   "spawn_in_workspace",
   "resync_agents",
   "send_to",
+  "supersede_agent_goal",
   "wait_for",
   "wait_for_all",
   "get_agent_state",
@@ -245,7 +246,7 @@ function resolveCurrentTestAgentId(
 }
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 13 agent lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 14 agent lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -273,11 +274,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 35 (20 low-level + 13 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 36 (20 low-level + 14 agent lifecycle + 2 v2)", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(35);
+    expect(Object.keys(registeredTools)).toHaveLength(36);
   });
 });
 
@@ -323,6 +324,14 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining([
+        "missing_cli_session_id",
+        "non_resumable",
+        "inbox_monitor_not_alive",
+      ]),
+    });
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -332,6 +341,303 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.auto_archive_on_done).toBe(false);
+  });
+
+  it("spawn_agent inherits the selected workspace when workspace is omitted", async () => {
+    const calls: string[] = [];
+    const mockClient = {
+      createWorkspace: vi.fn(),
+      selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+        calls.push(`select:${workspace}`);
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Collab",
+            selected: true,
+            current_directory: "/Users/etanheyman/Gits/orchestrator",
+          },
+          {
+            ref: "workspace:5",
+            title: "SkillCreator",
+            selected: false,
+            current_directory: "/Users/etanheyman/Gits/skillcreator",
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [],
+      }),
+      newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
+        calls.push(`spawn:${opts.workspace}`);
+        return {
+          workspace: opts.workspace,
+          surface: "surface:inherit",
+          pane: "pane:inherit",
+          title: "",
+          type: "terminal",
+        };
+      }),
+      newSurface: vi.fn(),
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:inherit",
+        text: "Codex\n>",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      log: vi.fn().mockResolvedValue(undefined),
+      setStatus: vi.fn().mockResolvedValue(undefined),
+      clearStatus: vi.fn().mockResolvedValue(undefined),
+      setProgress: vi.fn().mockResolvedValue(undefined),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+      listSurfaces: vi.fn().mockResolvedValue([
+        {
+          ref: "surface:inherit",
+          title: "skillcreatorCodex",
+          type: "terminal",
+          index: 0,
+          selected: true,
+          workspace_ref: "workspace:1",
+        },
+      ]),
+      identify: vi.fn().mockResolvedValue({}),
+      browser: vi.fn().mockResolvedValue({}),
+    };
+    const server = createTrackedServer({
+      client: mockClient as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "skillcreator",
+        model: "gpt-5.5",
+        cli: "codex",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace_id).toBe("workspace:1");
+    expect(calls).toContain("spawn:workspace:1");
+    expect(calls).not.toContain("spawn:workspace:5");
+  });
+
+  it("spawn_agent prefers the caller pane workspace over the selected workspace when workspace is omitted", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    delete process.env.CMUX_TAB_ID;
+
+    try {
+      const calls: string[] = [];
+      const mockClient = {
+        createWorkspace: vi.fn(),
+        selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+          calls.push(`select:${workspace}`);
+        }),
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:1",
+              title: "Voice Remediation",
+              selected: false,
+              current_directory: "/Users/etanheyman/Gits/orchestrator",
+            },
+            {
+              id: "selected-workspace-uuid",
+              ref: "workspace:5",
+              title: "Other Active Workspace",
+              selected: true,
+              current_directory: "/Users/etanheyman/Gits/voicelayer",
+            },
+          ],
+        }),
+        listPanes: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          panes: [],
+        })),
+        listPaneSurfaces: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        })),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
+          calls.push(`spawn:${opts.workspace}`);
+          return {
+            workspace: opts.workspace,
+            surface: "surface:caller",
+            pane: "pane:caller",
+            title: "",
+            type: "terminal",
+          };
+        }),
+        newSurface: vi.fn(),
+        send: vi.fn().mockResolvedValue(undefined),
+        sendKey: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:caller",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+        log: vi.fn().mockResolvedValue(undefined),
+        setStatus: vi.fn().mockResolvedValue(undefined),
+        clearStatus: vi.fn().mockResolvedValue(undefined),
+        setProgress: vi.fn().mockResolvedValue(undefined),
+        closeSurface: vi.fn().mockResolvedValue(undefined),
+        listSurfaces: vi.fn().mockResolvedValue([
+          {
+            ref: "surface:caller",
+            title: "voicelayerCodex",
+            type: "terminal",
+            index: 0,
+            selected: true,
+            workspace_ref: "workspace:1",
+          },
+        ]),
+        identify: vi.fn().mockResolvedValue({}),
+        browser: vi.fn().mockResolvedValue({}),
+      };
+      const server = createTrackedServer({
+        client: mockClient as any,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await tool.handler(
+        {
+          repo: "voicelayer",
+          model: "gpt-5.5",
+          cli: "codex",
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.workspace_id).toBe("workspace:1");
+      expect(calls).toContain("spawn:workspace:1");
+      expect(calls).not.toContain("spawn:workspace:5");
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
+  it("spawn_agent warns when an existing same-lane idle agent can be reused", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const firstResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "ws:1",
+      },
+      {} as any,
+    );
+    const first = firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const firstRecord = registry.get(first.agent_id);
+    registry.set(first.agent_id, { ...firstRecord, state: "idle" });
+
+    const secondResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "ws:1",
+      },
+      {} as any,
+    );
+    const second =
+      secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
+
+    expect(second.ok).toBe(true);
+    expect(second.duplicate_spawn_warning).toMatch(/Existing same-lane agent/);
+    expect(second.existing_same_lane_agents).toEqual([
+      expect.objectContaining({
+        agent_id: first.agent_id,
+        surface_id: first.surface_id,
+        workspace_id: first.workspace_id,
+        state: "idle",
+        role: "worker",
+      }),
+    ]);
+  });
+
+  it("spawn_agent force_new suppresses same-lane duplicate warnings", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const firstResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "ws:1",
+      },
+      {} as any,
+    );
+    const first = firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const firstRecord = registry.get(first.agent_id);
+    registry.set(first.agent_id, { ...firstRecord, state: "ready" });
+
+    const secondResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "ws:1",
+        force_new: true,
+      },
+      {} as any,
+    );
+    const second =
+      secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
+
+    expect(second.ok).toBe(true);
+    expect(second.duplicate_spawn_warning).toBeUndefined();
+    expect(second.existing_same_lane_agents).toEqual([]);
   });
 
   it("spawn_agent accepts an omitted model and resolves the CLI default", async () => {
@@ -386,6 +692,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("ic");
+    expect(parsed.health.status).toBe("unhealthy");
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -1357,6 +1664,14 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents[0].session_id).toBeNull();
     expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
+    expect(parsed.agents[0].health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining([
+        "missing_cli_session_id",
+        "non_resumable",
+        "inbox_monitor_not_alive",
+      ]),
+    });
   });
 
   it("list_agents includes resume_command when a session id is captured", async () => {
@@ -1420,6 +1735,114 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.cli).toBe("codex");
     expect(parsed.resume_command).toBeUndefined();
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining([
+        "missing_cli_session_id",
+        "non_resumable",
+        "inbox_monitor_not_alive",
+      ]),
+    });
+  });
+
+  it("get_agent_state reports recoverable blocker health from parsed screen actions", async () => {
+    const blockerScreen = `
+OpenAI Codex
+
+I cannot commit, push, or open a PR without explicit permission, so I am waiting for Etan.
+
+codex>
+`;
+    const mockClient = {
+      createWorkspace: vi.fn(),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            selected: true,
+            current_directory: "/Users/etanheyman/Gits/cmuxlayer",
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [],
+      }),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:1",
+        surface: "surface:blocker",
+        pane: "pane:blocker",
+        title: "",
+        type: "terminal",
+      }),
+      newSurface: vi.fn(),
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:blocker",
+        text: blockerScreen,
+        lines: 20,
+        scrollback_used: false,
+      }),
+      log: vi.fn().mockResolvedValue(undefined),
+      setStatus: vi.fn().mockResolvedValue(undefined),
+      clearStatus: vi.fn().mockResolvedValue(undefined),
+      setProgress: vi.fn().mockResolvedValue(undefined),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+      listSurfaces: vi.fn().mockResolvedValue([
+        {
+          ref: "surface:blocker",
+          title: "cmuxlayerCodex",
+          type: "terminal",
+          index: 0,
+          selected: true,
+          workspace_ref: "workspace:1",
+        },
+      ]),
+      identify: vi.fn().mockResolvedValue({}),
+      browser: vi.fn().mockResolvedValue({}),
+    };
+    const server = createTrackedServer({
+      client: mockClient as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining([
+        "recoverable_blocker_requires_action",
+      ]),
+      recommended_actions: ["route_pr_loop"],
+    });
   });
 
   it("get_agent_state marks auto-discovered null-session agents unresumable", async () => {
@@ -1461,6 +1884,16 @@ describe("agent lifecycle tool handlers", () => {
       cli_session_path: null,
       pid: null,
       resumable: false,
+      health: {
+        status: "unhealthy",
+        issue_codes: expect.arrayContaining([
+          "auto_discovered_agent",
+          "missing_cli_session_id",
+          "non_resumable",
+          "inbox_monitor_not_alive",
+        ]),
+        issues: expect.any(Array),
+      },
     });
     expect(parsed.resume_command).toBeUndefined();
   });
@@ -1559,8 +1992,8 @@ describe("agent lifecycle tool handlers", () => {
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
-    const agent = registry.get(agentId);
-    registry.set(agentId, { ...agent, state: "working" });
+    const working = engine.stateMgr.transition(agentId, "working");
+    registry.set(agentId, working);
     mockExec.mockClear();
 
     const result = await sendTo.handler(
@@ -1658,6 +2091,46 @@ describe("agent lifecycle tool handlers", () => {
     expect(result.isError).toBeFalsy();
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
+  });
+
+  it("send_to returns post-delivery screen evidence and health disagreement", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const agent = registry.get(agentId);
+    registry.set(agentId, { ...agent, state: "ready" });
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: "begin work", press_enter: true },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.registry_state).toBe("ready");
+    expect(parsed.screen).toMatchObject({
+      agent_type: "claude",
+      status: "working",
+    });
+    expect(parsed.state_conflict).toBe(true);
+    expect(parsed.health.issue_codes).toContain("registry_screen_disagreement");
   });
 
   it("send_to sanitizes and chunks delivery through the agent surface", async () => {
@@ -1819,6 +2292,97 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(result.isError).toBe(true);
     expect(result.structuredContent?.error).toMatch(/Agent not found/);
+  });
+
+  it("supersede_agent_goal updates registry metadata and delivers a file-backed goal", async () => {
+    const goalPath = join(TEST_DIR, "mission.md");
+    writeFileSync(goalPath, "# Mission\n\nFinish the lifecycle repair.\n", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const ready = engine.stateMgr.transition(agentId, "ready");
+    registry.set(agentId, ready);
+    const working = engine.stateMgr.transition(agentId, "working");
+    registry.set(agentId, working);
+    mockExec.mockClear();
+
+    const result = await supersede.handler(
+      {
+        agent_id: agentId,
+        goal_file: goalPath,
+        summary: "full baseline mission",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.task_summary).toBe("full baseline mission");
+    expect(parsed.goal_file).toBe(goalPath);
+    expect(parsed.registry_state).toBe("working");
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send",
+        "--surface",
+        "surface:new",
+        `/goal Read and execute this goal file until complete: ${goalPath}`,
+      ]),
+    );
+
+    const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+    const state =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(state.task_summary).toBe("full baseline mission");
+    expect(state.goal_file).toBe(goalPath);
+  });
+
+  it("supersede_agent_goal rejects a missing goal file", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+
+    const result = await supersede.handler(
+      {
+        agent_id: agentId,
+        goal_file: join(TEST_DIR, "missing.md"),
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatch(/ENOENT/);
   });
 
   it("wait_for defaults to done when target_state is omitted", async () => {

@@ -5269,6 +5269,76 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface consolidates stale live registry when pane shows TASK_DONE", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-done-consolidate");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-done-stale",
+      surface_id: "surface:worker-done-stale",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "finished task",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:worker-done-stale",
+        text: "gpt-5.5 xhigh · 60% left · ~/Gits/brainlayer\nImplemented.\nTASK_DONE",
+        lines: 3,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-done-stale" },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalledWith(
+      "surface:worker-done-stale",
+      {
+        workspace: undefined,
+        collapsePane: false,
+      },
+    );
+    expect(stateMgr.readState("worker-done-stale")?.state).toBe("done");
+    expect(result.structuredContent).toMatchObject({
+      surface: "surface:worker-done-stale",
+      stale_registry_done_consolidated: {
+        agent_id: "worker-done-stale",
+        previous_state: "working",
+        done_signal: "TASK_DONE",
+      },
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("close_surface guard is fail-safe when a stale terminal record shares the surface with a live one", async () => {
     const stateDir = join(tmpdir(), "cmuxlayer-close-surface-collision");
     rmSync(stateDir, { recursive: true, force: true });

@@ -242,6 +242,15 @@ export class AgentRegistry {
           continue;
         }
       }
+      if (!isAutoRecord && discoveredEntry && !discoveredEntry.read_error) {
+        liveRecord = this.syncManagedRecordSurfaceMetadata(
+          record,
+          discoveredEntry,
+        );
+        if (!liveRecord) {
+          continue;
+        }
+      }
 
       seenSurfaces.add(record.surface_id);
       merged.push({
@@ -365,6 +374,29 @@ export class AgentRegistry {
     }
 
     return record;
+  }
+
+  private syncManagedRecordSurfaceMetadata(
+    record: AgentRecord,
+    discoveredEntry: DiscoveredAgent,
+  ): AgentRecord | null {
+    const workspaceId = discoveredEntry.workspace_id ?? null;
+    if ((record.workspace_id ?? null) === workspaceId) {
+      return record;
+    }
+
+    try {
+      const updated = this.stateMgr.updateRecord(record.agent_id, {
+        workspace_id: workspaceId,
+      });
+      this.agents.set(record.agent_id, updated);
+      return updated;
+    } catch (error) {
+      if (this.evictMissingStateAgent(record.agent_id)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**

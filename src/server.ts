@@ -23,12 +23,13 @@ import {
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
-import { AgentDiscovery } from "./agent-discovery.js";
+import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
   toAgentStatePayload,
   toPublicAgent,
 } from "./agent-facade.js";
+import { evaluateAgentHealth } from "./agent-health.js";
 import type {
   AgentRecord,
   AgentRole,
@@ -82,6 +83,7 @@ import type {
   CmuxNewSurfaceResult,
   CmuxSurface,
   CmuxTerminalMetadata,
+  CmuxWorkspace,
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
@@ -89,7 +91,7 @@ import {
   matchReadyPattern,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
-import { resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   collectControlHealth,
@@ -1954,6 +1956,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // split failed for exactly this reason), then restore the prior focus AFTER
   // the new terminal is fully rendered — but ONLY when a jump was needed.
 
+  const envWorkspaceMatches = (
+    workspace: CmuxWorkspace,
+    candidate: string,
+  ): boolean => {
+    const normalized = candidate.trim();
+    if (!normalized) return false;
+    return (
+      workspace.ref === normalized ||
+      workspace.id === normalized ||
+      workspace.ref === `workspace:${normalized}` ||
+      workspace.id === `workspace:${normalized}`
+    );
+  };
+
+  /** Caller pane workspace ref first, then focused workspace as fallback. */
+  const currentCallerWorkspace = async (): Promise<string | undefined> => {
+    try {
+      const { workspaces } = await client.listWorkspaces();
+      const envCandidates = [
+        process.env.CMUX_WORKSPACE_ID,
+        process.env.CMUX_TAB_ID,
+      ].filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      );
+      for (const candidate of envCandidates) {
+        const match = workspaces.find((workspace) =>
+          envWorkspaceMatches(workspace, candidate),
+        );
+        if (match) return match.ref;
+      }
+      return workspaces.find((w) => w.selected)?.ref;
+    } catch {
+      return undefined;
+    }
+  };
+
   /** Currently-focused workspace ref, or undefined if it can't be read. */
   const currentFocusedWorkspace = async (): Promise<string | undefined> => {
     try {
@@ -2121,6 +2160,175 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     return { column: null, column_count: null };
+  };
+
+  const resolveSurfaceWorkspace = async (
+    surfaceRef: string,
+  ): Promise<string | null> => {
+    try {
+      const workspaceRefs = (await client.listWorkspaces()).workspaces.map(
+        (ws) => ws.ref,
+      );
+      for (const workspaceRef of workspaceRefs) {
+        const panes = await client.listPanes({ workspace: workspaceRef });
+        const rawGroups = await Promise.all(
+          panes.panes.map(async (pane) => {
+            const group = await client.listPaneSurfaces({
+              workspace: workspaceRef,
+              pane: pane.ref,
+            });
+            return {
+              ...group,
+              workspace_ref: group.workspace_ref ?? workspaceRef,
+              pane_ref: group.pane_ref ?? pane.ref,
+            };
+          }),
+        );
+        const groups = partitionPaneSurfacesByMembership(
+          panes.panes,
+          rawGroups,
+          {
+            workspace_ref: panes.workspace_ref ?? workspaceRef,
+            window_ref: panes.window_ref,
+          },
+        );
+        for (const group of groups) {
+          if (group.surfaces.some((surface) => surface.ref === surfaceRef)) {
+            return group.workspace_ref ?? workspaceRef;
+          }
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const evaluateServerAgentHealth = async (
+    agent: AgentRecord,
+    overrides?: {
+      monitor_alive?: boolean | null;
+      stale_count?: number;
+      screen_status?: string | null;
+      screen_actions?: string[] | null;
+      surface_workspace_id?: string | null;
+      surface_title?: string | null;
+      topology?: { column: number | null; column_count: number | null } | null;
+    },
+  ) => {
+    const topology =
+      overrides?.topology !== undefined
+        ? overrides.topology
+        : await resolveSurfaceColumn(
+            agent.surface_id,
+            agent.workspace_id ?? undefined,
+          );
+    const alive =
+      overrides?.monitor_alive ??
+      monitorAlive(agent.agent_id, INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS, inboxOpts);
+    const staleCount =
+      overrides?.stale_count ??
+      pendingDispatches(agent.agent_id, 120000, inboxOpts).length;
+    const parsedScreen =
+      overrides?.screen_status === undefined ||
+      overrides?.screen_actions === undefined
+        ? await readParsedSurface(agent.surface_id, agent.workspace_id ?? undefined)
+        : null;
+    const screenStatus =
+      overrides?.screen_status !== undefined
+        ? overrides.screen_status
+        : parsedScreen?.parsed.status;
+    const screenActions =
+      overrides?.screen_actions !== undefined
+        ? overrides.screen_actions
+        : parsedScreen?.parsed.actions;
+    const surfaceWorkspaceId =
+      overrides?.surface_workspace_id !== undefined
+        ? overrides.surface_workspace_id
+        : await resolveSurfaceWorkspace(agent.surface_id);
+    return evaluateAgentHealth(agent, {
+      monitor_alive: alive,
+      stale_count: staleCount,
+      screen_status: screenStatus,
+      screen_actions: screenActions,
+      surface_workspace_id: surfaceWorkspaceId,
+      surface_title: overrides?.surface_title,
+      topology,
+    });
+  };
+
+  const isLeadLikeSurfaceTitle = (title: string): boolean =>
+    /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
+
+  const buildOrphanSurfaceHealth = (surface: DiscoveredAgent) => {
+    const issueCodes: string[] = [];
+    const issues: string[] = [];
+    if (isLeadLikeSurfaceTitle(surface.surface_title)) {
+      issueCodes.push("missing_managed_lead_agent_id");
+      issues.push(
+        "lead/coordinator surface has no managed agent_id; recover/register or replace with a managed lead",
+      );
+    }
+
+    const title = surface.surface_title.trim().toLowerCase();
+    if (
+      title === "" ||
+      title === "gits" ||
+      title === "git" ||
+      title === "repos" ||
+      title === "projects" ||
+      title === "workspace"
+    ) {
+      issueCodes.push("ambiguous_repo_cwd_label");
+      issues.push(
+        "orphan terminal surface has an ambiguous repo/cwd label; tab title is not lane ownership",
+      );
+    }
+
+    return {
+      surface_id: surface.surface_id,
+      surface_title: surface.surface_title,
+      workspace_id: surface.workspace_id ?? null,
+      status: issueCodes.length > 0 ? "unhealthy" : "unknown",
+      issue_codes: issueCodes,
+      issues,
+    };
+  };
+
+  const collectDeliveryEvidence = async (agentId: string) => {
+    const agent = context.lifecycleSweepEngine?.getAgentState(agentId) ?? null;
+    if (!agent) {
+      return {
+        registry_state: null,
+        screen: null,
+        state_conflict: false,
+        health: undefined,
+      };
+    }
+    const screen = await readParsedSurface(
+      agent.surface_id,
+      agent.workspace_id ?? undefined,
+    );
+    const health = await evaluateServerAgentHealth(agent, {
+      screen_status: screen?.parsed.status ?? null,
+      screen_actions: screen?.parsed.actions ?? null,
+    });
+    return {
+      registry_state: agent.state,
+      screen: screen
+        ? {
+            status: screen.parsed.status,
+            agent_type: screen.parsed.agent_type,
+            model: screen.parsed.model,
+            done_signal: screen.parsed.done_signal,
+            actions: screen.parsed.actions ?? [],
+          }
+        : null,
+      state_conflict: health.issue_codes.includes(
+        "registry_screen_disagreement",
+      ),
+      health,
+    };
   };
 
   // 1. list_surfaces
@@ -3400,6 +3608,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.destructive,
     async (args) => {
       try {
+        let staleRegistryDoneConsolidated:
+          | { agent_id: string; previous_state: AgentState; done_signal: string }
+          | undefined;
         // Liveness guard: never destroy a pane whose agent is still live unless
         // the caller explicitly forces it. This is the safety net for the
         // "stale list said it was gone but it was actually alive" failure — on
@@ -3420,28 +3631,58 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           if (backingAgent) {
             let screenText = "(unable to read pane)";
+            let screenParsed: ReturnType<typeof parseScreen> | null = null;
             try {
               const screen = await client.readScreen(args.surface, {
                 workspace: args.workspace,
                 lines: 40,
               });
               screenText = screen.text;
+              screenParsed = parseScreen(screen.text);
             } catch {
               // Best-effort read; refuse regardless so a live agent is never
               // torn down without an explicit force.
             }
-            return err(
-              new Error(
-                `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live). Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
-              ),
-              {
-                refused: true,
-                surface: args.surface,
-                agent_id: backingAgent.agent_id,
-                state: backingAgent.state,
-                screen: screenText,
-              },
-            );
+            if (screenParsed?.done_signal) {
+              try {
+                const done = stateMgr.transition(backingAgent.agent_id, "done");
+                context.lifecycleRegistry?.set(backingAgent.agent_id, done);
+                staleRegistryDoneConsolidated = {
+                  agent_id: backingAgent.agent_id,
+                  previous_state: backingAgent.state,
+                  done_signal: screenParsed.done_signal,
+                };
+              } catch {
+                // If consolidation fails, keep the fail-safe refusal path.
+                return err(
+                  new Error(
+                    `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live) and registry consolidation failed. Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
+                  ),
+                  {
+                    refused: true,
+                    surface: args.surface,
+                    agent_id: backingAgent.agent_id,
+                    state: backingAgent.state,
+                    screen: screenText,
+                    parsed: screenParsed,
+                  },
+                );
+              }
+            } else {
+              return err(
+                new Error(
+                  `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live). Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
+                ),
+                {
+                  refused: true,
+                  surface: args.surface,
+                  agent_id: backingAgent.agent_id,
+                  state: backingAgent.state,
+                  screen: screenText,
+                  parsed: screenParsed,
+                },
+              );
+            }
           }
         }
 
@@ -3499,6 +3740,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           surface: args.surface,
           pane: closePolicy?.pane ?? undefined,
           collapse_pane: collapsePane,
+          stale_registry_done_consolidated: staleRegistryDoneConsolidated,
         };
         return okFormatted(formatOk("close_surface", data), data);
       } catch (e) {
@@ -3670,6 +3912,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
           inboxOpts,
         );
+        const pending = pendingDispatches(args.agent_id, 120000, inboxOpts);
         const nudge = { attempted: false, sent: false, reason: "" };
         if (args.nudge === "never") {
           nudge.reason = "nudge disabled by caller";
@@ -3714,10 +3957,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
           }
         }
+        const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+        const health = record
+          ? await evaluateServerAgentHealth(record, {
+              monitor_alive,
+              stale_count: pending.length,
+            })
+          : undefined;
         return ok({
           dispatched: msg,
           inbox: inboxPath(args.agent_id, inboxOpts),
           monitor_alive,
+          health,
           nudge,
         });
       } catch (e) {
@@ -3763,9 +4014,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.heartbeat_max_age_ms,
           inboxOpts,
         );
+        const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+        const health = record
+          ? await evaluateServerAgentHealth(record, {
+              monitor_alive: alive,
+              stale_count: pending.length,
+            })
+          : undefined;
         return ok({
           agent_id: args.agent_id,
           monitor_alive: alive,
+          health,
           undelivered_count: undelivered.length,
           undelivered,
           stale_count: pending.length,
@@ -4133,7 +4392,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed AI agent in a new terminal surface and return an agent_id for future routing. Use send_to and wait_for with that agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
+      "Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
       {
         repo: z
           .string()
@@ -4167,7 +4426,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "Timeout in milliseconds waiting for the agent ready prompt",
           ),
-        workspace: z.string().optional().describe("Target workspace ref"),
+        workspace: z
+          .string()
+          .optional()
+          .describe(
+            "Target workspace ref. Omit to use the caller/current workspace; pass only when intentionally spawning in a different workspace.",
+          ),
         worktree: worktreeArgSchema
           .optional()
           .describe(
@@ -4207,6 +4471,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "When true, automatically respawn the agent after unexpected PTY death using its captured CLI session ID.",
           ),
+        force_new: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "When true, suppress same repo/workspace/role duplicate-lane warnings. Default false so collab leads see reusable existing agents before spawning another lane.",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -4223,6 +4494,48 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.mcp_profile as McpProfile | undefined,
           );
 
+          const spawnWorkspace = args.workspace ?? (await currentCallerWorkspace());
+          const requestedRole = inferAgentRole({
+            role: args.role,
+            cli: args.cli,
+            launcherName: launcherNameForCli(args.repo, args.cli),
+          });
+          const existingSameLaneAgents = args.force_new
+            ? []
+            : registry
+                .list()
+                .filter(
+                  (agent) =>
+                    (agent.state === "ready" || agent.state === "idle") &&
+                    reposEquivalent(agent.repo, args.repo) &&
+                    (agent.workspace_id ?? null) === (spawnWorkspace ?? null) &&
+                    (agent.role ??
+                      inferAgentRole({
+                        cli: agent.cli,
+                        launcherName:
+                          agent.launcher_name ??
+                          launcherNameForCli(agent.repo, agent.cli),
+                      })) === requestedRole,
+                )
+                .map((agent) => ({
+                  agent_id: agent.agent_id,
+                  surface_id: agent.surface_id,
+                  workspace_id: agent.workspace_id ?? null,
+                  state: agent.state,
+                  role:
+                    agent.role ??
+                    inferAgentRole({
+                      cli: agent.cli,
+                      launcherName:
+                        agent.launcher_name ??
+                        launcherNameForCli(agent.repo, agent.cli),
+                    }),
+                  task_summary: agent.task_summary,
+                }));
+          const duplicateSpawnWarning =
+            existingSameLaneAgents.length > 0
+              ? `Existing same-lane agent(s) are idle/ready in ${spawnWorkspace ?? "unknown workspace"}; reuse or supersede unless a new lane is intentional. Pass force_new:true to suppress this warning.`
+              : undefined;
           const result = await engine.spawnAgent({
             repo: args.repo,
             model: args.model,
@@ -4230,7 +4543,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             prompt: args.prompt ?? "",
             boot_prompt_pending:
               hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
-            workspace: args.workspace,
+            workspace: spawnWorkspace,
             cwd: worktree.prepared?.path,
             mcp_env: worktree.mcpEnv,
             mcp_profile_label: worktree.mcpProfileLabel,
@@ -4247,7 +4560,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
-              const deliveryWorkspace = result.workspace_id ?? args.workspace;
+              const deliveryWorkspace = result.workspace_id ?? spawnWorkspace;
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
@@ -4345,6 +4658,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role === "orchestrator"
               ? ensureMonitorBoot(result.agent_id)
               : undefined;
+          const currentAgent = engine.getAgentState(result.agent_id);
+          const health = currentAgent
+            ? await evaluateServerAgentHealth(currentAgent)
+            : undefined;
 
           return okFormatted(
             formatOk("spawn_agent", {
@@ -4358,6 +4675,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   : undefined,
               surface: result.surface_id,
               role,
+              health,
+              duplicate_spawn_warning: duplicateSpawnWarning,
               monitor_boot: monitorBoot,
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
             }),
@@ -4366,6 +4685,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel,
               role,
+              health,
+              duplicate_spawn_warning: duplicateSpawnWarning,
+              existing_same_lane_agents: existingSameLaneAgents,
               monitor_boot: monitorBoot,
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
               boot_prompt_bytes: bootPromptDelivery?.bytes,
@@ -4468,6 +4790,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
             result.workspace_id ?? args.workspace,
           );
+          const currentAgent = engine.getAgentState(result.agent_id);
+          const health = currentAgent
+            ? await evaluateServerAgentHealth(currentAgent)
+            : undefined;
 
           return okFormatted(
             formatOk("new_worktree_split", {
@@ -4475,10 +4801,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface: result.surface_id,
               worktree: worktree.prepared?.path ?? "",
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
+              health,
             }),
             {
               ...result,
               role: "worker",
+              health,
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
@@ -4542,6 +4870,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             repo: string;
             cli: CliType;
             role: AgentRole;
+            health?: ReturnType<typeof evaluateAgentHealth>;
             monitor_boot?: MonitorBootResult;
             boot_prompt_delivered?: boolean;
             boot_prompt_submit_verified?: boolean | null;
@@ -4609,6 +4938,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role === "orchestrator"
                 ? ensureMonitorBoot(result.agent_id)
                 : undefined;
+            const currentAgent = engine.getAgentState(result.agent_id);
+            const health = currentAgent
+              ? await evaluateServerAgentHealth(currentAgent)
+              : undefined;
 
             spawnedAgents.push({
               agent_id: result.agent_id,
@@ -4616,6 +4949,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               repo: agent.repo,
               cli: agent.cli,
               role,
+              health,
               monitor_boot: monitorBoot,
               boot_prompt_delivered: hasPrompt
                 ? isBootPromptDelivered(bootPromptDelivery)
@@ -4650,7 +4984,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 12. wait_for
     server.tool(
       "wait_for",
-      "Block until an agent reaches a target state. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography.",
+      "Block until an agent reaches a target registry state and return health. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography. This does not yet watch report files or DONE markers; if a collab goal defines a report path/DONE marker, verify that file separately and treat registry/file or registry/screen disagreement as health evidence.",
       {
         agent_id: z.string().describe("Agent ID from spawn_agent"),
         target_state: z
@@ -4675,14 +5009,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             targetState,
             args.timeout_ms,
           );
+          const resultAgent = result.agent
+            ? engine.getAgentState(result.agent.agent_id)
+            : null;
+          const health = resultAgent
+            ? await evaluateServerAgentHealth(resultAgent)
+            : undefined;
           return okFormatted(
             formatOk("wait_for", {
               agent_id: args.agent_id,
               state: result.state,
+              health,
             }),
             {
               agent_id: args.agent_id,
               ...result,
+              health,
+              agent:
+                result.agent && health
+                  ? { ...result.agent, health }
+                  : result.agent,
             },
           );
         } catch (e) {
@@ -4694,7 +5040,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 13. wait_for_all
     server.tool(
       "wait_for_all",
-      "Block until ALL agents reach target state OR any agent errors (fail-fast with partial results).",
+      "Block until ALL agents reach a target registry state OR any agent errors, returning per-agent health with partial results. This does not yet watch report files or DONE markers; collab leads must verify required output files separately.",
       {
         agent_ids: z.array(z.string()).describe("Array of agent IDs"),
         target_state: z
@@ -4716,12 +5062,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.target_state,
             args.timeout_ms,
           );
+          const enrichedResults = await Promise.all(
+            results.map(async (result) => {
+              const resultAgent = result.agent
+                ? engine.getAgentState(result.agent.agent_id)
+                : null;
+              const health = resultAgent
+                ? await evaluateServerAgentHealth(resultAgent)
+                : undefined;
+              return {
+                ...result,
+                health,
+                agent:
+                  result.agent && health
+                    ? { ...result.agent, health }
+                    : result.agent,
+              };
+            }),
+          );
           return okFormatted(
             formatOk("wait_for_all", {
               count: results.length,
               target: args.target_state,
             }),
-            { results },
+            { results: enrichedResults },
           );
         } catch (e) {
           return err(e);
@@ -4732,7 +5096,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 14. get_agent_state
     server.tool(
       "get_agent_state",
-      "Get the full state of an agent including cli_session_id for resume.",
+      "Get the full registry state of an agent, including cli_session_id/resume data and health. Health may flag missing sessions, dead inbox monitors, topology drift, or registry/screen disagreement.",
       {
         agent_id: z.string().describe("Agent ID"),
       },
@@ -4742,8 +5106,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const state = engine.getAgentState(args.agent_id);
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
-          const formatted = formatAgentState(state);
-          const payload = toAgentStatePayload(state);
+          const health = await evaluateServerAgentHealth(state);
+          const formatted =
+            formatAgentState(state) +
+            `\nhealth: ${health.status}${
+              health.issues.length > 0
+                ? ` (${health.issues.join("; ")})`
+                : ""
+            }`;
+          const payload = { ...toAgentStatePayload(state), health };
           return okFormatted(
             formatted,
             payload as unknown as Record<string, unknown>,
@@ -4757,7 +5128,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 15. list_agents
     server.tool(
       "list_agents",
-      "List public agent handles with optional filters by state, repo, or model. Use these agent_id values with send_to and wait_for; use get_agent_state only when you need internal route/session details.",
+      "List public agent handles with optional filters by state, repo, or model, including health. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
       {
         state: z
           .enum([
@@ -4784,7 +5155,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               model: args.model,
             },
           });
-          const agents = merged.map(toPublicAgent);
+          const agents = await Promise.all(
+            merged.map(async (agent) => ({
+              ...toPublicAgent(agent),
+              health: await evaluateServerAgentHealth(agent),
+            })),
+          );
           const data = {
             agents: agents as unknown as Record<string, unknown>[],
             count: agents.length,
@@ -4815,15 +5191,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const after = await registry.listMerged(discovery, { force: true });
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
+          const orphanedSurfaces = discovered.filter(
+            (surface) => !surface.has_agent && !surface.read_error,
+          );
+          const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
           const diff = {
             added: [...afterIds].filter((id) => !beforeIds.has(id)),
             evicted: [...beforeIds].filter((id) => !afterIds.has(id)),
             mismatches: after
               .filter((agent) => agent.parsed_cli_mismatch)
               .map((agent) => agent.agent_id),
-            orphaned: discovered
-              .filter((surface) => !surface.has_agent && !surface.read_error)
-              .map((surface) => surface.surface_id),
+            orphaned: orphanedSurfaces.map((surface) => surface.surface_id),
+            orphaned_health: orphanedHealth,
+            health_failures: orphanedHealth.filter(
+              (health) => health.status === "unhealthy",
+            ),
           };
 
           return okFormatted(formatResync(diff), {
@@ -4867,7 +5249,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available.",
+      "Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. For collab supersession, send a short `/goal Read and follow <absolute goal file>` reference rather than a long lossy paste. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.",
       {
         ...SendToArgsSchema.shape,
         press_enter: SendToArgsSchema.shape.press_enter.describe(
@@ -4895,10 +5277,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allow_busy: args.allow_busy,
             source_event: "send_to",
           });
+          const evidence = await collectDeliveryEvidence(args.agent_id);
           const data = {
             agent_id: args.agent_id,
             retry_count: delivery.retry_count,
             submit_verified: delivery.submit_verified,
+            ...evidence,
           };
           return okFormatted(formatOk("send_to", data), data);
         } catch (e) {
@@ -4910,7 +5294,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 18. send_to_agent
     server.tool(
       "send_to_agent",
-      "Deprecated for client integrations: use send_to instead. Internal/advanced path for sending text input to an agent in ready or idle state.",
+      "Deprecated for client integrations: use send_to instead. Internal/advanced path for sending text input to an agent in ready or idle state. Returns the same post-delivery registry/screen health evidence as send_to.",
       {
         ...SendToArgsSchema.shape,
         press_enter: SendToArgsSchema.shape.press_enter.describe(
@@ -4940,12 +5324,77 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allow_busy: args.allow_busy,
             source_event: "send_to_agent",
           });
+          const evidence = await collectDeliveryEvidence(args.agent_id);
           const data = {
             agent_id: args.agent_id,
             retry_count: delivery.retry_count,
             submit_verified: delivery.submit_verified,
+            ...evidence,
           };
           return okFormatted(formatOk("send_to_agent", data), data);
+        } catch (e) {
+          return err(e);
+        }
+      },
+    );
+
+    server.tool(
+      "supersede_agent_goal",
+      "Replace an existing managed agent's active mission with a file-backed /goal contract. Updates registry task_summary/goal_file, sends `/goal Read and execute this goal file until complete: <path>` through the guarded agent relay, and returns delivery evidence plus health. Use this to reuse an existing pane instead of spawning a duplicate lane.",
+      {
+        agent_id: z.string().describe("Managed agent_id to supersede"),
+        goal_file: z
+          .string()
+          .describe("Absolute path to the goal file the agent must execute"),
+        summary: z
+          .string()
+          .optional()
+          .describe(
+            "Optional task_summary to store in the registry. Defaults to the goal_file path.",
+          ),
+        allow_busy: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe(
+            "If true, supersede even while the agent is working. Defaults true because supersession intentionally replaces the active mission.",
+          ),
+      },
+      ANNOTATIONS.mutating,
+      async (args) => {
+        try {
+          const current = engine.getAgentState(args.agent_id);
+          if (!current) {
+            return err(new Error(`Agent not found: ${args.agent_id}`));
+          }
+          await preflightBootPromptFile(args.goal_file);
+          const taskSummary = args.summary?.trim() || args.goal_file;
+          let updated = stateMgr.updateRecord(args.agent_id, {
+            task_summary: taskSummary,
+            goal_file: args.goal_file,
+          });
+          registry.set(args.agent_id, updated);
+          const delivery = await deliverAgentInput({
+            agent_id: args.agent_id,
+            text: `/goal Read and execute this goal file until complete: ${args.goal_file}`,
+            press_enter: true,
+            allow_busy: args.allow_busy ?? true,
+            source_event: "supersede_agent_goal",
+          });
+          if (updated.state === "ready" || updated.state === "idle") {
+            updated = stateMgr.transition(args.agent_id, "working");
+            registry.set(args.agent_id, updated);
+          }
+          const evidence = await collectDeliveryEvidence(args.agent_id);
+          const data = {
+            agent_id: args.agent_id,
+            goal_file: args.goal_file,
+            task_summary: taskSummary,
+            retry_count: delivery.retry_count,
+            submit_verified: delivery.submit_verified,
+            ...evidence,
+          };
+          return okFormatted(formatOk("supersede_agent_goal", data), data);
         } catch (e) {
           return err(e);
         }

@@ -188,6 +188,24 @@ gpt-5.5 xhigh · /workspaces/cmuxlayer
     expect(result.matched).toBe(true);
   });
 
+  it("matches Codex boot panel readiness even when the panel is above the composer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+╭──────────────────────────╮
+│ OpenAI Codex             │
+│ Model: gpt-5.5 xhigh     │
+│ Directory: /Users/etanheyman/Gits/voicelayer │
+│ Permissions: YOLO        │
+╰──────────────────────────╯
+
+›
+`,
+    );
+
+    expect(result.matched).toBe(true);
+  });
+
   it("does not match modern Codex while it is working on a queued prompt", () => {
     const result = matchReadyPattern(
       "codex",

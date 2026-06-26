@@ -39,6 +39,15 @@ const CURSOR_READY_RE = new RegExp(
   ].join("|"),
   "i",
 );
+const CODEX_READY_RE = new RegExp(
+  [
+    String.raw`codex>`,
+    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]+`,
+    String.raw`^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*gpt-\d[\w.-]*(?:\s+\w+)?\b[^\n]*(?:\n|$)[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)`,
+  ].join("|"),
+  "im",
+);
+const CODEX_ACTIVE_RE = /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b|Working\s*\(/i;
 
 export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
   claude: {
@@ -47,8 +56,7 @@ export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
     consecutive: 1,
   },
   codex: {
-    pattern:
-      /codex>|^(?![\s\S]*(?:Working \(|•\s*(?:Working|Waiting|Thinking)))[\s\S]*(?:^|\n)\s*›[^\n]*(?:\n|$)[\s\S]*\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]+/,
+    pattern: CODEX_READY_RE,
     confidence: "high",
     consecutive: 1,
   },
@@ -81,6 +89,7 @@ export function matchReadyPattern(
     matched:
       entry.pattern.test(screenContent) &&
       (cli !== "claude" || !CLAUDE_ACTIVE_RE.test(screenContent)) &&
+      (cli !== "codex" || !CODEX_ACTIVE_RE.test(screenContent)) &&
       (cli !== "cursor" || !CURSOR_ACTIVE_RE.test(screenContent)),
     confidence: entry.confidence,
     consecutive: entry.consecutive,
@@ -102,7 +111,11 @@ export function screenHasReadyAgentIdentity(
         screenText,
       );
     case "codex":
-      return /(?:^|\n)\s*codex>\s*$/im.test(screenText);
+      return (
+        /(?:^|\n)\s*codex>\s*$/im.test(screenText) ||
+        parsed.agent_type === "codex" ||
+        /(?:^|\n)\s*OpenAI\s+Codex\s*(?:\n|$)/i.test(screenText)
+      );
     case "cursor":
       return /(?:^|\n)\s*(?:cursor>|Cursor Agent)\s*$/im.test(screenText);
     case "kiro":

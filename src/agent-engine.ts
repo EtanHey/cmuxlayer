@@ -762,10 +762,32 @@ export class AgentEngine {
       : null;
   }
 
-  private hasGroundTruthDone(agent: AgentRecord): boolean {
+  private transcriptHasSettledDone(agent: AgentRecord): boolean {
     const session = this.loadGroundTruthSession(agent);
     if (!session?.state.done) return false;
     return Date.now() - session.mtime_ms >= DONE_QUIESCENCE_MS;
+  }
+
+  private screenContradictsTranscriptDone(text: string): boolean {
+    const parsed = parseScreen(text);
+    return parsed.status === "working" || parsed.status === "thinking";
+  }
+
+  private async hasGroundTruthDone(
+    agent: AgentRecord,
+    ctx?: SweepAgentContext,
+  ): Promise<boolean> {
+    if (!this.transcriptHasSettledDone(agent)) return false;
+    try {
+      const screen = ctx
+        ? await this.readSweepScreen(agent, ctx)
+        : await this.client.readScreen(agent.surface_id, {
+            lines: BOOT_SESSION_CAPTURE_LINES,
+          });
+      return !this.screenContradictsTranscriptDone(screen.text);
+    } catch {
+      return true;
+    }
   }
 
   private async hasCurrentOutputDoneEvidence(
@@ -797,7 +819,7 @@ export class AgentEngine {
     if (isCursorTerminalIdleTarget(agent, targetState)) return "state";
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
-    if (this.hasGroundTruthDone(agent)) return "transcript";
+    if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
       (await this.hasCurrentOutputDoneEvidence(agent))
       ? "screen"
@@ -1228,6 +1250,28 @@ export class AgentEngine {
       }
 
       try {
+        const screen = await this.readSweepScreen(agent, ctx);
+        const parsed = parseScreen(screen.text);
+        const match = matchReadyPattern(agent.cli, screen.text);
+        if (
+          match.matched &&
+          screenHasReadyAgentIdentity(agent.cli, screen.text, parsed)
+        ) {
+          this.stateMgr.updateRecord(agent.agent_id, {
+            boot_prompt_pending: false,
+          });
+          const ready = this.stateMgr.transition(agent.agent_id, "ready", {
+            error: null,
+          });
+          this.registry.set(agent.agent_id, ready);
+          this.readyPatternMatches.delete(agent.agent_id);
+          return ready;
+        }
+      } catch {
+        // Fall through to the explicit interrupted-delivery error below.
+      }
+
+      try {
         this.stateMgr.updateRecord(agent.agent_id, {
           boot_prompt_pending: false,
         });
@@ -1282,7 +1326,7 @@ export class AgentEngine {
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
 
-    if (this.hasGroundTruthDone(agent)) {
+    if (await this.hasGroundTruthDone(agent, ctx)) {
       try {
         const marked = this.stateMgr.updateRecord(agent.agent_id, {
           task_done_candidate_at: null,
