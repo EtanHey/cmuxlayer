@@ -555,6 +555,8 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("spawn_agent preserves parent workspace inheritance when workspace is omitted", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    process.env.CMUX_WORKSPACE_ID = "workspace:caller";
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const engine = (server as any)._registeredTools["interact"]._engine;
@@ -594,26 +596,37 @@ describe("agent lifecycle tool handlers", () => {
     engine.getRegistry().set(parentRecord.agent_id, parentRecord);
     mockExec.mockClear();
 
-    const result = await spawn.handler(
-      {
-        repo: "brainlayer",
-        model: "gpt-5.5",
-        cli: "codex",
-        role: "worker",
-        parent_agent_id: parentRecord.agent_id,
-      },
-      {} as any,
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    const splitCall = mockExec.mock.calls.find(
-      ([, args]) => Array.isArray(args) && args.includes("new-split"),
-    );
+    try {
+      const result = await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          role: "worker",
+          parent_agent_id: parentRecord.agent_id,
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      const splitCall = mockExec.mock.calls.find(
+        ([, args]) => Array.isArray(args) && args.includes("new-split"),
+      );
 
-    expect(parsed.ok).toBe(true);
-    expect(splitCall?.[1]).toEqual(
-      expect.arrayContaining(["--workspace", "workspace:parent"]),
-    );
+      expect(parsed.ok).toBe(true);
+      expect(splitCall?.[1]).toEqual(
+        expect.arrayContaining(["--workspace", "workspace:parent"]),
+      );
+      expect(splitCall?.[1]).not.toEqual(
+        expect.arrayContaining(["--workspace", "workspace:caller"]),
+      );
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+    }
   });
 
   it("spawn_agent warns when an existing same-lane idle agent can be reused", async () => {

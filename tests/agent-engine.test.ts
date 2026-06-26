@@ -3828,6 +3828,47 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
+    it("restores degraded quality when stale pending Codex boot recovery proves the pane is ready", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-ready-degraded",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          quality: "degraded",
+          error: "Post-spawn liveness failed: surface surface:42 is not live",
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: [
+          "╭──────────────────────────╮",
+          "│ OpenAI Codex             │",
+          "│ Model: gpt-5.5 xhigh     │",
+          "│ Directory: /Users/etanheyman/Gits/voicelayer │",
+          "│ Permissions: YOLO        │",
+          "╰──────────────────────────╯",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-ready-degraded")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+        error: null,
+        quality: "unknown",
+      });
+    });
+
     it("recovers stale pending Gemini boot prompt without requiring identity parsing", async () => {
       stateMgr.writeState(
         makeRecord({

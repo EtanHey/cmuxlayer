@@ -424,10 +424,10 @@ export class AgentRegistry {
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
   ): AgentRecord | null {
-    if (discoveredEntry.workspace_id === undefined) {
+    if (discoveredEntry.workspace_id == null) {
       return record;
     }
-    const workspaceId = discoveredEntry.workspace_id ?? null;
+    const workspaceId = discoveredEntry.workspace_id;
     if ((record.workspace_id ?? null) === workspaceId) {
       return record;
     }
