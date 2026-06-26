@@ -1109,6 +1109,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }) => Promise<unknown>)
     | null = null;
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
+  let lifecycleRefreshManagedMetadata:
+    | ((agentId?: string) => Promise<void>)
+    | null = null;
+  const refreshManagedMetadataBestEffort = async (
+    agentId?: string,
+  ): Promise<void> => {
+    try {
+      await lifecycleRefreshManagedMetadata?.(agentId);
+    } catch {
+      // Health/read paths should not fail just because a refresh scan failed.
+    }
+  };
 
   const server = new McpServer(
     {
@@ -1963,12 +1975,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): boolean => {
     const normalized = candidate.trim();
     if (!normalized) return false;
+    const aliasNormalized = normalized.replace(/^ws:/, "workspace:");
     return (
       workspace.ref === normalized ||
       workspace.id === normalized ||
+      workspace.ref === aliasNormalized ||
+      workspace.id === aliasNormalized ||
       workspace.ref === `workspace:${normalized}` ||
       workspace.id === `workspace:${normalized}`
     );
+  };
+
+  const canonicalWorkspaceRef = async (
+    candidate?: string,
+  ): Promise<string | undefined> => {
+    if (!candidate) return undefined;
+    try {
+      const { workspaces } = await client.listWorkspaces();
+      return (
+        workspaces.find((workspace) => envWorkspaceMatches(workspace, candidate))
+          ?.ref ?? candidate
+      );
+    } catch {
+      return candidate;
+    }
   };
 
   /** Caller pane workspace ref first, then focused workspace as fallback. */
@@ -2107,19 +2137,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return null;
   };
 
-  // Resolve a surface's 0-based column + the workspace column_count using the
-  // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
-  // geometry, then attribute the surface to its pane by membership (pane_id),
-  // NOT the unfiltered surface.list. Best-effort: returns nulls on any failure
-  // so callers (e.g. read_screen) never break when geometry is unavailable.
-  const resolveSurfaceColumn = async (
-    surfaceRef: string,
+  type SurfaceTopology = { column: number | null; column_count: number | null };
+  type SurfaceTopologySnapshot = {
+    workspaceBySurface: Map<string, string>;
+    titleBySurface: Map<string, string>;
+    topologyBySurface: Map<string, SurfaceTopology>;
+  };
+  const emptySurfaceTopology: SurfaceTopology = {
+    column: null,
+    column_count: null,
+  };
+
+  const collectSurfaceTopology = async (
     workspace?: string,
-  ): Promise<{ column: number | null; column_count: number | null }> => {
+  ): Promise<SurfaceTopologySnapshot | null> => {
     try {
       const workspaceRefs = workspace
         ? [workspace]
         : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
+      const snapshot: SurfaceTopologySnapshot = {
+        workspaceBySurface: new Map(),
+        titleBySurface: new Map(),
+        topologyBySurface: new Map(),
+      };
 
       for (const workspaceRef of workspaceRefs) {
         const panes = await client.listPanes({ workspace: workspaceRef });
@@ -2150,60 +2190,58 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         );
         for (const group of partitioned) {
-          if (group.surfaces.some((surface) => surface.ref === surfaceRef)) {
-            const column = columnIndex.get(group.pane_ref);
-            return { column: column ?? null, column_count: columnCount };
+          for (const surface of group.surfaces) {
+            snapshot.workspaceBySurface.set(
+              surface.ref,
+              group.workspace_ref ?? workspaceRef,
+            );
+            snapshot.titleBySurface.set(surface.ref, surface.title);
+            snapshot.topologyBySurface.set(surface.ref, {
+              column: columnIndex.get(group.pane_ref) ?? null,
+              column_count: columnCount,
+            });
           }
         }
       }
-    } catch {
-      return { column: null, column_count: null };
-    }
 
-    return { column: null, column_count: null };
+      return snapshot;
+    } catch {
+      return null;
+    }
   };
+
+  const healthTopologyOverrides = (
+    agent: AgentRecord,
+    snapshot: SurfaceTopologySnapshot | null,
+  ) =>
+    snapshot
+      ? {
+          topology:
+            snapshot.topologyBySurface.get(agent.surface_id) ??
+            emptySurfaceTopology,
+          surface_workspace_id:
+            snapshot.workspaceBySurface.get(agent.surface_id) ?? null,
+          surface_title: snapshot.titleBySurface.get(agent.surface_id) ?? null,
+        }
+      : {};
+
+  // Resolve a surface's 0-based column + the workspace column_count using the
+  // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
+  // geometry, then attribute the surface to its pane by membership (pane_id),
+  // NOT the unfiltered surface.list. Best-effort: returns nulls on any failure
+  // so callers (e.g. read_screen) never break when geometry is unavailable.
+  const resolveSurfaceColumn = async (
+    surfaceRef: string,
+    workspace?: string,
+  ): Promise<SurfaceTopology> =>
+    (await collectSurfaceTopology(workspace))?.topologyBySurface.get(
+      surfaceRef,
+    ) ?? emptySurfaceTopology;
 
   const resolveSurfaceWorkspace = async (
     surfaceRef: string,
-  ): Promise<string | null> => {
-    try {
-      const workspaceRefs = (await client.listWorkspaces()).workspaces.map(
-        (ws) => ws.ref,
-      );
-      for (const workspaceRef of workspaceRefs) {
-        const panes = await client.listPanes({ workspace: workspaceRef });
-        const rawGroups = await Promise.all(
-          panes.panes.map(async (pane) => {
-            const group = await client.listPaneSurfaces({
-              workspace: workspaceRef,
-              pane: pane.ref,
-            });
-            return {
-              ...group,
-              workspace_ref: group.workspace_ref ?? workspaceRef,
-              pane_ref: group.pane_ref ?? pane.ref,
-            };
-          }),
-        );
-        const groups = partitionPaneSurfacesByMembership(
-          panes.panes,
-          rawGroups,
-          {
-            workspace_ref: panes.workspace_ref ?? workspaceRef,
-            window_ref: panes.window_ref,
-          },
-        );
-        for (const group of groups) {
-          if (group.surfaces.some((surface) => surface.ref === surfaceRef)) {
-            return group.workspace_ref ?? workspaceRef;
-          }
-        }
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  };
+  ): Promise<string | null> =>
+    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ?? null;
 
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
@@ -2310,9 +2348,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       agent.surface_id,
       agent.workspace_id ?? undefined,
     );
+    const topology = await collectSurfaceTopology();
     const health = await evaluateServerAgentHealth(agent, {
       screen_status: screen?.parsed.status ?? null,
       screen_actions: screen?.parsed.actions ?? null,
+      ...healthTopologyOverrides(agent, topology),
     });
     return {
       registry_state: agent.state,
@@ -3932,6 +3972,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // INTERACTIVE_STATES gate, but the guarded relay path keeps the
           // stale-surface resync + recycled-occupant identity checks so the
           // pointer can never land in a foreign agent's pane.
+          await refreshManagedMetadataBestEffort(args.agent_id);
           let record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
           if (!record) {
             try {
@@ -3965,6 +4006,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
           }
         }
+        await refreshManagedMetadataBestEffort(args.agent_id);
         const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
         const health = record
           ? await evaluateServerAgentHealth(record, {
@@ -4022,6 +4064,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.heartbeat_max_age_ms,
           inboxOpts,
         );
+        await refreshManagedMetadataBestEffort(args.agent_id);
         const record = context.lifecycleRegistry?.get(args.agent_id) ?? null;
         const health = record
           ? await evaluateServerAgentHealth(record, {
@@ -4086,6 +4129,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
     lifecycleEnsureRegistered = async () => {
       await registry.listMerged(discovery, { force: true });
+    };
+    lifecycleRefreshManagedMetadata = async (agentId?: string) => {
+      await registry.refreshManagedSurfaceMetadata(discovery, {
+        agentId,
+        force: true,
+      });
     };
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
@@ -4262,6 +4311,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       allow_busy?: boolean;
       source_event: DeliveryEventType;
     }) => {
+      await refreshManagedMetadataBestEffort(args.agent_id);
       let route = engine.resolveAgentRoute(args.agent_id);
       // Guard against stale surface refs before sending. Registry refs drift
       // after a crash/respawn (a pane closes or is recycled), so a cached
@@ -4502,12 +4552,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.mcp_profile as McpProfile | undefined,
           );
 
-          const spawnWorkspace = args.workspace ?? (await currentCallerWorkspace());
+          const spawnWorkspace =
+            (await canonicalWorkspaceRef(args.workspace)) ??
+            (await currentCallerWorkspace());
           const requestedRole = inferAgentRole({
             role: args.role,
             cli: args.cli,
             launcherName: launcherNameForCli(args.repo, args.cli),
           });
+          await refreshManagedMetadataBestEffort();
           const existingSameLaneAgents = args.force_new
             ? []
             : registry
@@ -4655,8 +4708,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e, extra);
           }
 
+          await refreshManagedMetadataBestEffort(result.agent_id);
+          const currentAgent = engine.getAgentState(result.agent_id);
           const role =
-            engine.getAgentState(result.agent_id)?.role ??
+            currentAgent?.role ??
             inferAgentRole({
               role: args.role,
               cli: args.cli,
@@ -4666,9 +4721,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role === "orchestrator"
               ? ensureMonitorBoot(result.agent_id)
               : undefined;
-          const currentAgent = engine.getAgentState(result.agent_id);
+          const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent)
+            ? await evaluateServerAgentHealth(currentAgent, {
+                ...healthTopologyOverrides(currentAgent, topology),
+              })
             : undefined;
 
           return okFormatted(
@@ -4798,9 +4855,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
             result.workspace_id ?? args.workspace,
           );
+          await refreshManagedMetadataBestEffort(result.agent_id);
           const currentAgent = engine.getAgentState(result.agent_id);
+          const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent)
+            ? await evaluateServerAgentHealth(currentAgent, {
+                ...healthTopologyOverrides(currentAgent, topology),
+              })
             : undefined;
 
           return okFormatted(
@@ -4935,8 +4996,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
 
+            await refreshManagedMetadataBestEffort(result.agent_id);
+            const currentAgent = engine.getAgentState(result.agent_id);
             const role =
-              engine.getAgentState(result.agent_id)?.role ??
+              currentAgent?.role ??
               inferAgentRole({
                 role: agent.role,
                 cli: agent.cli,
@@ -4946,9 +5009,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role === "orchestrator"
                 ? ensureMonitorBoot(result.agent_id)
                 : undefined;
-            const currentAgent = engine.getAgentState(result.agent_id);
+            const topology = currentAgent ? await collectSurfaceTopology() : null;
             const health = currentAgent
-              ? await evaluateServerAgentHealth(currentAgent)
+              ? await evaluateServerAgentHealth(currentAgent, {
+                  ...healthTopologyOverrides(currentAgent, topology),
+                })
               : undefined;
 
             spawnedAgents.push({
@@ -5017,11 +5082,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             targetState,
             args.timeout_ms,
           );
+          await refreshManagedMetadataBestEffort(result.agent?.agent_id);
           const resultAgent = result.agent
             ? engine.getAgentState(result.agent.agent_id)
             : null;
+          const topology = resultAgent ? await collectSurfaceTopology() : null;
           const health = resultAgent
-            ? await evaluateServerAgentHealth(resultAgent)
+            ? await evaluateServerAgentHealth(resultAgent, {
+                ...healthTopologyOverrides(resultAgent, topology),
+              })
             : undefined;
           return okFormatted(
             formatOk("wait_for", {
@@ -5070,13 +5139,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.target_state,
             args.timeout_ms,
           );
+          await Promise.all(
+            results
+              .map((result) => result.agent?.agent_id)
+              .filter((agentId): agentId is string => Boolean(agentId))
+              .map((agentId) => refreshManagedMetadataBestEffort(agentId)),
+          );
+          const topology = await collectSurfaceTopology();
           const enrichedResults = await Promise.all(
             results.map(async (result) => {
               const resultAgent = result.agent
                 ? engine.getAgentState(result.agent.agent_id)
                 : null;
               const health = resultAgent
-                ? await evaluateServerAgentHealth(resultAgent)
+                ? await evaluateServerAgentHealth(resultAgent, {
+                    ...healthTopologyOverrides(resultAgent, topology),
+                  })
                 : undefined;
               return {
                 ...result,
@@ -5111,10 +5189,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         try {
+          await refreshManagedMetadataBestEffort(args.agent_id);
           const state = engine.getAgentState(args.agent_id);
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
-          const health = await evaluateServerAgentHealth(state);
+          const topology = await collectSurfaceTopology();
+          const health = await evaluateServerAgentHealth(state, {
+            ...healthTopologyOverrides(state, topology),
+          });
           const formatted =
             formatAgentState(state) +
             `\nhealth: ${health.status}${
@@ -5163,10 +5245,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               model: args.model,
             },
           });
+          const topology = await collectSurfaceTopology();
           const agents = await Promise.all(
             merged.map(async (agent) => ({
               ...toPublicAgent(agent),
-              health: await evaluateServerAgentHealth(agent),
+              health: await evaluateServerAgentHealth(agent, {
+                ...healthTopologyOverrides(agent, topology),
+              }),
             })),
           );
           const data = {
@@ -5371,6 +5456,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          await refreshManagedMetadataBestEffort(args.agent_id);
           const current = engine.getAgentState(args.agent_id);
           if (!current) {
             return err(new Error(`Agent not found: ${args.agent_id}`));
@@ -5551,6 +5637,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           // Resolve agent
+          await refreshManagedMetadataBestEffort(args.agent);
           const agent = engine.getAgentState(args.agent);
           if (!agent) {
             return err(

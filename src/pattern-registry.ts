@@ -101,7 +101,13 @@ export function screenHasActiveAgentMarker(
   screenText: string,
   parsed: ParsedScreenResult = parseScreen(screenText),
 ): boolean {
-  if (parsed.status === "working" || parsed.status === "thinking") {
+  if (
+    parsed.status === "working" ||
+    parsed.status === "thinking" ||
+    parsed.actions?.some((action) =>
+      action.startsWith("recoverable_blocker:"),
+    ) === true
+  ) {
     return true;
   }
 

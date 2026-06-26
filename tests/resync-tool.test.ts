@@ -767,6 +767,39 @@ describe("resync_agents tool", () => {
     );
   });
 
+  it("get_agent_state refreshes managed workspace_id after a surface move", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "skillcreatorCodex-019fdirect",
+        surface_id: "surface:315",
+        workspace_id: "workspace:5",
+        state: "working",
+        repo: "skillcreator",
+        model: "gpt-5.5",
+        cli: "codex",
+        cli_session_id: "019f0001-1111-7222-8333-444455556666",
+        role: "worker",
+      }),
+    );
+
+    const server = createServer({
+      exec: makeMovedManagedSurfaceExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools[
+      "get_agent_state"
+    ].handler({ agent_id: "skillcreatorCodex-019fdirect" }, {} as any);
+    const parsed = parseResult(result);
+
+    expect(parsed.workspace_id).toBe("workspace:1");
+    expect(stateMgr.readState("skillcreatorCodex-019fdirect")?.workspace_id).toBe(
+      "workspace:1",
+    );
+    expect(parsed.health.issue_codes).not.toContain("workspace_mismatch");
+  });
+
   it("resync_agents keeps existing auto agents when discovery hits read-screen errors", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState({

@@ -246,7 +246,7 @@ function resolveCurrentTestAgentId(
 }
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 14 agent lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 14 phase-5 lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -274,7 +274,7 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 36 (20 low-level + 14 agent lifecycle + 2 v2)", () => {
+  it("total tool count is 36", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -329,7 +329,6 @@ describe("agent lifecycle tool handlers", () => {
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
-        "inbox_monitor_not_alive",
       ]),
     });
 
@@ -594,7 +593,7 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({
         agent_id: first.agent_id,
         surface_id: first.surface_id,
-        workspace_id: first.workspace_id,
+        workspace_id: "workspace:1",
         state: "idle",
         role: "worker",
       }),
@@ -1669,7 +1668,6 @@ describe("agent lifecycle tool handlers", () => {
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
-        "inbox_monitor_not_alive",
       ]),
     });
   });
@@ -2017,7 +2015,7 @@ codex>
     expect(parsed.agent_id).toBe(agentId);
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(
-      expect.arrayContaining(["--workspace", "ws:1"]),
+      expect.arrayContaining(["--workspace", "workspace:1"]),
     );
   });
 

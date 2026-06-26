@@ -11,13 +11,12 @@
  *              read_screen, rename_tab, notify, set_status, set_progress,
  *              close_surface, browser_surface
  *   Metacommlayer write channel (2): dispatch_to_agent, inbox_check
- *   Agent lifecycle (14): spawn_agent, new_worktree_split, spawn_in_workspace,
+ *   Agent lifecycle (16): spawn_agent, new_worktree_split, spawn_in_workspace,
  *                         resync_agents,
  *                         send_to (canonical), send_to_agent (deprecated alias),
  *                         supersede_agent_goal, read_agent_output,
  *                         get_agent_state, list_agents, my_agents, wait_for,
- *                         wait_for_all, stop_agent
- *   V2 agent controls (2): kill, interact
+ *                         wait_for_all, stop_agent, kill, interact
  */
 
 import { readFileSync } from "node:fs";

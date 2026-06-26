@@ -5378,18 +5378,26 @@ describe("tool handler integration", () => {
       "• Waiting for command approval",
       "TASK_DONE",
     ].join("\n");
-    const mockClient = {
-      readScreen: vi.fn().mockResolvedValue({
-        surface: "surface:worker-done-active",
-        text: screenText,
-        lines: 3,
-        scrollback_used: false,
-      }),
-      closeSurface: vi.fn().mockResolvedValue(undefined),
-    };
-
+    const closeSurfaceSpy = vi.fn();
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:worker-done-active",
+            text: screenText,
+            lines: 3,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("close-surface")) {
+        closeSurfaceSpy(args);
+      }
+      return { stdout: JSON.stringify({}), stderr: "" };
+    });
     const server = createServer({
-      client: mockClient as any,
+      exec,
       stateDir,
       skipAgentLifecycle: true,
     });
@@ -5401,7 +5409,7 @@ describe("tool handler integration", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    expect(closeSurfaceSpy).not.toHaveBeenCalled();
     expect(stateMgr.readState("worker-done-active")?.state).toBe("working");
     expect(result.structuredContent).toMatchObject({
       refused: true,

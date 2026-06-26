@@ -312,6 +312,50 @@ export class AgentRegistry {
     return filtered;
   }
 
+  async refreshManagedSurfaceMetadata(
+    discovery: AgentDiscovery,
+    opts?: { agentId?: string; force?: boolean },
+  ): Promise<AgentRecord | null> {
+    const records = opts?.agentId
+      ? [this.get(opts.agentId)].filter(
+          (record): record is AgentRecord => record !== null,
+        )
+      : this.list();
+    if (records.length === 0) {
+      return null;
+    }
+
+    const discovered = await discovery.scan(opts?.force ?? false);
+    const bySurface = new Map(
+      discovered
+        .filter((entry) => !entry.read_error)
+        .map((entry) => [entry.surface_id, entry]),
+    );
+
+    let requested: AgentRecord | null = null;
+    for (const record of records) {
+      if (record.agent_id.startsWith("auto-")) {
+        continue;
+      }
+      const discoveredEntry = bySurface.get(record.surface_id);
+      if (!discoveredEntry) {
+        continue;
+      }
+      const updated = this.syncManagedRecordSurfaceMetadata(
+        record,
+        discoveredEntry,
+      );
+      if (!updated) {
+        continue;
+      }
+      if (!opts?.agentId || updated.agent_id === this.resolveAlias(opts.agentId)) {
+        requested = updated;
+      }
+    }
+
+    return opts?.agentId ? requested ?? this.get(opts.agentId) : null;
+  }
+
   /**
    * Sync an auto-discovered record with the latest parsed surface state.
    *
@@ -380,6 +424,9 @@ export class AgentRegistry {
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
   ): AgentRecord | null {
+    if (discoveredEntry.workspace_id === undefined) {
+      return record;
+    }
     const workspaceId = discoveredEntry.workspace_id ?? null;
     if ((record.workspace_id ?? null) === workspaceId) {
       return record;
