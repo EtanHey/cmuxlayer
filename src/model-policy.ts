@@ -57,7 +57,7 @@ export const MODEL_POLICY_CONTRACT: {
     },
     codex: {
       defaultModel: "codex",
-      allowModelOverrideByDefault: true,
+      allowModelOverrideByDefault: false,
       forbiddenModelPatterns: [],
       modelAliases: {
         "gpt-5": "gpt-5",
@@ -142,6 +142,11 @@ export function resolveLaunchModelFlag(
 ): string | null {
   const requested = model?.trim();
   if (!requested) return null;
+
+  if (cli === "codex") {
+    if (modelMatchesDefault(cli, requested)) return null;
+    if (!opts?.allowModelOverride) return null;
+  }
 
   if (cli === "cursor") {
     if (modelMatchesDefault(cli, requested)) return null;

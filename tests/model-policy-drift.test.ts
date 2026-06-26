@@ -52,6 +52,25 @@ describe("model-policy drift gate", () => {
       "claude-opus-4-8[1m]",
     );
 
+    const codex = MODEL_POLICY_CONTRACT.cli.codex;
+    expect(codex.allowModelOverrideByDefault).toBe(false);
+
+    const codexCoerced = resolveSpawnModelPolicy("codex", "gpt-5.5", {});
+    expect(codexCoerced.coerced).toBe(true);
+    expect(codexCoerced.effective_model).toBe(codex.defaultModel);
+    expect(codexCoerced.launcher_model).toBeNull();
+    expect(codexCoerced.warnings).toHaveLength(1);
+    expect(codexCoerced.warnings[0]).toContain("CODEX MODEL POLICY");
+    expect(codexCoerced.warnings[0]).toContain("gpt-5.5");
+
+    const codexEscaped = resolveSpawnModelPolicy("codex", "gpt-5.5", {
+      [MODEL_OVERRIDE_ENV]: "1",
+    });
+    expect(codexEscaped.coerced).toBe(false);
+    expect(codexEscaped.effective_model).toBe("gpt-5.5");
+    expect(codexEscaped.launcher_model).toBe("gpt-5.5");
+    expect(codexEscaped.override_allowed).toBe(true);
+
     const coerced = resolveSpawnModelPolicy("cursor", "sonnet-4", {});
     expect(coerced.coerced).toBe(true);
     expect(coerced.effective_model).toBe(cursor.defaultModel);

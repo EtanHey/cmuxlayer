@@ -4289,6 +4289,15 @@ describe("buildLaunchCommand", () => {
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
+    ).toBe("brainlayerCodex -s");
+    expect(
+      buildLaunchCommand(
+        "codex",
+        "brainlayer",
+        "gpt-5.3-codex-spark",
+        undefined,
+        { allowModelOverride: true },
+      ),
     ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
