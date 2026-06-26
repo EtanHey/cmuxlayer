@@ -303,6 +303,52 @@ export class StateManager {
     return updated;
   }
 
+  /**
+   * Explicitly reset an agent's lifecycle state after an operation that has
+   * already established new ground truth outside the normal state machine.
+   * This bypass is intentionally separate from transition().
+   */
+  resetState(
+    agentId: string,
+    toState: AgentState,
+    fields: AgentRecordPatch,
+    source: string,
+  ): AgentRecord {
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
+    if (!current) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    const updated: AgentRecord = {
+      ...current,
+      ...fields,
+      state: toState,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+
+    const agentDir = join(this.baseDir, dirName!);
+    const stateFile = this.stateFilePath(dirName!);
+    const tmpFile = join(agentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(updated);
+
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: agentId,
+      event: toState === "error" ? "error" : "transition",
+      from_state: current.state,
+      to_state: toState,
+      surface_id: updated.surface_id,
+      source,
+      error: fields.error ?? null,
+    });
+
+    return updated;
+  }
+
   renameState(agentId: string, newAgentId: string): AgentRecord {
     if (agentId === newAgentId) {
       const current = this.readState(agentId);

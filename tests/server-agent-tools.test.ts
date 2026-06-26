@@ -2514,6 +2514,73 @@ codex>
     expect(state.goal_file).toBe(goalPath);
   });
 
+  it.each(["done", "error"] as const)(
+    "supersede_agent_goal resets stale %s lifecycle metadata after delivery",
+    async (terminalState) => {
+      const goalPath = join(TEST_DIR, `reset-${terminalState}-mission.md`);
+      writeFileSync(goalPath, "# Mission\n\nReplace stale lifecycle state.\n", "utf8");
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+      const getState = (server as any)._registeredTools["get_agent_state"];
+
+      const spawnResult = await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          role: "worker",
+        },
+        {} as any,
+      );
+      const agentId = (
+        spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+      ).agent_id;
+      const engine = (server as any)._registeredTools["interact"]._engine;
+      const registry = engine.getRegistry();
+      let current = engine.stateMgr.transition(agentId, "ready");
+      registry.set(agentId, current);
+      current = engine.stateMgr.transition(agentId, "working");
+      registry.set(agentId, current);
+      current =
+        terminalState === "done"
+          ? engine.stateMgr.transition(agentId, "done")
+          : engine.stateMgr.transition(agentId, "error", {
+              error: "stale terminal error",
+            });
+      current = engine.stateMgr.updateRecord(agentId, {
+        task_done_candidate_at: "2026-06-26T21:00:00.000Z",
+        task_done_detected_at: "2026-06-26T21:01:00.000Z",
+      });
+      registry.set(agentId, current);
+      mockExec.mockClear();
+
+      const result = await supersede.handler(
+        {
+          agent_id: agentId,
+          goal_file: goalPath,
+          summary: "replacement mission",
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBeFalsy();
+      expect(parsed.registry_state).toBe("working");
+
+      const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+      const state =
+        stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+      expect(state.state).toBe("working");
+      expect(state.task_summary).toBe("replacement mission");
+      expect(state.goal_file).toBe(goalPath);
+      expect(state.task_done_candidate_at ?? null).toBeNull();
+      expect(state.task_done_detected_at ?? null).toBeNull();
+      expect(state.error ?? null).toBeNull();
+    },
+  );
+
   it("supersede_agent_goal does not update registry metadata when delivery fails", async () => {
     const goalPath = join(TEST_DIR, "undelivered-mission.md");
     writeFileSync(goalPath, "# Mission\n\nThis should not be recorded.\n", "utf8");

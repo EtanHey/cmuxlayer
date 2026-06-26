@@ -136,6 +136,22 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("registry_screen_disagreement");
   });
 
+  it("marks registry working while the screen parses done as unhealthy", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({
+        state: "working",
+        cli_session_id: "019f0001-1111-7222-8333-444455556666",
+      }),
+      {
+        monitor_alive: true,
+        screen_status: "done",
+      },
+    );
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("registry_screen_disagreement");
+  });
+
   it("marks registry workspace mismatch against the live surface as unhealthy", () => {
     const health = evaluateAgentHealth(makeRecord({ workspace_id: "workspace:5" }), {
       monitor_alive: true,

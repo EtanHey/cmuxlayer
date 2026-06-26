@@ -173,12 +173,17 @@ export function evaluateAgentHealth(
 
   const screenActive =
     input.screen_status === "working" || input.screen_status === "thinking";
+  const screenDone = input.screen_status === "done";
+  const registryActive =
+    agent.state === "creating" ||
+    agent.state === "booting" ||
+    agent.state === "working";
   const registryInactive =
     agent.state === "ready" ||
     agent.state === "idle" ||
     agent.state === "done" ||
     agent.state === "error";
-  if (screenActive && registryInactive) {
+  if ((screenActive && registryInactive) || (screenDone && registryActive)) {
     addIssue(
       issueCodes,
       issues,

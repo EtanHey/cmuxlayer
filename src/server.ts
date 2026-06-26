@@ -5496,15 +5496,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_event: "supersede_agent_goal",
           });
           const canonicalAgentId = current.agent_id;
-          let updated = stateMgr.updateRecord(canonicalAgentId, {
+          const supersedePatch = {
             task_summary: taskSummary,
             goal_file: args.goal_file,
-          });
+            task_done_candidate_at: null,
+            task_done_detected_at: null,
+            error: null,
+          };
+          let updated =
+            current.state === "working"
+              ? stateMgr.updateRecord(canonicalAgentId, supersedePatch)
+              : stateMgr.resetState(
+                  canonicalAgentId,
+                  "working",
+                  supersedePatch,
+                  "supersede_agent_goal",
+                );
           registry.set(canonicalAgentId, updated);
-          if (updated.state === "ready" || updated.state === "idle") {
-            updated = stateMgr.transition(canonicalAgentId, "working");
-            registry.set(canonicalAgentId, updated);
-          }
           const evidence = await collectDeliveryEvidence(canonicalAgentId);
           const data = {
             agent_id: canonicalAgentId,
