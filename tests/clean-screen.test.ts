@@ -55,6 +55,14 @@ describe("cleanScreenText (read_screen leanness)", () => {
     expect(cleanScreenText(input)).toBe("Green output");
   });
 
+  it("strips orphaned TTY cursor-control trailers from cmux pane previews", () => {
+    const input =
+      "etanheyman ~/Gits/cmuxlayer [fix/branch] $ ;1:1A;1:3A\nReal output";
+    expect(cleanScreenText(input)).toBe(
+      "etanheyman ~/Gits/cmuxlayer [fix/branch] $\nReal output",
+    );
+  });
+
   it("empty / all-chrome input → empty string", () => {
     expect(cleanScreenText("")).toBe("");
     expect(cleanScreenText("─────\n🤖 model\n  esc to interrupt")).toBe("");

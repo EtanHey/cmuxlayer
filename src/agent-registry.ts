@@ -242,6 +242,15 @@ export class AgentRegistry {
           continue;
         }
       }
+      if (!isAutoRecord && discoveredEntry && !discoveredEntry.read_error) {
+        liveRecord = this.syncManagedRecordSurfaceMetadata(
+          record,
+          discoveredEntry,
+        );
+        if (!liveRecord) {
+          continue;
+        }
+      }
 
       seenSurfaces.add(record.surface_id);
       merged.push({
@@ -301,6 +310,50 @@ export class AgentRegistry {
       : merged;
 
     return filtered;
+  }
+
+  async refreshManagedSurfaceMetadata(
+    discovery: AgentDiscovery,
+    opts?: { agentId?: string; force?: boolean },
+  ): Promise<AgentRecord | null> {
+    const records = opts?.agentId
+      ? [this.get(opts.agentId)].filter(
+          (record): record is AgentRecord => record !== null,
+        )
+      : this.list();
+    if (records.length === 0) {
+      return null;
+    }
+
+    const discovered = await discovery.scan(opts?.force ?? false);
+    const bySurface = new Map(
+      discovered
+        .filter((entry) => !entry.read_error)
+        .map((entry) => [entry.surface_id, entry]),
+    );
+
+    let requested: AgentRecord | null = null;
+    for (const record of records) {
+      if (record.agent_id.startsWith("auto-")) {
+        continue;
+      }
+      const discoveredEntry = bySurface.get(record.surface_id);
+      if (!discoveredEntry) {
+        continue;
+      }
+      const updated = this.syncManagedRecordSurfaceMetadata(
+        record,
+        discoveredEntry,
+      );
+      if (!updated) {
+        continue;
+      }
+      if (!opts?.agentId || updated.agent_id === this.resolveAlias(opts.agentId)) {
+        requested = updated;
+      }
+    }
+
+    return opts?.agentId ? requested ?? this.get(opts.agentId) : null;
   }
 
   /**
@@ -365,6 +418,32 @@ export class AgentRegistry {
     }
 
     return record;
+  }
+
+  private syncManagedRecordSurfaceMetadata(
+    record: AgentRecord,
+    discoveredEntry: DiscoveredAgent,
+  ): AgentRecord | null {
+    if (discoveredEntry.workspace_id == null) {
+      return record;
+    }
+    const workspaceId = discoveredEntry.workspace_id;
+    if ((record.workspace_id ?? null) === workspaceId) {
+      return record;
+    }
+
+    try {
+      const updated = this.stateMgr.updateRecord(record.agent_id, {
+        workspace_id: workspaceId,
+      });
+      this.agents.set(record.agent_id, updated);
+      return updated;
+    } catch (error) {
+      if (this.evictMissingStateAgent(record.agent_id)) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**

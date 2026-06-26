@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   CLI_READY_PATTERNS,
   matchReadyPattern,
+  screenHasActiveAgentMarker,
   type PatternMatch,
 } from "../src/pattern-registry.js";
 
@@ -175,6 +176,20 @@ gpt-5.5 xhigh · ~/Gits/brainlayer
     expect(result.matched).toBe(true);
   });
 
+  it("does not treat bare active Codex status lines as ready", () => {
+    for (const marker of ["Working", "Waiting for command approval", "Thinking"]) {
+      const screen = [
+        "gpt-5.5 xhigh · 70% left · ~/Gits/cmuxlayer",
+        marker,
+        "",
+        "›",
+      ].join("\n");
+
+      expect(matchReadyPattern("codex", screen).matched).toBe(false);
+      expect(screenHasActiveAgentMarker("codex", screen)).toBe(true);
+    }
+  });
+
   it("matches modern Codex idle prompt outside ~/Gits", () => {
     const result = matchReadyPattern(
       "codex",
@@ -185,6 +200,24 @@ gpt-5.5 xhigh · ~/Gits/brainlayer
 gpt-5.5 xhigh · /workspaces/cmuxlayer
 `,
     );
+    expect(result.matched).toBe(true);
+  });
+
+  it("matches Codex boot panel readiness even when the panel is above the composer", () => {
+    const result = matchReadyPattern(
+      "codex",
+      `
+╭──────────────────────────╮
+│ OpenAI Codex             │
+│ Model: gpt-5.5 xhigh     │
+│ Directory: /Users/etanheyman/Gits/voicelayer │
+│ Permissions: YOLO        │
+╰──────────────────────────╯
+
+›
+`,
+    );
+
     expect(result.matched).toBe(true);
   });
 

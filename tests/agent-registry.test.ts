@@ -310,6 +310,87 @@ describe("AgentRegistry", () => {
       );
       expect(removeStateSpy).not.toHaveBeenCalled();
     });
+
+    it("does not clear managed workspace_id when discovery omits workspace metadata", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "managed-codex",
+          surface_id: "surface:42",
+          workspace_id: "workspace:known",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:42"),
+      ]);
+      await registry.reconstitute();
+
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          {
+            surface_id: "surface:42",
+            surface_title: "brainlayerCodex",
+            cli: "codex",
+            parsed_status: "working",
+            model: "gpt-5.5",
+            token_count: null,
+            context_pct: null,
+            has_agent: true,
+            read_error: false,
+          },
+        ]),
+      };
+
+      await registry.listMerged(discovery as any);
+
+      expect(stateMgr.readState("managed-codex")?.workspace_id).toBe(
+        "workspace:known",
+      );
+      expect(registry.get("managed-codex")?.workspace_id).toBe(
+        "workspace:known",
+      );
+    });
+
+    it("does not clear managed workspace_id when discovery reports null workspace metadata", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "managed-codex-null",
+          surface_id: "surface:42",
+          workspace_id: "workspace:known",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:42"),
+      ]);
+      await registry.reconstitute();
+
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          {
+            surface_id: "surface:42",
+            surface_title: "brainlayerCodex",
+            cli: "codex",
+            parsed_status: "working",
+            model: "gpt-5.5",
+            token_count: null,
+            context_pct: null,
+            has_agent: true,
+            read_error: false,
+            workspace_id: null,
+          },
+        ]),
+      };
+
+      await registry.listMerged(discovery as any);
+
+      expect(stateMgr.readState("managed-codex-null")?.workspace_id).toBe(
+        "workspace:known",
+      );
+      expect(registry.get("managed-codex-null")?.workspace_id).toBe(
+        "workspace:known",
+      );
+    });
   });
 
   describe("purgeTerminal", () => {

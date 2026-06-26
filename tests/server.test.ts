@@ -3892,6 +3892,8 @@ describe("tool handler integration", () => {
 
   it("spawn_agent waits out a Codex auto-update, relaunches after bare shell, then delivers the boot prompt", async () => {
     vi.useRealTimers();
+    const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
+    process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-relaunch-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-relaunch.md");
     const prompt = "boot after update";
@@ -3952,6 +3954,9 @@ describe("tool handler integration", () => {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
         if (text.includes("cmuxlayerCodex")) {
+          if (launcherSends === 0) {
+            delete process.env.REPOGOLEM_ALLOW_MODEL;
+          }
           launcherSends += 1;
         } else if (text === prompt) {
           promptSent = true;
@@ -3997,25 +4002,35 @@ describe("tool handler integration", () => {
     });
     const tool = (server as any)._registeredTools["spawn_agent"];
 
-    const result = await tool.handler(
-      {
-        repo: "cmuxlayer",
-        model: "gpt-5.5",
-        cli: "codex",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 2_000,
-      },
-      {} as any,
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(launcherSends).toBe(2);
-    expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
-    expect(returnPresses).toBeGreaterThanOrEqual(3);
-
-    rmSync(stateDir, { recursive: true, force: true });
+    try {
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(launcherSends).toBe(2);
+      expect(
+        sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
+      ).toEqual(["cmuxlayerCodex -s -m gpt-5.5", "cmuxlayerCodex -s"]);
+      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+      expect(returnPresses).toBeGreaterThanOrEqual(3);
+    } finally {
+      if (previousAllowModel === undefined) {
+        delete process.env.REPOGOLEM_ALLOW_MODEL;
+      } else {
+        process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   }, 10_000);
 
   it("new_split times out when a CLI auto-update marker never clears", async () => {
@@ -5269,6 +5284,159 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface consolidates stale live registry when pane shows TASK_DONE", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-done-consolidate");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-done-stale",
+      surface_id: "surface:worker-done-stale",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "finished task",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:worker-done-stale",
+        text: "gpt-5.5 xhigh · 60% left · ~/Gits/brainlayer\nImplemented.\nTASK_DONE",
+        lines: 3,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-done-stale" },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalledWith(
+      "surface:worker-done-stale",
+      {
+        workspace: undefined,
+        collapsePane: false,
+      },
+    );
+    expect(stateMgr.readState("worker-done-stale")).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+      task_done_candidate_at: null,
+    });
+    expect(result.structuredContent).toMatchObject({
+      surface: "surface:worker-done-stale",
+      stale_registry_done_consolidated: {
+        agent_id: "worker-done-stale",
+        previous_state: "working",
+        done_signal: "TASK_DONE",
+      },
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface refuses stale DONE consolidation when pane shows an active Codex marker", async () => {
+    const stateDir = join(
+      tmpdir(),
+      "cmuxlayer-close-surface-done-active-refuse",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-done-active",
+      surface_id: "surface:worker-done-active",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "still active",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const screenText = [
+      "gpt-5.5 xhigh · 60% left · ~/Gits/brainlayer",
+      "• Waiting for command approval",
+      "TASK_DONE",
+    ].join("\n");
+    const closeSurfaceSpy = vi.fn();
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:worker-done-active",
+            text: screenText,
+            lines: 3,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("close-surface")) {
+        closeSurfaceSpy(args);
+      }
+      return { stdout: JSON.stringify({}), stderr: "" };
+    });
+    const server = createServer({
+      exec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-done-active" },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(closeSurfaceSpy).not.toHaveBeenCalled();
+    expect(stateMgr.readState("worker-done-active")?.state).toBe("working");
+    expect(result.structuredContent).toMatchObject({
+      refused: true,
+      surface: "surface:worker-done-active",
+      agent_id: "worker-done-active",
+      state: "working",
+      screen: screenText,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("close_surface guard is fail-safe when a stale terminal record shares the surface with a live one", async () => {
     const stateDir = join(tmpdir(), "cmuxlayer-close-surface-collision");
     rmSync(stateDir, { recursive: true, force: true });
@@ -5324,6 +5492,93 @@ describe("tool handler integration", () => {
       refused: true,
       agent_id: "zzz-live",
       state: "working",
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface refuses after stale DONE consolidation when another live agent shares the surface", async () => {
+    const stateDir = join(
+      tmpdir(),
+      "cmuxlayer-close-surface-post-consolidation-live",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    const base = {
+      surface_id: "surface:shared-done",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex" as const,
+      cli_session_id: null,
+      task_summary: "",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown" as const,
+      max_cost_per_agent: null,
+    };
+    stateMgr.writeState({
+      ...base,
+      agent_id: "aaa-live-done",
+      state: "working",
+    });
+    stateMgr.writeState({
+      ...base,
+      agent_id: "zzz-live-shared",
+      state: "working",
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:shared-done",
+        text: "All done.\nTASK_DONE",
+        lines: 2,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:shared-done" },
+      {} as any,
+    );
+
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    const finalStates = [
+      stateMgr.readState("aaa-live-done"),
+      stateMgr.readState("zzz-live-shared"),
+    ];
+    const doneState = finalStates.find((state) => state?.state === "done");
+    const liveState = finalStates.find((state) => state?.state === "working");
+    expect(doneState).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+    });
+    expect(liveState).toMatchObject({ state: "working" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      refused: true,
+      agent_id: liveState?.agent_id,
+      state: "working",
+      stale_registry_done_consolidated: {
+        agent_id: doneState?.agent_id,
+        previous_state: "working",
+        done_signal: "TASK_DONE",
+      },
     });
 
     rmSync(stateDir, { recursive: true, force: true });

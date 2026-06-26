@@ -56,6 +56,7 @@ import {
 import {
   matchReadyPattern,
   readyPatternRequiresAgentIdentity,
+  screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
@@ -729,9 +730,13 @@ export class AgentEngine {
     return this.registry;
   }
 
-  private hasOutputDoneEvidence(text: string): boolean {
+  private hasOutputDoneEvidence(cli: CliType, text: string): boolean {
     const parsed = parseScreen(text);
-    return parsed.status === "done" && parsed.done_signal !== null;
+    return (
+      parsed.status === "done" &&
+      parsed.done_signal !== null &&
+      !screenHasActiveAgentMarker(cli, text, parsed)
+    );
   }
 
   private requiresOutputDoneEvidence(targetState: AgentState): boolean {
@@ -762,10 +767,35 @@ export class AgentEngine {
       : null;
   }
 
-  private hasGroundTruthDone(agent: AgentRecord): boolean {
+  private transcriptHasSettledDone(agent: AgentRecord): boolean {
     const session = this.loadGroundTruthSession(agent);
     if (!session?.state.done) return false;
     return Date.now() - session.mtime_ms >= DONE_QUIESCENCE_MS;
+  }
+
+  private screenContradictsTranscriptDone(
+    cli: CliType,
+    text: string,
+  ): boolean {
+    const parsed = parseScreen(text);
+    return screenHasActiveAgentMarker(cli, text, parsed);
+  }
+
+  private async hasGroundTruthDone(
+    agent: AgentRecord,
+    ctx?: SweepAgentContext,
+  ): Promise<boolean> {
+    if (!this.transcriptHasSettledDone(agent)) return false;
+    try {
+      const screen = ctx
+        ? await this.readSweepScreen(agent, ctx)
+        : await this.client.readScreen(agent.surface_id, {
+            lines: BOOT_SESSION_CAPTURE_LINES,
+          });
+      return !this.screenContradictsTranscriptDone(agent.cli, screen.text);
+    } catch {
+      return false;
+    }
   }
 
   private async hasCurrentOutputDoneEvidence(
@@ -775,7 +805,7 @@ export class AgentEngine {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
-      return this.hasOutputDoneEvidence(screen.text);
+      return this.hasOutputDoneEvidence(agent.cli, screen.text);
     } catch {
       return false;
     }
@@ -797,7 +827,7 @@ export class AgentEngine {
     if (isCursorTerminalIdleTarget(agent, targetState)) return "state";
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
-    if (this.hasGroundTruthDone(agent)) return "transcript";
+    if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
       (await this.hasCurrentOutputDoneEvidence(agent))
       ? "screen"
@@ -1218,13 +1248,51 @@ export class AgentEngine {
       return agent;
     }
     if (agent.boot_prompt_pending) {
-      this.readyPatternMatches.delete(agent.agent_id);
       const since = Date.parse(agent.updated_at);
       if (
         Number.isNaN(since) ||
         Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
       ) {
+        this.readyPatternMatches.delete(agent.agent_id);
         return agent;
+      }
+
+      try {
+        const screen = await this.readSweepScreen(agent, ctx);
+        const parsed = parseScreen(screen.text);
+        const match = matchReadyPattern(agent.cli, screen.text);
+        if (
+          match.matched &&
+          (!readyPatternRequiresAgentIdentity(agent.cli) ||
+            screenHasReadyAgentIdentity(agent.cli, screen.text, parsed))
+        ) {
+          const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+          this.readyPatternMatches.set(agent.agent_id, count);
+          if (count < Math.max(1, match.consecutive)) {
+            return agent;
+          }
+
+          this.stateMgr.updateRecord(agent.agent_id, {
+            boot_prompt_pending: false,
+          });
+          let ready = this.stateMgr.transition(agent.agent_id, "ready", {
+            error: null,
+          });
+          if (
+            ready.quality === "degraded" &&
+            agent.error?.startsWith("Post-spawn liveness failed:")
+          ) {
+            ready = this.stateMgr.updateRecord(agent.agent_id, {
+              quality: "unknown",
+            });
+          }
+          this.registry.set(agent.agent_id, ready);
+          this.readyPatternMatches.delete(agent.agent_id);
+          return ready;
+        }
+        this.readyPatternMatches.delete(agent.agent_id);
+      } catch {
+        // Fall through to the explicit interrupted-delivery error below.
       }
 
       try {
@@ -1282,7 +1350,7 @@ export class AgentEngine {
   ): Promise<{ agent: AgentRecord; screenText?: string }> {
     if (TERMINAL_STATES.has(agent.state)) return { agent };
 
-    if (this.hasGroundTruthDone(agent)) {
+    if (await this.hasGroundTruthDone(agent, ctx)) {
       try {
         const marked = this.stateMgr.updateRecord(agent.agent_id, {
           task_done_candidate_at: null,
@@ -1300,7 +1368,7 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
-      if (!this.hasOutputDoneEvidence(screen.text)) {
+      if (!this.hasOutputDoneEvidence(agent.cli, screen.text)) {
         if (agent.task_done_candidate_at) {
           const updated = this.stateMgr.updateRecord(agent.agent_id, {
             task_done_candidate_at: null,

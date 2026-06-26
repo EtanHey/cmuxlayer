@@ -98,6 +98,40 @@ Do you want to allow this command?
     expect(parsed.errors).toContain("permission_prompt");
   });
 
+  it("detects recoverable pr-loop parking as an action instead of plain idle text", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+Model: gpt-5.5
+
+I cannot commit, push, or open a PR without explicit permission, so I am waiting for Etan.
+
+codex>
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.actions).toContain("recoverable_blocker:pr_loop");
+  });
+
+  it("detects recoverable MCP restart and successor blockers", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+Model: gpt-5.5
+
+The cmux MCP transport closed and I cannot reconnect MCPs from this session.
+I need permission to restart the cmuxlayer MCP before continuing.
+
+codex>
+`);
+
+    expect(parsed.actions).toEqual(
+      expect.arrayContaining([
+        "recoverable_blocker:restart",
+        "recoverable_blocker:successor",
+      ]),
+    );
+  });
+
   it("extracts model from no-cost status line (production format)", () => {
     const parsed = parseScreen(`
 ✻ Working…
@@ -298,6 +332,34 @@ TASK_DONE
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.done_signal).toBe("TASK_DONE");
     expect(parsed.status).toBe("done");
+  });
+
+  it("parses a Codex boot panel that is not bottom-aligned", () => {
+    const parsed = parseScreen(`
+╭──────────────────────────╮
+│ OpenAI Codex             │
+│ Model: gpt-5.5 xhigh     │
+│ Directory: /Users/etanheyman/Gits/voicelayer │
+│ Permissions: YOLO        │
+╰──────────────────────────╯
+
+›
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.model).toBe("gpt-5.5 xhigh");
+  });
+
+  it("does not classify ordinary prose mentioning OpenAI Codex as a Codex pane", () => {
+    const parsed = parseScreen(`
+Claude Code
+I read the OpenAI Codex release notes and updated the docs.
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
   });
 
   it("does not revive stale done evidence when later output starts with an arrow", () => {

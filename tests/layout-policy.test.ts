@@ -207,6 +207,20 @@ describe("layout policy", () => {
     expect(inferAgentRole({ launcherName: "brainlayerCursor" })).toBe("worker");
   });
 
+  it("treats Codex leads as worker topology by default unless role is explicit", () => {
+    expect(inferAgentRole({ cli: "codex" })).toBe("worker");
+    expect(inferAgentRole({ cli: "codex", launcherName: "cmuxlayerCodex" })).toBe(
+      "worker",
+    );
+    expect(
+      inferAgentRole({
+        cli: "codex",
+        launcherName: "cmuxlayerCodex",
+        role: "orchestrator",
+      }),
+    ).toBe("orchestrator");
+  });
+
   it("uses the final launcher marker when repo names contain role words", () => {
     expect(inferAgentRole({ launcherName: "myClaude-toolsCodex" })).toBe(
       "worker",

@@ -124,6 +124,18 @@ export function formatReadScreen(
     );
   }
 
+  const recoveryActions =
+    parsed.actions?.filter((action) =>
+      action.startsWith("recoverable_blocker:"),
+    ) ?? [];
+  if (recoveryActions.length > 0) {
+    result.push(
+      `\u2502 actions: ${recoveryActions
+        .map((action) => truncate(action, 40))
+        .join(", ")}`,
+    );
+  }
+
   if (parsed.response) {
     result.push(`\u251c\u2500 Response`);
     result.push(`\u2502 ${truncate(parsed.response, 70)}`);

@@ -3015,6 +3015,54 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("does not resolve done when TASK_DONE appears with a recoverable blocker", async () => {
+      vi.useFakeTimers();
+      try {
+        const candidateAt = new Date("2026-06-26T20:38:00.000Z");
+        vi.setSystemTime(new Date(candidateAt.getTime() + 5_001));
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "incident-recoverable-blocker-done",
+            state: "working",
+            surface_id: "surface:incident-recoverable-blocker-done",
+            cli: "codex",
+            role: "worker",
+            task_done_candidate_at: candidateAt.toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:incident-recoverable-blocker-done")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:incident-recoverable-blocker-done",
+          text: [
+            "OpenAI Codex",
+            "Model: gpt-5.5",
+            "I cannot commit, push, or open a PR without explicit permission, so I am parked.",
+            "TASK_DONE",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "incident-recoverable-blocker-done",
+          "done",
+          7_000,
+        );
+        await vi.advanceTimersByTimeAsync(8_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("incident-recoverable-blocker-done");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_candidate_at ?? null).toBeNull();
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("does not resolve done from a Claude completion banner without an explicit done signal", async () => {
       vi.useFakeTimers();
       try {
@@ -3271,6 +3319,205 @@ To continue this session, run codex resume ${sessionId}`,
         expect(engine.getAgentState("worker-transcript-fresh")?.state).toBe(
           "working",
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve stale transcript done while the live Codex pane is actively working", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:35:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done-active-screen.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-active-screen",
+            state: "working",
+            surface_id: "surface:worker-transcript-active-screen",
+            cli: "codex",
+            role: "worker",
+            cli_session_id: "019f04ff-40c8-70c0-aca4-f0defa559e81",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-active-screen")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-active-screen",
+          text: [
+            "gpt-5.5 · 70% left · ~/Gits/voicelayer",
+            "Working (1m 02s • esc to interrupt)",
+            "• Explored",
+            "  └ Read package.json",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-active-screen",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-active-screen");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve stale transcript done while the live Codex pane is waiting", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:36:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done-waiting-screen.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-waiting-screen",
+            state: "working",
+            surface_id: "surface:worker-transcript-waiting-screen",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-waiting-screen")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-waiting-screen",
+          text: [
+            "gpt-5.5 · 70% left · ~/Gits/voicelayer",
+            "• Waiting for command approval",
+            "TASK_DONE",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-waiting-screen",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-waiting-screen");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve stale transcript done while the live pane has a recoverable blocker", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:36:30.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(
+          TEST_DIR,
+          "stale-codex-done-recoverable-blocker.jsonl",
+        );
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-recoverable-blocker",
+            state: "working",
+            surface_id: "surface:worker-transcript-recoverable-blocker",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-recoverable-blocker")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:worker-transcript-recoverable-blocker",
+          text: [
+            "OpenAI Codex",
+            "Model: gpt-5.5",
+            "I cannot commit, push, or open a PR without explicit permission, so I am parked.",
+            "TASK_DONE",
+          ].join("\n"),
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-recoverable-blocker",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-recoverable-blocker");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve stale transcript done when the current screen cannot be read", async () => {
+      vi.useFakeTimers();
+      try {
+        const now = new Date("2026-06-26T20:37:00.000Z");
+        const stale = new Date(now.getTime() - 2_000);
+        vi.setSystemTime(now);
+        const transcript = join(TEST_DIR, "stale-codex-done-read-failure.jsonl");
+        writeCodexDoneTranscript(transcript);
+        utimesSync(transcript, stale, stale);
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-transcript-read-failure",
+            state: "working",
+            surface_id: "surface:worker-transcript-read-failure",
+            cli: "codex",
+            role: "worker",
+            cli_session_path: transcript,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:worker-transcript-read-failure")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockRejectedValue(
+          new Error("cmux read failed"),
+        );
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "worker-transcript-read-failure",
+          "done",
+          1_200,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        const agent = engine.getAgentState("worker-transcript-read-failure");
+        expect(agent?.state).toBe("working");
+        expect(agent?.task_done_detected_at ?? null).toBeNull();
       } finally {
         vi.useRealTimers();
       }
@@ -3540,6 +3787,119 @@ To continue this session, run codex resume ${sessionId}`,
         state: "error",
         boot_prompt_pending: false,
         error: "Boot prompt delivery interrupted before completion",
+      });
+    });
+
+    it("recovers stale pending Codex boot prompt when the pane is already usable", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-ready",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: [
+          "╭──────────────────────────╮",
+          "│ OpenAI Codex             │",
+          "│ Model: gpt-5.5 xhigh     │",
+          "│ Directory: /Users/etanheyman/Gits/voicelayer │",
+          "│ Permissions: YOLO        │",
+          "╰──────────────────────────╯",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-ready")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+        error: null,
+      });
+    });
+
+    it("restores degraded quality when stale pending Codex boot recovery proves the pane is ready", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-ready-degraded",
+          state: "booting",
+          surface_id: "surface:42",
+          cli: "codex",
+          boot_prompt_pending: true,
+          quality: "degraded",
+          error: "Post-spawn liveness failed: surface surface:42 is not live",
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:42",
+        text: [
+          "╭──────────────────────────╮",
+          "│ OpenAI Codex             │",
+          "│ Model: gpt-5.5 xhigh     │",
+          "│ Directory: /Users/etanheyman/Gits/voicelayer │",
+          "│ Permissions: YOLO        │",
+          "╰──────────────────────────╯",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-ready-degraded")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+        error: null,
+        quality: "unknown",
+      });
+    });
+
+    it("recovers stale pending Gemini boot prompt without requiring identity parsing", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-gemini-boot-ready",
+          state: "booting",
+          surface_id: "surface:gemini",
+          cli: "gemini",
+          boot_prompt_pending: true,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:gemini")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:gemini",
+        text: "> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini-boot-ready")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini-boot-ready")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+        error: null,
       });
     });
 
@@ -4289,6 +4649,15 @@ describe("buildLaunchCommand", () => {
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
+    ).toBe("brainlayerCodex -s");
+    expect(
+      buildLaunchCommand(
+        "codex",
+        "brainlayer",
+        "gpt-5.3-codex-spark",
+        undefined,
+        { allowModelOverride: true },
+      ),
     ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",

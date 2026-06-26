@@ -55,6 +55,8 @@ export interface AgentRecord {
   user_killed?: boolean;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
+  // File-backed goal contract for superseded/long-running collab tasks
+  goal_file?: string | null;
   // Launch context for worktree/profile-aware spawns
   launch_cwd?: string | null;
   mcp_profile?: string | null;
@@ -142,6 +144,7 @@ export type DeliveryEventType =
   | "send_command"
   | "send_to"
   | "send_to_agent"
+  | "supersede_agent_goal"
   | "interact"
   | "press_enter"
   | "dispatch_nudge";

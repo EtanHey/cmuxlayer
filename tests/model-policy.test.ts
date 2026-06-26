@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MODEL_OVERRIDE_ENV,
   MODEL_POLICY_CONTRACT,
+  resolveLaunchModelFlag,
   resolveModelAlias,
   resolveSpawnModelPolicy,
 } from "../src/model-policy.js";
@@ -17,6 +18,9 @@ describe("model policy contract", () => {
       "claude-opus-4-8[1m]",
     );
     expect(MODEL_POLICY_CONTRACT.cli.codex.defaultModel).toBe("codex");
+    expect(MODEL_POLICY_CONTRACT.cli.codex.allowModelOverrideByDefault).toBe(
+      false,
+    );
   });
 
   it("coerces Cursor model overrides to auto unless the escape env is enabled", () => {
@@ -36,6 +40,37 @@ describe("model policy contract", () => {
     expect(escaped.launcher_model).toBe("sonnet");
     expect(escaped.coerced).toBe(false);
     expect(escaped.override_allowed).toBe(true);
+  });
+
+  it("does not pass Codex model overrides to repoGolem launchers without the escape env", () => {
+    const coerced = resolveSpawnModelPolicy("codex", "gpt-5.5", {});
+
+    expect(coerced.effective_model).toBe("codex");
+    expect(coerced.launcher_model).toBeNull();
+    expect(coerced.coerced).toBe(true);
+    expect(coerced.warnings[0]).toContain("CODEX MODEL POLICY");
+    expect(coerced.warnings[0]).toContain("gpt-5.5");
+
+    const escaped = resolveSpawnModelPolicy("codex", "gpt-5.5", {
+      [MODEL_OVERRIDE_ENV]: "1",
+    });
+
+    expect(escaped.effective_model).toBe("gpt-5.5");
+    expect(escaped.launcher_model).toBe("gpt-5.5");
+    expect(escaped.coerced).toBe(false);
+    expect(escaped.override_allowed).toBe(true);
+
+    expect(
+      resolveLaunchModelFlag("codex", "gpt-5.5", {
+        allowModelOverride: false,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveLaunchModelFlag("codex", "gpt-5.5", {
+        allowModelOverride: true,
+      }),
+    ).toBe("gpt-5.5");
   });
 
   it("resolves omitted models to per-CLI defaults without pinning launcher args", () => {

@@ -108,6 +108,8 @@ export function inferContextWindow(
 }
 
 const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+const ORPHAN_TTY_CONTROL_TRAILER_RE =
+  /(?:^|\s)(?:(?:;[0-9]+[:;][0-9]+[A-Za-z])|(?:\[[0-9;:]*[A-Za-z]))+\s*$/;
 const DONE_SIGNAL_LINE_RE =
   /^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_DONE)(?:\s+\S{1,16})?\s*$/;
 const CLAUDE_COUNTER_RE = /^\s*CLAUDE_COUNTER:\s*(\d+)\s*$/m;
@@ -132,6 +134,9 @@ const CLAUDE_PERMISSION_APPROVAL_RE =
   /allow for this session|do you want to allow|\[y\/n\]/i;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
+const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
+const CODEX_PANEL_MODEL_RE =
+  /(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\b/im;
 const CODEX_CONTEXT_LEFT_RE =
   /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_WORKING_RE =
@@ -180,6 +185,14 @@ const CURSOR_USING_LINE_RE = /^\s*Using\s*:?\s*(.+)$/im;
 const CURSOR_MODEL_INLINE_RE =
   /\b(claude-[0-9][0-9a-z.-]*|gpt-[0-9][0-9a-z.-]*(?:\s+(?:high|low|mini))?|gemini-[0-9][0-9a-z.-]*)\b/i;
 const RULE_LINE_RE = /^[\s─-╿▀-▟\-=_~·•—–]+$/;
+const RECOVERABLE_BLOCKER_PREFIX =
+  /(?:\b(?:I|we|agent|codex)\s+(?:can(?:not|'t)|cannot|won't|am unable to|are unable to|unable to|do not have permission to|need permission to)\b|\bwaiting\s+for\s+(?:Etan|user|human|approval|permission)\b|\bblocked\b.{0,80}\b(?:approval|permission|user|human|Etan)\b)/is;
+const RECOVERABLE_PR_LOOP_BLOCKER_RE =
+  /(?:(?:\b(?:I|we|agent|codex)\s+(?:can(?:not|'t)|cannot|won't|am unable to|are unable to|unable to|do not have permission to|need permission to)\b|\bwaiting\s+for\s+(?:Etan|user|human|approval|permission)\b|\bblocked\b.{0,80}\b(?:approval|permission|user|human|Etan)\b).{0,160}\b(?:commit|push|(?:open|create)\s+(?:a\s+)?PR|PR|merge)\b|\b(?:commit|push|PR|merge)\b.{0,80}\b(?:waiting\s+for|approval|permission)\b)/is;
+const RECOVERABLE_RESTART_BLOCKER_RE =
+  /(?:(?:\b(?:I|we|agent|codex)\s+(?:can(?:not|'t)|cannot|won't|am unable to|are unable to|unable to|do not have permission to|need permission to)\b|\bwaiting\s+for\s+(?:Etan|user|human|approval|permission)\b|\bblocked\b.{0,80}\b(?:approval|permission|user|human|Etan)\b).{0,160}\b(?:restart|reload)\b.{0,80}\b(?:MCP|daemon|server|cmuxlayer|cmux)\b|\b(?:MCP|daemon|server|cmuxlayer|cmux)\b.{0,80}\b(?:restart|reload)\b.{0,80}\b(?:waiting|approval|permission|cannot|can't|need permission))/is;
+const RECOVERABLE_SUCCESSOR_BLOCKER_RE =
+  /(?:\b(?:MCP|cmux)\s+(?:transport|connection)\s+(?:closed|disconnected|died|lost)\b|\b(?:can(?:not|'t)|cannot|unable to)\s+reconnect\b.{0,80}\b(?:MCPs?|cmux|transport)\b|\b(?:resume|spawn)\b.{0,80}\b(?:managed\s+)?successor\b)/is;
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_ESCAPE_RE, "");
@@ -187,6 +200,10 @@ function stripAnsi(text: string): string {
 
 function normalizeText(text: string): string {
   return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function stripOrphanTtyControlTrailer(line: string): string {
+  return line.replace(ORPHAN_TTY_CONTROL_TRAILER_RE, "").replace(/\s+$/, "");
 }
 
 function isCursorAgentScreen(text: string): boolean {
@@ -246,6 +263,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
 
   if (
     CODEX_HEADER_RE.test(text) ||
+    (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
   ) {
@@ -489,8 +507,9 @@ function parseModelAndCost(
 ): { model: string | null; cost: number | null } {
   if (agentType === "codex") {
     const codexMatch = text.match(CODEX_HEADER_RE);
+    const panelModelMatch = text.match(CODEX_PANEL_MODEL_RE);
     return {
-      model: codexMatch?.[1]?.trim() ?? null,
+      model: codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim() ?? null,
       cost: null,
     };
   }
@@ -538,6 +557,30 @@ function parseCodexContextPct(text: string): number | null {
 
 function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
+}
+
+function uniqueActions(actions: string[]): string[] {
+  return Array.from(new Set(actions));
+}
+
+function parseRecoverableBlockerActions(text: string): string[] {
+  const actions: string[] = [];
+  if (RECOVERABLE_PR_LOOP_BLOCKER_RE.test(text)) {
+    actions.push("recoverable_blocker:pr_loop");
+  }
+  if (RECOVERABLE_RESTART_BLOCKER_RE.test(text)) {
+    actions.push("recoverable_blocker:restart");
+  }
+  if (
+    RECOVERABLE_SUCCESSOR_BLOCKER_RE.test(text) &&
+    (RECOVERABLE_BLOCKER_PREFIX.test(text) ||
+      /\b(?:MCP|cmux)\s+(?:transport|connection)\s+(?:closed|disconnected|died|lost)\b/is.test(
+        text,
+      ))
+  ) {
+    actions.push("recoverable_blocker:successor");
+  }
+  return actions;
 }
 
 function parseCursorScaledTokenCount(raw: string, suffix?: string): number {
@@ -769,6 +812,11 @@ export function parseScreen(text: string): ParsedScreenResult {
     contextPct = Math.min(100, Math.round((tokenCount / contextWindow) * 100));
   }
 
+  const actions = parseRecoverableBlockerActions(normalized);
+  if (agentType === "codex") {
+    actions.push(...parseCodexActions(normalized));
+  }
+
   const result: ParsedScreenResult = {
     agent_type: agentType,
     status: inferStatus(normalized, doneSignal, errors, agentType),
@@ -782,8 +830,8 @@ export function parseScreen(text: string): ParsedScreenResult {
     cost,
   };
 
-  if (agentType === "codex") {
-    result.actions = parseCodexActions(normalized);
+  if (actions.length > 0) {
+    result.actions = uniqueActions(actions);
   }
 
   return result;
@@ -814,7 +862,7 @@ const CHROME_LINE_RES: RegExp[] = [
 export function cleanScreenText(text: string, maxLines = 8): string {
   const out: string[] = [];
   for (const rawLine of normalizeText(text).split("\n")) {
-    const line = rawLine.replace(/\s+$/, "");
+    const line = stripOrphanTtyControlTrailer(rawLine);
     const trimmed = line.trim();
     if (!trimmed) {
       if (out.length > 0 && out[out.length - 1] !== "") out.push("");
