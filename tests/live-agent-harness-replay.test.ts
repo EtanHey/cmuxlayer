@@ -13,10 +13,16 @@ import { MODEL_POLICY_CONTRACT } from "../src/model-policy.js";
 
 type ClassifierInput = Parameters<typeof classifyWorkerFailures>[0];
 type ToolResultShape = Record<string, unknown>;
+type RegressionCase = {
+  name: string;
+  input: ClassifierInput;
+  expected: string[];
+};
 
 const repoRoot = join(__dirname, "..");
 const repo = "skill-creator";
 const workspace = "workspace:1";
+// Keep this local so replay fixtures pin the launcher text independently.
 const launcherSuffix: Record<CliType, string> = {
   claude: "Claude",
   codex: "Codex",
@@ -285,7 +291,7 @@ function makeAgentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("classifyWorkerFailures regression matrix", () => {
-  it.each([
+  const cases: RegressionCase[] = [
     {
       name: "spawn_agent returns ok false",
       input: baseClassifierInput("cursor", {
@@ -472,10 +478,12 @@ describe("classifyWorkerFailures regression matrix", () => {
       }),
       expected: ["stale_managed_record_after_close"],
     },
-  ])("$name", ({ input, expected }) => {
+  ];
+
+  it.each(cases)("$name", ({ input, expected }) => {
     const failures = classifyWorkerFailures(input);
 
-    expect(failures).toEqual(expect.arrayContaining(expected));
+    expect(failures).toEqual(expected);
   });
 });
 
