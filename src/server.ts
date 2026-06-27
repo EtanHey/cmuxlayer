@@ -906,6 +906,12 @@ export interface CreateServerOptions {
   /** Override git worktree execution/home for tests. */
   worktreeExec?: WorktreeExec;
   worktreeHomeDir?: string;
+  /**
+   * Ordered directories searched for `<root>/<repo>` when resolving a worktree's
+   * source repo and the target workspace's cwd is not a git work tree. Defaults
+   * to [`~/Gits`]. Set from CMUXLAYER_WORKTREE_REPO_ROOTS in the CLI entrypoint.
+   */
+  worktreeRepoRoots?: string[];
   /** Override control health collection (primarily for tests). */
   controlHealthCollector?: () => Promise<ControlHealth>;
   /** Periodic control health sample interval. Defaults to env or 60000ms; 0 disables. */
@@ -1253,6 +1259,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       path: z.string().optional(),
       branch: z.string().optional(),
       base: z.string().optional(),
+      repoRoot: z
+        .string()
+        .optional()
+        .describe(
+          "Explicit source repo checkout to branch the worktree from (overrides workspace/repoRoots resolution).",
+        ),
     }),
   ]);
 
@@ -4318,10 +4330,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return record;
     };
 
+    const resolveWorkspaceCwd = async (
+      workspaceRef: string | undefined,
+    ): Promise<string | undefined> => {
+      if (!workspaceRef) return undefined;
+      try {
+        const { workspaces } = await client.listWorkspaces();
+        const ws = workspaces.find((w) => w.ref === workspaceRef);
+        return ws?.current_directory ?? undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
     const prepareSpawnWorktree = async (
       repo: string,
       worktree: boolean | object | undefined,
       mcpProfile: McpProfile | undefined,
+      workspaceRef?: string,
     ) => {
       if (!worktree) {
         return {
@@ -4332,11 +4358,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const profile = mcpProfile ?? "inherit";
+      const worktreeObj =
+        worktree && typeof worktree === "object"
+          ? (worktree as { repoRoot?: string })
+          : undefined;
       const prepared = await prepareWorktree({
         repo,
         worktree: worktree as Parameters<typeof prepareWorktree>[0]["worktree"],
         exec: opts?.worktreeExec,
         homeGitsDir: opts?.worktreeHomeDir,
+        repoRoots: opts?.worktreeRepoRoots,
+        workspaceCwd: await resolveWorkspaceCwd(workspaceRef),
+        repoRoot: worktreeObj?.repoRoot,
       });
       return {
         prepared,
@@ -4591,6 +4624,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.repo,
             args.worktree,
             args.mcp_profile as McpProfile | undefined,
+            args.workspace,
           );
 
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
@@ -4853,6 +4887,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.repo,
             args.worktree ?? true,
             args.mcp_profile as McpProfile | undefined,
+            args.workspace,
           );
           const hasPrompt = hasInlinePrompt(args.prompt);
           const result = await engine.spawnAgent({

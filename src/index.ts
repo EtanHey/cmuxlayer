@@ -84,7 +84,15 @@ async function main() {
   }
 
   const client = await createCmuxClient();
-  const server = createServer({ client });
+  const worktreeRepoRoots = process.env.CMUXLAYER_WORKTREE_REPO_ROOTS?.split(":")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const server = createServer({
+    client,
+    ...(worktreeRepoRoots && worktreeRepoRoots.length > 0
+      ? { worktreeRepoRoots }
+      : {}),
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
