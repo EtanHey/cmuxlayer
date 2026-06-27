@@ -13,6 +13,7 @@ claude.scratchpad.md
 
 # graphify knowledge graph output (local build artifact)
 graphify-out/
+results/live-agent-harness/
 node_modules
 
 # git worktrees (e.g. isolated PR branches)
