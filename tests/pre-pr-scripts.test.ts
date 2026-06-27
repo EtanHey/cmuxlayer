@@ -20,6 +20,14 @@ describe("pre-PR script ladder", () => {
     expect(scripts["pre-pr"]).not.toContain("pre-pr:live");
   });
 
+  it("includes the production-shaped replay coverage in the deterministic harness tier", () => {
+    const scripts = packageScripts();
+
+    expect(scripts["pre-pr:harness"]).toContain(
+      "tests/live-agent-harness-replay.test.ts",
+    );
+  });
+
   it("exposes an explicit live pre-pr tier through the live harness", () => {
     const scripts = packageScripts();
 

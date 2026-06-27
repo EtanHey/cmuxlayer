@@ -54,8 +54,10 @@ bun run pre-pr:harness
 ```
 
 This checks the Cursor, Codex, Claude, and Gemini harness contracts with
-fixtures only. It does not connect to cmux, launch agent CLIs, touch BrainLayer,
-or write run artifacts.
+fixtures only, including MCP-shaped replay payloads for `spawn_agent`,
+`wait_for`, `get_agent_state`, `list_agents`, `list_surfaces`, and
+`close_surface`. It does not connect to cmux, launch agent CLIs, touch
+BrainLayer, or write run artifacts.
 
 Use the explicit live smoke tier only when you are willing to launch one real
 worker:
@@ -164,6 +166,31 @@ The runner fails red on:
 - stale managed record after close
 - unexpected extra live worker surfaces in the target workspace
 - worker not in right column / workspace not selected / third column topology
+
+## Classifier vs agent-health boundary
+
+`classifyWorkerFailures` is the live harness worker-run classifier. It only
+uses the evidence collected by the live runner for one harness worker:
+`spawn_agent`, launch state text, verbose `list_surfaces`, `wait_for`, report
+marker text, cleanup `get_agent_state`, cleanup `list_agents`, and cleanup
+`list_surfaces`.
+
+Agent lifecycle health remains the owner for broader registry/session/screen
+health:
+
+- `missing_cli_session_id` and `non_resumable`: outside the harness classifier
+  because the harness does not prove CLI session capture or resumability. Codex
+  replay fixtures can be classifier-green while `agent-health` marks a
+  long-running agent without `cli_session_id` unhealthy.
+- `registry_screen_disagreement`: outside the harness classifier because it
+  compares registry state against screen-parser state. The harness consumes
+  `wait_for` completion and report-marker evidence instead.
+- `parser_drift_after_done_evidence`: outside the harness classifier until the
+  screen parser exposes a concrete issue code or runner field for parser drift
+  after artifact-backed DONE evidence.
+- `inbox_turn_nudge_required`: outside the harness classifier because inbox
+  nudges are agent-health or inbox-monitor routing signals, not worker-run
+  pass/fail evidence from the no-live harness replay.
 
 ## Scope limits
 
