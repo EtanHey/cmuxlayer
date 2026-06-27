@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildRunReportMarkdown,
   buildWorkerGoalContent,
   buildWorkerSpecs,
   classifyWorkerFailures,
@@ -196,5 +197,47 @@ describe("live-agent-harness helpers", () => {
     expect(failures).toContain("managed_agent_id_invalid");
     expect(failures).toContain("report_missing");
     expect(workerIsGreen(failures)).toBe(false);
+  });
+
+  it("builds the final report marker from the supplied worker failure map", () => {
+    const report = buildRunReportMarkdown(
+      {
+        started_at: "2026-06-27T00:00:00.000Z",
+        finished_at: "2026-06-27T00:00:01.000Z",
+        config: {
+          cli: "cursor",
+          repo: "skill-creator",
+          workspace: "workspace:1",
+          count: 1,
+          root: "/tmp/run",
+          markerPrefix: "DONE_CURSOR_DUMMY",
+          workerNamePrefix: "cursor",
+          finalGreen: "GREEN",
+          finalRed: "RED",
+          mcpProfile: "sterile",
+          waitTimeoutMs: 1000,
+          cleanupTimeoutMs: 10_000,
+          cleanupPollMs: 500,
+          workerTitlePattern: /cursor agent/i,
+        },
+        workers: [
+          {
+            name: "cursor-01",
+            goal: "/tmp/run/goals/cursor-01.md",
+            report: "/tmp/run/reports/cursor-01.md",
+            marker: "DONE_CURSOR_DUMMY_01",
+            started_at: "2026-06-27T00:00:00.000Z",
+            failures: [],
+            green: true,
+          },
+        ],
+        events: [],
+      },
+      { "cursor-01": ["report_missing"] },
+    );
+
+    expect(report).toContain("report_missing");
+    expect(report).toContain("RED");
+    expect(report).not.toContain("GREEN");
   });
 });

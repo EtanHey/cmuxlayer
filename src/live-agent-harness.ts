@@ -546,7 +546,7 @@ export function buildRunReportMarkdown(
   );
 
   const allFailures = results.workers.flatMap(
-    (worker) => worker.failures ?? [],
+    (worker) => workerFailures[worker.name] ?? worker.failures ?? [],
   );
   const finalMarker =
     allFailures.length === 0

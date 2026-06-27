@@ -50,7 +50,29 @@ describe("pre-PR script ladder", () => {
     expect(script).toContain('cli: "cursor"');
     expect(script).toContain("count: 1");
     expect(script).toContain('mcpProfile: "sterile"');
+    expect(script).toContain("worktree: { name: liveHarnessWorktreeName(config) }");
     expect(script).not.toContain("count: 8");
+  });
+
+  it("handles MCP server spawn errors without an unhandled child process error", () => {
+    const script = readFileSync(
+      join(repoRoot, "scripts", "run-live-agent-harness.mjs"),
+      "utf8",
+    );
+
+    expect(script).toContain('this.child.on("error"');
+    expect(script).toContain("pending.reject(error)");
+  });
+
+  it("checks built harness artifacts before live runs after opt-in", () => {
+    const script = readFileSync(
+      join(repoRoot, "scripts", "run-live-agent-harness.mjs"),
+      "utf8",
+    );
+
+    expect(script).toContain("assertBuiltHarnessArtifacts");
+    expect(script).toContain("dist");
+    expect(script).toContain("bun run build");
   });
 
   it("keeps the hook installer explicit and transparent", () => {

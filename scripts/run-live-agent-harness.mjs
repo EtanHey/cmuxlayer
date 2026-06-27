@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -151,12 +152,22 @@ function assertLiveHarnessOptIn(env = process.env) {
   );
 }
 
+function assertBuiltHarnessArtifacts() {
+  const distEntry = join(REPO_ROOT, "dist", "live-agent-harness.js");
+  if (existsSync(distEntry)) return;
+  throw new Error("cmuxlayer is not built. Run `bun run build` before live harness runs.");
+}
+
 function defaultServerCommand() {
   const distEntry = join(REPO_ROOT, "dist", "index.js");
   return {
     command: process.execPath,
     args: [distEntry],
   };
+}
+
+function liveHarnessWorktreeName(config) {
+  return `live-agent-harness-${config.cli}-${basename(config.root)}`;
 }
 
 class McpStdioClient {
@@ -180,6 +191,13 @@ class McpStdioClient {
       this.closed = true;
       for (const [, pending] of this.pending) {
         pending.reject(new Error("MCP server exited"));
+      }
+      this.pending.clear();
+    });
+    this.child.on("error", (error) => {
+      this.closed = true;
+      for (const [, pending] of this.pending) {
+        pending.reject(error);
       }
       this.pending.clear();
     });
@@ -380,6 +398,7 @@ async function pollCloseCleanup(client, config, worker) {
 async function main() {
   assertLiveHarnessOptIn();
   const cliOptions = parseArgs(process.argv.slice(2));
+  assertBuiltHarnessArtifacts();
   harness = await import("../dist/live-agent-harness.js");
   const config = {
     cli: cliOptions.cli,
@@ -468,6 +487,7 @@ async function main() {
           role: "worker",
           workspace: config.workspace,
           force_new: true,
+          worktree: { name: liveHarnessWorktreeName(config) },
           boot_prompt_path: spec.goal,
           mcp_profile: config.mcpProfile,
         },

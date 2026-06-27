@@ -145,11 +145,27 @@ store only the final summary, final marker, and path to the run when the result
 matters.
 
 The runner defaults to `--mcp-profile sterile` so dummy workers do not inherit
-the normal MCP surface. Use `--mcp-profile skill_eval` or `--mcp-profile inherit`
-only when the test explicitly needs those capabilities.
+the normal MCP surface. Live spawns use a harness worktree so cmuxlayer applies
+the requested MCP profile to the launcher environment. Use
+`--mcp-profile skill_eval` or `--mcp-profile inherit` only when the test
+explicitly needs those capabilities.
+
+MCP profile meanings:
+
+- `sterile`: narrow local profile for dummy workers.
+- `skill_eval`: skill-evaluation profile.
+- `inherit`: full parent/default MCP surface.
 
 Exit code `0` only when every worker is green and the final marker matches
 `--final-green`.
+
+## Troubleshooting
+
+- `cmuxlayer is not built`: run `bun run build` before a live harness run.
+- `wait_for` timeout: increase `--wait-timeout-ms` or inspect the worker report
+  path under the run root.
+- To remove the local pre-push hook installed by `scripts/install-hooks.mjs`,
+  delete `.git/hooks/pre-push`.
 
 ## Red conditions
 
