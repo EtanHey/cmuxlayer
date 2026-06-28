@@ -1,5 +1,5 @@
 /**
- * cmux MCP server — registers core tools + agent lifecycle tools.
+ * cmuxlayer MCP server — registers core tools + agent lifecycle tools.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1124,7 +1124,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const server = new McpServer(
     {
-      name: "@golems/cmux-mcp",
+      name: "@golems/cmuxlayer",
       version: "0.1.0",
     },
     enableClaudeChannels
@@ -1406,7 +1406,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     context.controlHealthTimer = setInterval(() => {
       appendControlHealthSnapshot().catch((error) => {
         console.error(
-          "[cmux-mcp] control_health periodic sample failed:",
+          "[cmuxlayer] control_health periodic sample failed:",
           error,
         );
       });
@@ -4483,7 +4483,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .reconstitute()
         .then(() => engine.enableStartupPurge())
         .catch((e) =>
-          console.error("[cmux-mcp] registry reconstitution failed:", e),
+          console.error("[cmuxlayer] registry reconstitution failed:", e),
         );
       engine.startSweep(resolveSweepTiming());
     }

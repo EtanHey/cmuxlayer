@@ -1,5 +1,5 @@
 /**
- * Beautiful terminal output formatting for cmux MCP tool responses.
+ * Beautiful terminal output formatting for cmuxlayer MCP tool responses.
  *
  * Uses Unicode box-drawing characters for clean, professional display.
  * No ANSI color codes (MCP tool output doesn't support them in Claude Code).

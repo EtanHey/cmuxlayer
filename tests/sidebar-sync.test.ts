@@ -243,7 +243,7 @@ describe("Sidebar Sync", () => {
 
     expect(mockClient.log).toHaveBeenCalledWith(
       "spawned: brainlayer",
-      expect.objectContaining({ level: "info", source: "cmux-mcp" }),
+      expect.objectContaining({ level: "info", source: "cmuxlayer" }),
     );
     expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
       "spawned",
@@ -277,7 +277,7 @@ describe("Sidebar Sync", () => {
 
     expect(mockClient.log).toHaveBeenCalledWith(
       "done: brainlayer",
-      expect.objectContaining({ level: "success", source: "cmux-mcp" }),
+      expect.objectContaining({ level: "success", source: "cmuxlayer" }),
     );
     expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
       "done",
@@ -305,7 +305,7 @@ describe("Sidebar Sync", () => {
 
     expect(mockClient.log).toHaveBeenCalledWith(
       "errored: brainlayer",
-      expect.objectContaining({ level: "error", source: "cmux-mcp" }),
+      expect.objectContaining({ level: "error", source: "cmuxlayer" }),
     );
     expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
       "errored",
