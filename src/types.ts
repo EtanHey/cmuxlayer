@@ -1,4 +1,4 @@
-// Shared types for cmux MCP server
+// Shared types for cmuxlayer MCP server
 
 export type ControlMode = "autonomous" | "manual";
 export type IntentMode = "chat" | "audit";

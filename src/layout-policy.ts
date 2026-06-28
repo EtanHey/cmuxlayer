@@ -399,7 +399,7 @@ export function collectRoleSurfaceIds(
       if (isAgentRoleInferenceError(error)) {
         ids.unknown?.add(agent.surface_id);
         console.warn(
-          `[cmux-mcp] Unable to classify agent role for ${agent.surface_id}; not counting it as a worker`,
+          `[cmuxlayer] Unable to classify agent role for ${agent.surface_id}; not counting it as a worker`,
           error.message,
         );
         continue;

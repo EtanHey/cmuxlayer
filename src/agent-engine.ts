@@ -1454,14 +1454,14 @@ export class AgentEngine {
         this.registry.remove(agentId);
         await this.client.log(
           `crash-recovery: dropped missing agent ${agentId} after failure`,
-          { level: "warning", source: "cmux-mcp" },
+          { level: "warning", source: "cmuxlayer" },
         );
         return;
       }
 
       await this.client.log(
         `crash-recovery: failed to persist error for ${agentId}: ${persistMessage}`,
-        { level: "error", source: "cmux-mcp" },
+        { level: "error", source: "cmuxlayer" },
       );
     }
   }
@@ -1473,7 +1473,7 @@ export class AgentEngine {
     this.registry.set(agent.agent_id, updated);
     await this.client.log(
       `crash-recovery: max crash recoveries exceeded for ${agent.agent_id}`,
-      { level: "error", source: "cmux-mcp" },
+      { level: "error", source: "cmuxlayer" },
     );
   }
 
@@ -1545,7 +1545,7 @@ export class AgentEngine {
         );
         await this.client.log(
           `crash-recovery: respawned ${agent.agent_id} on ${surface.surface}`,
-          { level: "warning", source: "cmux-mcp" },
+          { level: "warning", source: "cmuxlayer" },
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1566,7 +1566,7 @@ export class AgentEngine {
     const spec = LIFECYCLE_LOGS[event];
     await this.client.log(`${spec.message}: ${agent.repo}`, {
       level: spec.level,
-      source: "cmux-mcp",
+      source: "cmuxlayer",
     });
 
     try {
@@ -1695,7 +1695,7 @@ export class AgentEngine {
             } else {
               await this.client.log(
                 `context-limit: depth ${agent.spawn_depth} agent ${repo} degraded; leaving pane running for orchestrator decision`,
-                { level: "warning", source: "cmux-mcp" },
+                { level: "warning", source: "cmuxlayer" },
               );
             }
           }
@@ -1831,7 +1831,7 @@ export class AgentEngine {
       try {
         await this.runSweep();
       } catch (e) {
-        console.error("[cmux-mcp] sweep failed (will retry):", e);
+        console.error("[cmuxlayer] sweep failed (will retry):", e);
       } finally {
         this.recordSweepStability();
         if (this.sweepTiming) {

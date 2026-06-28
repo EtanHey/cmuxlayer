@@ -5806,7 +5806,7 @@ describe("registry reconstitution error logging", () => {
     }
 
     expect(console.error).toHaveBeenCalledWith(
-      "[cmux-mcp] registry reconstitution failed:",
+      "[cmuxlayer] registry reconstitution failed:",
       expect.any(Error),
     );
   });
