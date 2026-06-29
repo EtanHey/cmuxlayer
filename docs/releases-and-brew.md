@@ -30,10 +30,10 @@ it and speaks JSON-RPC over stdin/stdout. It is *not* a daemon; there is no
 The launch chain:
 
 ```
-~/.golems/config.yaml                 mcpServers.cmux  (SOURCE OF TRUTH)
+~/.golems/config.yaml                 mcpServers.cmuxlayer  (SOURCE OF TRUTH)
    │  scripts/sync-config.sh --enforce  (regenerates per-repo configs)
    ▼
-~/Gits/<repo>/.mcp.json               mcpServers.cmux.command  (GENERATED; do not hand-edit)
+~/Gits/<repo>/.mcp.json               mcpServers.cmuxlayer.command  (GENERATED; do not hand-edit)
    ▼
 ~/.golems/bin/cmuxlayer-mcp           (launcher)
    ▼
@@ -41,7 +41,7 @@ brew --prefix/opt/cmuxlayer/bin/cmuxlayer   (brew, default)
    └─ or ~/Gits/cmuxlayer/src/index.ts via bun, when CMUXLAYER_DEV=1
 ```
 
-**Editing the launch command:** change `mcpServers.cmux` in `~/.golems/config.yaml`
+**Editing the launch command:** change `mcpServers.cmuxlayer` in `~/.golems/config.yaml`
 (the source), then propagate to every profiled repo's generated `.mcp.json`:
 
 ```bash
@@ -136,7 +136,7 @@ explicit `workspace` only when you deliberately want a different one.
 
 | Path | Role |
 |------|------|
-| `~/.golems/config.yaml` → `mcpServers.cmux` | wires the launcher into the fleet |
+| `~/.golems/config.yaml` → `mcpServers.cmuxlayer` | wires the launcher into the fleet |
 | `~/.golems/bin/cmuxlayer-mcp` | launcher: brew (default) vs live source (`CMUXLAYER_DEV=1`) |
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
 | `scripts/release.sh` | one-command release: bump → tag → formula bump → push |

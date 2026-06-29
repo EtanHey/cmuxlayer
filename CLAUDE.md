@@ -64,7 +64,7 @@ actually using.
 
 ### Distribution & releases
 The fleet runs the **brew-pinned** binary, not a working tree. Source of truth is
-`~/.golems/config.yaml` (`mcpServers.cmux`); `golems/scripts/sync-config.sh --enforce`
+`~/.golems/config.yaml` (`mcpServers.cmuxlayer`); `golems/scripts/sync-config.sh --enforce`
 regenerates each repo's `~/Gits/<repo>/.mcp.json` (generated — don't hand-edit),
 which points at `~/.golems/bin/cmuxlayer-mcp` (launcher) → `brew --prefix`/opt/cmuxlayer/bin/cmuxlayer.
 Set `CMUXLAYER_DEV=1` to run your live source instead. Cut a release with `scripts/release.sh <X.Y.Z>` (bumps

@@ -81,13 +81,13 @@ For an MCP reconnect, the safe sequence is:
 
 1. Focus the requested surface.
 2. Send `/mcp`.
-3. Highlight the requested server row, for example `cmux`.
+3. Highlight the requested server row, for example `cmuxlayer`.
 4. Visually confirm the cursor is on that server row.
 5. Press Enter.
 6. Highlight `Reconnect`.
 7. Visually confirm the cursor is on `Reconnect`, not `View tools`.
 8. Press Enter.
-9. Verify output such as `Reconnected to cmux`.
+9. Verify output such as `Reconnected to cmuxlayer`.
 
 When multiple surfaces are requested, finish and verify one surface before
 starting the next. Do not batch menu keypresses across panes.
