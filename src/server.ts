@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { constants as fsConstants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -1122,10 +1123,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  let PKG_VERSION = "0.0.0";
+  try {
+    PKG_VERSION = (
+      createRequire(import.meta.url)("../package.json") as { version: string }
+    ).version;
+  } catch {
+    // package.json not resolvable from here - keep the fallback.
+  }
+
   const server = new McpServer(
     {
       name: "cmuxlayer",
-      version: "0.1.0",
+      version: PKG_VERSION,
     },
     enableClaudeChannels
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
