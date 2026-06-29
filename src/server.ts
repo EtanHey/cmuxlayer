@@ -4499,7 +4499,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         model: z
           .string()
           .optional()
-          .describe("Model name (e.g. 'sonnet', 'codex', 'opus')"),
+          .describe("OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default."),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
           .describe("CLI tool to launch"),
