@@ -1124,7 +1124,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const server = new McpServer(
     {
-      name: "@golems/cmuxlayer",
+      name: "cmuxlayer",
       version: "0.1.0",
     },
     enableClaudeChannels
