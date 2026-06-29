@@ -31,7 +31,7 @@ Add to your MCP config:
 T3 Code inherits MCP servers from the Codex CLI config file at `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 
 ```toml
-[mcp_servers.cmux]
+[mcp_servers.cmuxlayer]
 command = "cmuxlayer"
 ```
 
@@ -40,7 +40,7 @@ command = "cmuxlayer"
 ```json
 {
   "mcpServers": {
-    "cmux": {
+    "cmuxlayer": {
       "command": "cmuxlayer"
     }
   }
@@ -169,7 +169,7 @@ The socket client connects to cmux via Unix socket. Auto-reconnects on disconnec
 cmuxLayer requires a running [cmux](https://github.com/manaflow-ai/cmux) instance. Install it first, then start a cmux session before using cmuxLayer.
 
 **Tools not appearing in Codex CLI or T3 Code**
-Restart the client after adding `cmuxlayer` to `~/.codex/config.toml`. If you use a custom Codex home, verify `$CODEX_HOME/config.toml` contains the same `mcp_servers.cmux` entry.
+Restart the client after adding `cmuxlayer` to `~/.codex/config.toml`. If you use a custom Codex home, verify `$CODEX_HOME/config.toml` contains the same `mcp_servers.cmuxlayer` entry.
 
 **Tools not appearing in Claude Code**
 Restart Claude Code after adding the MCP config. Run `claude mcp list` to verify cmuxlayer is connected.

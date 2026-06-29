@@ -147,7 +147,7 @@ export { sanitizeTerminalInput } from "./sanitize.js";
 const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
 const CLAUDE_CHANNEL_INSTRUCTIONS =
-  "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmux agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
+  "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
@@ -3083,7 +3083,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxLayer resolves the current backing surface. WARNING — DO NOT include a bare `@word` (e.g. `@narration-lead`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats `@` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (`narration-lead:`) for pane-to-pane addressing; reserve `@<name>` for collab-file posts where monitors match it. If a literal `@` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
+    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare `@word` (e.g. `@narration-lead`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats `@` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (`narration-lead:`) for pane-to-pane addressing; reserve `@<name>` for collab-file posts where monitors match it. If a literal `@` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
     {
       surface: z.string().describe("Target surface ref"),
       text: z.string().describe("Text to send"),

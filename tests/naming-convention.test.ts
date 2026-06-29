@@ -37,6 +37,14 @@ const FORBIDDEN: Array<{ re: RegExp; why: string }> = [
     why: 'the layer is one word: "cmuxlayer", not "cmux layer"/"cmux.layer"',
   },
   { re: /cmuxMcp/, why: 'use a cmuxlayer-based identifier, not "cmuxMcp"' },
+  {
+    re: /mcp_?servers\.cmux\b/i,
+    why: 'the MCP server key is "cmuxlayer"; config examples must say mcpServers.cmuxlayer / mcp_servers.cmuxlayer',
+  },
+  {
+    re: /mcp__cmux__/,
+    why: 'the tool namespace is "mcp__cmuxlayer__"; the server key was renamed cmux -> cmuxlayer',
+  },
 ];
 
 const SCAN_EXT = new Set([".ts", ".md"]);
