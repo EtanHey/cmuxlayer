@@ -22,7 +22,7 @@ describe("test state isolation", () => {
     const context = createServerContext({ skipAgentLifecycle: true });
     contexts.push(context);
 
-    expect(process.env.VITEST).toBeTruthy();
+    expect(process.env.VITEST).toBe("true");
     expect(context.stateDir).not.toBe(LIVE_STATE_DIR);
     expect(context.stateDir).toContain("cmuxlayer-vitest-state-");
     expect(existsSync(context.stateDir)).toBe(true);
