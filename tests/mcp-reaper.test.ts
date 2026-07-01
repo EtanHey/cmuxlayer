@@ -53,8 +53,7 @@ describe("selectReapablePids", () => {
     ];
 
     expect(selectReapablePids(processes, { minAgeSeconds: 600 })).toEqual([
-      101,
-      105,
+      101, 105,
     ]);
   });
 
@@ -94,8 +93,7 @@ describe("selectReapablePids", () => {
     ];
 
     expect(selectReapablePids(processes, { minAgeSeconds: 600 })).toEqual([
-      201,
-      204,
+      201, 204,
     ]);
   });
 
@@ -121,6 +119,52 @@ describe("selectReapablePids", () => {
         minAgeSeconds: 600,
       }),
     ).toEqual([301]);
+  });
+
+  it("reaps orphaned cmuxlayer node MCP servers even though the path has no -mcp suffix", () => {
+    const processes: ProcessInfo[] = [
+      {
+        // worktree dist form
+        pid: 601,
+        ppid: 1,
+        etimes: 1200,
+        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+      },
+      {
+        // brew Cellar form
+        pid: 602,
+        ppid: 1,
+        etimes: 1200,
+        command:
+          "/opt/homebrew/opt/node/bin/node /opt/homebrew/Cellar/cmuxlayer/0.2.9/libexec/dist/index.js",
+      },
+      {
+        // live: parent still alive -> not an orphan
+        pid: 603,
+        ppid: 4242,
+        etimes: 1200,
+        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+      },
+      {
+        // too young
+        pid: 604,
+        ppid: 1,
+        etimes: 120,
+        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+      },
+      {
+        // launchd-managed -> left alone
+        pid: 605,
+        ppid: 1,
+        etimes: 1200,
+        command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+        launchdManaged: true,
+      },
+    ];
+
+    expect(selectReapablePids(processes, { minAgeSeconds: 600 })).toEqual([
+      601, 602,
+    ]);
   });
 });
 
