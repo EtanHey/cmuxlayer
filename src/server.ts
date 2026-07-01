@@ -955,6 +955,8 @@ export interface CmuxServerContext {
 
 const DEFAULT_CONTROL_HEALTH_INTERVAL_MS = 60_000;
 const MIN_CONTROL_HEALTH_INTERVAL_MS = 5_000;
+const autoVitestStateDirs = new Set<string>();
+let autoVitestStateCleanupRegistered = false;
 
 function resolveControlHealthIntervalMs(input?: number): number {
   const raw =
@@ -971,6 +973,25 @@ function resolveControlHealthIntervalMs(input?: number): number {
   return Math.max(MIN_CONTROL_HEALTH_INTERVAL_MS, Math.floor(raw));
 }
 
+function registerAutoVitestStateDir(stateDir: string): void {
+  autoVitestStateDirs.add(stateDir);
+  if (autoVitestStateCleanupRegistered) {
+    return;
+  }
+  autoVitestStateCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const dir of autoVitestStateDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    autoVitestStateDirs.clear();
+  });
+}
+
+function removeAutoVitestStateDir(stateDir: string): void {
+  autoVitestStateDirs.delete(stateDir);
+  rmSync(stateDir, { recursive: true, force: true });
+}
+
 export function createServerContext(
   opts?: Omit<CreateServerOptions, "context">,
 ): CmuxServerContext {
@@ -984,6 +1005,9 @@ export function createServerContext(
     opts?.stateDir ??
     autoVitestStateDir ??
     join(homedir(), ".local", "state", "cmux-agents");
+  if (autoVitestStateDir) {
+    registerAutoVitestStateDir(autoVitestStateDir);
+  }
   const stateMgr = new StateManager(stateDir);
   const context: CmuxServerContext = {
     client,
@@ -1021,7 +1045,7 @@ export function createServerContext(
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
       if (autoVitestStateDir) {
-        rmSync(autoVitestStateDir, { recursive: true, force: true });
+        removeAutoVitestStateDir(autoVitestStateDir);
       }
     },
   };
@@ -1075,6 +1099,7 @@ function buildLifecycleChannelMeta(
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
+  const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = context.client;
   const stateMgr = context.stateMgr;
@@ -1151,6 +1176,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
       : undefined,
   );
+  if (ownsContext) {
+    const close = server.close.bind(server);
+    server.close = async (): Promise<void> => {
+      try {
+        await close();
+      } finally {
+        context.dispose();
+      }
+    };
+  }
 
   if (enableClaudeChannels) {
     server.server.registerCapabilities({

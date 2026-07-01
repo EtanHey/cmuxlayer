@@ -26,5 +26,10 @@ describe("test state isolation", () => {
     expect(context.stateDir).not.toBe(LIVE_STATE_DIR);
     expect(context.stateDir).toContain("cmuxlayer-vitest-state-");
     expect(existsSync(context.stateDir)).toBe(true);
+
+    const stateDir = context.stateDir;
+    context.dispose();
+    contexts.pop();
+    expect(existsSync(stateDir)).toBe(false);
   });
 });
