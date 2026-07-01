@@ -92,10 +92,7 @@ import {
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
-import {
-  reposEquivalent,
-  resolveWorkspaceRefForRepo,
-} from "./repo-workspace.js";
+import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   collectControlHealth,
@@ -292,7 +289,10 @@ function requireValue(
 }
 
 type ListSurfacesRemoteState =
-  "local" | "connected" | "disconnected" | "unavailable";
+  | "local"
+  | "connected"
+  | "disconnected"
+  | "unavailable";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -1138,7 +1138,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     | null = null;
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleRefreshManagedMetadata:
-    ((agentId?: string) => Promise<void>) | null = null;
+    | ((agentId?: string) => Promise<void>)
+    | null = null;
   const refreshManagedMetadataBestEffort = async (
     agentId?: string,
   ): Promise<void> => {
@@ -1737,8 +1738,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           updateWasSeen &&
           opts.onUpdateShellRelaunch &&
           matchesShellPrompt(screen.text) &&
-          !candidates.some(
-            (candidate) => matchReadyPattern(candidate, screen.text).matched,
+          !candidates.some((candidate) =>
+            matchReadyPattern(candidate, screen.text).matched,
           )
         ) {
           if (updateShellRelaunches >= BOOT_PROMPT_UPDATE_RELAUNCH_MAX) {
@@ -2020,9 +2021,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     try {
       const { workspaces } = await client.listWorkspaces();
       return (
-        workspaces.find((workspace) =>
-          envWorkspaceMatches(workspace, candidate),
-        )?.ref ?? candidate
+        workspaces.find((workspace) => envWorkspaceMatches(workspace, candidate))
+          ?.ref ?? candidate
       );
     } catch {
       return candidate;
@@ -2269,8 +2269,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const resolveSurfaceWorkspace = async (
     surfaceRef: string,
   ): Promise<string | null> =>
-    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ??
-    null;
+    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ?? null;
 
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
@@ -2288,7 +2287,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const closureArtifactVerified =
       overrides?.closure_artifact_verified !== undefined
         ? overrides.closure_artifact_verified
-        : agent.state === "done" && (agent.role ?? "worker") !== "orchestrator"
+        : agent.state === "done" &&
+            (agent.role ?? "worker") !== "orchestrator"
           ? Boolean(agent.task_done_detected_at)
           : null;
     const topology =
@@ -2307,10 +2307,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const parsedScreen =
       overrides?.screen_status === undefined ||
       overrides?.screen_actions === undefined
-        ? await readParsedSurface(
-            agent.surface_id,
-            agent.workspace_id ?? undefined,
-          )
+        ? await readParsedSurface(agent.surface_id, agent.workspace_id ?? undefined)
         : null;
     const screenStatus =
       overrides?.screen_status !== undefined
@@ -2459,10 +2456,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspaceCwdByRef.set(workspace.ref, cwd);
           }
         }
-        const paneByWorkspaceAndRef = new Map<
-          string,
-          Record<string, unknown>
-        >();
+        const paneByWorkspaceAndRef = new Map<string, Record<string, unknown>>();
         for (const { workspaceRef, panes } of panesByWorkspace) {
           for (const pane of panes.panes) {
             paneByWorkspaceAndRef.set(
@@ -2845,7 +2839,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
         let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
         if (bootPromptPath) {
           const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
@@ -2881,10 +2876,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data.role = inferredRole;
         }
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered =
-            isBootPromptDelivered(bootPromptDelivery);
+          data.boot_prompt_delivered = isBootPromptDelivered(
+            bootPromptDelivery,
+          );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
+          data.boot_prompt_submit_verified =
+            bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_split", {
@@ -2972,7 +2969,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result.title = args.title;
         }
         let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
         if (bootPromptPath) {
           const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
@@ -2998,10 +2996,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const data: Record<string, unknown> = { ...result };
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered =
-            isBootPromptDelivered(bootPromptDelivery);
+          data.boot_prompt_delivered = isBootPromptDelivered(
+            bootPromptDelivery,
+          );
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
+          data.boot_prompt_submit_verified =
+            bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_surface", {
@@ -3302,7 +3302,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         let bootPromptDelivery:
-          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+          | Awaited<ReturnType<typeof deliverBootPrompt>>
+          | undefined;
         if (bootPromptPath && launcherCli) {
           bootPromptDelivery = await deliverBootPrompt({
             surface: args.surface,
@@ -3328,8 +3329,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: delivery.submit_verified,
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
-          boot_prompt_submit_verified:
-            bootPromptDelivery?.submit_verified ?? null,
+          boot_prompt_submit_verified: bootPromptDelivery?.submit_verified ?? null,
         };
         return okFormatted(
           formatDelivery("send_command", {
@@ -3687,11 +3687,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         let staleRegistryDoneConsolidated:
-          | {
-              agent_id: string;
-              previous_state: AgentState;
-              done_signal: string;
-            }
+          | { agent_id: string; previous_state: AgentState; done_signal: string }
           | undefined;
         // Liveness guard: never destroy a pane whose agent is still live unless
         // the caller explicitly forces it. This is the safety net for the
@@ -3808,7 +3804,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         let closePolicy:
-          ReturnType<typeof chooseSurfaceClosePolicy> | undefined;
+          | ReturnType<typeof chooseSurfaceClosePolicy>
+          | undefined;
 
         try {
           const identified = args.workspace
@@ -4530,9 +4527,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         model: z
           .string()
           .optional()
-          .describe(
-            "OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default.",
-          ),
+          .describe("OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default."),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
           .describe("CLI tool to launch"),
@@ -4699,7 +4694,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
 
           let bootPromptDelivery:
-            Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+            | Awaited<ReturnType<typeof deliverBootPrompt>>
+            | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
               const deliveryWorkspace = result.workspace_id ?? spawnWorkspace;
@@ -4746,10 +4742,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             const clearBootPromptPending = () => {
-              const record = resolveSpawnRecord(
-                result.agent_id,
-                result.surface_id,
-              );
+              const record = resolveSpawnRecord(result.agent_id, result.surface_id);
               const agentId = record?.agent_id ?? result.agent_id;
               const updated = stateMgr.updateRecord(agentId, {
                 boot_prompt_pending: false,
@@ -4908,7 +4901,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
 
           let bootPromptDelivery:
-            Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+            | Awaited<ReturnType<typeof deliverBootPrompt>>
+            | undefined;
           if (hasPrompt) {
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
@@ -5041,7 +5035,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               auto_archive_on_done: false,
             });
             let bootPromptDelivery:
-              Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+              | Awaited<ReturnType<typeof deliverBootPrompt>>
+              | undefined;
 
             if (hasPrompt) {
               bootPromptDelivery = await deliverBootPrompt({
@@ -5091,9 +5086,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role === "orchestrator"
                 ? ensureMonitorBoot(result.agent_id)
                 : undefined;
-            const topology = currentAgent
-              ? await collectSurfaceTopology()
-              : null;
+            const topology = currentAgent ? await collectSurfaceTopology() : null;
             const health = currentAgent
               ? await evaluateServerAgentHealth(currentAgent, {
                   ...healthTopologyOverrides(currentAgent, topology),
@@ -5284,7 +5277,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const formatted =
             formatAgentState(state) +
             `\nhealth: ${health.status}${
-              health.issues.length > 0 ? ` (${health.issues.join("; ")})` : ""
+              health.issues.length > 0
+                ? ` (${health.issues.join("; ")})`
+                : ""
             }`;
           const payload = { ...toAgentStatePayload(state), health };
           return okFormatted(

@@ -85,7 +85,7 @@ function makeExec(): ExecFn {
       stdout: JSON.stringify({
         workspace: "workspace:1",
         surface: "surface:new",
-        pane: "pane:1",
+        pane: args.includes("new-split") ? "pane:2" : "pane:1",
         title: "",
         type: "terminal",
       }),

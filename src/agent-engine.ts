@@ -4,10 +4,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StateManager } from "./state-manager.js";
+import { dispatch, inboxPath, monitorAlive, type InboxOpts } from "./inbox.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
   AGENT_ENV,
@@ -46,6 +47,7 @@ import {
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
   collectRoleSurfaceIds,
+  deriveColumnIndex,
   inferAgentRole,
   inferRecordRole,
   inferRecordRoleOrNull,
@@ -165,6 +167,7 @@ export interface AgentEngineOptions {
     workspace?: string;
     command: string;
   }) => Promise<void>;
+  inboxOpts?: InboxOpts;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored";
@@ -178,6 +181,7 @@ const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
+const COMPLETION_WAKE_HEARTBEAT_MAX_AGE_MS = 60_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
@@ -229,11 +233,23 @@ interface StopSurfaceClosePolicy {
   collapsePane: boolean;
 }
 
-type TargetStateEvidenceSource = "state" | "transcript" | "screen";
+type TargetStateEvidenceSource = "state" | "transcript" | "screen" | "file";
 type RefreshedTargetStateEvidenceSource = Exclude<
   TargetStateEvidenceSource,
   "state"
 >;
+
+class AgentPlacementVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentPlacementVerificationError";
+  }
+}
+
+export interface WaitForOptions {
+  reportPath?: string;
+  doneMarker?: string;
+}
 
 // AIDEV-NOTE: Cursor has no distinct "done" lifecycle state — it settles to
 // "idle" when a task completes. A wait_for(target="done") on a Cursor agent
@@ -369,6 +385,13 @@ interface AgentEngineClient {
     value: number,
     opts?: { label?: string; workspace?: string; surface?: string },
   ): Promise<void>;
+  notify?(opts?: {
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    workspace?: string;
+    surface?: string;
+  }): Promise<void>;
   newSplit(
     direction: string,
     opts?: {
@@ -517,19 +540,22 @@ const REPO_LAUNCHER_ALIASES: Record<string, string[]> = {
  *
  * AIDEV-NOTE: R-039(cmuxlayer-code: launcher-name resolution) is distinct from weave-registry R-038 (wait_for(done) transcript ground-truth) and weave-registry R-039 (delta-wave coverage).
  *
- * cmuxlayer cannot know which form a given repo registered, so we generate
- * both and probe in order. Candidate #1 preserves today's behavior (verbatim
- * dir name); candidate #2 matches the registry's primary wrapper.
+ * cmuxlayer cannot know which form a legacy repo registered, so we generate
+ * both and probe in order. Candidate #1 is the repoGolem primary wrapper
+ * (lowercased, hyphen-stripped); the verbatim hyphenated name is only a
+ * compatibility fallback. This keeps `skill-creator` on `skillcreatorCursor`
+ * instead of trying the wrong visible launcher name first.
  */
 export function launcherNameCandidates(
   repo: string,
   suffix: LauncherSuffix,
 ): string[] {
   const safeRepo = sanitizeRepoName(repo);
+  const canonicalRepoGolemPrefix = safeRepo.replace(/-/g, "").toLowerCase();
   const prefixes = [
-    safeRepo,
-    safeRepo.replace(/-/g, "").toLowerCase(),
+    canonicalRepoGolemPrefix,
     ...(REPO_LAUNCHER_ALIASES[safeRepo] ?? []),
+    safeRepo,
   ];
   return [...new Set(prefixes)].map((prefix) => `${prefix}${suffix}`);
 }
@@ -659,6 +685,7 @@ export class AgentEngine {
     workspace?: string,
   ) => RoleSurfaceIds;
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
+  private inboxOpts?: InboxOpts;
   private sessionIdentityResolver: SessionIdentityResolver;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -684,6 +711,7 @@ export class AgentEngine {
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
+    this.inboxOpts = opts?.inboxOpts;
     this.sessionIdentityResolver =
       opts?.sessionIdentityResolver ??
       ((agent) => this.findTranscriptSessionIdentity(agent));
@@ -745,6 +773,45 @@ export class AgentEngine {
 
   private hasRecordedOutputDoneEvidence(agent: AgentRecord): boolean {
     return !!agent.task_done_detected_at;
+  }
+
+  private hasReportDoneEvidence(opts?: WaitForOptions): boolean {
+    if (!opts?.reportPath || !opts.doneMarker) {
+      return false;
+    }
+
+    try {
+      const lines = readFileSync(opts.reportPath, "utf8")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      return lines.at(-1) === opts.doneMarker;
+    } catch {
+      return false;
+    }
+  }
+
+  private markAgentDoneFromEvidence(
+    agent: AgentRecord,
+    opts?: WaitForOptions,
+  ): AgentRecord {
+    const marked = this.stateMgr.updateRecord(agent.agent_id, {
+      task_done_candidate_at: null,
+      task_done_detected_at: new Date().toISOString(),
+      task_done_evidence_source: opts?.reportPath ? "file" : "screen",
+      task_done_evidence:
+        opts?.reportPath && opts.doneMarker
+          ? `${opts.reportPath}:${opts.doneMarker}`
+          : null,
+      ...(agent.boot_prompt_pending ? { boot_prompt_pending: false } : {}),
+    });
+    this.registry.set(agent.agent_id, marked);
+    const updated =
+      marked.state === "done"
+        ? marked
+        : this.stateMgr.transition(agent.agent_id, "done");
+    this.registry.set(agent.agent_id, updated);
+    return updated;
   }
 
   private loadGroundTruthSession(
@@ -823,10 +890,12 @@ export class AgentEngine {
   private async getTargetStateEvidenceSource(
     agent: AgentRecord,
     targetState: AgentState,
+    opts?: WaitForOptions,
   ): Promise<TargetStateEvidenceSource | null> {
     if (isCursorTerminalIdleTarget(agent, targetState)) return "state";
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
+    if (this.hasReportDoneEvidence(opts)) return "file";
     if (await this.hasGroundTruthDone(agent)) return "transcript";
     return this.hasRecordedOutputDoneEvidence(agent) ||
       (await this.hasCurrentOutputDoneEvidence(agent))
@@ -838,6 +907,7 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
     waitForReadyPatternMatches: Map<string, number>,
+    opts?: WaitForOptions,
   ): Promise<{
     agent: AgentRecord;
     source?: RefreshedTargetStateEvidenceSource;
@@ -851,6 +921,16 @@ export class AgentEngine {
     }
     if (!this.requiresOutputDoneEvidence(targetState)) return { agent };
     if (TERMINAL_STATES.has(agent.state)) return { agent };
+    if (this.hasReportDoneEvidence(opts)) {
+      try {
+        return {
+          agent: this.markAgentDoneFromEvidence(agent, opts),
+          source: "file",
+        };
+      } catch {
+        return { agent };
+      }
+    }
     return { agent: (await this.maybeMarkTaskDone(agent, {})).agent };
   }
 
@@ -964,8 +1044,11 @@ export class AgentEngine {
       workspace ?? parentWorkspace,
       context?.repo,
     );
+    let priorFocus: string | null = null;
     if (workspace) {
       try {
+        const current = await this.currentFocusedWorkspace();
+        priorFocus = current && current !== workspace ? current : null;
         await this.client.selectWorkspace(workspace);
       } catch {
         // Best-effort: the workspace may already be focused, or the client may
@@ -1030,7 +1113,7 @@ export class AgentEngine {
           childWorkerSurfaceIds,
         },
       );
-      return placement.kind === "surface"
+      const result = placement.kind === "surface"
         ? this.client.newSurface({
             pane: placement.pane,
             type: "terminal",
@@ -1041,14 +1124,128 @@ export class AgentEngine {
             workspace,
             type: "terminal",
           });
+      const surface = await result;
+      if (
+        placement.kind === "split" &&
+        (await this.workerSplitTabbedIntoSinglePane(
+          surface,
+          workspace,
+          placement.pane,
+        ))
+      ) {
+        await this.client.closeSurface(surface.surface, { workspace });
+        const retry = await this.client.newSplit("right", {
+          workspace,
+          type: "terminal",
+        });
+        if (
+          await this.workerSplitTabbedIntoSinglePane(
+            retry,
+            workspace,
+            placement.pane,
+          )
+        ) {
+          try {
+            await this.client.closeSurface(retry.surface, { workspace });
+          } catch {
+            // The spawn must still fail; the retry surface is known bad.
+          }
+          throw new AgentPlacementVerificationError(
+            `Worker split verification failed: ${retry.surface} remained tabbed into a single-pane left/lead layout after retry`,
+          );
+        }
+        return retry;
+      }
+      return surface;
     } catch (error) {
-      if (isAgentRoleInferenceError(error)) {
+      if (
+        isAgentRoleInferenceError(error) ||
+        error instanceof AgentPlacementVerificationError
+      ) {
         throw error;
       }
       return this.client.newSplit("right", {
         workspace,
         type: "terminal",
       });
+    } finally {
+      if (priorFocus) {
+        try {
+          await this.client.selectWorkspace(priorFocus);
+        } catch {
+          // Focus restoration is best-effort; spawn routing still uses explicit workspace refs.
+        }
+      }
+    }
+  }
+
+  private async currentFocusedWorkspace(): Promise<string | null> {
+    try {
+      const { workspaces } = await this.client.listWorkspaces();
+      return workspaces.find((workspace) => workspace.selected)?.ref ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async workerSplitTabbedIntoSinglePane(
+    surface: CmuxNewSplitResult | CmuxNewSurfaceResult,
+    workspace?: string,
+    sourcePane?: string,
+  ): Promise<boolean> {
+    try {
+      if (sourcePane && surface.pane === sourcePane) {
+        return true;
+      }
+
+      const panes = await this.client.listPanes({ workspace });
+      if (panes.panes.length === 0) {
+        return false;
+      }
+
+      if (
+        panes.panes.length === 1 &&
+        panes.panes[0].surface_refs.includes(surface.surface) &&
+        panes.panes[0].surface_refs.length > 1
+      ) {
+        return true;
+      }
+
+      const columnCount = new Set(deriveColumnIndex(panes.panes).values()).size;
+      if (columnCount > 1) {
+        return false;
+      }
+
+      const paneFromRefs = panes.panes.find((pane) =>
+        pane.surface_refs.includes(surface.surface),
+      );
+      if (paneFromRefs && paneFromRefs.surface_refs.length > 1) {
+        return true;
+      }
+
+      const rawPaneSurfaces = await Promise.all(
+        panes.panes.map(async (pane) => {
+          const ps = await this.client.listPaneSurfaces({
+            workspace,
+            pane: pane.ref,
+          });
+          return ps.pane_ref ? ps : { ...ps, pane_ref: pane.ref };
+        }),
+      );
+      const paneSurfaces = partitionPaneSurfacesByMembership(
+        panes.panes,
+        rawPaneSurfaces,
+        {
+          workspace_ref: panes.workspace_ref ?? workspace,
+          window_ref: panes.window_ref,
+        },
+      );
+      const containingPane = paneSurfaces.find((group) =>
+        group.surfaces.some((entry) => entry.ref === surface.surface),
+      );
+      return (containingPane?.surfaces.length ?? 0) > 1;
+    } catch {
+      return false;
     }
   }
 
@@ -1164,16 +1361,24 @@ export class AgentEngine {
         this.registry.rename(previousAgentId, collisionAgentId, updated);
         return updated;
       }
-      const sessionPath =
-        identity.path ?? existingFinal.cli_session_path ?? null;
-      const canonicalFinal =
-        existingFinal.cli_session_id === identity.session_id &&
-        existingFinal.cli_session_path === sessionPath
-          ? existingFinal
-          : this.stateMgr.updateRecord(finalAgentId, {
-              cli_session_id: identity.session_id,
-              cli_session_path: sessionPath,
-            });
+      if (existingFinal.cli_session_id === identity.session_id) {
+        updated = this.stateMgr.updateRecord(updated.agent_id, {
+          cli_session_id: identity.session_id,
+          cli_session_path:
+            identity.path ??
+            updated.cli_session_path ??
+            existingFinal.cli_session_path ??
+            null,
+          cli_session_reused_from_agent_id: existingFinal.agent_id,
+        });
+        this.registry.set(updated.agent_id, updated);
+        return updated;
+      }
+
+      const canonicalFinal = this.stateMgr.updateRecord(finalAgentId, {
+        cli_session_id: identity.session_id,
+        cli_session_path: identity.path ?? existingFinal.cli_session_path ?? null,
+      });
       const index = this.stateMgr.getSurfaceSessionIndex();
       index.removeAgent(updated.agent_id);
       index.persistRecord(canonicalFinal);
@@ -1237,6 +1442,13 @@ export class AgentEngine {
     } catch {
       return agent;
     }
+  }
+
+  async captureBootSession(agentId: string): Promise<AgentRecord | null> {
+    const agent = this.registry.get(agentId);
+    if (!agent) return null;
+    const captured = await this.maybeCaptureBootSessionId(agent, {});
+    return captured;
   }
 
   private async maybeMarkBootReady(
@@ -1355,6 +1567,8 @@ export class AgentEngine {
         const marked = this.stateMgr.updateRecord(agent.agent_id, {
           task_done_candidate_at: null,
           task_done_detected_at: new Date().toISOString(),
+          task_done_evidence_source: "transcript",
+          task_done_evidence: agent.cli_session_path ?? agent.cli_session_id,
           ...(agent.boot_prompt_pending ? { boot_prompt_pending: false } : {}),
         });
         this.registry.set(agent.agent_id, marked);
@@ -1394,6 +1608,8 @@ export class AgentEngine {
       const marked = this.stateMgr.updateRecord(agent.agent_id, {
         task_done_candidate_at: null,
         task_done_detected_at: new Date().toISOString(),
+        task_done_evidence_source: "screen",
+        task_done_evidence: parseScreen(screen.text).done_signal,
         ...(agent.boot_prompt_pending ? { boot_prompt_pending: false } : {}),
       });
       this.registry.set(agent.agent_id, marked);
@@ -1576,7 +1792,97 @@ export class AgentEngine {
       // Ignore Claude channel push failures; logs and sidebar state remain canonical.
     }
 
+    if (event === "done") {
+      await this.notifyParentCompletion(agent);
+    }
+
     this.loggedEvents.add(eventKey);
+  }
+
+  private async notifyParentCompletion(agent: AgentRecord): Promise<void> {
+    if (!agent.parent_agent_id || !agent.task_done_detected_at) {
+      return;
+    }
+    if (agent.completion_notification_sent_at) {
+      return;
+    }
+
+    const parentId = agent.parent_agent_id;
+    const parent = this.registry.get(parentId);
+    const task = [
+      `Worker ${agent.agent_id} completed.`,
+      `state=${agent.state}`,
+      `done_at=${agent.task_done_detected_at}`,
+      `surface=${agent.surface_id}`,
+      `repo=${agent.repo}`,
+      `task=${agent.task_summary}`,
+    ].join(" ");
+
+    try {
+      const liveInbox = monitorAlive(
+        parentId,
+        COMPLETION_WAKE_HEARTBEAT_MAX_AGE_MS,
+        this.inboxOpts,
+      );
+      const msg = dispatch(
+        parentId,
+        {
+          from: agent.agent_id,
+          to: parentId,
+          tag: "completion",
+          task,
+        },
+        this.inboxOpts,
+      );
+
+      if (liveInbox) {
+        this.markCompletionNotification(agent, "inbox_monitor");
+        return;
+      }
+
+      if (!this.client.notify) {
+        this.markCompletionNotificationFailure(
+          agent,
+          `parent inbox monitor stale/absent; queued ${msg.id} at ${inboxPath(parentId, this.inboxOpts)} but cmux notify is unavailable`,
+        );
+        return;
+      }
+
+      await this.client.notify({
+        title: "Worker complete",
+        body: `${agent.agent_id} reached TASK_DONE; lead ${parentId} should verify output.`,
+        workspace: parent?.workspace_id ?? agent.workspace_id ?? undefined,
+        surface: parent?.surface_id,
+      });
+      this.markCompletionNotification(agent, "cmux_notify");
+    } catch (error) {
+      this.markCompletionNotificationFailure(
+        agent,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private markCompletionNotification(
+    agent: AgentRecord,
+    channel: string,
+  ): void {
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      completion_notification_sent_at: new Date().toISOString(),
+      completion_notification_channel: channel,
+      completion_notification_error: null,
+    });
+    this.registry.set(agent.agent_id, updated);
+  }
+
+  private markCompletionNotificationFailure(
+    agent: AgentRecord,
+    error: string,
+  ): void {
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      completion_notification_error: error,
+    });
+    this.registry.set(agent.agent_id, updated);
   }
 
   /**
@@ -2072,6 +2378,7 @@ export class AgentEngine {
     agentId: string,
     targetState: AgentState,
     timeoutMs: number,
+    opts?: WaitForOptions,
   ): Promise<WaitResult> {
     const start = Date.now();
 
@@ -2082,17 +2389,27 @@ export class AgentEngine {
     }
 
     // Retroactive check — already in target state with required evidence?
-    const initialEvidence = await this.getTargetStateEvidenceSource(
+    const initialRefreshed = await this.refreshTargetStateEvidence(
       initial,
       targetState,
+      new Map(),
+      opts,
+    );
+    const initialAgent = initialRefreshed.agent;
+    const initialEvidence = await this.getTargetStateEvidenceSource(
+      initialAgent,
+      targetState,
+      opts,
     );
     if (initialEvidence) {
       return {
         matched: true,
-        state: initial.state,
+        state: initialAgent.state,
         elapsed: Date.now() - start,
-        source: initialEvidence === "state" ? "immediate" : initialEvidence,
-        agent: toPublicAgent(initial),
+        source:
+          initialRefreshed.source ??
+          (initialEvidence === "state" ? "immediate" : initialEvidence),
+        agent: toPublicAgent(initialAgent),
       };
     }
 
@@ -2165,12 +2482,14 @@ export class AgentEngine {
           current,
           targetState,
           waitForReadyPatternMatches,
+          opts,
         );
         current = refreshed.agent;
 
         const evidenceSource = await this.getTargetStateEvidenceSource(
           current,
           targetState,
+          opts,
         );
         if (evidenceSource) {
           clearInterval(checkInterval);

@@ -16,6 +16,7 @@ export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 export type AgentRole = "orchestrator" | "ic" | "worker";
+export type TaskDoneEvidenceSource = "transcript" | "screen" | "file";
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
@@ -31,6 +32,7 @@ export interface AgentRecord {
   cli: CliType;
   cli_session_id: string | null;
   cli_session_path?: string | null;
+  cli_session_reused_from_agent_id?: string | null;
   launcher_name?: string | null;
   task_summary: string;
   pid: number | null;
@@ -45,6 +47,8 @@ export interface AgentRecord {
   auto_archive_on_done?: boolean;
   task_done_candidate_at?: string | null;
   task_done_detected_at?: string | null;
+  task_done_evidence_source?: TaskDoneEvidenceSource | null;
+  task_done_evidence?: string | null;
   deletion_intent: boolean;
   // Quality fields (Task 19)
   quality: AgentQuality;
@@ -57,6 +61,11 @@ export interface AgentRecord {
   boot_prompt_pending?: boolean;
   // File-backed goal contract for superseded/long-running collab tasks
   goal_file?: string | null;
+  // Parent/lead completion wake evidence. A child TASK_DONE without one of
+  // these fields is a health failure because the owning lead may stay asleep.
+  completion_notification_sent_at?: string | null;
+  completion_notification_channel?: string | null;
+  completion_notification_error?: string | null;
   // Launch context for worktree/profile-aware spawns
   launch_cwd?: string | null;
   mcp_profile?: string | null;
@@ -188,6 +197,7 @@ export interface WaitResult {
     | "evidence"
     | "transcript"
     | "screen"
+    | "file"
     | "timeout";
   agent: PublicAgent | null;
   error?: string;

@@ -197,6 +197,16 @@ function isWorkerMajorityPane(layout: PaneLayout): boolean {
   return layout.workerCount > 0 && layout.workerCount > nonWorkerCount;
 }
 
+function isExplicitWorkerMajorityPane(layout: PaneLayout): boolean {
+  const explicitWorkerCount = layout.surfaces.filter(
+    (surface) => roleFromLauncherLabel(surface.title) === "worker",
+  ).length;
+  const nonExplicitWorkerCount = layout.surfaces.length - explicitWorkerCount;
+  return (
+    explicitWorkerCount > 0 && explicitWorkerCount > nonExplicitWorkerCount
+  );
+}
+
 function isLeadMajorityPane(layout: PaneLayout): boolean {
   const leadCount = layout.orchestratorCount + layout.icCount;
   const nonLeadCount = layout.surfaces.length - leadCount;
@@ -454,7 +464,9 @@ export function chooseAgentSpawnPlacement(
 
   if (role === "orchestrator") {
     const leftLeadPane =
-      leftPane && !isWorkerMajorityPane(leftPane) ? leftPane : undefined;
+      leftPane && !isExplicitWorkerMajorityPane(leftPane)
+        ? leftPane
+        : undefined;
     const orchestratorPane =
       leftLeadPane ??
       leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane));
@@ -548,6 +560,13 @@ export function chooseAgentSpawnPlacement(
         pane: parentPane.pane.ref,
       };
     }
+  }
+
+  if (columnCount < 2) {
+    const seedPane = rightmostByColumn(layouts);
+    return seedPane
+      ? { kind: "split", direction: "right", pane: seedPane.pane.ref }
+      : { kind: "split", direction: "right" };
   }
 
   // Dock into the rightmost pane workers already own — including one that

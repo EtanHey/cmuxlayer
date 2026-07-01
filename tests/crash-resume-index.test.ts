@@ -166,7 +166,7 @@ describe("surface session crash-resume index", () => {
     }
   });
 
-  it("removes the pending index entry when the final agent already exists", async () => {
+  it("keeps the pending index entry when the final agent already exists for the same session", async () => {
     const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
     const sessionPath = "/tmp/codex-session.jsonl";
     const finalAgentId = "brainlayerCodex-019e942c";
@@ -218,28 +218,116 @@ describe("surface session crash-resume index", () => {
       const rawIndex = JSON.parse(
         readFileSync(join(TEST_DIR, "surface-session-index.json"), "utf-8"),
       );
-      expect(rawIndex.by_agent_id[pendingAgentId]).toBeUndefined();
+      expect(rawIndex.by_agent_id[pendingAgentId]).toMatchObject({
+        agent_id: pendingAgentId,
+        cli_session_id: sessionId,
+        surface_id: "surface:pending",
+      });
       expect(rawIndex.by_agent_id[finalAgentId]).toMatchObject({
         agent_id: finalAgentId,
         cli_session_id: sessionId,
       });
       expect(engine.getAgentState(pendingAgentId)).toMatchObject({
-        agent_id: finalAgentId,
+        agent_id: pendingAgentId,
         cli_session_id: sessionId,
         cli_session_path: sessionPath,
+        cli_session_reused_from_agent_id: finalAgentId,
       });
       expect(engine.getAgentState(finalAgentId)).toMatchObject({
         agent_id: finalAgentId,
         cli_session_id: sessionId,
-        cli_session_path: sessionPath,
+        cli_session_path: null,
       });
-      expect(stateMgr.readState(pendingAgentId)).toBeNull();
+      expect(stateMgr.readState(pendingAgentId)).toMatchObject({
+        agent_id: pendingAgentId,
+      });
     } finally {
       engine.dispose();
     }
   });
 
-  it("preserves an existing final session path when duplicate capture has none", async () => {
+  it("keeps a fresh managed id when a new spawn captures an already-managed session id", async () => {
+    const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
+    const sessionPath = "/tmp/codex-session.jsonl";
+    const finalAgentId = "brainlayerCodex-019e942c";
+    const pendingAgentId = "brainlayerCodex-pending-reused";
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: finalAgentId,
+        surface_id: "surface:final",
+        workspace_id: "workspace:old",
+        cli_session_id: sessionId,
+        cli_session_path: "/tmp/old-session.jsonl",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingAgentId,
+        surface_id: "surface:pending",
+        workspace_id: "workspace:old",
+      }),
+    );
+    const registry = new AgentRegistry(stateMgr, async () => [
+      {
+        ref: "surface:final",
+        title: "",
+        type: "terminal",
+        index: 0,
+        selected: false,
+      },
+      {
+        ref: "surface:pending",
+        title: "",
+        type: "terminal",
+        index: 1,
+        selected: true,
+      },
+    ]);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: (agent) =>
+        agent.agent_id === pendingAgentId
+          ? { session_id: sessionId, path: sessionPath }
+          : null,
+    });
+
+    try {
+      await registry.reconstitute();
+      await engine.runSweep();
+
+      const reusedAgent = engine.getAgentState(pendingAgentId);
+      expect(reusedAgent).toMatchObject({
+        agent_id: pendingAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+        cli_session_reused_from_agent_id: finalAgentId,
+      });
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        cli_session_path: "/tmp/old-session.jsonl",
+      });
+
+      const rawIndex = JSON.parse(
+        readFileSync(join(TEST_DIR, "surface-session-index.json"), "utf-8"),
+      );
+      expect(rawIndex.by_agent_id[pendingAgentId]).toMatchObject({
+        agent_id: pendingAgentId,
+        cli_session_id: sessionId,
+        surface_id: "surface:pending",
+      });
+      expect(rawIndex.by_agent_id[finalAgentId]).toMatchObject({
+        agent_id: finalAgentId,
+        cli_session_id: sessionId,
+        surface_id: "surface:final",
+      });
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("copies an existing final session path onto a distinct reused-session agent when duplicate capture has none", async () => {
     const sessionId = "019e942c-0dda-76f2-bbca-0ef6e484d1c9";
     const existingSessionPath = "/tmp/existing-session.jsonl";
     const finalAgentId = "brainlayerCodex-019e942c";
@@ -293,8 +381,10 @@ describe("surface session crash-resume index", () => {
         cli_session_path: existingSessionPath,
       });
       expect(engine.getAgentState(pendingAgentId)).toMatchObject({
-        agent_id: finalAgentId,
+        agent_id: pendingAgentId,
+        cli_session_id: sessionId,
         cli_session_path: existingSessionPath,
+        cli_session_reused_from_agent_id: finalAgentId,
       });
     } finally {
       engine.dispose();

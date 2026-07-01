@@ -3,12 +3,13 @@
  * Tests syncSidebar(), runSweep(), and lifecycle log events.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { readInbox, writeHeartbeat } from "../src/inbox.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -40,6 +41,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
     clearStatus: vi.fn().mockResolvedValue(undefined),
     setProgress: vi.fn().mockResolvedValue(undefined),
+    notify: vi.fn().mockResolvedValue(undefined),
     clearProgress: vi.fn().mockResolvedValue(undefined),
     identify: vi.fn().mockResolvedValue({}),
     browser: vi.fn().mockResolvedValue({}),
@@ -82,6 +84,7 @@ describe("Sidebar Sync", () => {
   let mockClient: CmuxClient;
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
+  const inboxOpts = { baseDir: join(TEST_DIR, "inboxes") };
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -93,6 +96,7 @@ describe("Sidebar Sync", () => {
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
+      inboxOpts,
     });
   });
 
@@ -287,6 +291,138 @@ describe("Sidebar Sync", () => {
         state: "done",
       }),
     );
+  });
+
+  it("writes child completion to a live parent inbox monitor", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "lead",
+        state: "ready",
+        surface_id: "surface:lead",
+        workspace_id: "workspace:7",
+        role: "orchestrator",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "child",
+        state: "done",
+        surface_id: "surface:child",
+        workspace_id: "workspace:7",
+        parent_agent_id: "lead",
+        spawn_depth: 1,
+        role: "worker",
+        task_done_detected_at: "2026-06-27T08:45:29.000Z",
+      }),
+    );
+    writeHeartbeat("lead", inboxOpts);
+    liveSurfaces = [makeSurface("surface:lead"), makeSurface("surface:child")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const updated = engine.getAgentState("child");
+    expect(updated).toMatchObject({
+      completion_notification_channel: "inbox_monitor",
+      completion_notification_sent_at: expect.any(String),
+      completion_notification_error: null,
+    });
+    const messages = readInbox("lead", inboxOpts);
+    expect(messages.at(-1)).toMatchObject({
+      from: "child",
+      to: "lead",
+      tag: "completion",
+    });
+    expect(messages.at(-1)?.task).toContain("Worker child completed.");
+    expect((mockClient as any).notify).not.toHaveBeenCalled();
+  });
+
+  it("falls back to cmux notify when the parent inbox monitor is stale", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "lead",
+        state: "ready",
+        surface_id: "surface:lead",
+        workspace_id: "workspace:7",
+        role: "orchestrator",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "child",
+        state: "done",
+        surface_id: "surface:child",
+        workspace_id: "workspace:7",
+        parent_agent_id: "lead",
+        spawn_depth: 1,
+        role: "worker",
+        task_done_detected_at: "2026-06-27T08:45:29.000Z",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead"), makeSurface("surface:child")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect((mockClient as any).notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Worker complete",
+        workspace: "workspace:7",
+        surface: "surface:lead",
+      }),
+    );
+    expect(engine.getAgentState("child")).toMatchObject({
+      completion_notification_channel: "cmux_notify",
+      completion_notification_sent_at: expect.any(String),
+      completion_notification_error: null,
+    });
+  });
+
+  it("records missing completion notification when no live inbox or notify fallback exists", async () => {
+    mockClient = makeMockClient({ notify: undefined as any });
+    const surfaceProvider = async () => liveSurfaces;
+    const registry = new AgentRegistry(stateMgr, surfaceProvider);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts,
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "lead",
+        state: "ready",
+        surface_id: "surface:lead",
+        workspace_id: "workspace:7",
+        role: "orchestrator",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "child",
+        state: "done",
+        surface_id: "surface:child",
+        workspace_id: "workspace:7",
+        parent_agent_id: "lead",
+        spawn_depth: 1,
+        role: "worker",
+        task_done_detected_at: "2026-06-27T08:45:29.000Z",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead"), makeSurface("surface:child")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const updated = engine.getAgentState("child");
+    expect(updated?.completion_notification_sent_at ?? null).toBeNull();
+    expect(updated?.completion_notification_error).toContain(
+      "parent inbox monitor stale/absent",
+    );
+    const rawState = readFileSync(
+      join(TEST_DIR, "child", "state.json"),
+      "utf8",
+    );
+    expect(rawState).toContain("completion_notification_error");
   });
 
   it("logs error event when agent enters error state", async () => {

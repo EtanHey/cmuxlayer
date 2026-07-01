@@ -45,10 +45,17 @@ const AGENT_TOOLS = [
   "my_agents",
 ] as const;
 
-function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
+function makeLifecycleExec(opts?: {
+  closeKeepsSurface?: boolean;
+  bootPromptSubmitFailuresBeforeWorking?: number;
+  cursorBootPromptClearsToIdle?: boolean;
+}): ExecFn {
   let readyText = "What can I help you with?\n>";
   let surfaceLive = true;
   let promptPending = false;
+  let pendingPromptText = "";
+  let promptSubmitFailuresRemaining =
+    opts?.bootPromptSubmitFailuresBeforeWorking ?? 0;
   let activeCli: "claude" | "codex" | "cursor" = "claude";
   const workingText = () => {
     if (activeCli === "codex") {
@@ -69,8 +76,16 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {
-        readyText = workingText();
-        promptPending = false;
+        if (promptSubmitFailuresRemaining > 0) {
+          promptSubmitFailuresRemaining -= 1;
+        } else {
+          readyText =
+            activeCli === "cursor" && opts?.cursorBootPromptClearsToIdle
+              ? "cursor> "
+              : workingText();
+          promptPending = false;
+          pendingPromptText = "";
+        }
       }
       return { stdout: "{}", stderr: "" };
     }
@@ -93,6 +108,7 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
         !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
       ) {
         promptPending = true;
+        pendingPromptText = text;
       }
     }
 
@@ -161,7 +177,9 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: readyText,
+          text: promptPending
+            ? `${readyText}\n${pendingPromptText}`
+            : readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -173,7 +191,7 @@ function makeLifecycleExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       stdout: JSON.stringify({
         workspace: "ws:1",
         surface: "surface:new",
-        pane: "pane:1",
+        pane: args.includes("new-split") ? "pane:2" : "pane:1",
         title: "",
         type: "terminal",
       }),
@@ -326,6 +344,19 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
+    expect(parsed.spawn_lifecycle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ step: "create_surface", status: "complete" }),
+        expect.objectContaining({ step: "register_agent", status: "complete" }),
+        expect.objectContaining({ step: "focus_init", status: "complete" }),
+        expect.objectContaining({ step: "read_ready", status: "complete" }),
+        expect.objectContaining({ step: "send_goal", status: "complete" }),
+        expect.objectContaining({
+          step: "verify_accepted",
+          status: "complete",
+        }),
+      ]),
+    );
     expect(parsed.health).toMatchObject({
       status: "unhealthy",
       issue_codes: expect.arrayContaining([
@@ -342,6 +373,99 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.auto_archive_on_done).toBe(false);
+  });
+
+  it("spawn_agent records boot prompt submit recovery in lifecycle evidence", async () => {
+    mockExec = makeLifecycleExec({ bootPromptSubmitFailuresBeforeWorking: 1 });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "",
+        cli: "codex",
+        prompt: "Say RECOVERY_OK and stop.",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(parsed.boot_prompt_retry_count).toBe(1);
+    expect(parsed.spawn_lifecycle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          step: "verify_accepted",
+          status: "complete",
+          evidence: expect.stringContaining("retry_count=1"),
+        }),
+      ]),
+    );
+  });
+
+  it("spawn_agent accepts Cursor boot prompt delivery when Enter clears back to idle", async () => {
+    mockExec = makeLifecycleExec({ cursorBootPromptClearsToIdle: true });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "skill-creator",
+        cli: "cursor",
+        role: "worker",
+        workspace: "workspace:1",
+        force_new: true,
+        prompt: "Write reports/cursor-01.md and finish.",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(parsed.spawn_lifecycle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          step: "verify_accepted",
+          status: "complete",
+          evidence: expect.stringContaining("submit_verified=true"),
+        }),
+      ]),
+    );
+  });
+
+  it("spawn_agent rejects Cursor boot prompt delivery when submitted text stays pending", async () => {
+    mockExec = makeLifecycleExec({
+      bootPromptSubmitFailuresBeforeWorking: Number.MAX_SAFE_INTEGER,
+    });
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "skill-creator",
+        cli: "cursor",
+        role: "worker",
+        workspace: "workspace:1",
+        force_new: true,
+        prompt: "Write reports/cursor-01.md and finish.",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain(
+      "Enter submit could not be verified for surface:new within 2000ms",
+    );
+    expect(parsed.boot_prompt_delivered).not.toBe(true);
   });
 
   it("spawn_agent inherits the selected workspace when workspace is omitted", async () => {
@@ -438,6 +562,34 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.workspace_id).toBe("workspace:1");
     expect(calls).toContain("spawn:workspace:1");
     expect(calls).not.toContain("spawn:workspace:5");
+  });
+
+  it("spawn_agent marks goal-delivery lifecycle steps skipped when no boot prompt is requested", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.spawn_lifecycle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ step: "read_ready", status: "skipped" }),
+        expect.objectContaining({ step: "send_goal", status: "skipped" }),
+        expect.objectContaining({
+          step: "verify_accepted",
+          status: "skipped",
+        }),
+      ]),
+    );
   });
 
   it("spawn_agent prefers the caller pane workspace over the selected workspace when workspace is omitted", async () => {
@@ -554,6 +706,143 @@ describe("agent lifecycle tool handlers", () => {
         delete process.env.CMUX_TAB_ID;
       } else {
         process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
+  it("spawn_agent uses the caller surface workspace from identify before focused workspace", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    const previousSurfaceId = process.env.CMUX_SURFACE_ID;
+    delete process.env.CMUX_WORKSPACE_ID;
+    delete process.env.CMUX_TAB_ID;
+    process.env.CMUX_SURFACE_ID = "surface:voicelayer-lead";
+
+    try {
+      const calls: string[] = [];
+      const mockClient = {
+        createWorkspace: vi.fn(),
+        selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+          calls.push(`select:${workspace}`);
+        }),
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:7",
+              title: "VoiceLayer",
+              selected: false,
+              current_directory: "/Users/etanheyman/Gits/voicelayer",
+            },
+            {
+              id: "selected-workspace-uuid",
+              ref: "workspace:1",
+              title: "Other Focused Workspace",
+              selected: true,
+              current_directory: "/Users/etanheyman/Gits/orchestrator",
+            },
+          ],
+        }),
+        identify: vi.fn().mockResolvedValue({
+          caller: {
+            workspace_ref: "workspace:7",
+            surface_ref: "surface:voicelayer-lead",
+            pane_ref: "pane:lead",
+          },
+          focused: {
+            workspace_ref: "workspace:1",
+            surface_ref: "surface:other",
+            pane_ref: "pane:other",
+          },
+        }),
+        listPanes: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          panes: [],
+        })),
+        listPaneSurfaces: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        })),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
+          calls.push(`spawn:${opts.workspace}`);
+          return {
+            workspace: opts.workspace,
+            surface: "surface:child",
+            pane: "pane:child",
+            title: "",
+            type: "terminal",
+          };
+        }),
+        newSurface: vi.fn(),
+        send: vi.fn().mockResolvedValue(undefined),
+        sendKey: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:child",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+        log: vi.fn().mockResolvedValue(undefined),
+        setStatus: vi.fn().mockResolvedValue(undefined),
+        clearStatus: vi.fn().mockResolvedValue(undefined),
+        setProgress: vi.fn().mockResolvedValue(undefined),
+        closeSurface: vi.fn().mockResolvedValue(undefined),
+        listSurfaces: vi.fn().mockResolvedValue([
+          {
+            ref: "surface:child",
+            title: "voicelayerCodex",
+            type: "terminal",
+            index: 0,
+            selected: true,
+            workspace_ref: "workspace:7",
+          },
+        ]),
+        browser: vi.fn().mockResolvedValue({}),
+      };
+      const server = createTrackedServer({
+        client: mockClient as any,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await tool.handler(
+        {
+          repo: "voicelayer",
+          model: "gpt-5.5",
+          cli: "codex",
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.workspace_id).toBe("workspace:7");
+      expect(calls).toContain("spawn:workspace:7");
+      expect(calls).not.toContain("spawn:workspace:1");
+      expect(mockClient.identify).toHaveBeenCalledWith(
+        "surface:voicelayer-lead",
+      );
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+      if (previousSurfaceId === undefined) {
+        delete process.env.CMUX_SURFACE_ID;
+      } else {
+        process.env.CMUX_SURFACE_ID = previousSurfaceId;
       }
     }
   });
@@ -944,6 +1233,44 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.task_summary).toBe("probe renamed state");
   });
 
+  it("spawn_agent captures a resolver session id before returning spawn health", async () => {
+    const sessionId = "019ec0e6-aaaa-7222-8333-444455556666";
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => sessionId,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "capture spawn health session",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.agent_id).toBe("cmuxlayerCodex-019ec0e6");
+    expect(parsed.health.issue_codes).not.toContain("missing_cli_session_id");
+    expect(parsed.health.issue_codes).not.toContain("non_resumable");
+
+    const stateTool = (server as any)._registeredTools["get_agent_state"];
+    const stateResult = await stateTool.handler(
+      { agent_id: parsed.agent_id },
+      {} as any,
+    );
+    const persisted =
+      stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+    expect(persisted.cli_session_id).toBe(sessionId);
+    expect(persisted.resumable).toBe(true);
+  });
+
   it("spawn_agent with worktree launches from the worktree and inherits MCPs by default", async () => {
     const gitsDir = join(TEST_DIR, "Gits");
     const repoRoot = join(gitsDir, "cmuxlayer");
@@ -1154,6 +1481,16 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.spawn_lifecycle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ step: "read_ready", status: "complete" }),
+        expect.objectContaining({ step: "send_goal", status: "complete" }),
+        expect.objectContaining({
+          step: "verify_accepted",
+          status: "complete",
+        }),
+      ]),
+    );
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -1302,7 +1639,7 @@ describe("agent lifecycle tool handlers", () => {
         stdout: JSON.stringify({
           workspace: "workspace:voice",
           surface: "surface:new",
-          pane: "pane:1",
+          pane: args.includes("new-split") ? "pane:2" : "pane:1",
           title: "",
           type: "terminal",
         }),
@@ -1444,7 +1781,7 @@ describe("agent lifecycle tool handlers", () => {
         stdout: JSON.stringify({
           workspace: "workspace:voice",
           surface: "surface:new",
-          pane: "pane:1",
+          pane: args.includes("new-split") ? "pane:2" : "pane:1",
           title: "",
           type: "terminal",
         }),
@@ -1821,7 +2158,10 @@ describe("agent lifecycle tool handlers", () => {
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
-        "inbox_monitor_not_alive",
+        "inbox_turn_nudge_required",
+      ]),
+      recommended_actions: expect.arrayContaining([
+        "dispatch_to_agent_with_nudge_auto",
       ]),
     });
   });
@@ -1855,6 +2195,60 @@ describe("agent lifecycle tool handlers", () => {
       status: "unhealthy",
       issue_codes: expect.arrayContaining(["closure_without_artifact"]),
     });
+  });
+
+  it("get_agent_state reports TASK_DONE child workers that did not notify their parent lead", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+
+    const parentResult = await spawn.handler(
+      {
+        repo: "golems",
+        model: "gpt-5.5",
+        cli: "claude",
+        role: "orchestrator",
+      },
+      {} as any,
+    );
+    const parentId = (
+      parentResult.structuredContent ?? JSON.parse(parentResult.content[0].text)
+    ).agent_id;
+    const childResult = await spawn.handler(
+      {
+        repo: "golems",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        parent_agent_id: parentId,
+      },
+      {} as any,
+    );
+    const childId = (
+      childResult.structuredContent ?? JSON.parse(childResult.content[0].text)
+    ).agent_id;
+    const done = engine.stateMgr.transition(childId, "done");
+    engine.getRegistry().set(childId, done);
+    const withDoneEvidence = engine.stateMgr.updateRecord(childId, {
+      task_done_detected_at: "2026-06-27T08:45:29.000Z",
+      completion_notification_error: "parent inbox monitor stale/absent",
+    });
+    engine.getRegistry().set(childId, withDoneEvidence);
+
+    const result = await getState.handler({ agent_id: childId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining([
+        "completion_notification_missing",
+      ]),
+    });
+    expect(parsed.completion_notification_error).toBe(
+      "parent inbox monitor stale/absent",
+    );
   });
 
   it("get_agent_state does not require closure artifacts for errored workers", async () => {
@@ -1989,7 +2383,10 @@ codex>
       issue_codes: expect.arrayContaining([
         "recoverable_blocker_requires_action",
       ]),
-      recommended_actions: ["route_pr_loop"],
+      recommended_actions: [
+        "dispatch_to_agent_with_nudge_auto",
+        "route_pr_loop",
+      ],
     });
   });
 
@@ -2038,7 +2435,7 @@ codex>
           "auto_discovered_agent",
           "missing_cli_session_id",
           "non_resumable",
-          "inbox_monitor_not_alive",
+          "inbox_turn_nudge_required",
         ]),
         issues: expect.any(Array),
       },
@@ -2828,6 +3225,438 @@ codex>
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.state).toBe("done");
     expect(parsed.agent.session_id).toBeNull();
+  }, 10_000);
+
+  it("wait_for(done) can promote completion from an exact report DONE marker", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const waitFor = (server as any)._registeredTools["wait_for"];
+    const reportPath = join(TEST_DIR, "agent-01-report.md");
+    writeFileSync(
+      reportPath,
+      ["# Agent 01", "work completed", "DONE_POSTFIX_LIVE8_AGENT_01"].join(
+        "\n",
+      ),
+    );
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine["stateMgr"];
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    stateMgr.transition(currentAgentId, "ready");
+    const working = stateMgr.transition(currentAgentId, "working");
+    engine.getRegistry().set(currentAgentId, working);
+
+    const result = await waitFor.handler(
+      {
+        agent_id: currentAgentId,
+        target_state: "done",
+        timeout_ms: 1000,
+        report_path: reportPath,
+        done_marker: "DONE_POSTFIX_LIVE8_AGENT_01",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.matched).toBe(true);
+    expect(parsed.source).toBe("file");
+    expect(parsed.state).toBe("done");
+    expect(engine.getRegistry().get(currentAgentId)).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+      task_done_evidence_source: "file",
+      task_done_evidence: `${reportPath}:DONE_POSTFIX_LIVE8_AGENT_01`,
+    });
+  }, 10_000);
+
+  it("wait_for(done) reclassifies a working-looking screen after file DONE as parser drift", async () => {
+    const baseExec = makeLifecycleExec();
+    const workingScreen = [
+      "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+      "Working (1m 12s • esc to interrupt)",
+      "Wrote reports/agent-01.md",
+      "DONE_POSTFIX2_AGENT_01",
+    ].join("\n");
+    mockExec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: workingScreen,
+            lines: 40,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(mockExec);
+    const waitFor = (server as any)._registeredTools["wait_for"];
+    const reportPath = join(TEST_DIR, "agent-01-postfix2-report.md");
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine["stateMgr"];
+    const currentAgentId = "skill-creatorCodex-019f0a4e";
+    const doneRecord: AgentRecord = {
+      agent_id: currentAgentId,
+      surface_id: "surface:new",
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "skill-creator",
+      model: "gpt-5.5",
+      cli: "codex",
+      cli_session_id: "019f0a4e-49b2-7700-8604-d59cb6ddd007",
+      cli_session_path: null,
+      launcher_name: "skillcreatorCodex",
+      task_summary: "postfix2 worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-27T00:00:00.000Z",
+      updated_at: "2026-06-27T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      auto_archive_on_done: false,
+      task_done_detected_at: "2026-06-27T08:45:29.000Z",
+      task_done_evidence_source: "file",
+      task_done_evidence: `${reportPath}:DONE_POSTFIX2_AGENT_01`,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      boot_prompt_pending: false,
+      launch_cwd: null,
+      mcp_profile: null,
+      worktree_path: null,
+      worktree_branch: null,
+    };
+    stateMgr.writeState(doneRecord);
+    engine.getRegistry().set(currentAgentId, doneRecord);
+    vi.spyOn(engine, "waitFor").mockResolvedValue({
+      matched: true,
+      state: "done",
+      elapsed: 12,
+      source: "file",
+      agent: {
+        agent_id: currentAgentId,
+        repo: "skill-creator",
+        model: "gpt-5.5",
+        state: "done",
+        session_id: "019f0a4e-49b2-7700-8604-d59cb6ddd007",
+        resumable: true,
+      },
+    });
+
+    const result = await waitFor.handler(
+      {
+        agent_id: currentAgentId,
+        target_state: "done",
+        timeout_ms: 1000,
+        report_path: reportPath,
+        done_marker: "DONE_POSTFIX2_AGENT_01",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.source).toBe("file");
+    expect(parsed.health.issue_codes).toContain(
+      "parser_drift_after_done_evidence",
+    );
+    expect(parsed.health.issue_codes).not.toContain(
+      "registry_screen_disagreement",
+    );
+  }, 10_000);
+
+  it("spawn_agent fails loudly when worker split retry remains on the original lone lead pane", async () => {
+    const surfacesToCreate = ["surface:432", "surface:433"];
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:35",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:388"],
+                selected_surface_ref: "surface:388",
+                pixel_frame: { x: 0, y: 0, width: 1423, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:35",
+            surfaces: [
+              {
+                ref: "surface:388",
+                title: "skillcreatorCodex",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        const surface = surfacesToCreate.shift() ?? "surface:unexpected";
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface,
+            pane: "pane:35",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("close-surface")) {
+        return { stdout: "{}", stderr: "" };
+      }
+      return { stdout: "{}", stderr: "" };
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "skill-creator",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "workspace:1",
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatch(
+      /Worker split verification failed/,
+    );
+    expect(
+      exec.mock.calls.some(([, args]) =>
+        args.includes("close-surface") && args.includes("surface:432"),
+      ),
+    ).toBe(true);
+    expect(
+      exec.mock.calls.some(([, args]) =>
+        args.includes("close-surface") && args.includes("surface:433"),
+      ),
+    ).toBe(true);
+    expect(exec.mock.calls.some(([, args]) => args.includes("send"))).toBe(
+      false,
+    );
+  }, 10_000);
+
+  it("close_surface consolidates stale ready Codex workers when screen tail has TASK_DONE", async () => {
+    let surfaceLive = true;
+    const terminalDoneScreen = [
+      "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+      "Working (1m 12s • esc to interrupt)",
+      "Wrote reports/agent-01.md",
+      "TASK_DONE",
+    ].join("\n");
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        surfaceLive = true;
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:new",
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: terminalDoneScreen,
+            lines: 40,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("close-surface")) {
+        surfaceLive = false;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: surfaceLive
+              ? [
+                  {
+                    ref: "pane:1",
+                    index: 0,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:new"],
+                    selected_surface_ref: "surface:new",
+                  },
+                ]
+              : [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: surfaceLive
+              ? [
+                  {
+                    ref: "surface:new",
+                    title: "skillcreatorCodex-019f0a29",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ]
+              : [],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(exec);
+    const closeSurface = (server as any)._registeredTools["close_surface"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine["stateMgr"];
+    const currentAgentId = "skill-creatorCodex-019f0a29";
+    const readyRecord: AgentRecord = {
+      agent_id: currentAgentId,
+      surface_id: "surface:new",
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "skill-creator",
+      model: "gpt-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      cli_session_path: null,
+      launcher_name: "skillcreatorCodex",
+      task_summary: "postfix live agent",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-27T00:00:00.000Z",
+      updated_at: "2026-06-27T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      auto_archive_on_done: false,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      boot_prompt_pending: false,
+      launch_cwd: null,
+      mcp_profile: null,
+      worktree_path: null,
+      worktree_branch: null,
+    };
+    stateMgr.writeState(readyRecord);
+    engine.getRegistry().set(currentAgentId, readyRecord);
+
+    const result = await closeSurface.handler(
+      { surface: "surface:new", workspace: "workspace:1" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.stale_registry_done_consolidated).toMatchObject({
+      agent_id: currentAgentId,
+      previous_state: "ready",
+      done_signal: "TASK_DONE",
+    });
+    expect(engine.getRegistry().get(currentAgentId)).toMatchObject({
+      state: "done",
+      task_done_detected_at: expect.any(String),
+    });
   }, 10_000);
 
   it("wait_for returns the engine snapshot without a second public-agent read", async () => {

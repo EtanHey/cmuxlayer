@@ -66,10 +66,11 @@ describe("model-policy drift gate", () => {
     const codexEscaped = resolveSpawnModelPolicy("codex", "gpt-5.5", {
       [MODEL_OVERRIDE_ENV]: "1",
     });
-    expect(codexEscaped.coerced).toBe(false);
-    expect(codexEscaped.effective_model).toBe("gpt-5.5");
-    expect(codexEscaped.launcher_model).toBe("gpt-5.5");
-    expect(codexEscaped.override_allowed).toBe(true);
+    expect(codexEscaped.coerced).toBe(true);
+    expect(codexEscaped.effective_model).toBe(codex.defaultModel);
+    expect(codexEscaped.launcher_model).toBeNull();
+    expect(codexEscaped.override_allowed).toBe(false);
+    expect(codexEscaped.warnings[0]).toContain("ignored");
 
     const coerced = resolveSpawnModelPolicy("cursor", "sonnet-4", {});
     expect(coerced.coerced).toBe(true);
@@ -82,10 +83,11 @@ describe("model-policy drift gate", () => {
     const escaped = resolveSpawnModelPolicy("cursor", "sonnet-4", {
       [MODEL_OVERRIDE_ENV]: "1",
     });
-    expect(escaped.coerced).toBe(false);
-    expect(escaped.effective_model).toBe("sonnet-4");
-    expect(escaped.launcher_model).toBe("sonnet-4");
-    expect(escaped.override_allowed).toBe(true);
+    expect(escaped.coerced).toBe(true);
+    expect(escaped.effective_model).toBe(cursor.defaultModel);
+    expect(escaped.launcher_model).toBeNull();
+    expect(escaped.override_allowed).toBe(false);
+    expect(escaped.warnings[0]).toContain("ignored");
   });
 });
 

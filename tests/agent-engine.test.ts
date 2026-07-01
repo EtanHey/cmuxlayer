@@ -245,6 +245,291 @@ describe("AgentEngine", () => {
       expect(result.state).toBe("booting");
     });
 
+    it("retries a worker split when cmux tabs the new surface into the lone lead pane", async () => {
+      type LayoutPhase = "lead-only" | "wrong-tab" | "right-split";
+      let phase: LayoutPhase = "lead-only";
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes:
+            phase === "right-split"
+              ? [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:lead"],
+                    selected_surface_ref: "surface:lead",
+                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+                  },
+                  {
+                    ref: "pane:right",
+                    index: 1,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:right"],
+                    selected_surface_ref: "surface:right",
+                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+                  },
+                ]
+              : [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: true,
+                    surface_count: phase === "wrong-tab" ? 2 : 1,
+                    surface_refs:
+                      phase === "wrong-tab"
+                        ? ["surface:lead", "surface:wrong"]
+                        : ["surface:lead"],
+                    selected_surface_ref:
+                      phase === "wrong-tab" ? "surface:wrong" : "surface:lead",
+                    pixel_frame: { x: 0, y: 0, width: 1000, height: 900 },
+                  },
+                ],
+        }),
+      );
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:left",
+          surfaces:
+            pane === "pane:right"
+              ? [
+                  {
+                    ref: "surface:right",
+                    title: "skillcreatorCodex-worker",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ]
+              : phase === "wrong-tab"
+                ? [
+                    {
+                      ref: "surface:lead",
+                      title: "skillcreatorClaude-LEAD",
+                      type: "terminal",
+                      index: 0,
+                      selected: false,
+                    },
+                    {
+                      ref: "surface:wrong",
+                      title: "skillcreatorCodex-worker",
+                      type: "terminal",
+                      index: 1,
+                      selected: true,
+                    },
+                  ]
+                : [
+                    {
+                      ref: "surface:lead",
+                      title: "skillcreatorClaude-LEAD",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ],
+        }),
+      );
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          if (phase === "lead-only") {
+            phase = "wrong-tab";
+            return {
+              workspace: "workspace:1",
+              surface: "surface:wrong",
+              pane: "pane:left",
+              title: "",
+              type: "terminal",
+            };
+          }
+          phase = "right-split";
+          return {
+            workspace: "workspace:1",
+            surface: "surface:right",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      const result = await engine.spawnAgent({
+        repo: "skill-creator",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        prompt: "postfix worker",
+        workspace: "workspace:1",
+      });
+
+      expect(result.surface_id).toBe("surface:right");
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:wrong", {
+        workspace: "workspace:1",
+      });
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(2);
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:right",
+        expect.any(String),
+        { workspace: "workspace:1" },
+      );
+    });
+
+    it("fails worker spawn when retry still leaves the worker tabbed in the lone left pane", async () => {
+      const surfacesToCreate = ["surface:426", "surface:427"];
+      const spawnedSurfaces: string[] = [];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:35",
+              index: 0,
+              focused: true,
+              surface_count: 2 + spawnedSurfaces.length,
+              surface_refs: ["surface:388", "surface:425", ...spawnedSurfaces],
+              selected_surface_ref:
+                spawnedSurfaces.at(-1) ?? "surface:388",
+              pixel_frame: { x: 0, y: 0, width: 1423, height: 900 },
+            },
+          ],
+        }),
+      );
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane }: { pane?: string }) => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane ?? "pane:35",
+          surfaces: [
+            {
+              ref: "surface:388",
+              title: "skillcreatorCodex LEAD",
+              type: "terminal",
+              index: 0,
+              selected: false,
+            },
+            {
+              ref: "surface:425",
+              title: "postfix2 evaluator",
+              type: "terminal",
+              index: 1,
+              selected: false,
+            },
+            ...spawnedSurfaces.map((ref, index) => ({
+              ref,
+              title: `skillcreatorCodex worker ${index + 1}`,
+              type: "terminal",
+              index: index + 2,
+              selected: index === createdSurfaces.length - 1,
+            })),
+          ],
+        }),
+      );
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          const surface = surfacesToCreate.shift() ?? "surface:unexpected";
+          spawnedSurfaces.push(surface);
+          return {
+            workspace: "workspace:1",
+            surface,
+            pane: "pane:35",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "skill-creator",
+          model: "gpt-5.5",
+          cli: "codex",
+          role: "worker",
+          prompt: "postfix2 worker",
+          workspace: "workspace:1",
+        }),
+      ).rejects.toThrow(/Worker split verification failed/);
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:426", {
+        workspace: "workspace:1",
+      });
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:427", {
+        workspace: "workspace:1",
+      });
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
+    it("fails worker spawn when cmux reports the retry surface on the original lone lead pane even if pane membership is stale", async () => {
+      const surfacesToCreate = ["surface:432", "surface:433"];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:35",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:388"],
+            selected_surface_ref: "surface:388",
+            pixel_frame: { x: 0, y: 0, width: 1423, height: 900 },
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:35",
+        surfaces: [
+          {
+            ref: "surface:388",
+            title: "skillcreatorCodex LEAD",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          const surface = surfacesToCreate.shift() ?? "surface:unexpected";
+          return {
+            workspace: "workspace:1",
+            surface,
+            pane: "pane:35",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "skill-creator",
+          model: "gpt-5.5",
+          cli: "codex",
+          role: "worker",
+          prompt: "postfix3 worker",
+          workspace: "workspace:1",
+        }),
+      ).rejects.toThrow(/Worker split verification failed/);
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:432", {
+        workspace: "workspace:1",
+      });
+      expect(mockClient.closeSurface).toHaveBeenCalledWith("surface:433", {
+        workspace: "workspace:1",
+      });
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
     it("sends the launch command to the surface", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
@@ -474,6 +759,58 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("restores the previously focused workspace after creating an agent surface", async () => {
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [
+          { ref: "workspace:caller", title: "Caller", selected: true },
+          { ref: "workspace:red-team", title: "Red Team", selected: false },
+        ],
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "workspace:red-team",
+        window_ref: "window:1",
+        pane_ref: "pane:left",
+        surfaces: [makeSurface("surface:interactive")],
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "workspace:red-team",
+      });
+
+      expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+        1,
+        "workspace:red-team",
+      );
+      expect(mockClient.selectWorkspace).toHaveBeenNthCalledWith(
+        2,
+        "workspace:caller",
+      );
+      expect(
+        (mockClient.newSplit as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        (mockClient.selectWorkspace as ReturnType<typeof vi.fn>).mock
+          .invocationCallOrder[1],
+      );
+    });
+
     it("inherits the workspace whose current directory matches the target repo", async () => {
       (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
         {
@@ -605,8 +942,8 @@ describe("AgentEngine", () => {
         workspace: "workspace:parent",
         type: "terminal",
       });
-      // The parent pin short-circuits repo-name resolution entirely.
-      expect(mockClient.listWorkspaces).not.toHaveBeenCalled();
+      // The parent pin still routes the worker to the parent workspace; any
+      // listWorkspaces call here is focus bookkeeping, not repo-name fallback.
     });
 
     it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {
@@ -4658,7 +4995,7 @@ describe("buildLaunchCommand", () => {
         undefined,
         { allowModelOverride: true },
       ),
-    ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
+    ).toBe("brainlayerCodex -s");
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
     );
@@ -4669,7 +5006,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("cursor", "cmuxlayer", "sonnet", undefined, {
         allowModelOverride: true,
       }),
-    ).toBe("cmuxlayerCursor -s -m sonnet");
+    ).toBe("cmuxlayerCursor -s");
   });
 
   it("preserves launcher defaults when model is omitted", () => {
@@ -4884,7 +5221,7 @@ describe("assertLauncherAvailable", () => {
     );
   });
 
-  it("falls back to the hyphen-stripped launcher when verbatim is unregistered", async () => {
+  it("uses the hyphen-stripped launcher when it is registered", async () => {
     // agent-html-host registered only as agenthtmlhostCursor (hyphens stripped).
     spawnMock.mockImplementation((_cmd, args) => {
       const probe = String(args?.[1] ?? "");
@@ -4904,7 +5241,7 @@ describe("assertLauncherAvailable", () => {
 
     await expect(
       assertLauncherAvailable("skill-creator", "Cursor"),
-    ).rejects.toThrow(/skill-creatorCursor.*skillcreatorCursor.*cli="kiro"/s);
+    ).rejects.toThrow(/skillcreatorCursor.*skill-creatorCursor.*cli="kiro"/s);
   });
 
   it("waits for the launcher probe process to exit after SIGTERM timeout", async () => {
@@ -4964,35 +5301,39 @@ describe("launcherNameCandidates", () => {
 
   it("adds the lowercased hyphen-stripped form for hyphenated repos", () => {
     expect(launcherNameCandidates("agent-html-host", "Cursor")).toEqual([
-      "agent-html-hostCursor",
       "agenthtmlhostCursor",
+      "agent-html-hostCursor",
     ]);
   });
 
-  it("preserves the verbatim form even when it has hyphens", () => {
+  it("uses the repoGolem primary wrapper before the verbatim hyphenated fallback", () => {
     expect(launcherNameCandidates("maakaf-home", "Claude")).toEqual([
-      "maakaf-homeClaude",
       "maakafhomeClaude",
+      "maakaf-homeClaude",
+    ]);
+    expect(launcherNameCandidates("skill-creator", "Cursor")).toEqual([
+      "skillcreatorCursor",
+      "skill-creatorCursor",
     ]);
   });
 });
 
 describe("resolveLauncherName", () => {
-  it("returns the verbatim launcher when it resolves first", async () => {
-    const probe = vi.fn(async (name: string) => name === "maakaf-homeCursor");
+  it("returns the canonical launcher when it resolves first", async () => {
+    const probe = vi.fn(async (name: string) => name === "maakafhomeCursor");
     await expect(
       resolveLauncherName("maakaf-home", "Cursor", probe),
-    ).resolves.toBe("maakaf-homeCursor");
-    expect(probe).toHaveBeenCalledWith("maakaf-homeCursor");
+    ).resolves.toBe("maakafhomeCursor");
+    expect(probe).toHaveBeenCalledWith("maakafhomeCursor");
   });
 
-  it("probes the stripped form only after the verbatim form misses", async () => {
-    const probe = vi.fn(async (name: string) => name === "agenthtmlhostCursor");
+  it("falls back to the verbatim form only after the canonical form misses", async () => {
+    const probe = vi.fn(async (name: string) => name === "agent-html-hostCursor");
     await expect(
       resolveLauncherName("agent-html-host", "Cursor", probe),
-    ).resolves.toBe("agenthtmlhostCursor");
-    expect(probe).toHaveBeenNthCalledWith(1, "agent-html-hostCursor");
-    expect(probe).toHaveBeenNthCalledWith(2, "agenthtmlhostCursor");
+    ).resolves.toBe("agent-html-hostCursor");
+    expect(probe).toHaveBeenNthCalledWith(1, "agenthtmlhostCursor");
+    expect(probe).toHaveBeenNthCalledWith(2, "agent-html-hostCursor");
   });
 
   it("falls back to the orc launcher alias for the orchestrator repo", async () => {
@@ -5008,7 +5349,7 @@ describe("resolveLauncherName", () => {
     const probe = vi.fn(async () => false);
     await expect(
       resolveLauncherName("agent-html-host", "Cursor", probe),
-    ).rejects.toThrow(/agent-html-hostCursor.*agenthtmlhostCursor/s);
+    ).rejects.toThrow(/agenthtmlhostCursor.*agent-html-hostCursor/s);
   });
 });
 

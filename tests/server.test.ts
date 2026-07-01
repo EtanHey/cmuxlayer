@@ -3747,6 +3747,13 @@ describe("tool handler integration", () => {
             workspace_ref: "workspace:1",
             panes: [
               {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:lead"],
+              },
+              {
                 ref: "pane:right",
                 index: 1,
                 focused: true,
@@ -3763,16 +3770,26 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
             window_ref: "window:1",
-            pane_ref: "pane:right",
-            surfaces: [
-              {
-                ref: "surface:worker-1",
-                title: "",
-                type: "terminal",
-                index: 0,
-                selected: true,
-              },
-            ],
+            pane_ref: args.includes("pane:left") ? "pane:left" : "pane:right",
+            surfaces: args.includes("pane:left")
+              ? [
+                  {
+                    ref: "surface:lead",
+                    title: "lead shell",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ]
+              : [
+                  {
+                    ref: "surface:worker-1",
+                    title: "",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ],
           }),
           stderr: "",
         };
@@ -4017,10 +4034,19 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(parsed.model_policy).toMatchObject({
+        requested_model: "gpt-5.5",
+        effective_model: "codex",
+        launcher_model: null,
+        coerced: true,
+      });
+      expect(parsed.model_policy.warnings[0]).toContain(
+        "REPOGOLEM_ALLOW_MODEL=1 was ignored",
+      );
       expect(launcherSends).toBe(2);
       expect(
         sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
-      ).toEqual(["cmuxlayerCodex -s -m gpt-5.5", "cmuxlayerCodex -s"]);
+      ).toEqual(["cmuxlayerCodex -s", "cmuxlayerCodex -s"]);
       expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
       expect(returnPresses).toBeGreaterThanOrEqual(3);
     } finally {

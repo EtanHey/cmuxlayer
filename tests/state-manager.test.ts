@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
@@ -78,6 +79,52 @@ describe("StateManager", () => {
       // The .tmp file should NOT exist after write
       const tmpFile = join(TEST_DIR, record.agent_id, "state.json.tmp");
       expect(existsSync(tmpFile)).toBe(false);
+    });
+
+    it("does not reuse a shared temp path under concurrent process writes", async () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({
+        agent_id: "race-agent",
+        state: "creating",
+        cli_session_id: null,
+      });
+      mgr.writeState(record);
+
+      const worker = `
+        import { StateManager } from ${JSON.stringify(new URL("../src/state-manager.ts", import.meta.url).href)};
+        const mgr = new StateManager(process.argv[1]);
+        const workerId = process.argv[2];
+        for (let i = 0; i < 150; i += 1) {
+          mgr.updateRecord("race-agent", { task_summary: workerId + ":" + i });
+        }
+      `;
+      const workers = await Promise.all(
+        Array.from({ length: 6 }, (_, index) =>
+          new Promise<{ status: number | null; stderr: string }>((resolve) => {
+            const runtime = process.versions.bun ? process.execPath : "bun";
+            const child = spawn(
+              runtime,
+              ["--eval", worker, TEST_DIR, `w${index}`],
+              { stdio: ["ignore", "ignore", "pipe"] },
+            );
+            let stderr = "";
+            child.stderr.setEncoding("utf-8");
+            child.stderr.on("data", (chunk) => {
+              stderr += chunk;
+            });
+            child.on("close", (status) => {
+              resolve({ status, stderr });
+            });
+          }),
+        ),
+      );
+
+      const failures = workers.filter((result) => result.status !== 0);
+      expect(failures.map((result) => result.stderr).join("\n")).not.toContain(
+        "ENOENT",
+      );
+      expect(failures).toHaveLength(0);
+      expect(mgr.readState("race-agent")?.agent_id).toBe("race-agent");
     });
   });
 

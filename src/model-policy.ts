@@ -144,13 +144,13 @@ export function resolveLaunchModelFlag(
   if (!requested) return null;
 
   if (cli === "codex") {
-    if (modelMatchesDefault(cli, requested)) return null;
-    if (!opts?.allowModelOverride) return null;
+    void opts;
+    return null;
   }
 
   if (cli === "cursor") {
-    if (modelMatchesDefault(cli, requested)) return null;
-    return opts?.allowModelOverride ? requested : null;
+    void opts;
+    return null;
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
@@ -165,7 +165,8 @@ export function resolveSpawnModelPolicy(
   const contract = MODEL_POLICY_CONTRACT.cli[cli];
   const requestedModel = model?.trim() ?? "";
   const requestedWasOmitted = requestedModel.length === 0;
-  const overrideAllowed = envFlagEnabled(env[MODEL_OVERRIDE_ENV]);
+  const envOverrideRequested = envFlagEnabled(env[MODEL_OVERRIDE_ENV]);
+  const overrideAllowed = contract.allowModelOverrideByDefault;
   const defaultModel = contract.defaultModel;
   const requestedOrDefault = requestedWasOmitted ? defaultModel : requestedModel;
   const resolvedRequested = resolveModelAlias(cli, requestedOrDefault);
@@ -181,7 +182,10 @@ export function resolveSpawnModelPolicy(
     const warning =
       `WARNING: ${cli.toUpperCase()} MODEL POLICY: requested ${family} "${requestedModel}" ` +
       `was coerced to "${effectiveModel}". ${cli} agents must use ${effectiveModel} ` +
-      `unless ${MODEL_OVERRIDE_ENV}=1 is set.`;
+      `for visible repoGolem launcher sessions; launcher policy owns model selection.` +
+      (envOverrideRequested
+        ? ` ${MODEL_OVERRIDE_ENV}=1 was ignored for this visible launcher path.`
+        : "");
 
     return {
       cli,

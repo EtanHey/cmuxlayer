@@ -9,9 +9,13 @@ export type AgentHealthIssueCode =
   | "non_resumable"
   | "inbox_monitor_not_alive"
   | "stale_inbox_dispatches"
+  | "inbox_turn_nudge_required"
   | "registry_screen_disagreement"
+  | "parser_drift_after_done_evidence"
+  | "pane_render_dead_or_interrupted"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
+  | "completion_notification_missing"
   | "recoverable_blocker_requires_action"
   | "missing_managed_lead_agent_id"
   | "ambiguous_repo_cwd_label"
@@ -29,6 +33,7 @@ export interface AgentHealthInput {
   monitor_alive?: boolean | null;
   stale_count?: number;
   screen_status?: string | null;
+  screen_text?: string | null;
   surface_workspace_id?: string | null;
   surface_title?: string | null;
   closure_artifact_verified?: boolean | null;
@@ -102,6 +107,13 @@ function hasAmbiguousRepoOrCwdLabel(agent: AgentRecord): boolean {
   );
 }
 
+function hasPaneRenderDeathEvidence(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /\b(?:interrupted|terminal disconnected|pane died|process died|pty died|session terminated)\b/i.test(
+    text,
+  );
+}
+
 export function evaluateAgentHealth(
   agent: AgentRecord,
   input: AgentHealthInput = {},
@@ -118,6 +130,7 @@ export function evaluateAgentHealth(
       "auto_discovered_agent",
       "agent was auto-discovered, not created through managed spawn_agent",
     );
+    addRecommendedAction(recommendedActions, "replace_with_managed_spawn");
 
     if (looksLeadLike(input.surface_title) || looksLeadLike(agent.repo)) {
       addIssue(
@@ -126,6 +139,7 @@ export function evaluateAgentHealth(
         "missing_managed_lead_agent_id",
         "lead/coordinator surface has no managed agent_id; recover/register or replace with a managed lead",
       );
+      addRecommendedAction(recommendedActions, "recover_or_replace_managed_lead");
     }
 
     if (hasAmbiguousRepoOrCwdLabel(agent)) {
@@ -145,6 +159,7 @@ export function evaluateAgentHealth(
       "missing_cli_session_id",
       "managed long-running agent has no cli_session_id",
     );
+    addRecommendedAction(recommendedActions, "capture_cli_session_or_respawn_managed");
     addIssue(
       issueCodes,
       issues,
@@ -154,12 +169,29 @@ export function evaluateAgentHealth(
   }
 
   if (input.monitor_alive === false) {
+    if (
+      (agent.cli === "codex" || agent.cli === "cursor") &&
+      role === "worker"
+    ) {
+      addIssue(
+        issueCodes,
+        issues,
+        "inbox_turn_nudge_required",
+        "Codex/Cursor worker has no live async inbox monitor; dispatch with nudge:auto or send a guarded turn nudge so it reads its inbox",
+      );
+      addRecommendedAction(
+        recommendedActions,
+        "dispatch_to_agent_with_nudge_auto",
+      );
+    } else {
     addIssue(
       issueCodes,
       issues,
       "inbox_monitor_not_alive",
       "agent inbox monitor heartbeat is absent or stale",
     );
+    addRecommendedAction(recommendedActions, "restart_inbox_monitor_or_nudge");
+    }
   }
 
   if ((input.stale_count ?? 0) > 0) {
@@ -169,6 +201,7 @@ export function evaluateAgentHealth(
       "stale_inbox_dispatches",
       "agent has unacked inbox dispatches past the ACK timeout",
     );
+    addRecommendedAction(recommendedActions, "restart_inbox_monitor_or_nudge");
   }
 
   const screenActive =
@@ -183,12 +216,37 @@ export function evaluateAgentHealth(
     agent.state === "idle" ||
     agent.state === "done" ||
     agent.state === "error";
-  if ((screenActive && registryInactive) || (screenDone && registryActive)) {
+  if (screenActive && registryInactive && agent.task_done_evidence_source) {
+    addIssue(
+      issueCodes,
+      issues,
+      "parser_drift_after_done_evidence",
+      `registry state is ${agent.state} from ${agent.task_done_evidence_source} DONE evidence while screen still parses as ${input.screen_status}`,
+    );
+    addRecommendedAction(
+      recommendedActions,
+      "trust_done_evidence_and_refresh_parser",
+    );
+  } else if ((screenActive && registryInactive) || (screenDone && registryActive)) {
     addIssue(
       issueCodes,
       issues,
       "registry_screen_disagreement",
       `registry state is ${agent.state} while screen parses as ${input.screen_status}`,
+    );
+    addRecommendedAction(recommendedActions, "resync_agents_and_trust_screen");
+  }
+
+  if (isLongRunning(agent) && hasPaneRenderDeathEvidence(input.screen_text)) {
+    addIssue(
+      issueCodes,
+      issues,
+      "pane_render_dead_or_interrupted",
+      "pane screen shows interrupted/dead render state while the managed agent is still long-running",
+    );
+    addRecommendedAction(
+      recommendedActions,
+      "recover_or_respawn_pane_from_cli_session",
     );
   }
 
@@ -203,6 +261,7 @@ export function evaluateAgentHealth(
       "registry_surface_workspace_mismatch",
       `registry workspace is ${agent.workspace_id ?? "null"} while surface is in ${input.surface_workspace_id}`,
     );
+    addRecommendedAction(recommendedActions, "resync_agents_and_correct_workspace");
   }
 
   if (input.closure_artifact_verified === false) {
@@ -212,6 +271,24 @@ export function evaluateAgentHealth(
       "closure_without_artifact",
       "worker closure is not backed by a verified DONE marker, BLOCKED/NOT_GREEN handoff, or successor transfer",
     );
+    addRecommendedAction(recommendedActions, "verify_done_artifact_or_blocked_handoff");
+  }
+
+  if (
+    agent.parent_agent_id &&
+    agent.state === "done" &&
+    agent.task_done_detected_at &&
+    !agent.completion_notification_sent_at
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "completion_notification_missing",
+      agent.completion_notification_error
+        ? `worker completed but parent lead notification failed: ${agent.completion_notification_error}`
+        : "worker completed but no parent lead completion notification was recorded",
+    );
+    addRecommendedAction(recommendedActions, "notify_parent_lead_and_restart_monitor");
   }
 
   const recoverableBlockerActions = Array.from(
@@ -236,13 +313,14 @@ export function evaluateAgentHealth(
     }
   }
 
-  if (agent.cli !== "claude" && role === "orchestrator") {
+  if (agent.cli !== "claude" && role === "orchestrator" && isAutoDiscovered(agent)) {
     addIssue(
       issueCodes,
       issues,
       "non_claude_orchestrator",
-      "non-Claude agent was assigned orchestrator topology role; use worker unless this is the single explicit left-side coordinator",
+      "auto-discovered non-Claude orchestrator is not a valid lead; replace with a managed lead or worker",
     );
+    addRecommendedAction(recommendedActions, "recover_or_replace_managed_lead");
   }
 
   const topology = input.topology;
@@ -254,6 +332,7 @@ export function evaluateAgentHealth(
         "topology_three_or_more_columns",
         `workspace has ${topology.column_count} columns; expected at most two lead/worker columns`,
       );
+      addRecommendedAction(recommendedActions, "repair_workspace_topology");
     }
     if (role === "orchestrator" && topology.column !== null && topology.column > 0) {
       addIssue(
@@ -262,6 +341,7 @@ export function evaluateAgentHealth(
         "orchestrator_not_leftmost",
         `orchestrator is in column ${topology.column}; expected leftmost column 0`,
       );
+      addRecommendedAction(recommendedActions, "repair_workspace_topology");
     }
     if (role === "worker" && topology.column === 0 && topology.column_count >= 2) {
       addIssue(
@@ -270,6 +350,7 @@ export function evaluateAgentHealth(
         "worker_in_leftmost_column",
         "worker is in the leftmost lead column; expected worker column on the right",
       );
+      addRecommendedAction(recommendedActions, "repair_workspace_topology");
     }
   }
 

@@ -486,6 +486,50 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
   });
 
+  it("tabs successor orchestrators into the left pane when an auto-discovered Codex lead is mislabeled worker", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:auto-codex-lead"], {
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+      makePane("pane:right", 1, ["surface:agent-02"], {
+        x: 500,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makeTitledPaneSurfaces("pane:left", [
+        {
+          ref: "surface:auto-codex-lead",
+          title: "skill-creator",
+        },
+      ]),
+      makeTitledPaneSurfaces("pane:right", [
+        {
+          ref: "surface:agent-02",
+          title: "Agent 02",
+        },
+      ]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(),
+        ic: new Set(),
+        worker: new Set(["surface:auto-codex-lead", "surface:agent-02"]),
+      },
+      { role: "orchestrator" },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
+  });
+
   it("splits orchestrators left when the leftmost pane is worker-majority despite a stale IC record", () => {
     const panes = [
       makePane(
@@ -552,7 +596,7 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "split", direction: "left" });
   });
 
-  it("docks workers into launcher-title Codex panes without registry state", () => {
+  it("splits right from a single launcher-title Codex pane instead of trusting it as a worker dock", () => {
     const panes = [makePane("pane:worker", 0, ["surface:cmuxlayer-worker"])];
     const paneSurfaces = [
       makeTitledPaneSurfaces("pane:worker", [
@@ -574,7 +618,11 @@ describe("layout policy", () => {
       { role: "worker" },
     );
 
-    expect(placement).toEqual({ kind: "surface", pane: "pane:worker" });
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:worker",
+    });
   });
 
   it("places the first IC in the right column above existing workers", () => {
