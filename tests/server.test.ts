@@ -1868,6 +1868,57 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("send_command accepts a cleared Claude boot prompt before a working marker streams", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let promptSent = false;
+    let returnPresses = 0;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: "Claude Code\nWhat can I help you with?\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
+    expect(returnPresses).toBe(3);
+  }, 10_000);
+
   it("send_command reports timeout with last screen lines and leaves launcher surface alive", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -4480,7 +4531,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(2);
   }, 10_000);
 
-  it("new_split fails when the boot prompt clears after retry but the agent stays idle", async () => {
+  it("new_split fails when the boot prompt clears after retry without agent identity", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-idle-after-clear.md");
     const prompt = "short boot prompt";
@@ -4515,9 +4566,11 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:2",
             text:
-              !promptSent || returnPresses >= 1
+              !promptSent
                 ? "codex> "
-                : `codex> ${prompt}`,
+                : returnPresses >= 1
+                  ? "> "
+                  : `> ${prompt}`,
             lines: 80,
             scrollback_used: false,
           }),
@@ -4534,6 +4587,7 @@ describe("tool handler integration", () => {
       {
         direction: "right",
         boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 50,
       },
       {} as any,
     );
@@ -4542,7 +4596,7 @@ describe("tool handler integration", () => {
 
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.error).toContain("Timed out");
     expect(parsed.boot_prompt_delivered).not.toBe(true);
     expect(returnPresses).toBe(2);
   }, 10_000);

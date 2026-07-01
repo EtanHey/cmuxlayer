@@ -154,7 +154,18 @@ const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
-const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
+const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
+function parsePositiveIntegerMs(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = parsePositiveIntegerMs(
+  process.env.CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS,
+  DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+);
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
@@ -1494,7 +1505,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+      const hasClearedAgentComposer =
+        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
+        !hasPendingInput;
       if (opts.require_working_status) {
+        if (retried && hasClearedAgentComposer) {
+          // Slow-to-stream boot prompts can clear the composer before the CLI
+          // renders a parsed working marker; identity + cleared input is enough
+          // evidence after the recovery Return has been attempted.
+          return { submit_verified: true, retry_count: retryCount };
+        }
+
         if (!retried) {
           await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
           await sendKeyWithRetry(opts.surface, "return", opts.workspace);
@@ -1517,9 +1538,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       if (
-        (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) ||
-          opts.allow_non_agent_clear === true) &&
-        !hasPendingInput
+        hasClearedAgentComposer ||
+        (opts.allow_non_agent_clear === true && !hasPendingInput)
       ) {
         // The submitted text is no longer echoed in the input box: the terminal
         // accepted it and cleared the prompt. For agent surfaces this catches
@@ -1761,6 +1781,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
+  const waitForBootPromptSubmitEvidence = async (opts: {
+    surface: string;
+    workspace?: string;
+    text: string;
+    timeout_ms: number;
+  }): Promise<void> => {
+    const start = Date.now();
+    let lastText = "";
+
+    while (Date.now() - start < opts.timeout_ms) {
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      if (snapshot) {
+        lastText = snapshot.text;
+        const hasPendingInput = screenShowsPendingInput(
+          snapshot.text,
+          opts.text,
+        );
+        if (
+          isSubmitVerifiedStatus(snapshot.parsed.status) ||
+          (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
+            !hasPendingInput)
+        ) {
+          return;
+        }
+      }
+
+      const remaining = opts.timeout_ms - (Date.now() - start);
+      if (remaining <= 0) {
+        break;
+      }
+      await delay(Math.min(BOOT_PROMPT_READY_POLL_MS, remaining));
+    }
+
+    throw new BootPromptTimeoutError(
+      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt submit evidence on ${opts.surface}`,
+      tailLines(lastText, 10),
+    );
+  };
+
   const waitForLaunchShellReady = async (opts: {
     surface: string;
     workspace?: string;
@@ -1947,6 +2006,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
       return { ...delivery, prompt_text: rawPrompt };
     } catch (error) {
+      if (error instanceof SubmitVerificationError) {
+        const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+        if (
+          !snapshot ||
+          !screenShowsPendingInput(snapshot.text, sanitizedText)
+        ) {
+          await waitForBootPromptSubmitEvidence({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            text: sanitizedText,
+            timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+          });
+          return {
+            bytes: Buffer.byteLength(sanitizedText, "utf8"),
+            retry_count: error.retry_count,
+            submit_verified: true,
+            prompt_text: rawPrompt,
+          };
+        }
+      }
+
       const deliveredChars = chunks
         .slice(0, sentChunks)
         .reduce((sum, chunk) => sum + chunk.length, 0);
@@ -3269,7 +3349,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "send_command",
-            verify_submit: shouldVerifySubmit,
+            verify_submit: bootPromptPath ? false : shouldVerifySubmit,
           }),
         );
 
