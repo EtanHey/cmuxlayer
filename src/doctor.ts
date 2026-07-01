@@ -271,6 +271,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isCmuxlayerMcpLauncher(part: string): boolean {
+  const normalized = part.replaceAll("\\", "/");
+  return (
+    normalized === "cmuxlayer-mcp" ||
+    normalized === "~/.golems/bin/cmuxlayer-mcp" ||
+    normalized.endsWith("/.golems/bin/cmuxlayer-mcp")
+  );
+}
+
 function serverReferencesLauncher(server: unknown): boolean {
   if (!isRecord(server)) {
     return false;
@@ -281,7 +290,7 @@ function serverReferencesLauncher(server: unknown): boolean {
     ? server.args.filter((arg): arg is string => typeof arg === "string")
     : [];
 
-  return [command, ...args].some((part) => part.includes("cmuxlayer-mcp"));
+  return [command, ...args].some(isCmuxlayerMcpLauncher);
 }
 
 function driftReason(serverKey: string, server: unknown): string | null {

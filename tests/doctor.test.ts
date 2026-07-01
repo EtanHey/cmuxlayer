@@ -340,6 +340,30 @@ describe("checkMcpConfigDrift", () => {
     ]);
   });
 
+  it("does not treat unrelated paths containing cmuxlayer-mcp as the launcher", async () => {
+    const report = await checkMcpConfigDrift(
+      fakeMcpConfigReaders({
+        "/Users/etanheyman/Gits/substring/.mcp.json": mcpConfig({
+          mcpServers: {
+            cmuxlayer: {
+              command: "node",
+              args: ["/Users/etanheyman/Gits/cmuxlayer-mcp/dist/index.js"],
+            },
+          },
+        }),
+      }),
+    );
+
+    expect(report.scanned).toBe(1);
+    expect(report.drifted).toEqual([
+      {
+        path: "/Users/etanheyman/Gits/substring/.mcp.json",
+        serverKey: "cmuxlayer",
+        reason: expect.stringMatching(/cmuxlayer-mcp/i),
+      },
+    ]);
+  });
+
   it("flags the stale cmux server key even when it points at the launcher", async () => {
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
