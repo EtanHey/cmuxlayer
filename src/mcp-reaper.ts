@@ -86,6 +86,11 @@ const DEFAULT_KNOWN_SERVER_NAMES = [
   "whatsapp-mcp",
 ] as const;
 const MCP_PACKAGE_NAME_PATTERN = /-mcp(?:$|[\s/._-])/i;
+// cmuxlayer is its own MCP server but its package/path is "cmuxlayer", not
+// "cmuxlayer-mcp", so the -mcp gate above never matched its node entrypoint.
+// Matches the dir component in both the worktree (`/Gits/cmuxlayer/dist/...`)
+// and brew (`/Cellar/cmuxlayer/<ver>/libexec/dist/...`) forms.
+const CMUXLAYER_PACKAGE_NAME_PATTERN = /(?:^|[\/\s])cmuxlayer(?:$|[\/\s._-])/i;
 const MCP_SERVER_ENTRYPOINT_PATTERN =
   /(?:^|[\/\s])(?:dist|build|lib)\/(?:index|server|mcp-server)\.(?:js|mjs|cjs)(?:$|[\s"'`])/i;
 
@@ -94,8 +99,7 @@ export function selectReapablePids(
   opts: SelectReapableOptions = {},
 ): number[] {
   const minAgeSeconds = opts.minAgeSeconds ?? DEFAULT_MIN_AGE_SECONDS;
-  const knownServerNames =
-    opts.knownServerNames ?? DEFAULT_KNOWN_SERVER_NAMES;
+  const knownServerNames = opts.knownServerNames ?? DEFAULT_KNOWN_SERVER_NAMES;
 
   return procList
     .filter((proc) => proc.ppid === 1)
@@ -116,7 +120,8 @@ function isMcpServerCommand(
   knownServerNames: readonly string[],
 ): boolean {
   if (
-    MCP_PACKAGE_NAME_PATTERN.test(command) &&
+    (MCP_PACKAGE_NAME_PATTERN.test(command) ||
+      CMUXLAYER_PACKAGE_NAME_PATTERN.test(command)) &&
     MCP_SERVER_ENTRYPOINT_PATTERN.test(command)
   ) {
     return true;
@@ -149,9 +154,7 @@ export function parseElapsedSeconds(etime: string): number {
   }
 
   const [hours, minutes, seconds] =
-    timeParts.length === 3
-      ? timeParts
-      : [0, timeParts[0], timeParts[1]];
+    timeParts.length === 3 ? timeParts : [0, timeParts[0], timeParts[1]];
   return days * 86400 + hours * 3600 + minutes * 60 + seconds;
 }
 
@@ -214,8 +217,7 @@ export function signalProcessBatch(
         pid: proc.pid,
         signal,
         errorCode: signalErrorCode(error),
-        errorMessage:
-          error instanceof Error ? error.message : String(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
       };
     }
   });
