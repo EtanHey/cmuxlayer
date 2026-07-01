@@ -5,9 +5,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
@@ -976,8 +976,14 @@ export function createServerContext(
 ): CmuxServerContext {
   const client =
     opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const autoVitestStateDir =
+    !opts?.stateDir && process.env.VITEST
+      ? mkdtempSync(join(tmpdir(), "cmuxlayer-vitest-state-"))
+      : null;
   const stateDir =
-    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+    opts?.stateDir ??
+    autoVitestStateDir ??
+    join(homedir(), ".local", "state", "cmux-agents");
   const stateMgr = new StateManager(stateDir);
   const context: CmuxServerContext = {
     client,
@@ -1014,6 +1020,9 @@ export function createServerContext(
       context.lifecycleSweepEngine = null;
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
+      if (autoVitestStateDir) {
+        rmSync(autoVitestStateDir, { recursive: true, force: true });
+      }
     },
   };
 
