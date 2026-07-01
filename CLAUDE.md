@@ -80,6 +80,12 @@ Two axes per surface:
 ### Claude Channels (Preview)
 Set `CMUXLAYER_ENABLE_CLAUDE_CHANNELS=1` to enable one-way lifecycle notifications via `notifications/claude/channel`.
 
+### Boot-prompt submit tuning
+`CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS` (positive integer, default `2000`) overrides how long a boot
+prompt's Enter is verified before delivery falls back to readiness/composer-cleared evidence. Raise
+it for agents that stream their first tokens slowly (e.g. Opus-4.8/1M, Gemini on multi-KB prompts) if
+you still see false `Enter submit could not be verified` errors; invalid values fall back to the default.
+
 ## Testing Conventions
 - Test files mirror source: `src/foo.ts` -> `tests/foo.test.ts`
 - Agent engine tests use 1-second timeouts for state change detection
