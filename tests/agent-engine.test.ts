@@ -245,6 +245,44 @@ describe("AgentEngine", () => {
       expect(result.state).toBe("booting");
     });
 
+    it("captures session identity before surfacing launch command failures", async () => {
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:new"),
+      ]);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: (agent) =>
+          agent.surface_id === "surface:new"
+            ? { session_id: sessionId, path: null }
+            : null,
+        launchCommandSender: async () => {
+          throw new Error(
+            "Timed out after 15000ms waiting for agent launch readiness on surface:new",
+          );
+        },
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "Fix gap F",
+        }),
+      ).rejects.toThrow(/waiting for agent launch readiness/);
+
+      const finalAgentId = "brainlayerCodex-019d9aa5";
+      expect(engine.getAgentState(finalAgentId)).toMatchObject({
+        agent_id: finalAgentId,
+        state: "error",
+        error: expect.stringContaining("Launch failed:"),
+        cli_session_id: sessionId,
+        cli_session_path: null,
+      });
+    });
+
     it("sends the launch command to the surface", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",

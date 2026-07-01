@@ -1592,7 +1592,16 @@ describe("agent lifecycle tool handlers", () => {
         stderr: "",
       };
     });
-    const server = createLifecycleServer(mockExec);
+    const sessionId = "019ec0e6-1111-2222-3333-444455556666";
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: (agent) =>
+        agent.surface_id === "surface:new"
+          ? { session_id: sessionId, path: null }
+          : null,
+    });
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
 
@@ -1621,6 +1630,10 @@ describe("agent lifecycle tool handlers", () => {
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(["booting", "ready"]).toContain(state.state);
     expect(state.error).toBeNull();
+    expect(state.cli_session_id).toBe(sessionId);
+    expect(state.resumable).toBe(true);
+    expect(state.health.issue_codes).not.toContain("missing_cli_session_id");
+    expect(state.health.issue_codes).not.toContain("non_resumable");
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
