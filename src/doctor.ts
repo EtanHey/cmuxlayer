@@ -13,7 +13,9 @@
  *   (b) §3 tap — whether `brew tap` lists etanhey/layers and the formula
  *       resolves (`brew info etanhey/layers/cmuxlayer`). Tap CASKS need
  *       `brew trust etanhey/layers`; cmuxlayer is a formula, not gated.
- *   (c) CMUX_SOCKET_PATH if set, else "unset (auto-discover)".
+ *   (c) CMUX_SOCKET_PATH if set, else "unset (auto-discover)";
+ *   (d) read-only `.mcp.json` drift detection for stale `cmux` keys or entries
+ *       that bypass `~/.golems/bin/cmuxlayer-mcp`.
  *
  * Non-interactivity invariants (§ headline / conformance checks):
  *   - exit 0 when healthy; runs cleanly under `</dev/null` with NONINTERACTIVE=1;
@@ -22,6 +24,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { readdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +61,29 @@ export type PmsetRunner = () => Promise<CommandResult>;
 /** Runs `launchctl print gui/<uid>/com.golems.cmux-caffeinate`; never throws. */
 export type LaunchctlRunner = () => Promise<CommandResult>;
 
+export interface McpConfigDriftEntry {
+  path: string;
+  serverKey: string;
+  reason: string;
+}
+
+export interface McpConfigDriftReport {
+  scanned: number;
+  drifted: McpConfigDriftEntry[];
+  note: string;
+}
+
+/** Lists candidate `.mcp.json` paths; best-effort callers may include missing files. */
+export type McpConfigPathLister = () => Promise<string[]> | string[];
+
+/** Reads a `.mcp.json` file; failures are skipped by the drift check. */
+export type McpConfigFileReader = (path: string) => Promise<string> | string;
+
+export interface CheckMcpConfigDriftOptions {
+  listMcpConfigPaths?: McpConfigPathLister;
+  readMcpConfigFile?: McpConfigFileReader;
+}
+
 export interface DoctorReport {
   /** Overall health. brew/tap gaps do NOT make the doctor unhealthy. */
   healthy: boolean;
@@ -80,6 +108,8 @@ export interface DoctorReport {
     durable: boolean;
     note: string;
   };
+  /** Read-only `.mcp.json` drift report; does NOT affect health. */
+  mcpConfigDrift: McpConfigDriftReport;
 }
 
 export interface RunDoctorOptions {
@@ -93,6 +123,10 @@ export interface RunDoctorOptions {
   pmset?: PmsetRunner;
   /** Injectable launchctl runner; defaults to the real launchd service probe. */
   launchctl?: LaunchctlRunner;
+  /** Injectable `.mcp.json` path lister for read-only drift checks. */
+  listMcpConfigPaths?: McpConfigPathLister;
+  /** Injectable `.mcp.json` file reader for read-only drift checks. */
+  readMcpConfigFile?: McpConfigFileReader;
 }
 
 /**
@@ -185,6 +219,22 @@ export const realLaunchctlRunner: LaunchctlRunner = async () => {
   }
 };
 
+export const realMcpConfigPathLister: McpConfigPathLister = async () => {
+  try {
+    const entries = await readdir(join(homedir(), "Gits"), {
+      withFileTypes: true,
+    });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(homedir(), "Gits", entry.name, ".mcp.json"));
+  } catch {
+    return [];
+  }
+};
+
+export const realMcpConfigFileReader: McpConfigFileReader = (path) =>
+  readFile(path, "utf-8");
+
 async function checkTap(brew: BrewRunner): Promise<DoctorReport["tap"]> {
   const tapNote = `tap CASKS need \`brew trust ${TAP_NAME}\`; cmuxlayer is a formula, not gated`;
 
@@ -214,6 +264,88 @@ async function checkTap(brew: BrewRunner): Promise<DoctorReport["tap"]> {
     tapPresent,
     formulaResolves,
     note: tapNote,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function serverReferencesLauncher(server: unknown): boolean {
+  if (!isRecord(server)) {
+    return false;
+  }
+
+  const command = typeof server.command === "string" ? server.command : "";
+  const args = Array.isArray(server.args)
+    ? server.args.filter((arg): arg is string => typeof arg === "string")
+    : [];
+
+  return [command, ...args].some((part) => part.includes("cmuxlayer-mcp"));
+}
+
+function driftReason(serverKey: string, server: unknown): string | null {
+  const reasons: string[] = [];
+
+  if (serverKey === "cmux") {
+    reasons.push("stale server key cmux (use cmuxlayer)");
+  }
+
+  if (!serverReferencesLauncher(server)) {
+    reasons.push("does not reference launcher cmuxlayer-mcp");
+  }
+
+  return reasons.length > 0 ? reasons.join("; ") : null;
+}
+
+export async function checkMcpConfigDrift(
+  opts: CheckMcpConfigDriftOptions = {},
+): Promise<McpConfigDriftReport> {
+  const listMcpConfigPaths =
+    opts.listMcpConfigPaths ?? realMcpConfigPathLister;
+  const readMcpConfigFile =
+    opts.readMcpConfigFile ?? realMcpConfigFileReader;
+
+  let paths: string[];
+  try {
+    paths = await listMcpConfigPaths();
+  } catch {
+    paths = [];
+  }
+
+  const drifted: McpConfigDriftEntry[] = [];
+  let scanned = 0;
+
+  for (const path of paths) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readMcpConfigFile(path));
+    } catch {
+      continue;
+    }
+
+    scanned += 1;
+
+    if (!isRecord(parsed) || !isRecord(parsed.mcpServers)) {
+      continue;
+    }
+
+    for (const [serverKey, server] of Object.entries(parsed.mcpServers)) {
+      if (serverKey !== "cmux" && serverKey !== "cmuxlayer") {
+        continue;
+      }
+
+      const reason = driftReason(serverKey, server);
+      if (reason) {
+        drifted.push({ path, serverKey, reason });
+      }
+    }
+  }
+
+  return {
+    scanned,
+    drifted,
+    note: "scanned ~/Gits/*/.mcp.json for cmux/cmuxlayer entries expected to reference launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
   };
 }
 
@@ -262,6 +394,10 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
 
   const tap = await checkTap(brew);
   const sleepGuard = await checkSleepGuard(pmset, launchctl);
+  const mcpConfigDrift = await checkMcpConfigDrift({
+    listMcpConfigPaths: opts.listMcpConfigPaths,
+    readMcpConfigFile: opts.readMcpConfigFile,
+  });
 
   // Health: only the version must resolve. Brew/tap gaps are reported but, per
   // the standard's "brew best-effort" rule, must NOT make the doctor unhealthy
@@ -284,6 +420,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
       : { set: false, value: null, note: "unset (auto-discover)" },
     sleepGuard,
+    mcpConfigDrift,
   };
 }
 
@@ -335,6 +472,21 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(
     `│ ${mark(report.sleepGuard.durable)} sleep guard: ${report.sleepGuard.note}`,
   );
+
+  if (report.mcpConfigDrift.drifted.length === 0) {
+    lines.push(
+      `│ ✔ .mcp.json drift: no mcp config drift (${report.mcpConfigDrift.scanned} scanned)`,
+    );
+  } else {
+    lines.push(
+      `│ ✗ .mcp.json drift: ${report.mcpConfigDrift.drifted.length} drifted (${report.mcpConfigDrift.scanned} scanned)`,
+    );
+    for (const entry of report.mcpConfigDrift.drifted) {
+      lines.push(
+        `│      ${entry.path} [${entry.serverKey}]: ${entry.reason}`,
+      );
+    }
+  }
 
   lines.push("└─");
   return lines.join("\n");
