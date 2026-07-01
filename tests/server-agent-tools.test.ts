@@ -17,11 +17,13 @@ import { tmpdir } from "node:os";
 import {
   createServer,
   createServerContext,
+  reconcileAgentLiveState,
   type CmuxServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
+import type { ParsedScreenResult } from "../src/types.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -448,9 +450,11 @@ describe("agent lifecycle tool handlers", () => {
       const calls: string[] = [];
       const mockClient = {
         createWorkspace: vi.fn(),
-        selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
-          calls.push(`select:${workspace}`);
-        }),
+        selectWorkspace: vi
+          .fn()
+          .mockImplementation(async (workspace: string) => {
+            calls.push(`select:${workspace}`);
+          }),
         listWorkspaces: vi.fn().mockResolvedValue({
           workspaces: [
             {
@@ -643,7 +647,8 @@ describe("agent lifecycle tool handlers", () => {
       },
       {} as any,
     );
-    const first = firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
+    const first =
+      firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
     const firstRecord = registry.get(first.agent_id);
@@ -660,7 +665,8 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
     const second =
-      secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
+      secondResult.structuredContent ??
+      JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
     expect(second.duplicate_spawn_warning).toMatch(/Existing same-lane agent/);
@@ -689,7 +695,8 @@ describe("agent lifecycle tool handlers", () => {
       },
       {} as any,
     );
-    const first = firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
+    const first =
+      firstResult.structuredContent ?? JSON.parse(firstResult.content[0].text);
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
     const firstRecord = registry.get(first.agent_id);
@@ -707,7 +714,8 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
     const second =
-      secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
+      secondResult.structuredContent ??
+      JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
     expect(second.duplicate_spawn_warning).toBeUndefined();
@@ -1280,10 +1288,10 @@ describe("agent lifecycle tool handlers", () => {
               lastSentText === "file prompt body"
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
                 : lastSentText === ""
-                ? "$ "
-                : launcherReturnCount < 2
-                  ? "$ voicelayerCodex -s"
-                  : "codex> ",
+                  ? "$ "
+                  : launcherReturnCount < 2
+                    ? "$ voicelayerCodex -s"
+                    : "codex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -1667,10 +1675,10 @@ describe("agent lifecycle tool handlers", () => {
     const getState = (server as any)._registeredTools["get_agent_state"];
 
     const spawnArgs = spawn.inputSchema.parse({
-        repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
-        prompt: "fix gap F",
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+      prompt: "fix gap F",
     });
     const spawnResult = await spawn.handler(spawnArgs, {} as any);
     const agentId = (
@@ -1693,11 +1701,11 @@ describe("agent lifecycle tool handlers", () => {
     const getState = (server as any)._registeredTools["get_agent_state"];
 
     const spawnArgs = spawn.inputSchema.parse({
-        repo: "cmuxlayer",
-        model: "gpt-5.4",
-        cli: "codex",
-        prompt: "fix gap F",
-        role: "worker",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      prompt: "fix gap F",
+      role: "worker",
     });
     const spawnResult = await spawn.handler(spawnArgs, {} as any);
     const agentId = (
@@ -2436,7 +2444,11 @@ codex>
 
   it("supersede_agent_goal updates registry metadata and delivers a file-backed goal", async () => {
     const goalPath = join(TEST_DIR, "mission.md");
-    writeFileSync(goalPath, "# Mission\n\nFinish the lifecycle repair.\n", "utf8");
+    writeFileSync(
+      goalPath,
+      "# Mission\n\nFinish the lifecycle repair.\n",
+      "utf8",
+    );
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const supersede = (server as any)._registeredTools["supersede_agent_goal"];
@@ -2488,7 +2500,10 @@ codex>
       ]),
     );
 
-    const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
     const state =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(state.task_summary).toBe("full baseline mission");
@@ -2552,7 +2567,11 @@ codex>
 
   it("supersede_agent_goal clears stale boot prompt metadata after delivery", async () => {
     const goalPath = join(TEST_DIR, "boot-pending-mission.md");
-    writeFileSync(goalPath, "# Mission\n\nReplace boot prompt state.\n", "utf8");
+    writeFileSync(
+      goalPath,
+      "# Mission\n\nReplace boot prompt state.\n",
+      "utf8",
+    );
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const supersede = (server as any)._registeredTools["supersede_agent_goal"];
@@ -2587,7 +2606,10 @@ codex>
     );
 
     expect(result.isError).toBeFalsy();
-    const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+    const stateResult = await getState.handler(
+      { agent_id: agentId },
+      {} as any,
+    );
     const state =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(state.state).toBe("working");
@@ -2599,10 +2621,16 @@ codex>
     "supersede_agent_goal resets stale %s lifecycle metadata after delivery",
     async (terminalState) => {
       const goalPath = join(TEST_DIR, `reset-${terminalState}-mission.md`);
-      writeFileSync(goalPath, "# Mission\n\nReplace stale lifecycle state.\n", "utf8");
+      writeFileSync(
+        goalPath,
+        "# Mission\n\nReplace stale lifecycle state.\n",
+        "utf8",
+      );
       const server = createLifecycleServer(mockExec);
       const spawn = (server as any)._registeredTools["spawn_agent"];
-      const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+      const supersede = (server as any)._registeredTools[
+        "supersede_agent_goal"
+      ];
       const getState = (server as any)._registeredTools["get_agent_state"];
 
       const spawnResult = await spawn.handler(
@@ -2650,9 +2678,13 @@ codex>
       expect(result.isError).toBeFalsy();
       expect(parsed.registry_state).toBe("working");
 
-      const stateResult = await getState.handler({ agent_id: agentId }, {} as any);
+      const stateResult = await getState.handler(
+        { agent_id: agentId },
+        {} as any,
+      );
       const state =
-        stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
+        stateResult.structuredContent ??
+        JSON.parse(stateResult.content[0].text);
       expect(state.state).toBe("working");
       expect(state.task_summary).toBe("replacement mission");
       expect(state.goal_file).toBe(goalPath);
@@ -2664,15 +2696,21 @@ codex>
 
   it("supersede_agent_goal does not update registry metadata when delivery fails", async () => {
     const goalPath = join(TEST_DIR, "undelivered-mission.md");
-    writeFileSync(goalPath, "# Mission\n\nThis should not be recorded.\n", "utf8");
+    writeFileSync(
+      goalPath,
+      "# Mission\n\nThis should not be recorded.\n",
+      "utf8",
+    );
     const backingExec = makeLifecycleExec();
-    const failingExec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
-      const text = String(args[args.length - 1] ?? "");
-      if (args.includes("send") && text.startsWith("/goal ")) {
-        throw new Error("send failed");
-      }
-      return backingExec(cmd, args);
-    });
+    const failingExec: ExecFn = vi
+      .fn()
+      .mockImplementation(async (cmd, args) => {
+        const text = String(args[args.length - 1] ?? "");
+        if (args.includes("send") && text.startsWith("/goal ")) {
+          throw new Error("send failed");
+        }
+        return backingExec(cmd, args);
+      });
     const server = createLifecycleServer(failingExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const supersede = (server as any)._registeredTools["supersede_agent_goal"];
@@ -2846,6 +2884,50 @@ codex>
 
     expect(result.isError).toBe(true);
     expect(result.structuredContent?.error).toMatch(/Agent not found/);
+  });
+
+  // Regression: my_agents reported state:"error" + token_count:null for a HEALTHY idle
+  // agent while read_screen returned context_window:1000000. The live screen parse is
+  // ground truth for liveness — a stale registry "error" must not mask a running agent.
+  describe("reconcileAgentLiveState", () => {
+    const liveScreen = (
+      status: ParsedScreenResult["status"],
+      tokenCount: number | null,
+    ): ParsedScreenResult => ({
+      agent_type: "claude",
+      status,
+      token_count: tokenCount,
+      context_pct: 20,
+      context_window: 1_000_000,
+      done_signal: null,
+      response: null,
+      errors: [],
+      model: "Opus",
+      cost: null,
+    });
+
+    it("surfaces live idle status when registry state is a stale error", () => {
+      expect(
+        reconcileAgentLiveState("error", liveScreen("idle", 196_000)),
+      ).toBe("idle");
+    });
+
+    it("surfaces live working status when registry state is a stale error", () => {
+      expect(
+        reconcileAgentLiveState("error", liveScreen("working", 50_000)),
+      ).toBe("working");
+    });
+
+    it("keeps registry error when there is no live screen to reconcile against", () => {
+      expect(reconcileAgentLiveState("error", null)).toBe("error");
+    });
+
+    it("does not override a healthy registry state", () => {
+      expect(reconcileAgentLiveState("working", null)).toBe("working");
+      expect(reconcileAgentLiveState("idle", liveScreen("idle", 10_000))).toBe(
+        "idle",
+      );
+    });
   });
 
   it("my_agents returns root agents when no parent_agent_id", async () => {
