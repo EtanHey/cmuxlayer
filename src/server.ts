@@ -4398,6 +4398,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return record;
     };
 
+    const captureSpawnSessionBestEffort = async <
+      T extends {
+        agent_id: string;
+        surface_id: string;
+      },
+    >(
+      result: T,
+    ): Promise<AgentRecord | null> => {
+      try {
+        await engine.captureBootSessionId(result.agent_id);
+      } catch {
+        // Keep spawn/boot error handling focused on the original outcome.
+      }
+      return canonicalizeSpawnResult(result);
+    };
+
     const prepareSpawnWorktree = async (
       repo: string,
       worktree: boolean | object | undefined,
@@ -4768,7 +4784,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   }),
               });
 
-              canonicalizeSpawnResult(result);
+              await captureSpawnSessionBestEffort(result);
               if (bootPromptDelivery.prompt_text !== null) {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   task_summary: bootPromptDelivery.prompt_text,
@@ -4804,7 +4820,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return updated;
             };
             try {
-              canonicalizeSpawnResult(result);
+              await captureSpawnSessionBestEffort(result);
               let updated = clearBootPromptPending();
               if (
                 !(e instanceof BootPromptTimeoutError) &&

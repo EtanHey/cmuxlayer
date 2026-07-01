@@ -1239,6 +1239,14 @@ export class AgentEngine {
     }
   }
 
+  async captureBootSessionId(agentId: string): Promise<AgentRecord | null> {
+    const agent = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (!agent) {
+      return null;
+    }
+    return this.maybeCaptureBootSessionId(agent, {});
+  }
+
   private async maybeMarkBootReady(
     agent: AgentRecord,
     ctx: SweepAgentContext,
@@ -2023,11 +2031,18 @@ export class AgentEngine {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      let failedAgentId = agentId;
       try {
-        const failed = this.stateMgr.transition(agentId, "error", {
+        failedAgentId =
+          (await this.captureBootSessionId(agentId))?.agent_id ?? agentId;
+      } catch {
+        // Preserve the original launch error for the caller.
+      }
+      try {
+        const failed = this.stateMgr.transition(failedAgentId, "error", {
           error: `Launch failed: ${message}`,
         });
-        this.registry.set(agentId, failed);
+        this.registry.set(failedAgentId, failed);
       } catch {
         // Preserve the original launch error for the caller.
       }
