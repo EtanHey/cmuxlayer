@@ -217,6 +217,41 @@ Token usage: total=50,000
     expect(parsed.context_pct).toBe(25); // 50000/200000
   });
 
+  // --- Regression: statusline context-% bug (Opus 4.8 @ 196K shown as ~98%) ---
+  // A current-gen Claude agent at 196K tokens is really at 196K/1M ≈ 20%, not 196K/200K ≈ 98%.
+  // The narrow-pane fallback drops the "4.8" version, leaving a bare "Opus" that must still
+  // resolve to the 1M window even though 196K does NOT exceed the stale 200K default.
+  it("renders bare 'Opus' narrow pane at 196K tokens as ~20% (1M window), not ~98%", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=196,000
+🤖 Opus
+`);
+
+    expect(parsed.model).toBe("Opus");
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(20); // 196000/1000000, NOT 196000/200000 ≈ 98
+  });
+
+  it("inferContextWindow: bare 'Opus' below 200K tokens still resolves 1M (current-gen)", () => {
+    // 196K ≯ 200K, so the old token-count upgrade guard failed and capped at 200K.
+    expect(inferContextWindow("Opus", 196_000, "🤖 Opus")).toBe(1_000_000);
+    expect(inferContextWindow("Sonnet", 196_000, "🤖 Sonnet")).toBe(1_000_000);
+  });
+
+  it("inferContextWindow: versioned 'Opus 4.8' at 196K resolves 1M", () => {
+    expect(inferContextWindow("Opus 4.8", 196_000, "🤖 Opus 4.8")).toBe(
+      1_000_000,
+    );
+  });
+
+  it("inferContextWindow: explicitly OLD Claude ('Sonnet 4.5') below 200K stays 200K", () => {
+    // Older-gen Claude must NOT be upgraded to 1M just because it's a Claude pane.
+    expect(inferContextWindow("Sonnet 4.5", 100_000, "🤖 Sonnet 4.5")).toBe(
+      200_000,
+    );
+  });
+
   it("parses Codex-style output with model, context left, and actions", () => {
     const parsed = parseScreen(`
 gpt-5.4 high · 87% left · ~/Gits/orchestrator
