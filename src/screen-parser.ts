@@ -64,12 +64,12 @@ function isCurrentGenClaudeModel(model: string | null): boolean {
   const id = normalizeModelId(model);
   // Versioned current-gen is decided by the shared harness map (opus-4.[678], sonnet-4-6 → 1M).
   if (
-    /opus|sonnet|haiku|claude/.test(id) &&
+    /opus|sonnet|haiku|claude|fable/.test(id) &&
     modelContextWindow(id) === 1_000_000
   )
     return true;
   // Bare family with no version at all → assume the current shipping gen (1M).
-  return /^(claude-)?(opus|sonnet)$/.test(id);
+  return /^(claude-)?(opus|sonnet|fable)$/.test(id);
 }
 
 /**

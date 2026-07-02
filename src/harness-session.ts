@@ -31,6 +31,9 @@ export interface HarnessSessionState {
 const MODEL_WINDOW_RULES: Array<[RegExp, number]> = [
   // Claude — current gen ships 1M standard (Opus 4.6/4.7/4.8, Sonnet 4.6)
   [/(opus-4-?[678])|(sonnet-4-?6)/, 1_000_000],
+  // Claude — Fable (Mythos tier) ships 1M standard. A live 151% reading proved it was
+  // falling through to the 200K default. Matches "fable", "fable-5", "claude-fable-5".
+  [/fable/, 1_000_000],
   // Claude — 200K tier (Haiku, and 4.0–4.5 generation incl. opus-4-1)
   [/haiku|(sonnet-4(?!-6))|(opus-4(?!-?[678]))|(opus-4-1)/, 200_000],
   // OpenAI GPT-5 / Codex family — 400K total window (272K input + 128K output)
@@ -467,12 +470,13 @@ function normalizeText(value: string): string {
 }
 
 function normalizePromptText(value: string): string {
-  return normalizeText(
-    value.replace(/<\/?\s*user_query\s*>/gi, " "),
-  );
+  return normalizeText(value.replace(/<\/?\s*user_query\s*>/gi, " "));
 }
 
-function promptTextMatchesExpected(value: string, expectedText: string): boolean {
+function promptTextMatchesExpected(
+  value: string,
+  expectedText: string,
+): boolean {
   return normalizePromptText(value) === expectedText;
 }
 
@@ -529,8 +533,7 @@ function recordPromptFields(event: Record<string, unknown>): unknown[] {
     );
   }
 
-  const payloadType =
-    typeof payload?.type === "string" ? payload.type : null;
+  const payloadType = typeof payload?.type === "string" ? payload.type : null;
   if (payloadType === "user_message" || payloadType === "user") {
     fields.push(payload?.message, payload?.text, payload?.input);
   }
@@ -568,7 +571,6 @@ function jsonlContainsExpectedPromptText(
 function parseCodexSessionMetaFromContent(
   content: string,
 ): { session_id: string; cwd: string | null } | null {
-
   for (const raw of content.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
@@ -606,7 +608,9 @@ function chooseIdentityCandidate(
   }
 
   if (hasExpectedText) {
-    const matches = candidates.filter((candidate) => candidate.expected_text_match);
+    const matches = candidates.filter(
+      (candidate) => candidate.expected_text_match,
+    );
     if (matches.length === 1) {
       const { expected_text_match, ...identity } = matches[0]!;
       return identity;
@@ -636,7 +640,11 @@ export function findLatestHarnessSessionIdentity(
       const candidates: HarnessSessionIdentityCandidate[] = [];
       for (const name of safeReaddir(root)) {
         const path = join(root, name);
-        if (!name.endsWith(".jsonl") || !isFile(path) || !afterSince(path, opts.sinceMs)) {
+        if (
+          !name.endsWith(".jsonl") ||
+          !isFile(path) ||
+          !afterSince(path, opts.sinceMs)
+        ) {
           continue;
         }
         const sessionId = sessionIdFromJsonlName(path);
@@ -670,7 +678,11 @@ export function findLatestHarnessSessionIdentity(
         if (!isDir(transcriptDir)) continue;
         for (const name of safeReaddir(transcriptDir)) {
           const path = join(transcriptDir, name);
-          if (!name.endsWith(".jsonl") || !isFile(path) || !afterSince(path, opts.sinceMs)) {
+          if (
+            !name.endsWith(".jsonl") ||
+            !isFile(path) ||
+            !afterSince(path, opts.sinceMs)
+          ) {
             continue;
           }
           const sessionId = sessionIdFromJsonlName(path) ?? dir;

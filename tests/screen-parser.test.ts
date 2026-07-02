@@ -252,6 +252,25 @@ Token usage: total=196,000
     );
   });
 
+  // Fable 5 (Mythos tier) ships a 1M window. Etan saw a live 151% reading on a 1M Fable
+  // seat — proof "Fable 5" fell through to the 200K default (300K/200K = 150%, clamped 151).
+  it("inferContextWindow: 'Fable 5' resolves 1M (versioned and bare)", () => {
+    expect(inferContextWindow("Fable 5", 300_000, "🤖 Fable 5")).toBe(
+      1_000_000,
+    );
+    expect(inferContextWindow("Fable", 100_000, "🤖 Fable")).toBe(1_000_000);
+  });
+
+  it("renders a Fable-5 pane at 300K tokens as ~30% (1M window), never >100%", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=300,000
+🤖 Fable 5
+`);
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(30); // 300000/1000000, NOT 300000/200000 ≈ 150
+  });
+
   it("parses Codex-style output with model, context left, and actions", () => {
     const parsed = parseScreen(`
 gpt-5.4 high · 87% left · ~/Gits/orchestrator
@@ -582,9 +601,7 @@ Using claude-sonnet-4-20250514
   });
 
   it("parses Cursor Agent v2026.06.04 fresh-boot ready chrome", () => {
-    const parsed = parseScreen(
-      readFixture("cursor-2026-06-04-boot-ready.txt"),
-    );
+    const parsed = parseScreen(readFixture("cursor-2026-06-04-boot-ready.txt"));
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.status).toBe("idle");
@@ -594,9 +611,7 @@ Using claude-sonnet-4-20250514
   });
 
   it("parses Cursor Agent v2026.06.04 standalone TASK_DONE output evidence", () => {
-    const parsed = parseScreen(
-      readFixture("cursor-2026-06-04-task-done.txt"),
-    );
+    const parsed = parseScreen(readFixture("cursor-2026-06-04-task-done.txt"));
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.status).toBe("done");
