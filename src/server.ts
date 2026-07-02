@@ -5,9 +5,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
@@ -955,6 +955,8 @@ export interface CmuxServerContext {
 
 const DEFAULT_CONTROL_HEALTH_INTERVAL_MS = 60_000;
 const MIN_CONTROL_HEALTH_INTERVAL_MS = 5_000;
+const autoVitestStateDirs = new Set<string>();
+let autoVitestStateCleanupRegistered = false;
 
 function resolveControlHealthIntervalMs(input?: number): number {
   const raw =
@@ -971,13 +973,41 @@ function resolveControlHealthIntervalMs(input?: number): number {
   return Math.max(MIN_CONTROL_HEALTH_INTERVAL_MS, Math.floor(raw));
 }
 
+function registerAutoVitestStateDir(stateDir: string): void {
+  autoVitestStateDirs.add(stateDir);
+  if (autoVitestStateCleanupRegistered) {
+    return;
+  }
+  autoVitestStateCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const dir of autoVitestStateDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    autoVitestStateDirs.clear();
+  });
+}
+
+function removeAutoVitestStateDir(stateDir: string): void {
+  autoVitestStateDirs.delete(stateDir);
+  rmSync(stateDir, { recursive: true, force: true });
+}
+
 export function createServerContext(
   opts?: Omit<CreateServerOptions, "context">,
 ): CmuxServerContext {
   const client =
     opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const autoVitestStateDir =
+    !opts?.stateDir && process.env.VITEST === "true"
+      ? mkdtempSync(join(tmpdir(), "cmuxlayer-vitest-state-"))
+      : null;
   const stateDir =
-    opts?.stateDir ?? join(homedir(), ".local", "state", "cmux-agents");
+    opts?.stateDir ??
+    autoVitestStateDir ??
+    join(homedir(), ".local", "state", "cmux-agents");
+  if (autoVitestStateDir) {
+    registerAutoVitestStateDir(autoVitestStateDir);
+  }
   const stateMgr = new StateManager(stateDir);
   const context: CmuxServerContext = {
     client,
@@ -1014,6 +1044,9 @@ export function createServerContext(
       context.lifecycleSweepEngine = null;
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
+      if (autoVitestStateDir) {
+        removeAutoVitestStateDir(autoVitestStateDir);
+      }
     },
   };
 
@@ -1066,6 +1099,7 @@ function buildLifecycleChannelMeta(
 }
 
 export function createServer(opts?: CreateServerOptions): McpServer {
+  const ownsContext = !opts?.context;
   const context = opts?.context ?? createServerContext(opts);
   const client = context.client;
   const stateMgr = context.stateMgr;
@@ -1142,6 +1176,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
       : undefined,
   );
+  if (ownsContext) {
+    const close = server.close.bind(server);
+    server.close = async (): Promise<void> => {
+      try {
+        await close();
+      } finally {
+        context.dispose();
+      }
+    };
+  }
 
   if (enableClaudeChannels) {
     server.server.registerCapabilities({
