@@ -17,11 +17,13 @@ import { tmpdir } from "node:os";
 import {
   createServer,
   createServerContext,
+  reconcileAgentLiveState,
   type CmuxServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
+import type { ParsedScreenResult } from "../src/types.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -2859,6 +2861,60 @@ codex>
 
     expect(result.isError).toBe(true);
     expect(result.structuredContent?.error).toMatch(/Agent not found/);
+  });
+
+  // Regression: my_agents reported state:"error" + token_count:null for a HEALTHY idle
+  // agent while read_screen returned context_window:1000000. The live screen parse is
+  // ground truth for liveness — a stale registry "error" must not mask a running agent.
+  describe("reconcileAgentLiveState", () => {
+    const liveScreen = (
+      status: ParsedScreenResult["status"],
+      tokenCount: number | null,
+    ): ParsedScreenResult => ({
+      agent_type: "claude",
+      status,
+      token_count: tokenCount,
+      context_pct: 20,
+      context_window: 1_000_000,
+      done_signal: null,
+      response: null,
+      errors: [],
+      model: "Opus",
+      cost: null,
+    });
+
+    it("surfaces live idle status when registry state is a stale error", () => {
+      expect(
+        reconcileAgentLiveState("error", liveScreen("idle", 196_000)),
+      ).toBe("idle");
+    });
+
+    it("surfaces live working status when registry state is a stale error", () => {
+      expect(
+        reconcileAgentLiveState("error", liveScreen("working", 50_000)),
+      ).toBe("working");
+    });
+
+    it("keeps registry error when there is no live screen to reconcile against", () => {
+      expect(reconcileAgentLiveState("error", null)).toBe("error");
+    });
+
+    it("does not override a healthy registry state", () => {
+      expect(reconcileAgentLiveState("working", null)).toBe("working");
+      expect(reconcileAgentLiveState("idle", liveScreen("idle", 10_000))).toBe(
+        "idle",
+      );
+    });
+
+    it("keeps registry error when the live screen is a bare shell (crashed agent, unknown type)", () => {
+      // parseScreen returns status:"idle" for a plain shell prompt with agent_type:"unknown";
+      // a crashed agent fallen back to a shell must NOT be reported healthy.
+      const shell: ParsedScreenResult = {
+        ...liveScreen("idle", null),
+        agent_type: "unknown",
+      };
+      expect(reconcileAgentLiveState("error", shell)).toBe("error");
+    });
   });
 
   it("my_agents returns root agents when no parent_agent_id", async () => {

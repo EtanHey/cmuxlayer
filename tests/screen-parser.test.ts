@@ -217,6 +217,60 @@ Token usage: total=50,000
     expect(parsed.context_pct).toBe(25); // 50000/200000
   });
 
+  // --- Regression: statusline context-% bug (Opus 4.8 @ 196K shown as ~98%) ---
+  // A current-gen Claude agent at 196K tokens is really at 196K/1M ≈ 20%, not 196K/200K ≈ 98%.
+  // The narrow-pane fallback drops the "4.8" version, leaving a bare "Opus" that must still
+  // resolve to the 1M window even though 196K does NOT exceed the stale 200K default.
+  it("renders bare 'Opus' narrow pane at 196K tokens as ~20% (1M window), not ~98%", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=196,000
+🤖 Opus
+`);
+
+    expect(parsed.model).toBe("Opus");
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(20); // 196000/1000000, NOT 196000/200000 ≈ 98
+  });
+
+  it("inferContextWindow: bare 'Opus' below 200K tokens still resolves 1M (current-gen)", () => {
+    // 196K ≯ 200K, so the old token-count upgrade guard failed and capped at 200K.
+    expect(inferContextWindow("Opus", 196_000, "🤖 Opus")).toBe(1_000_000);
+    expect(inferContextWindow("Sonnet", 196_000, "🤖 Sonnet")).toBe(1_000_000);
+  });
+
+  it("inferContextWindow: versioned 'Opus 4.8' at 196K resolves 1M", () => {
+    expect(inferContextWindow("Opus 4.8", 196_000, "🤖 Opus 4.8")).toBe(
+      1_000_000,
+    );
+  });
+
+  it("inferContextWindow: explicitly OLD Claude ('Sonnet 4.5') below 200K stays 200K", () => {
+    // Older-gen Claude must NOT be upgraded to 1M just because it's a Claude pane.
+    expect(inferContextWindow("Sonnet 4.5", 100_000, "🤖 Sonnet 4.5")).toBe(
+      200_000,
+    );
+  });
+
+  // Fable 5 (Mythos tier) ships a 1M window. Etan saw a live 151% reading on a 1M Fable
+  // seat — proof "Fable 5" fell through to the 200K default (300K/200K = 150%, clamped 151).
+  it("inferContextWindow: 'Fable 5' resolves 1M (versioned and bare)", () => {
+    expect(inferContextWindow("Fable 5", 300_000, "🤖 Fable 5")).toBe(
+      1_000_000,
+    );
+    expect(inferContextWindow("Fable", 100_000, "🤖 Fable")).toBe(1_000_000);
+  });
+
+  it("renders a Fable-5 pane at 300K tokens as ~30% (1M window), never >100%", () => {
+    const parsed = parseScreen(`
+✻ Working…
+Token usage: total=300,000
+🤖 Fable 5
+`);
+    expect(parsed.context_window).toBe(1_000_000);
+    expect(parsed.context_pct).toBe(30); // 300000/1000000, NOT 300000/200000 ≈ 150
+  });
+
   it("parses Codex-style output with model, context left, and actions", () => {
     const parsed = parseScreen(`
 gpt-5.4 high · 87% left · ~/Gits/orchestrator
@@ -547,9 +601,7 @@ Using claude-sonnet-4-20250514
   });
 
   it("parses Cursor Agent v2026.06.04 fresh-boot ready chrome", () => {
-    const parsed = parseScreen(
-      readFixture("cursor-2026-06-04-boot-ready.txt"),
-    );
+    const parsed = parseScreen(readFixture("cursor-2026-06-04-boot-ready.txt"));
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.status).toBe("idle");
@@ -559,9 +611,7 @@ Using claude-sonnet-4-20250514
   });
 
   it("parses Cursor Agent v2026.06.04 standalone TASK_DONE output evidence", () => {
-    const parsed = parseScreen(
-      readFixture("cursor-2026-06-04-task-done.txt"),
-    );
+    const parsed = parseScreen(readFixture("cursor-2026-06-04-task-done.txt"));
 
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.status).toBe("done");

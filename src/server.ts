@@ -862,6 +862,37 @@ function resolveLatestSurfaceAgentRecord(
     })[0];
 }
 
+// Map a live screen status onto a healthy AgentState. Only running/idle states are "healthy"
+// enough to override a stale registry error — "done"/"frozen" are left to the registry.
+const LIVE_HEALTHY_STATE: Partial<
+  Record<ParsedScreenResult["status"], AgentState>
+> = {
+  working: "working",
+  thinking: "working",
+  idle: "idle",
+};
+
+/**
+ * Reconcile a registry AgentState with the live read_screen parse for my_agents.
+ * The registry can hold a STALE "error" for an agent that is actually alive (idle/working);
+ * read_screen is ground truth for liveness. When the registry says "error" but the live screen
+ * still parses a healthy running status, surface the live state instead. All other cases keep
+ * the registry state (we never downgrade a healthy registry state on a transient screen blip).
+ */
+export function reconcileAgentLiveState(
+  registryState: AgentState,
+  screen: ParsedScreenResult | null,
+): AgentState {
+  // Only a REAL agent screen can clear an error. parseScreen reports status:"idle" for a
+  // plain shell prompt (agent_type:"unknown"), so a crashed agent fallen back to a shell must
+  // keep its registry error instead of being masked as healthy idle.
+  if (registryState === "error" && screen && screen.agent_type !== "unknown") {
+    const live = LIVE_HEALTHY_STATE[screen.status];
+    if (live) return live;
+  }
+  return registryState;
+}
+
 function enrichParsedScreen(
   parsed: ParsedScreenResult,
   rawText: string,
@@ -6084,7 +6115,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return {
                 agent_id: agent.agent_id,
                 repo: agent.repo,
-                state: agent.state,
+                // Reconcile a stale registry "error" against the live screen: a healthy idle
+                // agent must not be reported as errored just because the registry lagged.
+                state: reconcileAgentLiveState(agent.state, screenData),
                 model: agent.model,
                 cli: agent.cli,
                 session_id: agent.cli_session_id,

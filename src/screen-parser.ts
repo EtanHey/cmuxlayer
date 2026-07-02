@@ -3,6 +3,10 @@ import type {
   ParsedScreenResult,
   ParsedScreenStatus,
 } from "./types.js";
+// AIDEV-NOTE: Single source of truth for per-model context windows lives in
+// harness-session.ts (MODEL_WINDOW_RULES). screen-parser delegates versioned lookups to it
+// (via modelContextWindow) so the fallback table below never drifts from the JSONL path.
+import { modelContextWindow } from "./harness-session.js";
 
 // AIDEV-NOTE: DEFAULT context window sizes per model family. Verified numbers (researcher,
 // BrainLayer brainbar-8a3da79c-159, 2026-06-04) — do NOT guess/round. This is the SCREEN-PARSER
@@ -39,24 +43,50 @@ const SORTED_MODEL_ENTRIES = Object.entries(MODEL_MAX_TOKENS).sort(
   ([a], [b]) => b.length - a.length,
 );
 
-const VERSIONED_MODEL_MAX_RULES: Array<[RegExp, number]> = [
-  [/(?:claude[-\s])?opus[-\s]4(?:[.\s-])?[678]\b/i, 1_000_000],
-  [/(?:claude[-\s])?sonnet[-\s]4(?:[.\s-])?6\b/i, 1_000_000],
-];
+/**
+ * Normalize a DISPLAY model string ("Opus 4.8", "Sonnet 4.6") into the dash-delimited id
+ * form ("opus-4-8", "sonnet-4-6") that harness-session's MODEL_WINDOW_RULES expects.
+ */
+function normalizeModelId(model: string): string {
+  return model
+    .toLowerCase()
+    .trim()
+    .replace(/[.\s]+/g, "-");
+}
+
+/**
+ * True when the model is a current-gen Claude that ships the 1M window standard — including a
+ * BARE "Opus"/"Sonnet" with no version (a narrow pane dropped the "4.8"). Explicitly OLD
+ * versions (Opus/Sonnet 4.5, opus-4-1, Haiku) are NOT current-gen and stay on the 200K tier.
+ */
+function isCurrentGenClaudeModel(model: string | null): boolean {
+  if (!model) return false;
+  const id = normalizeModelId(model);
+  // Versioned current-gen is decided by the shared harness map (opus-4.[678], sonnet-4-6 → 1M).
+  if (
+    /opus|sonnet|haiku|claude|fable/.test(id) &&
+    modelContextWindow(id) === 1_000_000
+  )
+    return true;
+  // Bare family with no version at all → assume the current shipping gen (1M).
+  return /^(claude-)?(opus|sonnet|fable)$/.test(id);
+}
 
 /**
  * Resolve the DEFAULT context window for a model string.
- * Returns the base tier (e.g. 200K for Claude). Use inferContextWindow() for
- * smart inference that detects the 1M tier from "(1M" suffix or token count.
+ * Returns the base tier (e.g. 200K for a bare/older Claude). Use inferContextWindow() for
+ * smart inference that detects the 1M tier from "(1M" suffix, current-gen model, or token count.
  */
 export function resolveModelMax(model: string | null): number | null {
   if (!model) return null;
+
+  // Single source of truth: delegate known/versioned models to the harness-session map.
+  const known = modelContextWindow(normalizeModelId(model));
+  if (known !== null) return known;
+
+  // Bare-family fallback — harness-session intentionally omits bare "opus"/"sonnet" (never a
+  // wrong 1M). Here they resolve to the conservative 200K default tier.
   const lower = model.toLowerCase().trim();
-
-  for (const [re, max] of VERSIONED_MODEL_MAX_RULES) {
-    if (re.test(lower)) return max;
-  }
-
   for (const [key, max] of SORTED_MODEL_ENTRIES) {
     if (lower.includes(key) || lower.includes(key.replace("-", " ")))
       return max;
@@ -83,6 +113,11 @@ export function inferContextWindow(
   // if model parsing fails. CASE-SENSITIVE uppercase M on purpose: Codex's working timer
   // "(1m 12s • esc to interrupt)" uses lowercase m and must NOT be read as a 1M window.
   if (/\(1M\b/.test(rawText)) return 1_000_000;
+
+  // Current-gen Claude ships 1M standard. This catches the narrow-pane case where the version
+  // is dropped (bare "Opus"/"Sonnet") AND the token count is still under the stale 200K default
+  // (e.g. 196K) — where the token-count upgrade guard below would otherwise wrongly cap at 200K.
+  if (isCurrentGenClaudeModel(model)) return 1_000_000;
 
   const defaultMax = resolveModelMax(model);
   const looksLikeClaudePane =
