@@ -110,6 +110,10 @@ export interface SpawnAgentResult {
   mcp_env?: string;
 }
 
+type CreatedAgentSurface = (CmuxNewSplitResult | CmuxNewSurfaceResult) & {
+  warnings?: string[];
+};
+
 export interface CapturedSessionIdentity {
   session_id: string;
   path?: string | null;
@@ -942,7 +946,7 @@ export class AgentEngine {
       parentAgent?: AgentRecord | null;
       repo?: string;
     },
-  ): Promise<CmuxNewSplitResult | CmuxNewSurfaceResult> {
+  ): Promise<CreatedAgentSurface> {
     // Pin a child worker to the parent orchestrator's ACTUAL workspace before
     // falling back to repo-name resolution. Without this a worker re-resolves
     // its workspace purely from the repo directory name, which fails for
@@ -1030,26 +1034,47 @@ export class AgentEngine {
           childWorkerSurfaceIds,
         },
       );
-      return placement.kind === "surface"
-        ? this.client.newSurface({
-            pane: placement.pane,
-            type: "terminal",
-            workspace,
-          })
-        : this.client.newSplit(placement.direction, {
-            ...(placement.pane ? { pane: placement.pane } : {}),
-            workspace,
-            type: "terminal",
-          });
+      const surface =
+        placement.kind === "surface"
+          ? await this.client.newSurface({
+              pane: placement.pane,
+              type: "terminal",
+              workspace,
+            })
+          : await this.client.newSplit(placement.direction, {
+              ...(placement.pane ? { pane: placement.pane } : {}),
+              workspace,
+              type: "terminal",
+            });
+      return this.withWorkspacePlacementWarning(surface, workspace);
     } catch (error) {
       if (isAgentRoleInferenceError(error)) {
         throw error;
       }
-      return this.client.newSplit("right", {
+      const surface = await this.client.newSplit("right", {
         workspace,
         type: "terminal",
       });
+      return this.withWorkspacePlacementWarning(surface, workspace);
     }
+  }
+
+  private withWorkspacePlacementWarning<T extends CreatedAgentSurface>(
+    surface: T,
+    requestedWorkspace: string | undefined,
+  ): T {
+    if (
+      !requestedWorkspace ||
+      !surface.workspace ||
+      surface.workspace === requestedWorkspace
+    ) {
+      return surface;
+    }
+    const warning = `Spawn placement mismatch: requested ${requestedWorkspace} but cmux returned ${surface.workspace} for surface ${surface.surface}`;
+    return {
+      ...surface,
+      warnings: [...(surface.warnings ?? []), warning],
+    };
   }
 
   private async resolveWorkspaceForRepo(
@@ -2057,7 +2082,7 @@ export class AgentEngine {
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
-      warnings: modelPolicy.warnings,
+      warnings: [...modelPolicy.warnings, ...(surface.warnings ?? [])],
       model_policy: modelPolicy,
       cwd: spawnParams.cwd,
       mcp_env: spawnParams.mcp_env,
