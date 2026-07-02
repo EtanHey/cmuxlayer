@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ack,
   ackedIds,
+  agentDir,
   dispatch,
   inboxPath,
   monitorAlive,
@@ -154,6 +155,19 @@ describe("inbox write-channel", () => {
     const cmd = recommendedCodexWatch("a10", opts);
     expect(cmd).toBe(
       `tail -n0 -F ${inboxPath("a10", opts)} >> ${surfacedLogPath("a10", opts)}`,
+    );
+  });
+
+  it("Codex watch recreates a deleted channel dir before returning a surfaced-log write command", () => {
+    const dir = agentDir("a10-deleted", opts);
+    writeHeartbeat("a10-deleted", opts);
+    rmSync(dir, { recursive: true, force: true });
+
+    const cmd = recommendedCodexWatch("a10-deleted", opts);
+
+    expect(existsSync(dir)).toBe(true);
+    expect(cmd).toBe(
+      `tail -n0 -F ${inboxPath("a10-deleted", opts)} >> ${surfacedLogPath("a10-deleted", opts)}`,
     );
   });
 

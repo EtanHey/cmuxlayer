@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
-import { writeHeartbeat, readInbox } from "../src/inbox.js";
+import { agentDir, writeHeartbeat, readInbox } from "../src/inbox.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
@@ -489,5 +489,25 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.undelivered_count).toBe(1);
+  });
+
+  it("get_agent_state reports a deleted inbox channel dir distinctly from a never-armed monitor", async () => {
+    const agentId = await spawnTestAgent(server);
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    rmSync(agentDir(agentId, { baseDir: inboxDir }), {
+      recursive: true,
+      force: true,
+    });
+
+    const getState = server._registeredTools["get_agent_state"];
+    const result = await getState.handler({ agent_id: agentId }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining(["inbox_channel_dir_deleted"]),
+    });
+    expect(parsed.health.issue_codes).not.toContain("inbox_monitor_not_alive");
   });
 });

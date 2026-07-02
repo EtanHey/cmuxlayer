@@ -20,7 +20,7 @@
 //
 // send_input is KEPT as the fallback path — this channel is additive (belt-and-suspenders) until
 // proven in production.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -90,12 +90,36 @@ export function heartbeatPath(agentId: string, opts?: InboxOpts): string {
   return join(agentDir(agentId, opts), "monitor.heartbeat");
 }
 
-function ensureDir(agentId: string, opts?: InboxOpts): void {
+function channelMarkerDir(opts?: InboxOpts): string {
+  return join(baseDirOf(opts), ".channel-dirs");
+}
+
+function channelMarkerPath(agentId: string, opts?: InboxOpts): string {
+  return join(channelMarkerDir(opts), `${encodeURIComponent(agentId)}.created`);
+}
+
+function ensureChannelDirForWrite(agentId: string, opts?: InboxOpts): void {
   mkdirSync(agentDir(agentId, opts), { recursive: true });
+  mkdirSync(channelMarkerDir(opts), { recursive: true });
+  appendFileSync(channelMarkerPath(agentId, opts), "");
+}
+
+export function channelDirExists(agentId: string, opts?: InboxOpts): boolean {
+  return existsSync(agentDir(agentId, opts));
+}
+
+export function channelDirDeletedAfterCreate(
+  agentId: string,
+  opts?: InboxOpts,
+): boolean {
+  return (
+    existsSync(channelMarkerPath(agentId, opts)) &&
+    !channelDirExists(agentId, opts)
+  );
 }
 
 export function ensureInboxFile(agentId: string, opts?: InboxOpts): string {
-  ensureDir(agentId, opts);
+  ensureChannelDirForWrite(agentId, opts);
   const path = inboxPath(agentId, opts);
   appendFileSync(path, "");
   return path;
@@ -146,7 +170,7 @@ export function dispatch(
   input: DispatchInput,
   opts?: InboxOpts,
 ): InboxMessage {
-  ensureDir(agentId, opts);
+  ensureChannelDirForWrite(agentId, opts);
   const ts = input.ts_ms ?? nowOf(opts);
   const msg: InboxMessage = {
     id: input.id ?? genId(ts),
@@ -194,7 +218,7 @@ export function ack(
   status: string,
   opts?: InboxOpts,
 ): InboxAck {
-  ensureDir(agentId, opts);
+  ensureChannelDirForWrite(agentId, opts);
   const record: InboxAck = {
     ts_ms: nowOf(opts),
     agent: agentId,
@@ -228,7 +252,7 @@ export function writeHeartbeat(
   opts?: InboxOpts,
   source: MonitorHeartbeatSource = "agent",
 ): number {
-  ensureDir(agentId, opts);
+  ensureChannelDirForWrite(agentId, opts);
   const ts = nowOf(opts);
   const sourceSuffix = source === "agent" ? "" : ` ${source}`;
   appendFileSync(heartbeatPath(agentId, opts), `${ts}${sourceSuffix}\n`);
@@ -313,5 +337,6 @@ export function recommendedCodexWatch(
   agentId: string,
   opts?: InboxOpts,
 ): string {
+  ensureChannelDirForWrite(agentId, opts);
   return `tail -n0 -F ${inboxPath(agentId, opts)} >> ${surfacedLogPath(agentId, opts)}`;
 }
