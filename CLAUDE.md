@@ -86,6 +86,11 @@ prompt's Enter is verified before delivery falls back to readiness/composer-clea
 it for agents that stream their first tokens slowly (e.g. Opus-4.8/1M, Gemini on multi-KB prompts) if
 you still see false `Enter submit could not be verified` errors; invalid values fall back to the default.
 
+`CMUXLAYER_MAX_INLINE_CHARS` (positive integer >= 500, default `1800`) caps raw pane-keystroke payloads
+for `send_input.text`, `send_command.command`, and `spawn_agent.prompt`. Larger task payloads should live
+in a file and be delivered as one line (`Read and follow <path>`); launcher boot prompts should use
+`boot_prompt_path`. Invalid values fall back to the default.
+
 ## Testing Conventions
 - Test files mirror source: `src/foo.ts` -> `tests/foo.test.ts`
 - Agent engine tests use 1-second timeouts for state change detection
