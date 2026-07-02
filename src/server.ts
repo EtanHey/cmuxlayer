@@ -320,9 +320,6 @@ function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
   if (/\bsurface[-_\s]?not[-_\s]?found\b/.test(text)) {
     return true;
   }
-  if (text.includes("surface is not a terminal")) {
-    return true;
-  }
   return /\bnot_found\b/.test(text) && text.includes("surface");
 }
 

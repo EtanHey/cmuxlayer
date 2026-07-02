@@ -4637,7 +4637,7 @@ describe("tool handler integration", () => {
         if (!transientFailureThrown) {
           transientFailureThrown = true;
           throw Object.assign(new Error("temporary read unavailable"), {
-            stderr: "pty read temporarily unavailable",
+            stderr: "Surface is not a terminal",
           });
         }
         return {
