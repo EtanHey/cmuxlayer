@@ -149,6 +149,7 @@ const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
 const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 const SEND_INPUT_CHUNK_THRESHOLD = 500;
+const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
@@ -165,6 +166,19 @@ function parsePositiveIntegerMs(
 const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = parsePositiveIntegerMs(
   process.env.CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS,
   DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+);
+function parseMaxInlineChars(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= SEND_INPUT_CHUNK_THRESHOLD
+    ? parsed
+    : fallback;
+}
+const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
+  process.env.CMUXLAYER_MAX_INLINE_CHARS,
+  DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
@@ -603,6 +617,30 @@ function getBootPromptPath(value: string | null | undefined): string | null {
 
 function hasInlinePrompt(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function assertInlineInputAllowed(opts: {
+  tool: "send_input" | "send_command" | "spawn_agent";
+  arg: "text" | "command" | "prompt";
+  value: string | undefined;
+  allowLongInline?: boolean;
+}): void {
+  if (
+    opts.allowLongInline ||
+    opts.value === undefined ||
+    opts.value.length <= SEND_INPUT_MAX_INLINE_CHARS
+  ) {
+    return;
+  }
+
+  const argName = `${opts.tool}.${opts.arg}`;
+  const promptPathGuidance =
+    opts.tool === "spawn_agent" || opts.tool === "send_command"
+      ? " For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path."
+      : " For launchers, put the full boot prompt in a file and pass boot_prompt_path.";
+  throw new Error(
+    `${argName} is ${opts.value.length} characters, above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}. Pane keystrokes are capped to one-line pointers: write the payload to a file and send "Read and follow <path>" instead.${promptPathGuidance} To deliberately send raw inline text, pass allow_long_inline:true. CMUXLAYER_MAX_INLINE_CHARS may be set to a positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
+  );
 }
 
 function assertBootPromptMode(
@@ -3238,10 +3276,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    "Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare `@word` (e.g. `@narration-lead`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats `@` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (`narration-lead:`) for pane-to-pane addressing; reserve `@<name>` for collab-file posts where monitors match it. If a literal `@` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Long text over 500 characters is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.",
+    `Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare \`@word\` (e.g. \`@narration-lead\`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats \`@\` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (\`narration-lead:\`) for pane-to-pane addressing; reserve \`@<name>\` for collab-file posts where monitors match it. If a literal \`@\` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); write large payloads to a file and send one line: "Read and follow <path>". Pass allow_long_inline:true only for deliberate raw sends. Text over ${SEND_INPUT_CHUNK_THRESHOLD} characters that is allowed is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.`,
     {
       surface: z.string().describe("Target surface ref"),
-      text: z.string().describe("Text to send"),
+      text: z
+        .string()
+        .describe(
+          `Text to send. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters by default; for large payloads write a file and send "Read and follow <path>" instead.`,
+        ),
       workspace: z.string().optional().describe("Target workspace ref"),
       chunk_size: z
         .number()
@@ -3266,10 +3308,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .string()
         .optional()
         .describe("Rename tab suffix to this task name"),
+      allow_long_inline: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
+        ),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        assertInlineInputAllowed({
+          tool: "send_input",
+          arg: "text",
+          value: args.text,
+          allowLongInline: args.allow_long_inline,
+        });
         const sanitizedText = sanitizeTerminalInput(args.text);
         const chunks =
           sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
@@ -3365,12 +3420,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 7. send_command
   server.tool(
     "send_command",
-    "Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command. WARNING — never include a bare `@word` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; `@<name>` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; passing boot_prompt_path for plain shell commands is rejected.",
+    `Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command only when it fits the ${SEND_INPUT_MAX_INLINE_CHARS}-character inline cap. WARNING — never include a bare \`@word\` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; \`@<name>\` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; use boot_prompt_path instead of embedding a long boot prompt in pane keystrokes. Passing boot_prompt_path for plain shell commands is rejected. Pass allow_long_inline:true only for deliberate raw long commands.`,
     {
       surface: z.string().describe("Target surface ref"),
       command: z
         .string()
-        .describe("Command text to send before pressing return"),
+        .describe(
+          `Command text to send before pressing return. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters by default; for agent boot prompts, keep the command short and pass boot_prompt_path.`,
+        ),
       workspace: z.string().optional().describe("Target workspace ref"),
       boot_prompt_path: z
         .string()
@@ -3386,10 +3443,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(BOOT_PROMPT_TIMEOUT_MS)
         .describe("Timeout in milliseconds waiting for the agent ready prompt"),
+      allow_long_inline: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Bypass the inline command length cap for a deliberate raw send.",
+        ),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        assertInlineInputAllowed({
+          tool: "send_command",
+          arg: "command",
+          value: args.command,
+          allowLongInline: args.allow_long_inline,
+        });
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         const launcherCli = bootPromptPath
           ? inferLauncherCli(args.command)
@@ -4662,7 +4732,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      "Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.",
+      `Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Inline prompt is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use boot_prompt_path for larger boot prompts. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.`,
       {
         repo: z
           .string()
@@ -4678,7 +4748,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Inline task prompt to send after the agent is ready. Mutually exclusive with boot_prompt_path.",
+            `Inline task prompt to send after the agent is ready. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters by default; use boot_prompt_path for larger prompts. Mutually exclusive with boot_prompt_path.`,
           ),
         boot_prompt_path: z
           .string()
@@ -4748,12 +4818,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "When true, suppress same repo/workspace/role duplicate-lane warnings. Default false so collab leads see reusable existing agents before spawning another lane.",
           ),
+        allow_long_inline: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Bypass the inline prompt length cap for a deliberate raw boot-prompt send. Prefer boot_prompt_path for large prompts.",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
         try {
           const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
           assertBootPromptMode(args.prompt, bootPromptPath);
+          assertInlineInputAllowed({
+            tool: "spawn_agent",
+            arg: "prompt",
+            value: args.prompt,
+            allowLongInline: args.allow_long_inline,
+          });
           if (bootPromptPath) {
             await preflightBootPromptFile(bootPromptPath);
           }

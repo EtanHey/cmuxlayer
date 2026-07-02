@@ -418,6 +418,7 @@ describe("enter reliability", () => {
     const result = await callTool(server, "send_command", {
       surface: client.surface,
       command: "y".repeat(2000),
+      allow_long_inline: true,
     });
     const parsed = parseResult(result);
     const events = readEventLog();
