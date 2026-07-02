@@ -4491,7 +4491,7 @@ describe("tool handler integration", () => {
         returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
-      if (args.includes("send")) {
+      if (args.includes("send") || args.includes("set-buffer")) {
         promptSent = true;
         return { stdout: "{}", stderr: "" };
       }
@@ -4529,6 +4529,153 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
     expect(returnPresses).toBe(2);
+  }, 10_000);
+
+  it("new_split reports pane_died when the new surface disappears during boot prompt submit verification", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-pane-died.md");
+    const prompt = "short boot prompt";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let promptSent = false;
+    let returnPresses = 0;
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send") || args.includes("set-buffer")) {
+        promptSent = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        if (promptSent && returnPresses > 0) {
+          throw Object.assign(new Error("Command failed"), {
+            code: 1,
+            stderr: "not_found: Surface not found for the given surface_id",
+          });
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text: "codex> ",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 50,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("pane_died");
+    expect(parsed.error).toContain("surface surface:2 disappeared");
+    expect(parsed.surface).toBe("surface:2");
+  }, 10_000);
+
+  it("new_split does not classify transient read errors as pane_died during boot prompt fallback", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-transient-read.md");
+    const prompt = "short boot prompt";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+    let promptSent = false;
+    let returnPresses = 0;
+    let transientFailureThrown = false;
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send") || args.includes("set-buffer")) {
+        promptSent = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        if (!transientFailureThrown) {
+          transientFailureThrown = true;
+          throw Object.assign(new Error("temporary read unavailable"), {
+            stderr: "pty read temporarily unavailable",
+          });
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text:
+              promptSent && returnPresses >= 2
+                ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                : promptSent
+                  ? `codex> ${prompt}`
+                  : "codex> ",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.error_code).toBeUndefined();
+    expect(transientFailureThrown).toBe(true);
   }, 10_000);
 
   it("new_split fails when the boot prompt clears after retry without agent identity", async () => {

@@ -275,6 +275,70 @@ class BootPromptDeliveryError extends Error {
   }
 }
 
+class SurfaceGoneError extends Error {
+  readonly error_code = "pane_died";
+
+  constructor(
+    readonly surface: string,
+    readonly originalError: unknown,
+  ) {
+    super(`surface ${surface} disappeared - respawn`);
+    this.name = "SurfaceGoneError";
+  }
+}
+
+function readErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    const extra = error as Error & {
+      code?: unknown;
+      stderr?: unknown;
+      stdout?: unknown;
+      cause?: unknown;
+    };
+    return [
+      error.name,
+      error.message,
+      typeof extra.code === "string" ? extra.code : "",
+      typeof extra.stderr === "string" ? extra.stderr : "",
+      typeof extra.stdout === "string" ? extra.stdout : "",
+      extra.cause instanceof Error ? extra.cause.message : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return String(error);
+}
+
+function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
+  const text = readErrorText(error).toLowerCase();
+  const surfaceLower = surface.toLowerCase();
+  if (
+    text.includes(`unable to resolve workspace for surface ${surfaceLower}`)
+  ) {
+    return true;
+  }
+  if (/\bsurface[-_\s]?not[-_\s]?found\b/.test(text)) {
+    return true;
+  }
+  if (text.includes("surface is not a terminal")) {
+    return true;
+  }
+  return /\bnot_found\b/.test(text) && text.includes("surface");
+}
+
+function surfaceGonePayload(
+  error: SurfaceGoneError,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    error_code: error.error_code,
+    pane_died: true,
+    surface: error.surface,
+    action: "respawn",
+    ...extra,
+  };
+}
+
 function ok(data: Record<string, unknown>): ToolReturn {
   const payload = { ok: true, ...data };
   return {
@@ -1547,6 +1611,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
+    opts?: { throwOnSurfaceGone?: boolean },
   ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     try {
       const screen = await client.readScreen(surface, {
@@ -1563,7 +1628,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         resolveHarnessStateForSurface(stateMgr, surface),
       );
       return { text, parsed };
-    } catch {
+    } catch (error) {
+      if (opts?.throwOnSurfaceGone && isSurfaceGoneReadFailure(error, surface)) {
+        throw new SurfaceGoneError(surface, error);
+      }
       return null;
     }
   };
@@ -1610,7 +1678,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let retryCount = 0;
 
     while (Date.now() - startedAt < SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS) {
-      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
+        throwOnSurfaceGone: true,
+      });
       if (!snapshot) {
         return { submit_verified: null, retry_count: retryCount };
       }
@@ -1884,6 +1954,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (error instanceof BootPromptTimeoutError) {
           throw error;
         }
+        if (isSurfaceGoneReadFailure(error, opts.surface)) {
+          throw new SurfaceGoneError(opts.surface, error);
+        }
         lastText = error instanceof Error ? error.message : String(error);
       }
 
@@ -1910,7 +1983,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let lastText = "";
 
     while (Date.now() - start < opts.timeout_ms) {
-      const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+      const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
+        throwOnSurfaceGone: true,
+      });
       if (snapshot) {
         lastText = snapshot.text;
         const hasPendingInput = screenShowsPendingInput(
@@ -1965,6 +2040,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
       } catch (error) {
+        if (isSurfaceGoneReadFailure(error, opts.surface)) {
+          throw new SurfaceGoneError(opts.surface, error);
+        }
         lastText = error instanceof Error ? error.message : String(error);
       }
 
@@ -2006,6 +2084,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
       } catch (error) {
+        if (isSurfaceGoneReadFailure(error, opts.surface)) {
+          throw new SurfaceGoneError(opts.surface, error);
+        }
         lastText = error instanceof Error ? error.message : String(error);
       }
 
@@ -2125,6 +2206,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
       return { ...delivery, prompt_text: rawPrompt };
     } catch (error) {
+      if (error instanceof SurfaceGoneError) {
+        throw error;
+      }
       if (error instanceof SubmitVerificationError) {
         const snapshot = await readParsedSurface(opts.surface, opts.workspace);
         if (
@@ -3067,6 +3151,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof SurfaceGoneError) {
+          return err(e, surfaceGonePayload(e));
+        }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
             surface: result?.surface,
@@ -3185,6 +3272,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof SurfaceGoneError) {
+          return err(e, surfaceGonePayload(e));
+        }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
             surface: result?.surface,
@@ -3409,6 +3499,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof SurfaceGoneError) {
+          return err(e, surfaceGonePayload(e));
+        }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
             submit_verified: false,
@@ -3543,6 +3636,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        if (e instanceof SurfaceGoneError) {
+          return err(e, surfaceGonePayload(e));
+        }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
             submit_verified: false,
@@ -5003,6 +5099,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               agent_id: result.agent_id,
               surface_id: result.surface_id,
             };
+            if (e instanceof SurfaceGoneError) {
+              return err(e, surfaceGonePayload(e, extra));
+            }
             if (e instanceof BootPromptTimeoutError) {
               try {
                 clearBootPromptPending();
