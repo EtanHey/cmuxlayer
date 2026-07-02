@@ -512,6 +512,48 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("warns when cmux returns a spawned surface in a different workspace than requested", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:interactive"],
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "workspace:intended",
+        window_ref: "window:1",
+        pane_ref: "pane:left",
+        surfaces: [makeSurface("surface:interactive")],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:wrong",
+        surface: "surface:new",
+        pane: "pane:new",
+        title: "",
+        type: "terminal",
+      });
+
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix placement",
+        workspace: "workspace:intended",
+      });
+
+      expect(result.workspace_id).toBe("workspace:wrong");
+      expect(result.warnings).toContain(
+        "Spawn placement mismatch: requested workspace:intended but cmux returned workspace:wrong for surface surface:new",
+      );
+    });
+
     it("inherits the workspace whose current directory matches the target repo", async () => {
       (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue(
         {
