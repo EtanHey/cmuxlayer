@@ -53,6 +53,7 @@ import {
   parseScreen,
 } from "./screen-parser.js";
 import {
+  channelDirDeletedAfterCreate,
   dispatch,
   ensureInboxFile,
   inboxPath,
@@ -2534,6 +2535,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_title?: string | null;
       topology?: { column: number | null; column_count: number | null } | null;
       closure_artifact_verified?: boolean | null;
+      inbox_channel_dir_deleted?: boolean | null;
     },
   ) => {
     const closureArtifactVerified =
@@ -2553,6 +2555,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const alive =
       overrides?.monitor_alive ??
       monitorAlive(agent.agent_id, INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS, inboxOpts);
+    const inboxChannelDirDeleted =
+      overrides?.inbox_channel_dir_deleted ??
+      (!alive && channelDirDeletedAfterCreate(agent.agent_id, inboxOpts));
     const staleCount =
       overrides?.stale_count ??
       pendingDispatches(agent.agent_id, 120000, inboxOpts).length;
@@ -2575,6 +2580,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : await resolveSurfaceWorkspace(agent.surface_id);
     return evaluateAgentHealth(agent, {
       monitor_alive: alive,
+      inbox_channel_dir_deleted: inboxChannelDirDeleted,
       stale_count: staleCount,
       screen_status: screenStatus,
       screen_actions: screenActions,

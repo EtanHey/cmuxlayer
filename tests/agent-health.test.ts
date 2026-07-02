@@ -69,6 +69,21 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("missing_cli_session_id");
   });
 
+  it("distinguishes a deleted inbox channel dir from a never-armed monitor", () => {
+    const deleted = evaluateAgentHealth(makeRecord(), {
+      monitor_alive: false,
+      inbox_channel_dir_deleted: true,
+    });
+    const neverArmed = evaluateAgentHealth(makeRecord(), {
+      monitor_alive: false,
+    });
+
+    expect(deleted.issue_codes).toContain("inbox_channel_dir_deleted");
+    expect(deleted.issue_codes).not.toContain("inbox_monitor_not_alive");
+    expect(neverArmed.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(neverArmed.issue_codes).not.toContain("inbox_channel_dir_deleted");
+  });
+
   it("marks auto-discovered lead surfaces as missing managed lead ids", () => {
     const health = evaluateAgentHealth(
       makeRecord({

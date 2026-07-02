@@ -7,6 +7,7 @@ export type AgentHealthIssueCode =
   | "auto_discovered_agent"
   | "missing_cli_session_id"
   | "non_resumable"
+  | "inbox_channel_dir_deleted"
   | "inbox_monitor_not_alive"
   | "stale_inbox_dispatches"
   | "registry_screen_disagreement"
@@ -27,6 +28,7 @@ export interface AgentTopologyHealthInput {
 
 export interface AgentHealthInput {
   monitor_alive?: boolean | null;
+  inbox_channel_dir_deleted?: boolean | null;
   stale_count?: number;
   screen_status?: string | null;
   surface_workspace_id?: string | null;
@@ -153,7 +155,14 @@ export function evaluateAgentHealth(
     );
   }
 
-  if (input.monitor_alive === false) {
+  if (input.monitor_alive === false && input.inbox_channel_dir_deleted === true) {
+    addIssue(
+      issueCodes,
+      issues,
+      "inbox_channel_dir_deleted",
+      "agent inbox channel dir was deleted after creation; next inbox write will recreate it",
+    );
+  } else if (input.monitor_alive === false) {
     addIssue(
       issueCodes,
       issues,
