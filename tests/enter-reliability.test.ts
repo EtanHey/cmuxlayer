@@ -364,6 +364,7 @@ describe("enter reliability", () => {
       agent_id: "agent-1",
       text: "x".repeat(2000),
       press_enter: true,
+      allow_long_inline: true,
     });
     const parsed = parseResult(result);
     const events = readEventLog();
@@ -584,11 +585,13 @@ describe("enter reliability", () => {
       agent_id: "agent-1",
       text: "first\n".repeat(300),
       press_enter: true,
+      allow_long_inline: true,
     });
     await callTool(server, "send_to", {
       agent_id: "agent-1",
       text: "second\n".repeat(300),
       press_enter: true,
+      allow_long_inline: true,
     });
 
     const events = readEventLog().filter(

@@ -212,6 +212,7 @@ const SendToArgsSchema = z.object({
   text: z.string(),
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
+  allow_long_inline: z.boolean().optional().default(false),
 });
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
@@ -620,7 +621,12 @@ function hasInlinePrompt(value: string | undefined): value is string {
 }
 
 function assertInlineInputAllowed(opts: {
-  tool: "send_input" | "send_command" | "spawn_agent";
+  tool:
+    | "send_input"
+    | "send_command"
+    | "spawn_agent"
+    | "send_to"
+    | "send_to_agent";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -5645,14 +5651,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      "Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. For collab supersession, send a short `/goal Read and follow <absolute goal file>` reference rather than a long lossy paste. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.",
+      `Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); write large payloads to a file and send one line: "Read and follow <path>". For collab supersession, send a short \`/goal Read and follow <absolute goal file>\` reference rather than a long lossy paste. For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path through spawn_agent/send_command instead of routing raw long text through the agent composer. Pass allow_long_inline:true only for deliberate raw sends. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.`,
       {
         ...SendToArgsSchema.shape,
+        text: SendToArgsSchema.shape.text.describe(
+          `Text to send. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters by default; for large payloads write a file and send "Read and follow <path>" instead.`,
+        ),
         press_enter: SendToArgsSchema.shape.press_enter.describe(
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
           "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
+        ),
+        allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
+          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
       },
       ANNOTATIONS.mutating,
@@ -5666,6 +5678,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const args = parsedArgs.data;
+          assertInlineInputAllowed({
+            tool: "send_to",
+            arg: "text",
+            value: args.text,
+            allowLongInline: args.allow_long_inline,
+          });
           const delivery = await deliverAgentInput({
             agent_id: args.agent_id,
             text: args.text,
@@ -5690,14 +5708,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 18. send_to_agent
     server.tool(
       "send_to_agent",
-      "Deprecated for client integrations: use send_to instead. Internal/advanced path for sending text input to an agent in ready or idle state. Returns the same post-delivery registry/screen health evidence as send_to.",
+      `Deprecated for client integrations: use send_to instead. Internal/advanced path for sending text input to an agent in ready or idle state. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); write large payloads to a file and send one line: "Read and follow <path>". For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path through spawn_agent/send_command instead of routing raw long text through the agent composer. Pass allow_long_inline:true only for deliberate raw sends. Returns the same post-delivery registry/screen health evidence as send_to.`,
       {
         ...SendToArgsSchema.shape,
+        text: SendToArgsSchema.shape.text.describe(
+          `Text to send. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters by default; for large payloads write a file and send "Read and follow <path>" instead.`,
+        ),
         press_enter: SendToArgsSchema.shape.press_enter.describe(
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
           "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
+        ),
+        allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
+          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
       },
       ANNOTATIONS.mutating,
@@ -5713,6 +5737,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const args = parsedArgs.data;
+          assertInlineInputAllowed({
+            tool: "send_to_agent",
+            arg: "text",
+            value: args.text,
+            allowLongInline: args.allow_long_inline,
+          });
           const delivery = await deliverAgentInput({
             agent_id: args.agent_id,
             text: args.text,
