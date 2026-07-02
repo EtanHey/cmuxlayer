@@ -16,6 +16,28 @@ function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
+function getLifecycleEngine(server: any) {
+  return server._registeredTools.interact._engine;
+}
+
+async function spawnReadyAgent(server: any) {
+  const spawn = server._registeredTools["spawn_agent"];
+  const spawnResult = await spawn.handler(
+    {
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+    },
+    {} as any,
+  );
+  const agentId = parseToolResult(spawnResult).agent_id;
+  const engine = getLifecycleEngine(server);
+  const registry = engine.getRegistry();
+  const agent = registry.get(agentId);
+  registry.set(agentId, { ...agent, state: "ready" });
+  return agentId;
+}
+
 function makeLifecycleExec(): ExecFn {
   let readyText = "codex> ";
   let promptPending = false;
@@ -375,6 +397,191 @@ describe("pane input pointer discipline", () => {
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
+    context.dispose();
+  });
+
+  it("send_to refuses over-threshold text with file-pointer guidance and opt-out naming", async () => {
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendTo = (server as any)._registeredTools["send_to"];
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(601),
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("send_to.text");
+    expect(parsed.error).toContain("allow_long_inline");
+    expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(mockExec).not.toHaveBeenCalled();
+    context.dispose();
+  });
+
+  it("send_to allow_long_inline bypasses the inline text cap", async () => {
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendTo = (server as any)._registeredTools["send_to"];
+    expect(sendTo.inputSchema.shape.allow_long_inline).toBeDefined();
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(2_000),
+        press_enter: true,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("set-buffer"),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(setBufferCalls.length).toBeGreaterThan(1);
+    context.dispose();
+  });
+
+  it("short send_to text stays allowed at the configured cap", async () => {
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendTo = (server as any)._registeredTools["send_to"];
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(600),
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send-key", "--surface", "surface:new"]),
+    );
+    context.dispose();
+  });
+
+  it("send_to_agent refuses over-threshold text unless explicitly opted out", async () => {
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendToAgent = (server as any)._registeredTools["send_to_agent"];
+    expect(sendToAgent.inputSchema.shape.allow_long_inline).toBeDefined();
+    mockExec.mockClear();
+
+    let result = await sendToAgent.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(601),
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    let parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("send_to_agent.text");
+    expect(parsed.error).toContain("allow_long_inline");
+    expect(mockExec).not.toHaveBeenCalled();
+
+    result = await sendToAgent.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(2_000),
+        press_enter: true,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("set-buffer"))
+        .length,
+    ).toBeGreaterThan(1);
+    context.dispose();
+  });
+
+  it("CMUXLAYER_MAX_INLINE_CHARS changes the send_to cap", async () => {
+    process.env.CMUXLAYER_MAX_INLINE_CHARS = "700";
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendTo = (server as any)._registeredTools["send_to"];
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      {
+        agent_id: agentId,
+        text: "x".repeat(701),
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS=700");
+    expect(mockExec).not.toHaveBeenCalled();
     context.dispose();
   });
 });
