@@ -1,8 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { StateManager } from "../src/state-manager.js";
+import {
+  classifySurfaceSessionRoute,
+  StateManager,
+} from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-state");
@@ -188,6 +197,104 @@ describe("StateManager", () => {
     it("does not throw for non-existent agent", () => {
       const mgr = new StateManager(TEST_DIR);
       expect(() => mgr.removeState("nonexistent")).not.toThrow();
+    });
+  });
+
+  describe("surface session route classification", () => {
+    it("classifies an indexed old surface as stale after respawn moves the agent", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({
+        agent_id: "agent-stale-1",
+        surface_id: "surface:old",
+        workspace_id: "workspace:main",
+        state: "ready",
+        cli: "claude",
+        cli_session_id: "claude-session-old",
+      });
+      mgr.writeState(record);
+      const entry = mgr.getSurfaceSessionIndex().lookup({
+        workspace_id: record.workspace_id,
+        surface_id: record.surface_id,
+      });
+
+      expect(
+        classifySurfaceSessionRoute({
+          agent: record,
+          index_entry: entry,
+          live_surface_refs: ["surface:new"],
+        }),
+      ).toBe("stale_surface");
+    });
+
+    it("classifies a recycled surface as stale when the index occupant differs", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const oldAgent = makeRecord({
+        agent_id: "agent-old",
+        surface_id: "surface:reused",
+        workspace_id: "workspace:main",
+        state: "ready",
+        cli_session_id: "session-old",
+      });
+      const newAgent = makeRecord({
+        agent_id: "agent-new",
+        surface_id: "surface:reused",
+        workspace_id: "workspace:main",
+        state: "ready",
+        cli_session_id: "session-new",
+      });
+      mgr.writeState(oldAgent);
+      mgr.writeState(newAgent);
+      const entry = mgr.getSurfaceSessionIndex().lookup({
+        workspace_id: oldAgent.workspace_id,
+        surface_id: oldAgent.surface_id,
+      });
+
+      expect(
+        classifySurfaceSessionRoute({
+          agent: oldAgent,
+          index_entry: entry,
+          live_surface_refs: ["surface:reused"],
+        }),
+      ).toBe("stale_surface");
+    });
+
+    it("returns null when newest lookup entries tie with distinct identities", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const updatedAt = "2026-07-04T12:00:00.000Z";
+      writeFileSync(
+        join(TEST_DIR, "surface-session-index.json"),
+        JSON.stringify(
+          {
+            version: 1,
+            by_agent_id: {
+              "agent-a": {
+                agent_id: "agent-a",
+                workspace_id: "workspace:main",
+                surface_id: "surface:reused",
+                cli_session_id: "session-a",
+                updated_at: updatedAt,
+              },
+              "agent-b": {
+                agent_id: "agent-b",
+                workspace_id: "workspace:main",
+                surface_id: "surface:reused",
+                cli_session_id: "session-b",
+                updated_at: updatedAt,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+        "utf-8",
+      );
+
+      expect(
+        mgr.getSurfaceSessionIndex().lookup({
+          workspace_id: "workspace:main",
+          surface_id: "surface:reused",
+        }),
+      ).toBeNull();
     });
   });
 

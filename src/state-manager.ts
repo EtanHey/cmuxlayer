@@ -44,6 +44,35 @@ export interface SurfaceSessionLookupKey {
   surface_id: string;
 }
 
+export type SurfaceSessionRouteState = "ready" | "stale_surface";
+
+export function classifySurfaceSessionRoute(input: {
+  agent: AgentRecord;
+  index_entry: SurfaceSessionIndexEntry | null;
+  live_surface_refs: string[];
+}): SurfaceSessionRouteState {
+  if (!input.live_surface_refs.includes(input.agent.surface_id)) {
+    return "stale_surface";
+  }
+
+  const entry = input.index_entry;
+  if (!entry) {
+    return input.agent.cli_session_id ? "stale_surface" : "ready";
+  }
+
+  const agentWorkspaceId = input.agent.workspace_id ?? null;
+  if (
+    entry.agent_id !== input.agent.agent_id ||
+    entry.workspace_id !== agentWorkspaceId ||
+    entry.surface_id !== input.agent.surface_id ||
+    entry.cli_session_id !== input.agent.cli_session_id
+  ) {
+    return "stale_surface";
+  }
+
+  return "ready";
+}
+
 interface SurfaceSessionIndexFile {
   version: 1;
   by_agent_id: Record<string, SurfaceSessionIndexEntry>;
@@ -126,6 +155,20 @@ export class SurfaceSessionIndex {
       (a, b) =>
         new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
     );
+    if (matches.length > 1) {
+      const newestTime = new Date(matches[0].updated_at).getTime();
+      const tiedNewest = matches.filter(
+        (entry) => new Date(entry.updated_at).getTime() === newestTime,
+      );
+      const distinctNewest = new Set(
+        tiedNewest.map(
+          (entry) => `${entry.agent_id}\u0000${entry.cli_session_id}`,
+        ),
+      );
+      if (distinctNewest.size > 1) {
+        return null;
+      }
+    }
     return matches[0] ?? null;
   }
 }
