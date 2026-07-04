@@ -62,7 +62,7 @@ const fixtures = fixtureNames.map(readPainpointFixture);
 function legacyClassifierShape(fixture: PainpointFixture): string {
   if (fixture.screen_text !== undefined) {
     const parsed = parseScreen(fixture.screen_text);
-    return `legacy:${parsed.agent_type}:${parsed.status}:${parsed.errors.join(",")}`;
+    return parsed.control_state ?? `legacy:${parsed.agent_type}:${parsed.status}:${parsed.errors.join(",")}`;
   }
   return "legacy:no-canonical-control-plane-classifier";
 }
@@ -148,7 +148,12 @@ describe("Phase 0 painpoint replay corpus", () => {
       continue;
     }
 
-    it.todo(
+    const testFn =
+      fixture.id === "claude-ask-user-question-overlay" ||
+      fixture.id === "claude-permission-confirmation"
+        ? it
+        : it.todo;
+    testFn(
       `${fixture.id} classifies as ${fixture.expected_state} via the canonical control-plane state machine`,
       () => {
         expect(legacyClassifierShape(fixture)).toBe(fixture.expected_state);

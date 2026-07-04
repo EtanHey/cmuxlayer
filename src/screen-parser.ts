@@ -167,6 +167,16 @@ const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CLAUDE_PERMISSION_APPROVAL_RE =
   /allow for this session|do you want to allow|\[y\/n\]/i;
+const PROMPT_BLOCK_WINDOW_LINES = 8;
+const INTERACTIVE_PROMPT_TOOL_RE = /^\s*(AskUserQuestion|ask-tool)\s*$/i;
+const INTERACTIVE_PROMPT_CLARIFICATION_RE =
+  /agent is asking for clarification/i;
+const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
+const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
+const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
+const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
+const PERMISSION_PROMPT_MARKER_RE =
+  /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
@@ -506,20 +516,82 @@ function parseResponse(text: string): string | null {
   return response || extractClaudeResponseTail(text);
 }
 
+function hasMenuBlock(text: string, opts?: { tailOnly?: boolean }): boolean {
+  const lines = text.split("\n");
+  const lastMeaningfulIndex = lines.reduce(
+    (last, line, index) => (line.trim() ? index : last),
+    -1,
+  );
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!MENU_SELECTOR_RE.test(lines[index])) {
+      continue;
+    }
+    if (
+      opts?.tailOnly &&
+      lines
+        .slice(index + 1)
+        .some((line) => BARE_READY_PROMPT_RE.test(line))
+    ) {
+      continue;
+    }
+    const block = lines
+      .slice(index + 1, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    if (
+      MENU_OPTION_RE.test(block) &&
+      (!opts?.tailOnly ||
+        lastMeaningfulIndex <= index + PROMPT_BLOCK_WINDOW_LINES)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPermissionPromptBlock(text: string): boolean {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!PERMISSION_PROMPT_MARKER_RE.test(line)) {
+      continue;
+    }
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    if (PERMISSION_PROMPT_PRIMARY_RE.test(block)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasInteractivePromptBlock(text: string): boolean {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!INTERACTIVE_PROMPT_TOOL_RE.test(lines[index])) {
+      continue;
+    }
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    const hasClarification =
+      INTERACTIVE_PROMPT_CLARIFICATION_RE.test(block);
+    if (hasClarification && hasMenuBlock(block)) {
+      return true;
+    }
+  }
+  return hasMenuBlock(text, { tailOnly: true });
+}
+
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
-  const lowered = text.toLowerCase();
-  const permissionPatterns = [
-    "approve command?",
-    "permission denied",
-    "permission prompt",
-    "do you want to allow",
-    "allow for this session",
-    "[y/n]",
-  ];
 
-  if (permissionPatterns.some((pattern) => lowered.includes(pattern))) {
+  if (hasPermissionPromptBlock(text)) {
     errors.push("permission_prompt");
+  }
+
+  if (!errors.includes("permission_prompt") && hasInteractivePromptBlock(text)) {
+    errors.push("interactive_prompt");
   }
 
   if (text.includes("SQLITE_BUSY")) {
@@ -534,6 +606,26 @@ function parseErrors(text: string): string[] {
   }
 
   return errors;
+}
+
+function inferControlState(
+  status: ParsedScreenStatus,
+  errors: string[],
+  agentType: ParsedScreenAgentType,
+): ParsedScreenResult["control_state"] {
+  if (errors.includes("permission_prompt")) {
+    return "permission_prompt";
+  }
+  if (errors.includes("interactive_prompt")) {
+    return "interactive_overlay";
+  }
+  if (status === "thinking" || status === "working") {
+    return "busy";
+  }
+  if (status === "idle" && agentType !== "unknown") {
+    return "ready";
+  }
+  return "unknown";
 }
 
 function parseModelAndCost(
@@ -852,9 +944,11 @@ export function parseScreen(text: string): ParsedScreenResult {
     actions.push(...parseCodexActions(normalized));
   }
 
+  const status = inferStatus(normalized, doneSignal, errors, agentType);
   const result: ParsedScreenResult = {
     agent_type: agentType,
-    status: inferStatus(normalized, doneSignal, errors, agentType),
+    status,
+    control_state: inferControlState(status, errors, agentType),
     token_count: tokenCount,
     context_pct: contextPct,
     context_window: contextWindow,

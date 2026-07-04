@@ -83,19 +83,184 @@ Token usage: total=12,345 input=10,000 output=2,345
   });
 
   it("recognizes Claude permission approval dialogs as Claude", () => {
-    const parsed = parseScreen(`
-Do you want to allow this command?
+    const parsed = parseScreen(readFixture("painpoints/claude-permission-confirmation.txt"));
 
-❯ 1. Allow for this session
-  2. Allow once
-  3. Deny
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("permission_prompt");
+    expect(parsed.control_state).toBe("permission_prompt");
+  });
+
+  it("recognizes Claude AskUserQuestion overlays as interactive overlays", () => {
+    const parsed = parseScreen(
+      readFixture("painpoints/claude-ask-user-question-overlay.txt"),
+    );
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes generic active choice menus as interactive overlays", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Select a model for the next worker:
+> 1. Opus
+  2. Sonnet
+  3. Haiku
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes permission prompts without numbered options", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Do you want to allow this command?
 
 [y/n]
 `);
 
     expect(parsed.agent_type).toBe("claude");
-    expect(parsed.status).toBe("frozen");
     expect(parsed.errors).toContain("permission_prompt");
+    expect(parsed.control_state).toBe("permission_prompt");
+  });
+
+  it("does not treat prose mentioning AskUserQuestion as an interactive overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note: AskUserQuestion is a tool name mentioned in this plan.
+There is no modal overlay, no selected response line, and no numbered choice box.
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not combine separated AskUserQuestion prose, numbered lists, and prompts into an overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note: AskUserQuestion is mentioned in a plan paragraph.
+
+Implementation checklist:
+1. Read the plan
+2. Run the tests
+
+Done reading.
+> unrelated shell prompt
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat one selected numbered line as a menu overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Done:
+> 1. Read the plan
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale menu history above a fresh prompt as active", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Earlier selection:
+> 1. Use pnpm
+  2. Use npm
+
+Applied pnpm.
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale menu history above a Codex prompt as active", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+Model: gpt-5.5
+
+Earlier selection:
+> 1. Use pnpm
+  2. Use npm
+
+Applied pnpm.
+
+codex>
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("detects an active menu despite stale permission fragments above it", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Earlier transcript mentioned [y/n].
+
+Choose routing mode:
+> 1. Current worker
+  2. New worker
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("does not treat stale permission denied output as an active permission prompt", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+$ cat ./private.txt
+bash: ./private.txt: Permission denied
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("permission_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale bracketed y/n text as an active permission prompt", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Notes from the previous run:
+[y/n] appeared in an old command transcript.
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("permission_prompt");
+    expect(parsed.control_state).toBe("ready");
   });
 
   it("detects recoverable pr-loop parking as an action instead of plain idle text", () => {

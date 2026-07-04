@@ -256,6 +256,24 @@ class SubmitVerificationError extends Error {
   }
 }
 
+class DeliverySafetyGateError extends Error {
+  readonly submit_verified = false;
+
+  constructor(
+    readonly error_code:
+      | "blocked_by_interactive_prompt"
+      | "blocked_by_permission_prompt",
+    readonly screen: ParsedScreenResult,
+  ) {
+    super(
+      error_code === "blocked_by_permission_prompt"
+        ? "delivery blocked by active permission prompt"
+        : "delivery blocked by active interactive prompt",
+    );
+    this.name = "DeliverySafetyGateError";
+  }
+}
+
 class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
@@ -1634,6 +1652,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const assertDeliveryTargetIsSafe = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<void> => {
+    const snapshot = await readParsedSurface(surface, workspace, {
+      throwOnSurfaceGone: true,
+    });
+    if (!snapshot) {
+      return;
+    }
+
+    if (snapshot.parsed.control_state === "permission_prompt") {
+      throw new DeliverySafetyGateError(
+        "blocked_by_permission_prompt",
+        snapshot.parsed,
+      );
+    }
+
+    if (snapshot.parsed.control_state === "interactive_overlay") {
+      throw new DeliverySafetyGateError(
+        "blocked_by_interactive_prompt",
+        snapshot.parsed,
+      );
+    }
+  };
+
   const maybeRenameTask = async (opts: {
     surface: string;
     workspace?: string;
@@ -2361,6 +2405,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const run = async () => {
       try {
+        await assertDeliveryTargetIsSafe(record.surface, record.workspace);
         await deliverInputChunks({
           surface: record.surface,
           workspace: record.workspace,
@@ -3472,6 +3517,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.press_enter &&
           (!targetRecord || INTERACTIVE_AGENT_STATES.has(targetRecord.state));
         const delivery = await withSurfaceWrite(args.surface, async () => {
+          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
           return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -3504,6 +3550,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (e) {
         if (e instanceof SurfaceGoneError) {
           return err(e, surfaceGonePayload(e));
+        }
+        if (e instanceof DeliverySafetyGateError) {
+          return err(e, {
+            error_code: e.error_code,
+            submit_verified: e.submit_verified,
+            screen: e.screen,
+          });
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
@@ -3587,8 +3640,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const shouldVerifySubmit =
           !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
-        const delivery = await withSurfaceWrite(args.surface, async () =>
-          deliverInputChunks({
+        const delivery = await withSurfaceWrite(args.surface, async () => {
+          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
+          return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
             chunks,
@@ -3597,8 +3651,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             press_enter: true,
             source_event: "send_command",
             verify_submit: bootPromptPath ? false : shouldVerifySubmit,
-          }),
-        );
+          });
+        });
 
         let bootPromptDelivery:
           | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -3641,6 +3695,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (e) {
         if (e instanceof SurfaceGoneError) {
           return err(e, surfaceGonePayload(e));
+        }
+        if (e instanceof DeliverySafetyGateError) {
+          return err(e, {
+            error_code: e.error_code,
+            submit_verified: e.submit_verified,
+            screen: e.screen,
+          });
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
@@ -4332,7 +4393,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           inboxOpts,
         );
         const pending = pendingDispatches(args.agent_id, 120000, inboxOpts);
-        const nudge = { attempted: false, sent: false, reason: "" };
+        const nudge: {
+          attempted: boolean;
+          sent: boolean;
+          reason: string;
+          error_code?: string;
+        } = { attempted: false, sent: false, reason: "" };
         if (args.nudge === "never") {
           nudge.reason = "nudge disabled by caller";
         } else if (monitor_alive) {
@@ -4371,6 +4437,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               nudge.sent = true;
               nudge.reason = `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
             } catch (e) {
+              if (e instanceof DeliverySafetyGateError) {
+                nudge.error_code = e.error_code;
+              }
               nudge.reason = `nudge failed (dispatch still durable in inbox file): ${
                 e instanceof Error ? e.message : String(e)
               }`;
@@ -4796,8 +4865,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
 
-      return withSurfaceWrite(route.surface_id, async () =>
-        deliverInputChunks({
+      return withSurfaceWrite(route.surface_id, async () => {
+        await assertDeliveryTargetIsSafe(
+          route.surface_id,
+          route.workspace_id ?? undefined,
+        );
+        return deliverInputChunks({
           surface: route.surface_id,
           workspace: route.workspace_id ?? undefined,
           chunks,
@@ -4813,8 +4886,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // false-failing a legitimate interjection.
           verify_submit:
             args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
-        }),
-      );
+        });
+      });
     };
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
@@ -5172,6 +5245,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5296,6 +5376,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5460,6 +5547,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5520,6 +5614,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5802,6 +5903,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           return okFormatted(formatOk("send_to", data), data);
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5861,6 +5969,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },

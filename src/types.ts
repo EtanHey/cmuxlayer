@@ -127,10 +127,23 @@ export type ParsedScreenStatus =
   | "working"
   | "idle"
   | "done";
+export type ParsedControlPlaneState =
+  | "unknown"
+  | "shell"
+  | "agent_booting"
+  | "ready"
+  | "busy"
+  | "interactive_overlay"
+  | "permission_prompt"
+  | "composer_dirty"
+  | "dead"
+  | "stale_surface"
+  | "poisoned_registry";
 
 export interface ParsedScreenResult {
   agent_type: ParsedScreenAgentType;
   status: ParsedScreenStatus;
+  control_state: ParsedControlPlaneState;
   token_count: number | null;
   context_pct: number | null;
   context_window: number | null;

@@ -1569,20 +1569,25 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should have called send, then send-key, then the submit verification read.
-    expect(mockExec).toHaveBeenCalledTimes(3);
+    // Should preflight the screen, then send, press enter, and verify submit.
+    expect(mockExec).toHaveBeenCalledTimes(4);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["read-screen"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["send-key"]),
+      expect.arrayContaining(["send"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
+      "cmux",
+      expect.arrayContaining(["send-key"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      4,
       "cmux",
       expect.arrayContaining(["read-screen"]),
     );
@@ -1600,14 +1605,19 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(2);
+    expect(mockExec).toHaveBeenCalledTimes(3);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
+      "cmux",
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      2,
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
-      2,
+      3,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );
@@ -2055,8 +2065,8 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(readsWhenBootPromptSent).toBe(2);
-    expect(reads).toBe(3);
+    expect(readsWhenBootPromptSent).toBe(3);
+    expect(reads).toBe(4);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -2399,7 +2409,10 @@ describe("tool handler integration", () => {
       { surface: "surface:1", text: "echo first" },
       {} as any,
     );
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !releaseSend; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(releaseSend).toBeTruthy();
 
     const second = await tool.handler(
       { surface: "surface:1", text: "echo second" },
