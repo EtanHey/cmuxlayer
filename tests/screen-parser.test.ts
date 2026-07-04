@@ -83,19 +83,38 @@ Token usage: total=12,345 input=10,000 output=2,345
   });
 
   it("recognizes Claude permission approval dialogs as Claude", () => {
-    const parsed = parseScreen(`
-Do you want to allow this command?
-
-❯ 1. Allow for this session
-  2. Allow once
-  3. Deny
-
-[y/n]
-`);
+    const parsed = parseScreen(readFixture("painpoints/claude-permission-confirmation.txt"));
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("frozen");
     expect(parsed.errors).toContain("permission_prompt");
+    expect(parsed.control_state).toBe("permission_prompt");
+  });
+
+  it("recognizes Claude AskUserQuestion overlays as interactive overlays", () => {
+    const parsed = parseScreen(
+      readFixture("painpoints/claude-ask-user-question-overlay.txt"),
+    );
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("does not treat prose mentioning AskUserQuestion as an interactive overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note: AskUserQuestion is a tool name mentioned in this plan.
+There is no modal overlay, no selected response line, and no numbered choice box.
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
   });
 
   it("detects recoverable pr-loop parking as an action instead of plain idle text", () => {

@@ -256,6 +256,24 @@ class SubmitVerificationError extends Error {
   }
 }
 
+class DeliverySafetyGateError extends Error {
+  readonly submit_verified = false;
+
+  constructor(
+    readonly error_code:
+      | "blocked_by_interactive_prompt"
+      | "blocked_by_permission_prompt",
+    readonly screen: ParsedScreenResult,
+  ) {
+    super(
+      error_code === "blocked_by_permission_prompt"
+        ? "delivery blocked by active permission prompt"
+        : "delivery blocked by active interactive prompt",
+    );
+    this.name = "DeliverySafetyGateError";
+  }
+}
+
 class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
@@ -1631,6 +1649,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         throw new SurfaceGoneError(surface, error);
       }
       return null;
+    }
+  };
+
+  const assertDeliveryTargetIsSafe = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<void> => {
+    const snapshot = await readParsedSurface(surface, workspace, {
+      throwOnSurfaceGone: true,
+    });
+    if (!snapshot) {
+      return;
+    }
+
+    if (snapshot.parsed.control_state === "permission_prompt") {
+      throw new DeliverySafetyGateError(
+        "blocked_by_permission_prompt",
+        snapshot.parsed,
+      );
+    }
+
+    if (snapshot.parsed.control_state === "interactive_overlay") {
+      throw new DeliverySafetyGateError(
+        "blocked_by_interactive_prompt",
+        snapshot.parsed,
+      );
     }
   };
 
@@ -3430,6 +3474,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? chunkTerminalInput(sanitizedText, args.chunk_size)
             : [sanitizedText];
 
+        await assertDeliveryTargetIsSafe(args.surface, args.workspace);
+
         if (args.background) {
           const record: DeliveryRecord = {
             delivery_id: randomUUID(),
@@ -3504,6 +3550,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (e) {
         if (e instanceof SurfaceGoneError) {
           return err(e, surfaceGonePayload(e));
+        }
+        if (e instanceof DeliverySafetyGateError) {
+          return err(e, {
+            error_code: e.error_code,
+            submit_verified: e.submit_verified,
+            screen: e.screen,
+          });
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
@@ -4332,7 +4385,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           inboxOpts,
         );
         const pending = pendingDispatches(args.agent_id, 120000, inboxOpts);
-        const nudge = { attempted: false, sent: false, reason: "" };
+        const nudge: {
+          attempted: boolean;
+          sent: boolean;
+          reason: string;
+          error_code?: string;
+        } = { attempted: false, sent: false, reason: "" };
         if (args.nudge === "never") {
           nudge.reason = "nudge disabled by caller";
         } else if (monitor_alive) {
@@ -4371,6 +4429,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               nudge.sent = true;
               nudge.reason = `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
             } catch (e) {
+              if (e instanceof DeliverySafetyGateError) {
+                nudge.error_code = e.error_code;
+              }
               nudge.reason = `nudge failed (dispatch still durable in inbox file): ${
                 e instanceof Error ? e.message : String(e)
               }`;
@@ -4790,6 +4851,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
 
+      await assertDeliveryTargetIsSafe(
+        route.surface_id,
+        route.workspace_id ?? undefined,
+      );
+
       const sanitizedText = sanitizeTerminalInput(args.text);
       const chunks =
         sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
@@ -5172,6 +5238,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5296,6 +5369,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5460,6 +5540,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5520,6 +5607,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5802,6 +5896,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           return okFormatted(formatOk("send_to", data), data);
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },
@@ -5861,6 +5962,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
+          if (e instanceof DeliverySafetyGateError) {
+            return err(e, {
+              error_code: e.error_code,
+              submit_verified: e.submit_verified,
+              screen: e.screen,
+            });
+          }
           return err(e);
         }
       },

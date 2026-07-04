@@ -167,6 +167,10 @@ const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CLAUDE_PERMISSION_APPROVAL_RE =
   /allow for this session|do you want to allow|\[y\/n\]/i;
+const INTERACTIVE_PROMPT_TOOL_RE =
+  /\bAskUserQuestion\b|\bask-tool\b|agent is asking for clarification/i;
+const INTERACTIVE_PROMPT_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
+const INTERACTIVE_PROMPT_OPTION_RE = /^\s*\d+\.\s+\S.+$/gm;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
@@ -522,6 +526,15 @@ function parseErrors(text: string): string[] {
     errors.push("permission_prompt");
   }
 
+  const optionCount = [...text.matchAll(INTERACTIVE_PROMPT_OPTION_RE)].length;
+  if (
+    INTERACTIVE_PROMPT_TOOL_RE.test(text) &&
+    INTERACTIVE_PROMPT_SELECTOR_RE.test(text) &&
+    optionCount > 0
+  ) {
+    errors.push("interactive_prompt");
+  }
+
   if (text.includes("SQLITE_BUSY")) {
     errors.push("SQLITE_BUSY");
   }
@@ -534,6 +547,26 @@ function parseErrors(text: string): string[] {
   }
 
   return errors;
+}
+
+function inferControlState(
+  status: ParsedScreenStatus,
+  errors: string[],
+  agentType: ParsedScreenAgentType,
+): ParsedScreenResult["control_state"] {
+  if (errors.includes("permission_prompt")) {
+    return "permission_prompt";
+  }
+  if (errors.includes("interactive_prompt")) {
+    return "interactive_overlay";
+  }
+  if (status === "thinking" || status === "working") {
+    return "busy";
+  }
+  if (status === "idle" && agentType !== "unknown") {
+    return "ready";
+  }
+  return "unknown";
 }
 
 function parseModelAndCost(
@@ -852,9 +885,11 @@ export function parseScreen(text: string): ParsedScreenResult {
     actions.push(...parseCodexActions(normalized));
   }
 
+  const status = inferStatus(normalized, doneSignal, errors, agentType);
   const result: ParsedScreenResult = {
     agent_type: agentType,
-    status: inferStatus(normalized, doneSignal, errors, agentType),
+    status,
+    control_state: inferControlState(status, errors, agentType),
     token_count: tokenCount,
     context_pct: contextPct,
     context_window: contextWindow,

@@ -1569,20 +1569,25 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should have called send, then send-key, then the submit verification read.
-    expect(mockExec).toHaveBeenCalledTimes(3);
+    // Should preflight the screen, then send, press enter, and verify submit.
+    expect(mockExec).toHaveBeenCalledTimes(4);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["read-screen"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["send-key"]),
+      expect.arrayContaining(["send"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
+      "cmux",
+      expect.arrayContaining(["send-key"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      4,
       "cmux",
       expect.arrayContaining(["read-screen"]),
     );

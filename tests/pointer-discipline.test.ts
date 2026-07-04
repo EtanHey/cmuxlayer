@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -38,8 +44,12 @@ async function spawnReadyAgent(server: any) {
   return agentId;
 }
 
-function makeLifecycleExec(): ExecFn {
-  let readyText = "codex> ";
+const readPainpointFixture = (name: string) =>
+  readFileSync(new URL(`./fixtures/painpoints/${name}`, import.meta.url), "utf8");
+
+function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "): ExecFn {
+  let readyText =
+    typeof initialReadyText === "function" ? initialReadyText() : initialReadyText;
   let promptPending = false;
 
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
@@ -64,7 +74,10 @@ function makeLifecycleExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: readyText,
+          text:
+            typeof initialReadyText === "function"
+              ? initialReadyText()
+              : readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -259,6 +272,131 @@ describe("pane input pointer discipline", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1"]),
     );
+  });
+
+  it("send_input refuses while a Claude AskUserQuestion overlay is active", async () => {
+    const overlayText = readPainpointFixture("claude-ask-user-question-overlay.txt");
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: overlayText,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: "new task", press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("blocked_by_interactive_prompt");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.screen).toMatchObject({
+      control_state: "interactive_overlay",
+      errors: expect.arrayContaining(["interactive_prompt"]),
+    });
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send")),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send-key")),
+    ).toBe(false);
+  });
+
+  it("send_input allows prose that only mentions AskUserQuestion", async () => {
+    const proseText = [
+      "Claude Code",
+      "",
+      "Reviewer note: AskUserQuestion is a tool name mentioned in this plan.",
+      "There is no modal overlay, selected response line, or numbered choice box.",
+      "",
+      "❯ ",
+    ].join("\n");
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: proseText,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: "new task", press_enter: false },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBeUndefined();
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send")),
+    ).toBe(true);
+  });
+
+  it("send_to refuses while a Claude permission prompt is active", async () => {
+    const permissionText = readPainpointFixture("claude-permission-confirmation.txt");
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "codex> ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const tool = (server as any)._registeredTools["send_to"];
+    screenText = permissionText;
+    mockExec.mockClear();
+
+    const result = await tool.handler(
+      { agent_id: agentId, text: "continue", press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("blocked_by_permission_prompt");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.screen).toMatchObject({
+      control_state: "permission_prompt",
+      errors: expect.arrayContaining(["permission_prompt"]),
+    });
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send")),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("paste-buffer")),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send-key")),
+    ).toBe(false);
+    context.dispose();
   });
 
   it("send_command refuses over-threshold command text unless explicitly opted out", async () => {

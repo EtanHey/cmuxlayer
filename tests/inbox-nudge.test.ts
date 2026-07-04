@@ -257,7 +257,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(readInbox("ghost-agent", { baseDir: inboxDir })).toHaveLength(1);
   });
 
-  it("discovers and registers a launcher-spawned Claude agent before nudging", async () => {
+  it("discovers a launcher-spawned Claude permission prompt but does not type a nudge into it", async () => {
     exec = makeExec(
       [
         "Do you want to allow this command?",
@@ -296,8 +296,9 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.nudge.attempted).toBe(true);
-    expect(parsed.nudge.sent).toBe(true);
-    expect(sendCalls(exec).length).toBeGreaterThan(before);
+    expect(parsed.nudge.sent).toBe(false);
+    expect(parsed.nudge.error_code).toBe("blocked_by_permission_prompt");
+    expect(sendCalls(exec).length).toBe(before);
     expect(
       readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
     ).toContain("GO");
