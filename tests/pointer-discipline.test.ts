@@ -48,6 +48,8 @@ const readPainpointFixture = (name: string) =>
   readFileSync(new URL(`./fixtures/painpoints/${name}`, import.meta.url), "utf8");
 
 function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "): ExecFn {
+  // Function mode is caller-driven and intentionally bypasses the internal
+  // promptPending -> readyText simulation used by static string mode.
   let readyText =
     typeof initialReadyText === "function" ? initialReadyText() : initialReadyText;
   let promptPending = false;
@@ -152,6 +154,23 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
       }),
       stderr: "",
     };
+  });
+}
+
+function makeStaticScreenExec(text: string): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:1",
+          text,
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+    return { stdout: "{}", stderr: "" };
   });
 }
 
@@ -277,20 +296,7 @@ describe("pane input pointer discipline", () => {
   it("send_input refuses while a Claude AskUserQuestion overlay is active", async () => {
     const overlayText = readPainpointFixture("claude-ask-user-question-overlay.txt");
     const { createServer } = await loadServerModule();
-    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
-      if (args.includes("read-screen")) {
-        return {
-          stdout: JSON.stringify({
-            surface: "surface:1",
-            text: overlayText,
-            lines: 20,
-            scrollback_used: false,
-          }),
-          stderr: "",
-        };
-      }
-      return { stdout: "{}", stderr: "" };
-    });
+    const mockExec = makeStaticScreenExec(overlayText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_input"];
 
@@ -326,20 +332,7 @@ describe("pane input pointer discipline", () => {
       "❯ ",
     ].join("\n");
     const { createServer } = await loadServerModule();
-    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
-      if (args.includes("read-screen")) {
-        return {
-          stdout: JSON.stringify({
-            surface: "surface:1",
-            text: proseText,
-            lines: 20,
-            scrollback_used: false,
-          }),
-          stderr: "",
-        };
-      }
-      return { stdout: "{}", stderr: "" };
-    });
+    const mockExec = makeStaticScreenExec(proseText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_input"];
 
@@ -402,20 +395,7 @@ describe("pane input pointer discipline", () => {
   it("send_command refuses while a Claude permission prompt is active", async () => {
     const permissionText = readPainpointFixture("claude-permission-confirmation.txt");
     const { createServer } = await loadServerModule();
-    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
-      if (args.includes("read-screen")) {
-        return {
-          stdout: JSON.stringify({
-            surface: "surface:1",
-            text: permissionText,
-            lines: 20,
-            scrollback_used: false,
-          }),
-          stderr: "",
-        };
-      }
-      return { stdout: "{}", stderr: "" };
-    });
+    const mockExec = makeStaticScreenExec(permissionText);
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_command"];
 

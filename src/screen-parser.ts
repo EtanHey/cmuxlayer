@@ -167,11 +167,14 @@ const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
 const CLAUDE_PERMISSION_APPROVAL_RE =
   /allow for this session|do you want to allow|\[y\/n\]/i;
+const PROMPT_BLOCK_WINDOW_LINES = 8;
 const INTERACTIVE_PROMPT_TOOL_RE = /^\s*(AskUserQuestion|ask-tool)\s*$/i;
 const INTERACTIVE_PROMPT_CLARIFICATION_RE =
   /agent is asking for clarification/i;
-const INTERACTIVE_PROMPT_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
-const INTERACTIVE_PROMPT_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
+const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
+const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
+const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
+const PERMISSION_PROMPT_SECONDARY_RE = /allow for this session|\[y\/n\]/i;
 const PERMISSION_PROMPT_MARKER_RE =
   /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
 const CODEX_HEADER_RE =
@@ -513,20 +516,35 @@ function parseResponse(text: string): string | null {
   return response || extractClaudeResponseTail(text);
 }
 
-function hasPromptBlock(
-  text: string,
-  markerRe: RegExp,
-  windowSize = 8,
-): boolean {
+function hasMenuBlock(text: string): boolean {
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
-    if (!markerRe.test(lines[index])) {
+    if (!MENU_SELECTOR_RE.test(lines[index])) {
       continue;
     }
-    const block = lines.slice(index, index + windowSize + 1).join("\n");
-    const hasSelector = INTERACTIVE_PROMPT_SELECTOR_RE.test(block);
-    const hasOption = INTERACTIVE_PROMPT_OPTION_RE.test(block);
-    if (hasSelector && hasOption) {
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    if (MENU_OPTION_RE.test(block)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPermissionPromptBlock(text: string): boolean {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!PERMISSION_PROMPT_MARKER_RE.test(line)) {
+      continue;
+    }
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    const hasPrimaryMarker = PERMISSION_PROMPT_PRIMARY_RE.test(block);
+    const hasSecondaryMarker = PERMISSION_PROMPT_SECONDARY_RE.test(block);
+    if (hasPrimaryMarker || (hasSecondaryMarker && hasMenuBlock(block))) {
       return true;
     }
   }
@@ -539,22 +557,22 @@ function hasInteractivePromptBlock(text: string): boolean {
     if (!INTERACTIVE_PROMPT_TOOL_RE.test(lines[index])) {
       continue;
     }
-    const block = lines.slice(index, index + 7).join("\n");
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
     const hasClarification =
       INTERACTIVE_PROMPT_CLARIFICATION_RE.test(block);
-    const hasSelector = INTERACTIVE_PROMPT_SELECTOR_RE.test(block);
-    const hasOption = INTERACTIVE_PROMPT_OPTION_RE.test(block);
-    if (hasClarification && hasSelector && hasOption) {
+    if (hasClarification && hasMenuBlock(block)) {
       return true;
     }
   }
-  return false;
+  return hasMenuBlock(text) && !PERMISSION_PROMPT_MARKER_RE.test(text);
 }
 
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
-  if (hasPromptBlock(text, PERMISSION_PROMPT_MARKER_RE)) {
+  if (hasPermissionPromptBlock(text)) {
     errors.push("permission_prompt");
   }
 

@@ -102,6 +102,35 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.control_state).toBe("interactive_overlay");
   });
 
+  it("recognizes generic active choice menus as interactive overlays", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Select a model for the next worker:
+> 1. Opus
+  2. Sonnet
+  3. Haiku
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes permission prompts without numbered options", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Do you want to allow this command?
+
+[y/n]
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).toContain("permission_prompt");
+    expect(parsed.control_state).toBe("permission_prompt");
+  });
+
   it("does not treat prose mentioning AskUserQuestion as an interactive overlay", () => {
     const parsed = parseScreen(`
 Claude Code
@@ -142,6 +171,21 @@ Claude Code
 
 $ cat ./private.txt
 bash: ./private.txt: Permission denied
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("permission_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale bracketed y/n text as an active permission prompt", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Notes from the previous run:
+[y/n] appeared in an old command transcript.
 
 ❯ 
 `);
