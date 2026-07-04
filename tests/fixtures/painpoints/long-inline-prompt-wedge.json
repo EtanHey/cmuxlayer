@@ -1,0 +1,18 @@
+{
+  "id": "long-inline-prompt-wedge",
+  "description": "Long inline prompt must be refused before keystrokes or left as composer_dirty if already typed.",
+  "expected_state": "composer_dirty",
+  "phase_home": "phase-1-delivery-safety-gate",
+  "source_evidence": [
+    "src/server.ts:153-183",
+    "src/server.ts:685-711"
+  ],
+  "inline_length": 1801,
+  "limit_env": "CMUXLAYER_MAX_INLINE_CHARS",
+  "screen_text": "OpenAI Codex\nModel: gpt-5.5\n\ncodex> " ,
+  "assertions": [
+    "assertInlineInputAllowed rejects before delivery unless allow_long_inline is true",
+    "large payload guidance points to file-pointer delivery",
+    "no partial send and no submit_verified:true"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "multiline-payload-premature-submit",
+  "description": "Multiline Codex payload must paste as one composer message or refuse instead of submitting line by line.",
+  "expected_state": "composer_dirty",
+  "phase_home": "phase-1-delivery-safety-gate",
+  "source_evidence": [
+    "src/server.ts:607-619",
+    "src/server.ts:658-660",
+    "src/sanitize.ts:1-17"
+  ],
+  "payload": "line one\nline two\nline three",
+  "target_cli": "codex",
+  "observed_symptom": "Codex receives newline-delimited text as separate submitted messages.",
+  "root_cause_status": "unconfirmed; fixture covers symptom and candidate newline chunking path",
+  "assertions": [
+    "multiline text uses paste delivery as one composer message",
+    "press_enter occurs once after final chunk",
+    "if paste is unavailable, delivery refuses before typing"
+  ]
+}

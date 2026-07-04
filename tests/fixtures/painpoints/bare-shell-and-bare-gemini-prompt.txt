@@ -1,0 +1,9 @@
+case: bash prompt
+etanheyman cmuxlayer-worker-1783191155415 $
+
+case: bare greater-than prompt
+>
+
+case: repeated bare greater-than prompt without Gemini identity
+>
+>

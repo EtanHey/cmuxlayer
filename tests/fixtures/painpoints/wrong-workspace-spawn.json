@@ -1,0 +1,28 @@
+{
+  "id": "wrong-workspace-spawn",
+  "description": "Same-repo child spawn must inherit the parent workspace instead of the focused workspace.",
+  "expected_state": "ready",
+  "phase_home": "phase-4-layout-workspace-determinism",
+  "source_evidence": [
+    "src/agent-engine.ts:950-970",
+    "src/repo-workspace.ts:76-105"
+  ],
+  "parent_agent": {
+    "agent_id": "parent-orchestrator",
+    "repo": "/example/workspaces/cmuxlayer",
+    "workspace_id": "workspace:A",
+    "surface_id": "surface:parent",
+    "state": "ready",
+    "role": "orchestrator"
+  },
+  "spawn_request": {
+    "repo": "/example/workspaces/cmuxlayer.wt/cmuxlayer-worker-1",
+    "focused_workspace": "workspace:B",
+    "explicit_workspace": null
+  },
+  "assertions": [
+    "same-repo child spawn selects workspace:A",
+    "no split is created in workspace:B",
+    "ready is valid only when the child occupies the intended workspace"
+  ]
+}

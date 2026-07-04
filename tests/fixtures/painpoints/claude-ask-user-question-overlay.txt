@@ -1,0 +1,11 @@
+Claude Code
+
+AskUserQuestion
+The agent is asking for clarification before continuing.
+
+> Which workspace should I use?
+  1. Current workspace
+  2. New worker split
+
+Simulated attempted send_to payload:
+Read and follow docs.local/plans/2026-07-04-cmuxlayer-painpoint-remediation/reports/GOAL-phase0-invariant-contract.md

@@ -1,0 +1,39 @@
+{
+  "id": "registry-ghost-duplicate-surface",
+  "description": "Registry contains a stale error/booting ghost and conflicting duplicate routes.",
+  "expected_state": "poisoned_registry",
+  "phase_home": "phase-6-registry-resync-ghost-reaper",
+  "source_evidence": [
+    "src/server.ts:4278-4286",
+    "src/server.ts:4307-4313",
+    "tests/agent-facade.test.ts:95-111"
+  ],
+  "records": [
+    {
+      "agent_id": "agent-ghost",
+      "surface_id": "surface:missing",
+      "workspace_id": "workspace:main",
+      "state": "error",
+      "cli": "codex"
+    },
+    {
+      "agent_id": "agent-dup",
+      "surface_id": "surface:1",
+      "workspace_id": "workspace:main",
+      "state": "ready",
+      "cli": "claude"
+    },
+    {
+      "agent_id": "agent-dup",
+      "surface_id": "surface:2",
+      "workspace_id": "workspace:main",
+      "state": "ready",
+      "cli": "claude"
+    }
+  ],
+  "assertions": [
+    "conflicting routes are rejected",
+    "ghost records are evicted or marked poisoned",
+    "dispatch_to_agent does not rely on poisoned lifecycle state"
+  ]
+}
