@@ -827,6 +827,38 @@ etanheyman ~ [master] $
 
     expect(parsed.agent_type).toBe("unknown");
     expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("shell");
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("detects shell prompts without whitespace before the prompt marker", () => {
+    const parsed = parseScreen("etanheyman@mac ~/repo5$");
+
+    expect(parsed.agent_type).toBe("unknown");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("shell");
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("does not classify stale shell prompts above current output as shell", () => {
+    const parsed = parseScreen(`
+etanheyman@mac ~/repo5$
+running local setup output
+still printing logs
+`);
+
+    expect(parsed.agent_type).toBe("unknown");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("unknown");
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("does not classify percentage status lines as shell prompts", () => {
+    const parsed = parseScreen("Auto · 16.1%");
+
+    expect(parsed.agent_type).toBe("unknown");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("unknown");
     expect(parsed.errors).toEqual([]);
   });
 

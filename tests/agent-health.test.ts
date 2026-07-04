@@ -167,6 +167,43 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("registry_screen_disagreement");
   });
 
+  it("marks stale dispatches on a live monitor as wedged, not dead", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: true,
+      stale_count: 2,
+      screen_status: "working",
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("stale_inbox_dispatches");
+    expect(health.issue_codes).toContain("agent_wedged");
+    expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
+  });
+
+  it("does not mark stale dispatches as wedged when monitor liveness is unknown", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      stale_count: 2,
+      screen_status: "working",
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("stale_inbox_dispatches");
+    expect(health.issue_codes).not.toContain("agent_wedged");
+    expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
+  });
+
+  it("marks an absent monitor as dead evidence, not a wedged live pane", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: false,
+      stale_count: 0,
+      screen_status: "working",
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("inbox_monitor_not_alive");
+    expect(health.issue_codes).not.toContain("agent_wedged");
+  });
+
   it("marks registry workspace mismatch against the live surface as unhealthy", () => {
     const health = evaluateAgentHealth(makeRecord({ workspace_id: "workspace:5" }), {
       monitor_alive: true,
