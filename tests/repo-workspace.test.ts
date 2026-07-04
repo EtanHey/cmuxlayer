@@ -43,6 +43,21 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     ).toBe(2);
   });
 
+  it("scores path-shaped repo roots and their worktree directories", () => {
+    expect(
+      workspaceDirectoryRepoMatchScore(
+        "/example/workspaces/cmuxlayer",
+        "/example/workspaces/cmuxlayer",
+      ),
+    ).toBe(2);
+    expect(
+      workspaceDirectoryRepoMatchScore(
+        "/example/workspaces/cmuxlayer.wt/cmuxlayer-worker-1",
+        "/example/workspaces/cmuxlayer",
+      ),
+    ).toBe(2);
+  });
+
   it("does not match an unrelated sibling repo (no substring/prefix match)", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
@@ -188,5 +203,14 @@ describe("reposEquivalent", () => {
     expect(reposEquivalent("cmuxlayer", "cmux-layer")).toBe(true);
     expect(reposEquivalent("Brainlayer", "brainlayer")).toBe(true);
     expect(reposEquivalent("brainlayer", "voicelayer")).toBe(false);
+  });
+
+  it("treats a repo root path and a same-repo worktree path as equivalent", () => {
+    expect(
+      reposEquivalent(
+        "/example/workspaces/cmuxlayer",
+        "/example/workspaces/cmuxlayer.wt/cmuxlayer-worker-1",
+      ),
+    ).toBe(true);
   });
 });

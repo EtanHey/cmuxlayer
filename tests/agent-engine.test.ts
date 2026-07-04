@@ -29,7 +29,11 @@ import {
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
-import { MAX_RESPAWN_ATTEMPTS, type AgentRecord } from "../src/agent-types.js";
+import {
+  MAX_CHILDREN,
+  MAX_RESPAWN_ATTEMPTS,
+  type AgentRecord,
+} from "../src/agent-types.js";
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
@@ -243,6 +247,41 @@ describe("AgentEngine", () => {
       );
       expect(result.surface_id).toBe("surface:new");
       expect(result.state).toBe("booting");
+    });
+
+    it("enforces max children when parent and children are rehydrated from disk", async () => {
+      const parent = makeRecord({
+        agent_id: "parent-claude",
+        surface_id: "surface:parent",
+        state: "ready",
+        cli: "claude",
+        spawn_depth: 0,
+      });
+      stateMgr.writeState(parent);
+      for (let i = 0; i < MAX_CHILDREN; i++) {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `child-${i}`,
+            surface_id: `surface:child-${i}`,
+            state: "ready",
+            cli: "codex",
+            parent_agent_id: parent.agent_id,
+            spawn_depth: parent.spawn_depth + 1,
+          }),
+        );
+      }
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          parent_agent_id: parent.agent_id,
+        }),
+      ).rejects.toThrow(`Max children exceeded: ${MAX_CHILDREN}`);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
 
     it("captures session identity before surfacing launch command failures", async () => {
@@ -548,7 +587,7 @@ describe("AgentEngine", () => {
         workspace: "workspace:intended",
       });
 
-      expect(result.workspace_id).toBe("workspace:wrong");
+      expect(result.workspace_id).toBe("workspace:intended");
       expect(result.warnings).toContain(
         "Spawn placement mismatch: requested workspace:intended but cmux returned workspace:wrong for surface surface:new",
       );
@@ -888,6 +927,54 @@ describe("AgentEngine", () => {
 
       expect(mockClient.newSurface).toHaveBeenCalledWith({
         pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:1",
+      });
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    });
+
+    it("rehydrates persisted role surfaces before placing after reconnect", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "existing-worker",
+          state: "ready",
+          surface_id: "surface:worker-existing",
+          workspace_id: "ws:1",
+          role: "worker",
+        }),
+      );
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:worker",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:worker-existing"],
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: "pane:worker",
+        surfaces: [makeSurface("surface:worker-existing")],
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix gap F",
+        workspace: "ws:1",
+      });
+
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:worker",
         type: "terminal",
         workspace: "ws:1",
       });

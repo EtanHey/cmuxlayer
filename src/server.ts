@@ -2636,6 +2636,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
+  const agentForSpawnHealth = (
+    agent: AgentRecord,
+    result: { workspace_id?: string; warnings?: string[] },
+  ): AgentRecord => {
+    const placementMismatch =
+      result.warnings?.some((warning) =>
+        warning.startsWith("Spawn placement mismatch:"),
+      ) ?? false;
+    if (!placementMismatch || !result.workspace_id) return agent;
+    return { ...agent, workspace_id: result.workspace_id };
+  };
+
   const isLeadLikeSurfaceTitle = (title: string): boolean =>
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
 
@@ -5207,9 +5219,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : undefined;
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent, {
-                ...healthTopologyOverrides(currentAgent, topology),
-              })
+            ? await evaluateServerAgentHealth(
+                agentForSpawnHealth(currentAgent, result),
+                {
+                  ...healthTopologyOverrides(currentAgent, topology),
+                },
+              )
             : undefined;
 
           return okFormatted(
@@ -5350,9 +5365,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const currentAgent = engine.getAgentState(result.agent_id);
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent, {
-                ...healthTopologyOverrides(currentAgent, topology),
-              })
+            ? await evaluateServerAgentHealth(
+                agentForSpawnHealth(currentAgent, result),
+                {
+                  ...healthTopologyOverrides(currentAgent, topology),
+                },
+              )
             : undefined;
 
           return okFormatted(
@@ -5509,9 +5527,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 : undefined;
             const topology = currentAgent ? await collectSurfaceTopology() : null;
             const health = currentAgent
-              ? await evaluateServerAgentHealth(currentAgent, {
-                  ...healthTopologyOverrides(currentAgent, topology),
-                })
+              ? await evaluateServerAgentHealth(
+                  agentForSpawnHealth(currentAgent, result),
+                  {
+                    ...healthTopologyOverrides(currentAgent, topology),
+                  },
+                )
               : undefined;
 
             spawnedAgents.push({

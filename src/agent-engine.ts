@@ -111,6 +111,7 @@ export interface SpawnAgentResult {
 }
 
 type CreatedAgentSurface = (CmuxNewSplitResult | CmuxNewSurfaceResult) & {
+  actual_workspace?: string;
   warnings?: string[];
 };
 
@@ -1002,7 +1003,18 @@ export class AgentEngine {
           group.surfaces.map((surface) => surface.ref),
         ),
       );
-      const roleSurfaceIds = collectRoleSurfaceIds(this.registry.list());
+      const knownAgentsById = new Map(
+        this.stateMgr
+          .listStates()
+          .map((agent) => [agent.agent_id, agent] as const),
+      );
+      for (const agent of this.registry.list()) {
+        knownAgentsById.set(agent.agent_id, agent);
+      }
+      const liveKnownAgents = [...knownAgentsById.values()].filter((agent) =>
+        liveSurfaceIds.has(agent.surface_id),
+      );
+      const roleSurfaceIds = collectRoleSurfaceIds(liveKnownAgents);
       const extraRoleSurfaceIds =
         this.roleSurfaceIdsProvider?.(liveSurfaceIds, workspace) ?? null;
       if (extraRoleSurfaceIds) {
@@ -1014,8 +1026,8 @@ export class AgentEngine {
       }
       const childWorkerSurfaceIds = new Set(
         parentAgent
-          ? this.registry
-              .getChildren(parentAgent.agent_id)
+          ? liveKnownAgents
+              .filter((agent) => agent.parent_agent_id === parentAgent.agent_id)
               .filter((agent) => inferRecordRoleOrNull(agent) === "worker")
               .map((agent) => agent.surface_id)
           : [],
@@ -1073,6 +1085,8 @@ export class AgentEngine {
     const warning = `Spawn placement mismatch: requested ${requestedWorkspace} but cmux returned ${surface.workspace} for surface ${surface.surface}`;
     return {
       ...surface,
+      workspace: requestedWorkspace,
+      actual_workspace: surface.workspace,
       warnings: [...(surface.warnings ?? []), warning],
     };
   }
@@ -1968,17 +1982,30 @@ export class AgentEngine {
     });
 
     if (spawnParams.parent_agent_id) {
-      const parent = this.registry.get(spawnParams.parent_agent_id);
+      const parent =
+        this.registry.get(spawnParams.parent_agent_id) ??
+        this.stateMgr.readState(spawnParams.parent_agent_id);
       if (!parent) {
         throw new Error(
           `Parent agent not found: ${spawnParams.parent_agent_id}`,
         );
       }
+      if (!this.registry.get(parent.agent_id)) {
+        this.registry.set(parent.agent_id, parent);
+      }
       if (parent.spawn_depth >= MAX_SPAWN_DEPTH) {
         throw new Error(`Max spawn depth exceeded: ${MAX_SPAWN_DEPTH}`);
       }
-      const children = this.registry.getChildren(parent.agent_id);
-      if (children.length >= MAX_CHILDREN) {
+      const childrenById = new Map<string, AgentRecord>();
+      for (const child of this.stateMgr.listStates()) {
+        if (child.parent_agent_id === parent.agent_id) {
+          childrenById.set(child.agent_id, child);
+        }
+      }
+      for (const child of this.registry.getChildren(parent.agent_id)) {
+        childrenById.set(child.agent_id, child);
+      }
+      if (childrenById.size >= MAX_CHILDREN) {
         throw new Error(`Max children exceeded: ${MAX_CHILDREN}`);
       }
       spawnDepth = parent.spawn_depth + 1;
@@ -2051,7 +2078,7 @@ export class AgentEngine {
     try {
       await this.sendLaunchCommand(
         surface.surface,
-        surface.workspace,
+        surface.actual_workspace ?? surface.workspace,
         launchCmd,
       );
     } catch (error) {

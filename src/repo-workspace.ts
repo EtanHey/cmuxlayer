@@ -4,10 +4,28 @@ export function pathBaseName(path: string): string {
   return index >= 0 ? normalized.slice(index + 1) : normalized;
 }
 
+function repoIdentityToken(input: string): string {
+  const normalized = input.trim().replace(/\/+$/, "");
+  if (!normalized) return "";
+  const segments = normalized.split("/").filter(Boolean);
+  const worktreeSegment = segments.find((segment) =>
+    segment.toLowerCase().endsWith(".wt"),
+  );
+  if (worktreeSegment) return worktreeSegment.slice(0, -3);
+  const worktreesIndex = segments.findIndex(
+    (segment) => segment.toLowerCase() === ".worktrees",
+  );
+  if (worktreesIndex > 0) return segments[worktreesIndex - 1] ?? "";
+  const baseName = pathBaseName(normalized);
+  return baseName.toLowerCase().endsWith(".wt")
+    ? baseName.slice(0, -3)
+    : baseName;
+}
+
 function tokenMatchesRepo(token: string, repo: string): boolean {
-  const normalizedRepo = repo.toLowerCase();
+  const normalizedRepo = repoIdentityToken(repo).toLowerCase();
   const normalizedRepoNoHyphen = normalizedRepo.replace(/-/g, "");
-  const normalizedToken = token.toLowerCase();
+  const normalizedToken = repoIdentityToken(token).toLowerCase();
   return (
     normalizedToken === normalizedRepo ||
     normalizedToken.replace(/-/g, "") === normalizedRepoNoHyphen
