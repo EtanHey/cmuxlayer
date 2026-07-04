@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -74,6 +75,9 @@ describe("worktree helpers", () => {
     mkdirSync(collidingPath, { recursive: true });
     vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
     const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("branch") && args.includes("--list")) {
+        return { stdout: "", stderr: "" };
+      }
       if (args.includes("worktree") && args.includes("list")) {
         return {
           stdout: worktreeListOutput([repoRoot, collidingPath]),
@@ -111,6 +115,51 @@ describe("worktree helpers", () => {
       nextPath,
       "HEAD",
     ]);
+  });
+
+  it("retries generated default names when the generated branch already exists", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const firstId = (0.5).toString(36).slice(2, 8).padEnd(6, "0");
+    const secondId = (0.25).toString(36).slice(2, 8).padEnd(6, "0");
+    const collidingName = `cmuxlayer-worker-${firstId}`;
+    const nextName = `cmuxlayer-worker-${secondId}`;
+    const collidingBranch = `cmuxlayer/${collidingName}`;
+    const nextPath = join(TEST_ROOT, "cmuxlayer.wt", nextName);
+    mkdirSync(repoRoot, { recursive: true });
+    vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("branch") && args.includes("--list")) {
+        const branch = args.at(-1);
+        return {
+          stdout: branch === collidingBranch ? `  ${collidingBranch}\n` : "",
+          stderr: "",
+        };
+      }
+      if (args.includes("worktree") && args.includes("add")) {
+        if (args.includes(collidingBranch)) {
+          throw new Error("fatal: a branch named already exists");
+        }
+        mkdirSync(nextPath, { recursive: true });
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: true,
+      exec,
+    });
+
+    expect(result).toMatchObject({
+      path: nextPath,
+      name: nextName,
+      branch: `cmuxlayer/${nextName}`,
+      created: true,
+      reused: false,
+    });
   });
 
   it("creates a named git worktree with a deterministic default path", async () => {
@@ -199,6 +248,41 @@ describe("worktree helpers", () => {
       "git",
       expect.arrayContaining(["worktree", "add"]),
     );
+  });
+
+  it("reuses a repo worktree when git reports canonical paths through a symlink", async () => {
+    const actualGitsDir = join(TEST_ROOT, "actual-gits");
+    const linkedGitsDir = join(TEST_ROOT, "linked-gits");
+    const repoRoot = join(linkedGitsDir, "repo");
+    const worktreePath = join(linkedGitsDir, "cmuxlayer.wt", "linked");
+    const actualRepoRoot = join(actualGitsDir, "repo");
+    const actualWorktreePath = join(actualGitsDir, "cmuxlayer.wt", "linked");
+    mkdirSync(actualRepoRoot, { recursive: true });
+    mkdirSync(actualWorktreePath, { recursive: true });
+    symlinkSync(actualGitsDir, linkedGitsDir, "dir");
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([actualRepoRoot, actualWorktreePath]),
+          stderr: "",
+        };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: linkedGitsDir,
+      worktree: { name: "linked", reuse: true },
+      exec,
+    });
+
+    expect(result).toMatchObject({
+      path: worktreePath,
+      created: false,
+      reused: true,
+    });
   });
 
   it("symlinks node_modules from the main checkout when present", async () => {

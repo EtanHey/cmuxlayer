@@ -4,6 +4,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  realpathSync,
   symlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -75,6 +76,14 @@ function safeName(input: string): string {
 function defaultWorkerName(repo: string): string {
   const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
   return safeName(`${repo}-worker-${shortId}`);
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function assertInside(root: string, path: string): void {
@@ -159,6 +168,21 @@ function copyMcpJson(repoRoot: string, worktreePath: string): boolean {
   return true;
 }
 
+async function branchExists(
+  repoRoot: string,
+  branch: string,
+  exec: WorktreeExec,
+): Promise<boolean> {
+  const result = await exec("git", [
+    "-C",
+    repoRoot,
+    "branch",
+    "--list",
+    branch,
+  ]);
+  return result.stdout.trim().length > 0;
+}
+
 function parseWorktreeListPaths(stdout: string): string[] {
   return stdout
     .split("\n")
@@ -187,9 +211,9 @@ async function assertExistingWorktree(
     "list",
     "--porcelain",
   ]);
-  const expectedPath = resolve(path);
+  const expectedPath = canonicalPath(path);
   const belongsToRepo = parseWorktreeListPaths(worktreeList.stdout).some(
-    (worktreePath) => resolve(worktreePath) === expectedPath,
+    (worktreePath) => canonicalPath(worktreePath) === expectedPath,
   );
   if (!belongsToRepo) {
     throw new Error(`Existing path is not a worktree of ${repoRoot}: ${path}`);
@@ -203,23 +227,35 @@ export async function prepareWorktree(
   const homeGitsDir = resolve(input.homeGitsDir ?? join(homedir(), "Gits"));
   const repoRoot = resolve(input.repoRoot ?? join(homeGitsDir, repo));
   assertInside(homeGitsDir, repoRoot);
+  const exec = input.exec ?? defaultExec;
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
   let worktreePath = spec.path
     ? resolve(spec.path)
     : join(homeGitsDir, `${repo}.wt`, spec.name);
   if (spec.generatedName && !spec.path) {
-    for (let attempts = 0; existsSync(worktreePath) && attempts < 10; attempts++) {
+    for (let attempts = 0; attempts < 10; attempts++) {
+      const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+      const pathExists = existsSync(worktreePath);
+      const branchTaken = pathExists
+        ? false
+        : await branchExists(repoRoot, branch, exec);
+      if (!pathExists && !branchTaken) {
+        break;
+      }
       spec.name = defaultWorkerName(repo);
       worktreePath = join(homeGitsDir, `${repo}.wt`, spec.name);
     }
-    if (existsSync(worktreePath)) {
+    const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+    if (
+      existsSync(worktreePath) ||
+      (await branchExists(repoRoot, branch, exec))
+    ) {
       throw new Error(`Unable to generate a unique worktree path for ${repo}`);
     }
   }
   assertInside(homeGitsDir, worktreePath);
 
-  const exec = input.exec ?? defaultExec;
   if (existsSync(worktreePath)) {
     if (!spec.reuse) {
       throw new Error(`Worktree already exists: ${worktreePath}`);
