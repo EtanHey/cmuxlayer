@@ -117,6 +117,40 @@ There is no modal overlay, no selected response line, and no numbered choice box
     expect(parsed.control_state).toBe("ready");
   });
 
+  it("does not combine separated AskUserQuestion prose, numbered lists, and prompts into an overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note: AskUserQuestion is mentioned in a plan paragraph.
+
+Implementation checklist:
+1. Read the plan
+2. Run the tests
+
+Done reading.
+> unrelated shell prompt
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale permission denied output as an active permission prompt", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+$ cat ./private.txt
+bash: ./private.txt: Permission denied
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("permission_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("detects recoverable pr-loop parking as an action instead of plain idle text", () => {
     const parsed = parseScreen(`
 OpenAI Codex

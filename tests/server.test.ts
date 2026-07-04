@@ -1605,14 +1605,19 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(2);
+    expect(mockExec).toHaveBeenCalledTimes(3);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
+      "cmux",
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      2,
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
-      2,
+      3,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );
@@ -2060,8 +2065,8 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(readsWhenBootPromptSent).toBe(2);
-    expect(reads).toBe(3);
+    expect(readsWhenBootPromptSent).toBe(3);
+    expect(reads).toBe(4);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),

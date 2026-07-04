@@ -399,6 +399,48 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
+  it("send_command refuses while a Claude permission prompt is active", async () => {
+    const permissionText = readPainpointFixture("claude-permission-confirmation.txt");
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: permissionText,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", command: "codex resume 123" },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("blocked_by_permission_prompt");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.screen).toMatchObject({
+      control_state: "permission_prompt",
+      errors: expect.arrayContaining(["permission_prompt"]),
+    });
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send")),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, args]) => args.includes("send-key")),
+    ).toBe(false);
+  });
+
   it("send_command refuses over-threshold command text unless explicitly opted out", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
     const { createServer } = await loadServerModule();

@@ -3640,6 +3640,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const shouldVerifySubmit =
           !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
+        await assertDeliveryTargetIsSafe(args.surface, args.workspace);
+
         const delivery = await withSurfaceWrite(args.surface, async () =>
           deliverInputChunks({
             surface: args.surface,
@@ -3694,6 +3696,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (e) {
         if (e instanceof SurfaceGoneError) {
           return err(e, surfaceGonePayload(e));
+        }
+        if (e instanceof DeliverySafetyGateError) {
+          return err(e, {
+            error_code: e.error_code,
+            submit_verified: e.submit_verified,
+            screen: e.screen,
+          });
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
