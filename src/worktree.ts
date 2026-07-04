@@ -150,7 +150,18 @@ function copyMcpJson(repoRoot: string, worktreePath: string): boolean {
   return true;
 }
 
-async function assertExistingWorktree(path: string, exec: WorktreeExec) {
+function parseWorktreeListPaths(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
+}
+
+async function assertExistingWorktree(
+  path: string,
+  repoRoot: string,
+  exec: WorktreeExec,
+) {
   const result = await exec("git", [
     "-C",
     path,
@@ -159,6 +170,20 @@ async function assertExistingWorktree(path: string, exec: WorktreeExec) {
   ]);
   if (result.stdout.trim() !== "true") {
     throw new Error(`Existing path is not a git worktree: ${path}`);
+  }
+  const worktreeList = await exec("git", [
+    "-C",
+    repoRoot,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
+  const expectedPath = resolve(path);
+  const belongsToRepo = parseWorktreeListPaths(worktreeList.stdout).some(
+    (worktreePath) => resolve(worktreePath) === expectedPath,
+  );
+  if (!belongsToRepo) {
+    throw new Error(`Existing path is not a worktree of ${repoRoot}: ${path}`);
   }
 }
 
@@ -185,7 +210,7 @@ export async function prepareWorktree(
     if (!stat.isDirectory()) {
       throw new Error(`Worktree path exists but is not a directory: ${worktreePath}`);
     }
-    await assertExistingWorktree(worktreePath, exec);
+    await assertExistingWorktree(worktreePath, repoRoot, exec);
     return {
       path: worktreePath,
       name: basename(worktreePath),

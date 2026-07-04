@@ -15,6 +15,10 @@ import {
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-worktree-test");
 
+function worktreeListOutput(paths: string[]): string {
+  return paths.map((path) => `worktree ${path}\n`).join("");
+}
+
 describe("worktree helpers", () => {
   beforeEach(() => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
@@ -99,7 +103,15 @@ describe("worktree helpers", () => {
     const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "existing");
     mkdirSync(repoRoot, { recursive: true });
     mkdirSync(worktreePath, { recursive: true });
-    const exec = vi.fn().mockResolvedValue({ stdout: "true\n", stderr: "" });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([repoRoot, worktreePath]),
+          stderr: "",
+        };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
 
     const result = await prepareWorktree({
       repo: "cmuxlayer",
@@ -178,7 +190,15 @@ describe("worktree helpers", () => {
     mkdirSync(repoRoot, { recursive: true });
     mkdirSync(worktreePath, { recursive: true });
     writeFileSync(join(repoRoot, ".mcp.json"), mcpConfig);
-    const exec = vi.fn().mockResolvedValue({ stdout: "true\n", stderr: "" });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([repoRoot, worktreePath]),
+          stderr: "",
+        };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
 
     const result = await prepareWorktree({
       repo: "cmuxlayer",
@@ -203,7 +223,15 @@ describe("worktree helpers", () => {
     mkdirSync(worktreePath, { recursive: true });
     writeFileSync(join(repoRoot, ".mcp.json"), sourceConfig);
     writeFileSync(join(worktreePath, ".mcp.json"), existingConfig);
-    const exec = vi.fn().mockResolvedValue({ stdout: "true\n", stderr: "" });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([repoRoot, worktreePath]),
+          stderr: "",
+        };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
 
     const result = await prepareWorktree({
       repo: "cmuxlayer",
@@ -217,6 +245,36 @@ describe("worktree helpers", () => {
     expect(readFileSync(join(worktreePath, ".mcp.json"), "utf8")).toBe(
       existingConfig,
     );
+  });
+
+  it("rejects reuse when an existing git worktree does not belong to the repo root", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(TEST_ROOT, "other.wt", "foreign");
+    const foreignRepoRoot = join(TEST_ROOT, "foreign-repo");
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(repoRoot, ".mcp.json"), '{"mcpServers":{"cmux":{}}}\n');
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([repoRoot, foreignRepoRoot]),
+          stderr: "",
+        };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
+
+    await expect(
+      prepareWorktree({
+        repo: "cmuxlayer",
+        repoRoot,
+        homeGitsDir: TEST_ROOT,
+        worktree: { path: worktreePath, reuse: true },
+        exec,
+      }),
+    ).rejects.toThrow(/not a worktree of/);
+
+    expect(existsSync(join(worktreePath, ".mcp.json"))).toBe(false);
   });
 
   it("skips .mcp.json copy when the source file is missing", async () => {
