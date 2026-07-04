@@ -101,6 +101,7 @@ export interface SpawnAgentResult {
   agent_id: string;
   surface_id: string;
   workspace_id?: string;
+  actual_workspace_id?: string;
   state: AgentState;
   model?: string;
   requested_model?: string;
@@ -2106,6 +2107,7 @@ export class AgentEngine {
       agent_id: agentId,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
+      actual_workspace_id: surface.actual_workspace,
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
