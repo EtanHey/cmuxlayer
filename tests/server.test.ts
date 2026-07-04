@@ -2409,7 +2409,10 @@ describe("tool handler integration", () => {
       { surface: "surface:1", text: "echo first" },
       {} as any,
     );
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 10 && !releaseSend; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(releaseSend).toBeTruthy();
 
     const second = await tool.handler(
       { surface: "surface:1", text: "echo second" },

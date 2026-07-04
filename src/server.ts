@@ -2405,6 +2405,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const run = async () => {
       try {
+        await assertDeliveryTargetIsSafe(record.surface, record.workspace);
         await deliverInputChunks({
           surface: record.surface,
           workspace: record.workspace,
@@ -3474,8 +3475,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? chunkTerminalInput(sanitizedText, args.chunk_size)
             : [sanitizedText];
 
-        await assertDeliveryTargetIsSafe(args.surface, args.workspace);
-
         if (args.background) {
           const record: DeliveryRecord = {
             delivery_id: randomUUID(),
@@ -3518,6 +3517,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.press_enter &&
           (!targetRecord || INTERACTIVE_AGENT_STATES.has(targetRecord.state));
         const delivery = await withSurfaceWrite(args.surface, async () => {
+          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
           return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -3640,10 +3640,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const shouldVerifySubmit =
           !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
-        await assertDeliveryTargetIsSafe(args.surface, args.workspace);
-
-        const delivery = await withSurfaceWrite(args.surface, async () =>
-          deliverInputChunks({
+        const delivery = await withSurfaceWrite(args.surface, async () => {
+          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
+          return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
             chunks,
@@ -3652,8 +3651,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             press_enter: true,
             source_event: "send_command",
             verify_submit: bootPromptPath ? false : shouldVerifySubmit,
-          }),
-        );
+          });
+        });
 
         let bootPromptDelivery:
           | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -4860,19 +4859,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       }
 
-      await assertDeliveryTargetIsSafe(
-        route.surface_id,
-        route.workspace_id ?? undefined,
-      );
-
       const sanitizedText = sanitizeTerminalInput(args.text);
       const chunks =
         sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
 
-      return withSurfaceWrite(route.surface_id, async () =>
-        deliverInputChunks({
+      return withSurfaceWrite(route.surface_id, async () => {
+        await assertDeliveryTargetIsSafe(
+          route.surface_id,
+          route.workspace_id ?? undefined,
+        );
+        return deliverInputChunks({
           surface: route.surface_id,
           workspace: route.workspace_id ?? undefined,
           chunks,
@@ -4888,8 +4886,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // false-failing a legitimate interjection.
           verify_submit:
             args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
-        }),
-      );
+        });
+      });
     };
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).

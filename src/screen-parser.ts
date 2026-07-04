@@ -173,6 +173,7 @@ const INTERACTIVE_PROMPT_CLARIFICATION_RE =
   /agent is asking for clarification/i;
 const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
+const BARE_READY_PROMPT_RE = /^\s*[>❯]\s*$/;
 const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
 const PERMISSION_PROMPT_SECONDARY_RE = /allow for this session|\[y\/n\]/i;
 const PERMISSION_PROMPT_MARKER_RE =
@@ -516,16 +517,32 @@ function parseResponse(text: string): string | null {
   return response || extractClaudeResponseTail(text);
 }
 
-function hasMenuBlock(text: string): boolean {
+function hasMenuBlock(text: string, opts?: { tailOnly?: boolean }): boolean {
   const lines = text.split("\n");
+  const lastMeaningfulIndex = lines.reduce(
+    (last, line, index) => (line.trim() ? index : last),
+    -1,
+  );
   for (let index = 0; index < lines.length; index += 1) {
     if (!MENU_SELECTOR_RE.test(lines[index])) {
       continue;
     }
+    if (
+      opts?.tailOnly &&
+      lines
+        .slice(index + 1)
+        .some((line) => BARE_READY_PROMPT_RE.test(line))
+    ) {
+      continue;
+    }
     const block = lines
-      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .slice(index + 1, index + PROMPT_BLOCK_WINDOW_LINES + 1)
       .join("\n");
-    if (MENU_OPTION_RE.test(block)) {
+    if (
+      MENU_OPTION_RE.test(block) &&
+      (!opts?.tailOnly ||
+        lastMeaningfulIndex <= index + PROMPT_BLOCK_WINDOW_LINES)
+    ) {
       return true;
     }
   }
@@ -566,7 +583,7 @@ function hasInteractivePromptBlock(text: string): boolean {
       return true;
     }
   }
-  return hasMenuBlock(text) && !PERMISSION_PROMPT_MARKER_RE.test(text);
+  return hasMenuBlock(text, { tailOnly: true }) && !PERMISSION_PROMPT_MARKER_RE.test(text);
 }
 
 function parseErrors(text: string): string[] {

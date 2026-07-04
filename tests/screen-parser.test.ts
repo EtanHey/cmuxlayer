@@ -165,6 +165,39 @@ Done reading.
     expect(parsed.control_state).toBe("ready");
   });
 
+  it("does not treat one selected numbered line as a menu overlay", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Done:
+> 1. Read the plan
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not treat stale menu history above a fresh prompt as active", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Earlier selection:
+> 1. Use pnpm
+  2. Use npm
+
+Applied pnpm.
+
+❯ 
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("does not treat stale permission denied output as an active permission prompt", () => {
     const parsed = parseScreen(`
 Claude Code
