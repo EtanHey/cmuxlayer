@@ -198,6 +198,41 @@ Applied pnpm.
     expect(parsed.control_state).toBe("ready");
   });
 
+  it("does not treat stale menu history above a Codex prompt as active", () => {
+    const parsed = parseScreen(`
+OpenAI Codex
+Model: gpt-5.5
+
+Earlier selection:
+> 1. Use pnpm
+  2. Use npm
+
+Applied pnpm.
+
+codex>
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("detects an active menu despite stale permission fragments above it", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Earlier transcript mentioned [y/n].
+
+Choose routing mode:
+> 1. Current worker
+  2. New worker
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
   it("does not treat stale permission denied output as an active permission prompt", () => {
     const parsed = parseScreen(`
 Claude Code

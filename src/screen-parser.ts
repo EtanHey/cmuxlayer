@@ -173,9 +173,8 @@ const INTERACTIVE_PROMPT_CLARIFICATION_RE =
   /agent is asking for clarification/i;
 const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
-const BARE_READY_PROMPT_RE = /^\s*[>❯]\s*$/;
+const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
-const PERMISSION_PROMPT_SECONDARY_RE = /allow for this session|\[y\/n\]/i;
 const PERMISSION_PROMPT_MARKER_RE =
   /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
 const CODEX_HEADER_RE =
@@ -559,9 +558,7 @@ function hasPermissionPromptBlock(text: string): boolean {
     const block = lines
       .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
       .join("\n");
-    const hasPrimaryMarker = PERMISSION_PROMPT_PRIMARY_RE.test(block);
-    const hasSecondaryMarker = PERMISSION_PROMPT_SECONDARY_RE.test(block);
-    if (hasPrimaryMarker || (hasSecondaryMarker && hasMenuBlock(block))) {
+    if (PERMISSION_PROMPT_PRIMARY_RE.test(block)) {
       return true;
     }
   }
@@ -583,7 +580,7 @@ function hasInteractivePromptBlock(text: string): boolean {
       return true;
     }
   }
-  return hasMenuBlock(text, { tailOnly: true }) && !PERMISSION_PROMPT_MARKER_RE.test(text);
+  return hasMenuBlock(text, { tailOnly: true });
 }
 
 function parseErrors(text: string): string[] {
@@ -593,7 +590,7 @@ function parseErrors(text: string): string[] {
     errors.push("permission_prompt");
   }
 
-  if (hasInteractivePromptBlock(text)) {
+  if (!errors.includes("permission_prompt") && hasInteractivePromptBlock(text)) {
     errors.push("interactive_prompt");
   }
 
