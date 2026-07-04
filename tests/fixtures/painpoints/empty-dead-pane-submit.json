@@ -1,0 +1,20 @@
+{
+  "id": "empty-dead-pane-submit",
+  "description": "Empty or gone pane must not produce submit_verified:true.",
+  "expected_state": "dead",
+  "phase_home": "phase-5-submit-verification-v2",
+  "source_evidence": [
+    "src/server.ts:279-338",
+    "src/server.ts:1686-1688"
+  ],
+  "screen_text": "",
+  "read_error": {
+    "message": "surface surface:dead-1 is gone",
+    "error_code": "pane_died"
+  },
+  "assertions": [
+    "verifySubmitAfterEnter returns null or false",
+    "delivery result reports pane_died",
+    "submit_verified is never true"
+  ]
+}

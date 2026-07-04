@@ -1,0 +1,38 @@
+{
+  "id": "stale-surface-after-respawn",
+  "description": "Agent record points at an old surface after respawn; live surface list omits it.",
+  "expected_state": "stale_surface",
+  "phase_home": "phase-2-agent-identity-surface-index and phase-6-registry-resync-ghost-reaper",
+  "source_evidence": [
+    "src/state-manager.ts:34-45",
+    "src/state-manager.ts:83-130",
+    "src/server.ts:4703-4745",
+    "tests/stale-surface-ref.test.ts:178-195"
+  ],
+  "agent_record": {
+    "agent_id": "agent-stale-1",
+    "surface_id": "surface:old",
+    "workspace_id": "workspace:main",
+    "state": "ready",
+    "cli": "claude",
+    "cli_session_id": "claude-session-old"
+  },
+  "live_surfaces": [
+    {
+      "ref": "surface:new",
+      "workspace_ref": "workspace:main",
+      "title": "claude replacement"
+    }
+  ],
+  "surface_session_index": {
+    "agent_id": "agent-stale-1",
+    "surface_id": "surface:old",
+    "workspace_id": "workspace:main",
+    "cli_session_id": "claude-session-old"
+  },
+  "assertions": [
+    "send_to rescans before delivery",
+    "no send occurs to surface:old",
+    "route is repaired or refused as stale"
+  ]
+}

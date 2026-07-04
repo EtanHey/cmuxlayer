@@ -1,0 +1,9 @@
+Claude Code
+
+Do you want to allow this command?
+
+> 1. Allow for this session
+  2. Allow once
+  3. Deny
+
+[y/n]

@@ -1,0 +1,27 @@
+{
+  "id": "boot-prompt-typed-not-submitted",
+  "description": "Boot prompt remains visible in the composer after delivery was attempted.",
+  "expected_state": "composer_dirty",
+  "secondary_state": "agent_booting",
+  "phase_home": "phase-3-spawn-readiness-monitor-boot and phase-5-submit-verification-v2",
+  "source_evidence": [
+    "src/agent-types.ts:56-57",
+    "src/server.ts:850-860",
+    "src/server.ts:1974-1997"
+  ],
+  "agent_record": {
+    "agent_id": "agent-booting-1",
+    "surface_id": "surface:boot-1",
+    "workspace_id": "workspace:main",
+    "state": "booting",
+    "boot_prompt_pending": true,
+    "cli": "codex"
+  },
+  "screen_text": "OpenAI Codex\nModel: gpt-5.5\n\ncodex> Read and follow docs.local/plans/phase-0.md",
+  "submitted_text": "Read and follow docs.local/plans/phase-0.md",
+  "assertions": [
+    "pending input remains visible",
+    "boot_prompt_pending is not silently cleared",
+    "agent does not transition to ready"
+  ]
+}
