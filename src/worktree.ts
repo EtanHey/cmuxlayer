@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -51,6 +52,7 @@ export interface PreparedWorktree {
   created: boolean;
   reused: boolean;
   node_modules_linked: boolean;
+  mcp_json_copied: boolean;
 }
 
 function defaultExec(cmd: string, args: string[]) {
@@ -86,7 +88,8 @@ function normalizeWorktreeRequest(
   Omit<WorktreeRequest, "create" | "reuse" | "base"> & { name: string } {
   const spec: WorktreeRequest =
     request === true || request === false || request === undefined ? {} : request;
-  const name = safeName(spec.name ?? `${repo}-worker-${Date.now()}`);
+  const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  const name = safeName(spec.name ?? `${repo}-worker-${shortId}`);
   return {
     create: spec.create ?? true,
     reuse: spec.reuse ?? true,
@@ -137,6 +140,16 @@ function linkNodeModules(repoRoot: string, worktreePath: string): boolean {
   return true;
 }
 
+function copyMcpJson(repoRoot: string, worktreePath: string): boolean {
+  const source = join(repoRoot, ".mcp.json");
+  const target = join(worktreePath, ".mcp.json");
+  if (!existsSync(source) || existsSync(target)) {
+    return false;
+  }
+  copyFileSync(source, target);
+  return true;
+}
+
 async function assertExistingWorktree(path: string, exec: WorktreeExec) {
   const result = await exec("git", [
     "-C",
@@ -181,6 +194,7 @@ export async function prepareWorktree(
       created: false,
       reused: true,
       node_modules_linked: linkNodeModules(repoRoot, worktreePath),
+      mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
     };
   }
 
@@ -209,5 +223,6 @@ export async function prepareWorktree(
     created: true,
     reused: false,
     node_modules_linked: linkNodeModules(repoRoot, worktreePath),
+    mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
   };
 }

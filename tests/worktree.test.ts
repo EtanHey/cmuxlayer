@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,7 +22,40 @@ describe("worktree helpers", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it("generates distinct parseable default worker names for the same repo", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    mkdirSync(repoRoot, { recursive: true });
+    vi.spyOn(Date, "now").mockReturnValue(1783204101457);
+    vi.spyOn(Math, "random")
+      .mockReturnValueOnce(0.123456789)
+      .mockReturnValueOnce(0.987654321);
+    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    const first = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: true,
+      exec,
+    });
+    const second = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: true,
+      exec,
+    });
+
+    expect(first.name).toMatch(/^cmuxlayer-worker-[a-z0-9]{6}$/);
+    expect(second.name).toMatch(/^cmuxlayer-worker-[a-z0-9]{6}$/);
+    expect(first.name).not.toBe(second.name);
+    expect(first.name).not.toContain("1783204101457");
+    expect(first.path).toBe(join(TEST_ROOT, "cmuxlayer.wt", first.name));
+    expect(second.path).toBe(join(TEST_ROOT, "cmuxlayer.wt", second.name));
   });
 
   it("creates a named git worktree with a deterministic default path", async () => {
@@ -105,6 +144,100 @@ describe("worktree helpers", () => {
     });
 
     expect(result.node_modules_linked).toBe(true);
+  });
+
+  it("copies .mcp.json byte-for-byte into a newly created worktree", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "with-mcp");
+    const mcpConfig = '{\n  "mcpServers": {\n    "cmuxlayer": {}\n  }\n}\n';
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(join(repoRoot, ".mcp.json"), mcpConfig);
+    const exec = vi.fn().mockImplementation(async () => {
+      mkdirSync(worktreePath, { recursive: true });
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "with-mcp" },
+      exec,
+    });
+
+    expect(result.mcp_json_copied).toBe(true);
+    expect(readFileSync(join(worktreePath, ".mcp.json"), "utf8")).toBe(
+      mcpConfig,
+    );
+  });
+
+  it("copies .mcp.json when reusing an existing worktree", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "existing-mcp");
+    const mcpConfig = '{\n  "mcpServers": {\n    "brainlayer": {}\n  }\n}\n';
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(repoRoot, ".mcp.json"), mcpConfig);
+    const exec = vi.fn().mockResolvedValue({ stdout: "true\n", stderr: "" });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "existing-mcp", reuse: true },
+      exec,
+    });
+
+    expect(result.mcp_json_copied).toBe(true);
+    expect(readFileSync(join(worktreePath, ".mcp.json"), "utf8")).toBe(
+      mcpConfig,
+    );
+  });
+
+  it("does not overwrite an existing worktree .mcp.json", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "keeps-mcp");
+    const sourceConfig = '{"mcpServers":{"cmuxlayer":{}}}\n';
+    const existingConfig = '{"mcpServers":{"local":{}}}\n';
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(worktreePath, { recursive: true });
+    writeFileSync(join(repoRoot, ".mcp.json"), sourceConfig);
+    writeFileSync(join(worktreePath, ".mcp.json"), existingConfig);
+    const exec = vi.fn().mockResolvedValue({ stdout: "true\n", stderr: "" });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "keeps-mcp", reuse: true },
+      exec,
+    });
+
+    expect(result.mcp_json_copied).toBe(false);
+    expect(readFileSync(join(worktreePath, ".mcp.json"), "utf8")).toBe(
+      existingConfig,
+    );
+  });
+
+  it("skips .mcp.json copy when the source file is missing", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "missing-mcp");
+    mkdirSync(repoRoot, { recursive: true });
+    const exec = vi.fn().mockImplementation(async () => {
+      mkdirSync(worktreePath, { recursive: true });
+      return { stdout: "", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "missing-mcp" },
+      exec,
+    });
+
+    expect(result.mcp_json_copied).toBe(false);
+    expect(existsSync(join(worktreePath, ".mcp.json"))).toBe(false);
   });
 
   it("rejects a path outside the allowed Gits root", async () => {
