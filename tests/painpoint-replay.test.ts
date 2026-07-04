@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { describe, expect, it } from "vitest";
+import { evaluateAgentHealth } from "../src/agent-health.js";
+import { reposEquivalent } from "../src/repo-workspace.js";
 import { parseScreen } from "../src/screen-parser.js";
 import { classifySurfaceSessionRoute } from "../src/state-manager.js";
 import type {
@@ -24,6 +26,15 @@ type PainpointFixture = {
     surface_id: string;
     cli_session_id: string;
     updated_at?: string;
+  };
+  parent_agent?: {
+    repo: string;
+    workspace_id: string;
+  };
+  spawn_request?: {
+    repo: string;
+    focused_workspace: string;
+    explicit_workspace: string | null;
   };
 };
 
@@ -144,6 +155,41 @@ describe("Phase 0 painpoint replay corpus", () => {
               fixture.live_surfaces?.map((surface) => surface.ref) ?? [],
           }),
         ).toBe(fixture.expected_state);
+      });
+      continue;
+    }
+
+    if (fixture.id === "wrong-workspace-spawn") {
+      it(`${fixture.id} inherits the same-repo parent workspace and flags wrong actual placement`, () => {
+        expect(fixture.parent_agent).toBeTruthy();
+        expect(fixture.spawn_request).toBeTruthy();
+        const parent = fixture.parent_agent!;
+        const spawn = fixture.spawn_request!;
+        expect(reposEquivalent(parent.repo, spawn.repo)).toBe(true);
+        expect(spawn.explicit_workspace).toBeNull();
+
+        const child = recordFromFixture({
+          agent_id: "child-worker",
+          surface_id: "surface:child",
+          workspace_id: parent.workspace_id,
+          repo: spawn.repo,
+          cli: "codex",
+          role: "worker",
+          state: "ready",
+        });
+
+        expect(
+          evaluateAgentHealth(child, {
+            monitor_alive: true,
+            surface_workspace_id: parent.workspace_id,
+          }).issue_codes,
+        ).not.toContain("registry_surface_workspace_mismatch");
+        expect(
+          evaluateAgentHealth(child, {
+            monitor_alive: true,
+            surface_workspace_id: spawn.focused_workspace,
+          }).issue_codes,
+        ).toContain("registry_surface_workspace_mismatch");
       });
       continue;
     }

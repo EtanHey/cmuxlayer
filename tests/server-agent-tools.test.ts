@@ -821,6 +821,38 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("spawn_agent delivers inline prompts to the actual workspace after placement mismatch", async () => {
+    const server = createLifecycleServer(mockExec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+    const prompt = "fix placement mismatch prompt delivery";
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.workspace_id).toBe("workspace:1");
+    expect(parsed.actual_workspace_id).toBe("ws:1");
+
+    const promptSendCall = mockExec.mock.calls.find(([, args]) => {
+      const argv = args as string[];
+      return argv.includes("send") && argv.includes(prompt);
+    });
+    expect(promptSendCall).toBeDefined();
+    const argv = promptSendCall![1] as string[];
+    const workspaceIndex = argv.indexOf("--workspace");
+    expect(workspaceIndex).toBeGreaterThanOrEqual(0);
+    expect(argv[workspaceIndex + 1]).toBe("ws:1");
+  });
+
   it("spawn_agent delivers inline prompts with blank lines without empty chunks", async () => {
     const baseExec = makeLifecycleExec();
     const prompt = `${"a".repeat(500)}\n\n${"b".repeat(600)}`;

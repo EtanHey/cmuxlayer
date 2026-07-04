@@ -2636,6 +2636,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
   };
 
+  const agentForSpawnHealth = (
+    agent: AgentRecord,
+    result: { workspace_id?: string; warnings?: string[] },
+  ): AgentRecord => {
+    const placementMismatch =
+      result.warnings?.some((warning) =>
+        warning.startsWith("Spawn placement mismatch:"),
+      ) ?? false;
+    if (!placementMismatch || !result.workspace_id) return agent;
+    return { ...agent, workspace_id: result.workspace_id };
+  };
+
+  const spawnDeliveryWorkspace = (
+    result: { actual_workspace_id?: string; workspace_id?: string },
+    fallback?: string,
+  ): string | undefined =>
+    result.actual_workspace_id ?? result.workspace_id ?? fallback;
+
   const isLeadLikeSurfaceTitle = (title: string): boolean =>
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
 
@@ -5102,7 +5120,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
-              const deliveryWorkspace = result.workspace_id ?? spawnWorkspace;
+              const deliveryWorkspace = spawnDeliveryWorkspace(
+                result,
+                spawnWorkspace,
+              );
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
@@ -5207,9 +5228,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : undefined;
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent, {
-                ...healthTopologyOverrides(currentAgent, topology),
-              })
+            ? await evaluateServerAgentHealth(
+                agentForSpawnHealth(currentAgent, result),
+                {
+                  ...healthTopologyOverrides(currentAgent, topology),
+                },
+              )
             : undefined;
 
           return okFormatted(
@@ -5318,9 +5342,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             | Awaited<ReturnType<typeof deliverBootPrompt>>
             | undefined;
           if (hasPrompt) {
+            const deliveryWorkspace = spawnDeliveryWorkspace(
+              result,
+              args.workspace,
+            );
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
-              workspace: result.workspace_id ?? args.workspace,
+              workspace: deliveryWorkspace,
               cli: args.cli,
               prompt: args.prompt,
               timeout_ms: args.boot_prompt_timeout_ms,
@@ -5328,7 +5356,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 relaunchSpawnAgentAfterUpdate({
                   agentId: result.agent_id,
                   surface: result.surface_id,
-                  workspace: result.workspace_id ?? args.workspace,
+                  workspace: deliveryWorkspace,
                   model: result.model ?? args.model,
                   mcpEnv: result.mcp_env,
                 }),
@@ -5344,15 +5372,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await restoreFocusAfterRender(
             priorFocus,
             result.surface_id,
-            result.workspace_id ?? args.workspace,
+            spawnDeliveryWorkspace(result, args.workspace),
           );
           await refreshManagedMetadataBestEffort(result.agent_id);
           const currentAgent = engine.getAgentState(result.agent_id);
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
-            ? await evaluateServerAgentHealth(currentAgent, {
-                ...healthTopologyOverrides(currentAgent, topology),
-              })
+            ? await evaluateServerAgentHealth(
+                agentForSpawnHealth(currentAgent, result),
+                {
+                  ...healthTopologyOverrides(currentAgent, topology),
+                },
+              )
             : undefined;
 
           return okFormatted(
@@ -5460,9 +5491,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               | undefined;
 
             if (hasPrompt) {
+              const deliveryWorkspace = spawnDeliveryWorkspace(
+                result,
+                workspace,
+              );
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
-                workspace,
+                workspace: deliveryWorkspace,
                 cli: agent.cli,
                 prompt: agent.prompt,
                 timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
@@ -5470,7 +5505,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   relaunchSpawnAgentAfterUpdate({
                     agentId: result.agent_id,
                     surface: result.surface_id,
-                    workspace,
+                    workspace: deliveryWorkspace,
                     model: result.model ?? agent.model,
                     mcpEnv: result.mcp_env,
                   }),
@@ -5509,9 +5544,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 : undefined;
             const topology = currentAgent ? await collectSurfaceTopology() : null;
             const health = currentAgent
-              ? await evaluateServerAgentHealth(currentAgent, {
-                  ...healthTopologyOverrides(currentAgent, topology),
-                })
+              ? await evaluateServerAgentHealth(
+                  agentForSpawnHealth(currentAgent, result),
+                  {
+                    ...healthTopologyOverrides(currentAgent, topology),
+                  },
+                )
               : undefined;
 
             spawnedAgents.push({
