@@ -62,6 +62,57 @@ describe("worktree helpers", () => {
     expect(second.path).toBe(join(TEST_ROOT, "cmuxlayer.wt", second.name));
   });
 
+  it("retries generated default names instead of reusing a colliding worktree", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const firstId = (0.5).toString(36).slice(2, 8).padEnd(6, "0");
+    const secondId = (0.25).toString(36).slice(2, 8).padEnd(6, "0");
+    const collidingName = `cmuxlayer-worker-${firstId}`;
+    const nextName = `cmuxlayer-worker-${secondId}`;
+    const collidingPath = join(TEST_ROOT, "cmuxlayer.wt", collidingName);
+    const nextPath = join(TEST_ROOT, "cmuxlayer.wt", nextName);
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(collidingPath, { recursive: true });
+    vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return {
+          stdout: worktreeListOutput([repoRoot, collidingPath]),
+          stderr: "",
+        };
+      }
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(nextPath, { recursive: true });
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: true,
+      exec,
+    });
+
+    expect(result).toMatchObject({
+      path: nextPath,
+      name: nextName,
+      created: true,
+      reused: false,
+    });
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "add",
+      "-b",
+      `cmuxlayer/${nextName}`,
+      nextPath,
+      "HEAD",
+    ]);
+  });
+
   it("creates a named git worktree with a deterministic default path", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
     mkdirSync(repoRoot, { recursive: true });
@@ -96,6 +147,18 @@ describe("worktree helpers", () => {
       join(TEST_ROOT, "cmuxlayer.wt", "skill-eval"),
       "origin/main",
     ]);
+  });
+
+  it("rejects an empty explicit worktree name", async () => {
+    await expect(
+      prepareWorktree({
+        repo: "cmuxlayer",
+        repoRoot: join(TEST_ROOT, "repo"),
+        homeGitsDir: TEST_ROOT,
+        worktree: { name: "" },
+        exec: vi.fn(),
+      }),
+    ).rejects.toThrow(/Invalid worktree name/);
   });
 
   it("reuses an existing worktree when reuse is enabled", async () => {

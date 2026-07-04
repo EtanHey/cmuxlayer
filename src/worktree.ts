@@ -72,6 +72,11 @@ function safeName(input: string): string {
   return normalized;
 }
 
+function defaultWorkerName(repo: string): string {
+  const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return safeName(`${repo}-worker-${shortId}`);
+}
+
 function assertInside(root: string, path: string): void {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(path);
@@ -85,15 +90,19 @@ function normalizeWorktreeRequest(
   repo: string,
   request: boolean | WorktreeRequest | undefined,
 ): Required<Pick<WorktreeRequest, "create" | "reuse" | "base">> &
-  Omit<WorktreeRequest, "create" | "reuse" | "base"> & { name: string } {
+  Omit<WorktreeRequest, "create" | "reuse" | "base"> & {
+    generatedName: boolean;
+    name: string;
+  } {
   const spec: WorktreeRequest =
     request === true || request === false || request === undefined ? {} : request;
-  const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-  const name = safeName(spec.name ?? `${repo}-worker-${shortId}`);
+  const generatedName = spec.name === undefined;
+  const name = generatedName ? defaultWorkerName(repo) : safeName(spec.name ?? "");
   return {
     create: spec.create ?? true,
     reuse: spec.reuse ?? true,
     base: spec.base ?? "HEAD",
+    generatedName,
     name,
     ...(spec.path ? { path: spec.path } : {}),
     ...(spec.branch ? { branch: spec.branch } : {}),
@@ -196,9 +205,18 @@ export async function prepareWorktree(
   assertInside(homeGitsDir, repoRoot);
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
-  const worktreePath = spec.path
+  let worktreePath = spec.path
     ? resolve(spec.path)
     : join(homeGitsDir, `${repo}.wt`, spec.name);
+  if (spec.generatedName && !spec.path) {
+    for (let attempts = 0; existsSync(worktreePath) && attempts < 10; attempts++) {
+      spec.name = defaultWorkerName(repo);
+      worktreePath = join(homeGitsDir, `${repo}.wt`, spec.name);
+    }
+    if (existsSync(worktreePath)) {
+      throw new Error(`Unable to generate a unique worktree path for ${repo}`);
+    }
+  }
   assertInside(homeGitsDir, worktreePath);
 
   const exec = input.exec ?? defaultExec;
