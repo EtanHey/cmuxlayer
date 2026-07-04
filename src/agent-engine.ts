@@ -1587,7 +1587,7 @@ export class AgentEngine {
         );
         await this.sendLaunchCommand(
           surface.surface,
-          surface.workspace,
+          surface.actual_workspace ?? surface.workspace,
           resumeCmd,
         );
         await this.client.log(

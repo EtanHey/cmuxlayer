@@ -1771,6 +1771,46 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
+    it("sends crash recovery resume commands to the actual cmux workspace on placement mismatch", async () => {
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:wrong",
+        surface: "surface:new",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      } satisfies CmuxNewSplitResult);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-crash-mismatch",
+          state: "working",
+          surface_id: "surface:dead",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          crash_recover: true,
+          workspace_id: "workspace:intended",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [];
+      await engine.runSweep();
+
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "workspace:wrong" },
+      );
+      expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
+        workspace: "workspace:wrong",
+      });
+      expect(engine.getAgentState("agent-crash-mismatch")?.workspace_id).toBe(
+        "workspace:intended",
+      );
+    });
+
     it("respawns launcher CLI agents with their resolved launcher name", async () => {
       stateMgr.writeState(
         makeRecord({

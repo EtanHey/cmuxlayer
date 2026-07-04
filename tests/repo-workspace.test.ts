@@ -58,6 +58,21 @@ describe("workspaceDirectoryRepoMatchScore", () => {
     ).toBe(2);
   });
 
+  it("treats a path under an unrelated .wt ancestor as the final repo basename", () => {
+    expect(
+      workspaceDirectoryRepoMatchScore(
+        "/Users/x/outer.wt/nestedrepo",
+        "/Users/x/outer.wt/nestedrepo",
+      ),
+    ).toBe(2);
+    expect(
+      workspaceDirectoryRepoMatchScore(
+        "/Users/x/outer.wt/nestedrepo",
+        "/Users/x/Gits/outer",
+      ),
+    ).toBe(0);
+  });
+
   it("does not match an unrelated sibling repo (no substring/prefix match)", () => {
     expect(
       workspaceDirectoryRepoMatchScore(
@@ -212,5 +227,14 @@ describe("reposEquivalent", () => {
         "/example/workspaces/cmuxlayer.wt/cmuxlayer-worker-1",
       ),
     ).toBe(true);
+  });
+
+  it("does not let an unrelated .wt ancestor replace the repo basename", () => {
+    expect(
+      reposEquivalent("/Users/x/outer.wt/nestedrepo", "nestedrepo"),
+    ).toBe(true);
+    expect(reposEquivalent("/Users/x/outer.wt/nestedrepo", "outer")).toBe(
+      false,
+    );
   });
 });

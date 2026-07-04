@@ -8,18 +8,31 @@ function repoIdentityToken(input: string): string {
   const normalized = input.trim().replace(/\/+$/, "");
   if (!normalized) return "";
   const segments = normalized.split("/").filter(Boolean);
-  const worktreeSegment = segments.find((segment) =>
-    segment.toLowerCase().endsWith(".wt"),
-  );
-  if (worktreeSegment) return worktreeSegment.slice(0, -3);
   const worktreesIndex = segments.findIndex(
     (segment) => segment.toLowerCase() === ".worktrees",
   );
   if (worktreesIndex > 0) return segments[worktreesIndex - 1] ?? "";
   const baseName = pathBaseName(normalized);
-  return baseName.toLowerCase().endsWith(".wt")
-    ? baseName.slice(0, -3)
-    : baseName;
+  if (baseName.toLowerCase().endsWith(".wt")) {
+    return baseName.slice(0, -3);
+  }
+  const worktreeSegment = segments.find((segment) =>
+    segment.toLowerCase().endsWith(".wt"),
+  );
+  if (worktreeSegment) {
+    const worktreeRepo = worktreeSegment.slice(0, -3);
+    const normalizedBase = baseName.toLowerCase().replace(/[-_]/g, "");
+    const normalizedWorktreeRepo = worktreeRepo
+      .toLowerCase()
+      .replace(/[-_]/g, "");
+    if (
+      normalizedBase === normalizedWorktreeRepo ||
+      normalizedBase.startsWith(`${normalizedWorktreeRepo}worker`)
+    ) {
+      return worktreeRepo;
+    }
+  }
+  return baseName;
 }
 
 function tokenMatchesRepo(token: string, repo: string): boolean {
