@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  realpathSync,
   symlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -51,6 +53,7 @@ export interface PreparedWorktree {
   created: boolean;
   reused: boolean;
   node_modules_linked: boolean;
+  mcp_json_copied: boolean;
 }
 
 function defaultExec(cmd: string, args: string[]) {
@@ -70,6 +73,19 @@ function safeName(input: string): string {
   return normalized;
 }
 
+function defaultWorkerName(repo: string): string {
+  const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return safeName(`${repo}-worker-${shortId}`);
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 function assertInside(root: string, path: string): void {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(path);
@@ -83,14 +99,19 @@ function normalizeWorktreeRequest(
   repo: string,
   request: boolean | WorktreeRequest | undefined,
 ): Required<Pick<WorktreeRequest, "create" | "reuse" | "base">> &
-  Omit<WorktreeRequest, "create" | "reuse" | "base"> & { name: string } {
+  Omit<WorktreeRequest, "create" | "reuse" | "base"> & {
+    generatedName: boolean;
+    name: string;
+  } {
   const spec: WorktreeRequest =
     request === true || request === false || request === undefined ? {} : request;
-  const name = safeName(spec.name ?? `${repo}-worker-${Date.now()}`);
+  const generatedName = spec.name === undefined;
+  const name = generatedName ? defaultWorkerName(repo) : safeName(spec.name ?? "");
   return {
     create: spec.create ?? true,
     reuse: spec.reuse ?? true,
     base: spec.base ?? "HEAD",
+    generatedName,
     name,
     ...(spec.path ? { path: spec.path } : {}),
     ...(spec.branch ? { branch: spec.branch } : {}),
@@ -137,7 +158,43 @@ function linkNodeModules(repoRoot: string, worktreePath: string): boolean {
   return true;
 }
 
-async function assertExistingWorktree(path: string, exec: WorktreeExec) {
+function copyMcpJson(repoRoot: string, worktreePath: string): boolean {
+  const source = join(repoRoot, ".mcp.json");
+  const target = join(worktreePath, ".mcp.json");
+  if (!existsSync(source) || existsSync(target)) {
+    return false;
+  }
+  copyFileSync(source, target);
+  return true;
+}
+
+async function branchExists(
+  repoRoot: string,
+  branch: string,
+  exec: WorktreeExec,
+): Promise<boolean> {
+  const result = await exec("git", [
+    "-C",
+    repoRoot,
+    "branch",
+    "--list",
+    branch,
+  ]);
+  return result.stdout.trim().length > 0;
+}
+
+function parseWorktreeListPaths(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
+}
+
+async function assertExistingWorktree(
+  path: string,
+  repoRoot: string,
+  exec: WorktreeExec,
+) {
   const result = await exec("git", [
     "-C",
     path,
@@ -146,6 +203,20 @@ async function assertExistingWorktree(path: string, exec: WorktreeExec) {
   ]);
   if (result.stdout.trim() !== "true") {
     throw new Error(`Existing path is not a git worktree: ${path}`);
+  }
+  const worktreeList = await exec("git", [
+    "-C",
+    repoRoot,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
+  const expectedPath = canonicalPath(path);
+  const belongsToRepo = parseWorktreeListPaths(worktreeList.stdout).some(
+    (worktreePath) => canonicalPath(worktreePath) === expectedPath,
+  );
+  if (!belongsToRepo) {
+    throw new Error(`Existing path is not a worktree of ${repoRoot}: ${path}`);
   }
 }
 
@@ -156,14 +227,35 @@ export async function prepareWorktree(
   const homeGitsDir = resolve(input.homeGitsDir ?? join(homedir(), "Gits"));
   const repoRoot = resolve(input.repoRoot ?? join(homeGitsDir, repo));
   assertInside(homeGitsDir, repoRoot);
+  const exec = input.exec ?? defaultExec;
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
-  const worktreePath = spec.path
+  let worktreePath = spec.path
     ? resolve(spec.path)
     : join(homeGitsDir, `${repo}.wt`, spec.name);
+  if (spec.generatedName && !spec.path) {
+    for (let attempts = 0; attempts < 10; attempts++) {
+      const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+      const pathExists = existsSync(worktreePath);
+      const branchTaken = pathExists
+        ? false
+        : await branchExists(repoRoot, branch, exec);
+      if (!pathExists && !branchTaken) {
+        break;
+      }
+      spec.name = defaultWorkerName(repo);
+      worktreePath = join(homeGitsDir, `${repo}.wt`, spec.name);
+    }
+    const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+    if (
+      existsSync(worktreePath) ||
+      (await branchExists(repoRoot, branch, exec))
+    ) {
+      throw new Error(`Unable to generate a unique worktree path for ${repo}`);
+    }
+  }
   assertInside(homeGitsDir, worktreePath);
 
-  const exec = input.exec ?? defaultExec;
   if (existsSync(worktreePath)) {
     if (!spec.reuse) {
       throw new Error(`Worktree already exists: ${worktreePath}`);
@@ -172,7 +264,7 @@ export async function prepareWorktree(
     if (!stat.isDirectory()) {
       throw new Error(`Worktree path exists but is not a directory: ${worktreePath}`);
     }
-    await assertExistingWorktree(worktreePath, exec);
+    await assertExistingWorktree(worktreePath, repoRoot, exec);
     return {
       path: worktreePath,
       name: basename(worktreePath),
@@ -181,6 +273,7 @@ export async function prepareWorktree(
       created: false,
       reused: true,
       node_modules_linked: linkNodeModules(repoRoot, worktreePath),
+      mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
     };
   }
 
@@ -209,5 +302,6 @@ export async function prepareWorktree(
     created: true,
     reused: false,
     node_modules_linked: linkNodeModules(repoRoot, worktreePath),
+    mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
   };
 }
