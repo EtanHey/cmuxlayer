@@ -284,6 +284,42 @@ describe("AgentEngine", () => {
       expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
 
+    it("does not count terminal children against max children after disk rehydration", async () => {
+      const parent = makeRecord({
+        agent_id: "parent-with-terminal-children",
+        surface_id: "surface:parent",
+        state: "ready",
+        cli: "claude",
+        spawn_depth: 0,
+      });
+      stateMgr.writeState(parent);
+      for (let i = 0; i < MAX_CHILDREN; i++) {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `terminal-child-${i}`,
+            surface_id: `surface:terminal-child-${i}`,
+            state: i % 2 === 0 ? "done" : "error",
+            cli: "codex",
+            parent_agent_id: parent.agent_id,
+            spawn_depth: parent.spawn_depth + 1,
+          }),
+        );
+      }
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix gap F",
+          parent_agent_id: parent.agent_id,
+        }),
+      ).resolves.toMatchObject({
+        surface_id: "surface:new",
+        state: "booting",
+      });
+    });
+
     it("captures session identity before surfacing launch command failures", async () => {
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
       engine.dispose();

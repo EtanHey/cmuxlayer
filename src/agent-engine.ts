@@ -1999,11 +1999,15 @@ export class AgentEngine {
       }
       const childrenById = new Map<string, AgentRecord>();
       for (const child of this.stateMgr.listStates()) {
-        if (child.parent_agent_id === parent.agent_id) {
+        if (
+          child.parent_agent_id === parent.agent_id &&
+          !TERMINAL_STATES.has(child.state)
+        ) {
           childrenById.set(child.agent_id, child);
         }
       }
       for (const child of this.registry.getChildren(parent.agent_id)) {
+        if (TERMINAL_STATES.has(child.state)) continue;
         childrenById.set(child.agent_id, child);
       }
       if (childrenById.size >= MAX_CHILDREN) {
