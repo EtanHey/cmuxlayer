@@ -57,13 +57,14 @@ function readPainpointFixture(fileName: string): PainpointFixture {
   const expectedById: Record<string, string> = {
     "claude-ask-user-question-overlay": "interactive_overlay",
     "claude-permission-confirmation": "permission_prompt",
+    "codex-update-menu": "interactive_overlay",
     "bare-shell-and-bare-gemini-prompt": "shell",
   };
   return {
     id,
     expected_state: expectedById[id] ?? "unknown",
     phase_home:
-      id === "bare-shell-and-bare-gemini-prompt"
+      id === "bare-shell-and-bare-gemini-prompt" || id === "codex-update-menu"
         ? "phase-3-spawn-readiness-monitor-boot"
         : "phase-1-delivery-safety-gate",
     source_evidence: [fileName],
@@ -161,6 +162,7 @@ describe("Phase 0 painpoint replay corpus", () => {
       "boot-prompt-typed-not-submitted",
       "claude-ask-user-question-overlay",
       "claude-permission-confirmation",
+      "codex-update-menu",
       "empty-dead-pane-submit",
       "long-inline-prompt-wedge",
       "multiline-payload-premature-submit",

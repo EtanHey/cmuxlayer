@@ -174,6 +174,7 @@ const INTERACTIVE_PROMPT_CLARIFICATION_RE =
 const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
+const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
 const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
 const PERMISSION_PROMPT_MARKER_RE =
   /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
@@ -188,6 +189,12 @@ const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
+const CODEX_UPDATE_MENU_RE =
+  /(?:^|\n)\s*(?:\u2728\s*)?Update available!\s*(?:\n|$)/i;
+const CODEX_UPDATE_MENU_SKIP_RE =
+  /(?:^|\n)\s*(?:[>❯]\s*)?Skip until next version\s*(?:\n|$)/i;
+const CODEX_UPDATE_MENU_RELEASE_NOTES_RE =
+  /(?:^|\n)\s*(?:See full release notes:|https:\/\/github\.com\/openai\/codex\/releases(?:\/latest)?)\s*(?:\n|$)/i;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
@@ -245,6 +252,63 @@ function stripAnsi(text: string): string {
 
 function normalizeText(text: string): string {
   return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function hasCodexUpdateMenuMarkers(normalized: string): boolean {
+  return (
+    (CODEX_BOOT_PANEL_RE.test(normalized) || CODEX_HEADER_RE.test(normalized)) &&
+    CODEX_UPDATE_MENU_RE.test(normalized) &&
+    CODEX_UPDATE_MENU_SKIP_RE.test(normalized) &&
+    CODEX_UPDATE_MENU_RELEASE_NOTES_RE.test(normalized)
+  );
+}
+
+function isCodexUpdateMenuScreenNormalized(
+  normalized: string,
+  opts?: { tailOnly?: boolean },
+): boolean {
+  if (!hasCodexUpdateMenuMarkers(normalized)) {
+    return false;
+  }
+  if (!opts?.tailOnly) {
+    return true;
+  }
+
+  const lines = normalized.split("\n");
+  const lastMeaningfulIndex = lines.reduce(
+    (last, line, index) => (line.trim() ? index : last),
+    -1,
+  );
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const block = lines
+      .slice(index, index + CODEX_UPDATE_MENU_WINDOW_LINES)
+      .join("\n");
+    if (!hasCodexUpdateMenuMarkers(block)) {
+      continue;
+    }
+    if (
+      lines
+        .slice(index + 1)
+        .some((line) => BARE_READY_PROMPT_RE.test(line))
+    ) {
+      continue;
+    }
+    if (lastMeaningfulIndex <= index + CODEX_UPDATE_MENU_WINDOW_LINES - 1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isCodexUpdateMenuScreen(text: string): boolean {
+  return isCodexUpdateMenuScreenNormalized(normalizeText(text), {
+    tailOnly: true,
+  });
+}
+
+function hasActiveCodexUpdateMenuScreen(text: string): boolean {
+  return isCodexUpdateMenuScreenNormalized(text, { tailOnly: true });
 }
 
 function stripOrphanTtyControlTrailer(line: string): string {
@@ -309,6 +373,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   if (
     CODEX_HEADER_RE.test(text) ||
     (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
+    hasActiveCodexUpdateMenuScreen(text) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
   ) {
@@ -591,6 +656,14 @@ function parseErrors(text: string): string[] {
   }
 
   if (!errors.includes("permission_prompt") && hasInteractivePromptBlock(text)) {
+    errors.push("interactive_prompt");
+  }
+
+  if (
+    !errors.includes("permission_prompt") &&
+    !errors.includes("interactive_prompt") &&
+    hasActiveCodexUpdateMenuScreen(text)
+  ) {
     errors.push("interactive_prompt");
   }
 

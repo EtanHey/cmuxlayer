@@ -50,6 +50,7 @@ import {
 import {
   cleanScreenText,
   inferContextWindow,
+  isCodexUpdateMenuScreen,
   parseScreen,
 } from "./screen-parser.js";
 import {
@@ -208,6 +209,8 @@ const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
 const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
+const BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS =
+  BOOT_PROMPT_READY_POLL_MS * 3;
 const BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS = BOOT_PROMPT_READY_POLL_MS * 3;
 
 function bootPromptUpdateMaxMs(): number {
@@ -317,6 +320,20 @@ class BootPromptDeliveryError extends Error {
   ) {
     super(message);
     this.name = "BootPromptDeliveryError";
+  }
+}
+
+class BootPromptUpdateMenuBlockedError extends Error {
+  readonly error_code = "blocked_by_update_menu";
+  readonly recovery =
+    "Codex is showing the interactive update menu. Select 'Skip until next version' and rerun the spawn, or launch Codex once manually and dismiss the menu.";
+
+  constructor(
+    message: string,
+    readonly last_10_lines: string[],
+  ) {
+    super(message);
+    this.name = "BootPromptUpdateMenuBlockedError";
   }
 }
 
@@ -839,6 +856,13 @@ function matchesCliUpdateContinuationMarker(text: string): boolean {
   return /(?:^|\n)[^\n]*(?:Update ran successfully|Please restart)[^\n]*/i.test(
     text,
   );
+}
+
+function shouldHandleCodexUpdateMenu(
+  cli: CliType | undefined,
+  text: string,
+): boolean {
+  return (cli === undefined || cli === "codex") && isCodexUpdateMenuScreen(text);
 }
 
 function readyPatternCandidates(cli?: CliType): CliType[] {
@@ -1938,6 +1962,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
+    let codexUpdateMenuDismissed = false;
+    let codexUpdateMenuDismissedAt: number | null = null;
     const updateMaxMs = bootPromptUpdateMaxMs();
     const postUpdateReadyBudgetMs = () =>
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
@@ -1956,6 +1982,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           matchesCliUpdateMarker(screen.text) ||
           (matchesCliUpdateContinuationMarker(screen.text) &&
             !matchesShellPrompt(screen.text));
+
+        if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
+          if (codexUpdateMenuDismissed) {
+            const elapsedSinceDismissMs =
+              codexUpdateMenuDismissedAt === null
+                ? BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
+                : now - codexUpdateMenuDismissedAt;
+            if (
+              elapsedSinceDismissMs < BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
+            ) {
+              consecutiveMatches.clear();
+              await delay(BOOT_PROMPT_READY_POLL_MS);
+              continue;
+            }
+            throw new BootPromptUpdateMenuBlockedError(
+              `Boot prompt delivery blocked by Codex update menu on ${opts.surface}`,
+              tailLines(lastText, 10),
+            );
+          }
+          updateWasSeen = true;
+          consecutiveMatches.clear();
+          await sendKeyWithRetry(opts.surface, "down", opts.workspace);
+          await delay(SEND_INPUT_ENTER_DELAY_MS);
+          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+          codexUpdateMenuDismissed = true;
+          const dismissedAt = Date.now();
+          codexUpdateMenuDismissedAt = dismissedAt;
+          deadline = Math.max(
+            deadline,
+            dismissedAt + postUpdateReadyBudgetMs(),
+            dismissedAt +
+              BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS +
+              BOOT_PROMPT_READY_POLL_MS,
+          );
+          await delay(BOOT_PROMPT_READY_POLL_MS);
+          continue;
+        }
 
         if (updateMarker) {
           updateWasSeen = true;
@@ -2024,7 +2087,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       } catch (error) {
-        if (error instanceof BootPromptTimeoutError) {
+        if (
+          error instanceof BootPromptTimeoutError ||
+          error instanceof BootPromptUpdateMenuBlockedError
+        ) {
           throw error;
         }
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
@@ -3289,6 +3355,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             last_10_lines: e.last_10_lines,
           });
         }
+        if (e instanceof BootPromptUpdateMenuBlockedError) {
+          return err(e, {
+            surface: result?.surface,
+            error_code: e.error_code,
+            last_10_lines: e.last_10_lines,
+            recovery: e.recovery,
+          });
+        }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, {
             surface: result?.surface,
@@ -3408,6 +3482,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return err(e, {
             surface: result?.surface,
             last_10_lines: e.last_10_lines,
+          });
+        }
+        if (e instanceof BootPromptUpdateMenuBlockedError) {
+          return err(e, {
+            surface: result?.surface,
+            error_code: e.error_code,
+            last_10_lines: e.last_10_lines,
+            recovery: e.recovery,
           });
         }
         if (e instanceof BootPromptDeliveryError) {
@@ -3797,6 +3879,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, { last_10_lines: e.last_10_lines });
+        }
+        if (e instanceof BootPromptUpdateMenuBlockedError) {
+          return err(e, {
+            error_code: e.error_code,
+            last_10_lines: e.last_10_lines,
+            recovery: e.recovery,
+          });
         }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, { delivered_chars: e.delivered_chars });
@@ -5302,6 +5391,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 // Preserve the original timeout response.
               }
               return err(e, { ...extra, last_10_lines: e.last_10_lines });
+            }
+            if (e instanceof BootPromptUpdateMenuBlockedError) {
+              return err(e, {
+                ...extra,
+                error_code: e.error_code,
+                last_10_lines: e.last_10_lines,
+                recovery: e.recovery,
+              });
             }
             if (e instanceof BootPromptDeliveryError) {
               return err(e, { ...extra, delivered_chars: e.delivered_chars });

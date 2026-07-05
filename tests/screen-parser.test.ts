@@ -117,6 +117,97 @@ Select a model for the next worker:
     expect(parsed.control_state).toBe("interactive_overlay");
   });
 
+  it("recognizes the Codex update menu as an interactive overlay", () => {
+    // Reconstructed from local Codex CLI 0.142.5 binary strings; fixture stays screen-only.
+    const parsed = parseScreen(readFixture("painpoints/codex-update-menu.txt"));
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes a Codex update menu with a sparkle-prefixed update line", () => {
+    const parsed = parseScreen(`
+>_ OpenAI Codex
+
+\u2728 Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+
+> Release notes
+  Skip until next version
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("does not classify prose with isolated Codex update strings as an update menu", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Standup notes:
+Update available!
+Skip until next version
+
+This is copied prose, not a live Codex TUI menu.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not classify prose with Codex update release-note lines as an update menu", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note:
+Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+Skip until next version
+
+This is copied documentation, not a live Codex TUI menu.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
+  it("does not classify a pasted Codex update menu transcript above a Claude prompt as active", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Here is the Codex screen I copied:
+
+>_ OpenAI Codex
+
+Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+See https://github.com/openai/codex for installation options.
+
+> Release notes
+  Skip until next version
+
+This is copied output, not the active TUI.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("recognizes permission prompts without numbered options", () => {
     const parsed = parseScreen(`
 Claude Code
