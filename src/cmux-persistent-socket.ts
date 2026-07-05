@@ -195,6 +195,14 @@ export class CmuxPersistentSocket {
     this.pendingV1 = [];
   }
 
+  private rejectPendingV2(error: CmuxSocketError): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pending.clear();
+  }
+
   private processBuffer(): void {
     let newlineIdx: number;
     while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
@@ -205,20 +213,57 @@ export class CmuxPersistentSocket {
 
       try {
         const parsed = JSON.parse(line) as Partial<V2Response>;
-        const entry =
-          typeof parsed.id === "string" ? this.pending.get(parsed.id) : null;
-        if (entry && typeof parsed.id === "string") {
+        if (typeof parsed.id === "string") {
+          const entry = this.pending.get(parsed.id);
+          if (!entry) {
+            continue;
+          }
           clearTimeout(entry.timer);
           this.pending.delete(parsed.id);
           entry.resolve(parsed as V2Response);
         } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
         }
-      } catch {
-        if (this.pendingV1.length > 0) {
+      } catch (error) {
+        if (this.isJsonLikeFrame(line)) {
+          if (line.trimStart().startsWith("[") && this.pendingV1.length > 0) {
+            this.resolveNextV1(line);
+            continue;
+          }
+          this.rejectMalformedFrame(line, error);
+        } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
         }
       }
+    }
+  }
+
+  private isJsonLikeFrame(line: string): boolean {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith("{") || trimmed.startsWith("[");
+  }
+
+  private rejectMalformedFrame(line: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    const socketError = new CmuxSocketError(
+      `Malformed cmux socket frame: ${detail}; frame=${line.slice(0, 120)}`,
+      "protocol_error",
+    );
+    if (line.trimStart().startsWith("{") && this.pending.size > 0) {
+      this.rejectPendingV2(socketError);
+      return;
+    }
+
+    const entry = this.pendingV1.shift();
+    if (entry) {
+      clearTimeout(entry.timer);
+      entry.reject(socketError);
+      this.writeNextV1();
+      return;
+    }
+
+    if (this.pending.size > 0) {
+      this.rejectPendingV2(socketError);
     }
   }
 

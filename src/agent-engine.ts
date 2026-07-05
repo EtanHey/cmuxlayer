@@ -91,6 +91,8 @@ import {
 } from "./surface-topology.js";
 import type { InboxOpts } from "./inbox.js";
 
+type ProcessLiveness = "alive" | "gone" | "unknown";
+
 export interface SpawnAgentParams {
   repo: string;
   model?: string;
@@ -3232,11 +3234,11 @@ export class AgentEngine {
     }
   }
 
-  private isProcessGone(pid: number | null | undefined): boolean {
-    if (!pid) return true;
+  private processLiveness(pid: number | null | undefined): ProcessLiveness {
+    if (!pid) return "gone";
     try {
       process.kill(pid, 0);
-      return false;
+      return "alive";
     } catch (error) {
       if (
         typeof error === "object" &&
@@ -3244,10 +3246,28 @@ export class AgentEngine {
         "code" in error &&
         (error as { code?: unknown }).code === "ESRCH"
       ) {
-        return true;
+        return "gone";
       }
-      return false;
+      return "unknown";
     }
+  }
+
+  private isProcessMissingError(error: unknown): boolean {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ESRCH"
+    );
+  }
+
+  private isProcessGone(pid: number | null | undefined): boolean {
+    const liveness = this.processLiveness(pid);
+    return liveness === "gone" || liveness === "unknown";
+  }
+
+  private isProcessConfirmedGone(pid: number | null | undefined): boolean {
+    return this.processLiveness(pid) === "gone";
   }
 
   private isTerminalDeadRegistryGhost(agent: AgentRecord): boolean {
@@ -3266,9 +3286,13 @@ export class AgentEngine {
     const evicted: string[] = [];
 
     for (const agent of this.registry.list()) {
+      const processGone =
+        agent.pid !== null &&
+        agent.pid !== undefined &&
+        this.processLiveness(agent.pid) === "gone";
       if (
         !this.isTerminalDeadRegistryGhost(agent) &&
-        (!agent.pid || !this.isProcessGone(agent.pid))
+        !processGone
       ) {
         continue;
       }
@@ -3308,8 +3332,11 @@ export class AgentEngine {
   private async readStopPostCondition(
     agent: AgentRecord,
     paneRef: string | null,
+    treatUnknownProcessAsGone: boolean,
   ): Promise<StopPostConditionResult> {
-    const processGone = this.isProcessGone(agent.pid);
+    const processGone = treatUnknownProcessAsGone
+      ? this.isProcessGone(agent.pid)
+      : this.isProcessConfirmedGone(agent.pid);
     const [surfaceGone, paneGone] = await Promise.all([
       this.isSurfaceGone(agent.surface_id),
       this.isPaneGone(paneRef, agent.workspace_id),
@@ -3321,9 +3348,14 @@ export class AgentEngine {
     agent: AgentRecord,
     paneRef: string | null,
     expectPaneGone: boolean,
+    treatUnknownProcessAsGone: boolean,
   ): Promise<StopPostConditionResult> {
     const deadline = Date.now() + this.stopPostConditionTimeoutMs;
-    let result = await this.readStopPostCondition(agent, paneRef);
+    let result = await this.readStopPostCondition(
+      agent,
+      paneRef,
+      treatUnknownProcessAsGone,
+    );
     while (
       !(
         result.processGone &&
@@ -3335,7 +3367,11 @@ export class AgentEngine {
       await new Promise((resolve) =>
         setTimeout(resolve, STOP_POST_CONDITION_POLL_MS),
       );
-      result = await this.readStopPostCondition(agent, paneRef);
+      result = await this.readStopPostCondition(
+        agent,
+        paneRef,
+        treatUnknownProcessAsGone,
+      );
     }
     return result;
   }
@@ -3399,11 +3435,14 @@ export class AgentEngine {
       route.workspace_id,
     );
 
+    let forceSignalAccepted = force === true && !agent.pid;
     if (force && agent.pid) {
       try {
         process.kill(agent.pid, "SIGKILL");
-      } catch {
-        // Process may already be dead — that's fine
+        forceSignalAccepted = true;
+      } catch (error) {
+        forceSignalAccepted = this.isProcessMissingError(error);
+        // Process may already be dead; other failures must preserve tracking.
       }
     } else {
       // Graceful: send Ctrl+C
@@ -3426,6 +3465,7 @@ export class AgentEngine {
       agent,
       stopClosePolicy.paneRef,
       stopClosePolicy.collapsePane,
+      force === true && forceSignalAccepted,
     );
     if (
       !stopResult.processGone ||

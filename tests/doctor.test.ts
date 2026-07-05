@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   checkMcpConfigDrift,
+  detectRuntimeProvenance,
   parseSystemSleepPrevented,
   runDoctor,
   renderDoctorText,
@@ -276,6 +277,149 @@ describe("runDoctor — report shape", () => {
       },
     ]);
   });
+
+  it("reports the running dist entrypoint path as runtime provenance", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
+          ],
+          env: {},
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: true,
+      entrypoint:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
+      mode: "dist",
+      ok: true,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/running dist\/index\.js/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("treats the Homebrew cmuxlayer bin entrypoint as trusted dist provenance", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/opt/homebrew/bin/cmuxlayer",
+          ],
+          env: {},
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: true,
+      entrypoint: "/opt/homebrew/bin/cmuxlayer",
+      mode: "dist",
+      ok: true,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/brew-installed cmuxlayer/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("surfaces live source runtime provenance without failing the doctor", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: { CMUXLAYER_DEV: "1" },
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/Users/etanheyman/.bun/bin/bun",
+            "/Users/etanheyman/Gits/cmuxlayer/src/index.ts",
+          ],
+          env: { CMUXLAYER_DEV: "1" },
+          execPath: "/Users/etanheyman/.bun/bin/bun",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: false,
+      mode: "source",
+      ok: false,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/live source/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("keeps launcher runtime provenance ahead of the development env override", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: { CMUXLAYER_DEV: "1" },
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+          ],
+          env: { CMUXLAYER_DEV: "1" },
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: false,
+      entrypoint: "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+      mode: "launcher",
+      ok: false,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/launcher path/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("reports unknown runtime provenance without failing the doctor", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/tmp/cmuxlayer-wrapper",
+          ],
+          env: {},
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: false,
+      entrypoint: "/tmp/cmuxlayer-wrapper",
+      mode: "unknown",
+      ok: false,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/unknown/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("includes a manual MCP reconnect probe procedure in the doctor report", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+    });
+
+    expect(report.mcpReconnectProcedure.automation).toBe(false);
+    expect(report.mcpReconnectProcedure.note).toMatch(/\/mcp/);
+    expect(report.mcpReconnectProcedure.note).toMatch(/Reconnect/);
+    expect(report.mcpReconnectProcedure.note).toMatch(/cmuxlayer doctor/);
+  });
 });
 
 describe("parseSystemSleepPrevented", () => {
@@ -444,6 +588,20 @@ describe("renderDoctorText", () => {
         durable: false,
         note: "not durable; install launchd/cmux-caffeinate/README.md",
       },
+      runtimeProvenance: {
+        distEntrypoint: true,
+        entrypoint:
+          "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
+        execPath: "/opt/homebrew/opt/node/bin/node",
+        mode: "dist",
+        nodeVersion: "v22.0.0",
+        ok: true,
+        note: "running dist/index.js",
+      },
+      mcpReconnectProcedure: {
+        automation: false,
+        note: "Manual probe: /mcp -> cmuxlayer -> Reconnect, then run cmuxlayer doctor --json.",
+      },
       mcpConfigDrift: {
         scanned: 0,
         drifted: [],
@@ -483,6 +641,13 @@ describe("renderDoctorText", () => {
     const text = renderDoctorText(baseReport());
     expect(text).toMatch(/sleep guard/i);
     expect(text).toMatch(/launchd\/cmux-caffeinate\/README\.md/);
+  });
+
+  it("prints runtime provenance and the MCP reconnect probe procedure", () => {
+    const text = renderDoctorText(baseReport());
+    expect(text).toMatch(/runtime.*dist\/index\.js/i);
+    expect(text).toMatch(/\/mcp.*Reconnect/i);
+    expect(text).toMatch(/cmuxlayer doctor --json/i);
   });
 
   it("prints a no-drift line when no .mcp.json drift is detected", () => {
@@ -547,6 +712,20 @@ describe("renderDoctorJson", () => {
         durable: true,
         note: "durable",
       },
+      runtimeProvenance: {
+        distEntrypoint: true,
+        entrypoint:
+          "/opt/homebrew/Cellar/cmuxlayer/0.3.1/libexec/dist/index.js",
+        execPath: "/opt/homebrew/opt/node/bin/node",
+        mode: "dist",
+        nodeVersion: "v22.0.0",
+        ok: true,
+        note: "running dist/index.js",
+      },
+      mcpReconnectProcedure: {
+        automation: false,
+        note: "Manual probe: /mcp -> cmuxlayer -> Reconnect, then run cmuxlayer doctor --json.",
+      },
       mcpConfigDrift: {
         scanned: 1,
         drifted: [
@@ -569,6 +748,8 @@ describe("renderDoctorJson", () => {
     expect(parsed.socketPath.set).toBe(true);
     expect(parsed.socketPath.value).toBe("/tmp/x.sock");
     expect(parsed.sleepGuard.durable).toBe(true);
+    expect(parsed.runtimeProvenance.mode).toBe("dist");
+    expect(parsed.mcpReconnectProcedure.automation).toBe(false);
     expect(parsed.mcpConfigDrift.scanned).toBe(1);
     expect(parsed.mcpConfigDrift.drifted[0]?.serverKey).toBe("cmuxlayer");
   });

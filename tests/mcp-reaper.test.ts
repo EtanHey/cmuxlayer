@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PROCESS_TABLE_PS_ARGS,
   parseElapsedSeconds,
   parseCliOptions,
   parseLaunchdServicePids,
   parseProcessLine,
+  runReaper,
   selectReapablePids,
   signalProcessBatch,
 } from "../src/mcp-reaper.js";
@@ -279,6 +280,187 @@ describe("parseCliOptions", () => {
     );
     expect(() => parseCliOptions(["--grace-seconds"])).toThrow(
       "--grace-seconds requires a value",
+    );
+  });
+});
+
+describe("runReaper audit evidence", () => {
+  const reapable: ProcessInfo = {
+    pid: 701,
+    ppid: 1,
+    etimes: 1200,
+    command: "node /Users/etanheyman/Gits/cmuxlayer/dist/index.js",
+  };
+
+  const baseOptions = {
+    dryRun: true,
+    graceSeconds: 0,
+    knownServerNames: [],
+    logFile: "/tmp/cmuxlayer-reaper-test.log",
+    minAgeSeconds: 600,
+  };
+
+  it("skips audit-log writes when nothing is reapable", async () => {
+    const lines: string[] = [];
+    const outputs: string[] = [];
+    const readProcessTable = vi
+      .fn<() => Promise<ProcessInfo[]>>()
+      .mockResolvedValueOnce([]);
+
+    await runReaper(baseOptions, {
+      appendAuditLine: async (line) => {
+        lines.push(line);
+      },
+      readProcessTable,
+      readRamEvidence: () => ({
+        processRssBytes: 11,
+        systemFreeBytes: 22,
+        systemTotalBytes: 33,
+      }),
+      writeStdout: (line) => {
+        outputs.push(line);
+      },
+    });
+
+    expect(readProcessTable).toHaveBeenCalledTimes(1);
+    expect(lines).toEqual([]);
+    expect(outputs).toEqual(["No reapable ppid=1 idle node MCP orphans found."]);
+  });
+
+  it("records before/after process and RAM evidence for dry-run audits", async () => {
+    const lines: string[] = [];
+    const outputs: string[] = [];
+    const readProcessTable = vi
+      .fn<() => Promise<ProcessInfo[]>>()
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([reapable]);
+
+    await runReaper(baseOptions, {
+      appendAuditLine: async (line) => {
+        lines.push(line);
+      },
+      readProcessTable,
+      readRamEvidence: () => ({
+        processRssBytes: 11,
+        systemFreeBytes: 22,
+        systemTotalBytes: 33,
+      }),
+      writeStdout: (line) => {
+        outputs.push(line);
+      },
+    });
+
+    expect(readProcessTable).toHaveBeenCalledTimes(2);
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=before dry_run=true total_processes=1 reapable_processes=1 reapable_pids=701 system_free_bytes=22 system_total_bytes=33 process_rss_bytes=11/,
+      ),
+    );
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=after dry_run=true total_processes=1 reapable_processes=1 reapable_pids=701 system_free_bytes=22 system_total_bytes=33 process_rss_bytes=11/,
+      ),
+    );
+    expect(lines).toContainEqual(
+      expect.stringContaining("DRY_RUN would terminate pid=701"),
+    );
+    expect(outputs).toContainEqual(
+      expect.stringContaining("DRY_RUN would terminate pid=701"),
+    );
+  });
+
+  it("records before/after evidence and signal attempts for execute audits", async () => {
+    const lines: string[] = [];
+    const outputs: string[] = [];
+    const killCalls: Array<[number, NodeJS.Signals]> = [];
+    const readProcessTable = vi
+      .fn<() => Promise<ProcessInfo[]>>()
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([]);
+
+    await runReaper(
+      { ...baseOptions, dryRun: false },
+      {
+        appendAuditLine: async (line) => {
+          lines.push(line);
+        },
+        isProcessAlive: () => false,
+        killProcess: (pid, signal) => {
+          killCalls.push([pid, signal]);
+        },
+        readProcessTable,
+        readRamEvidence: () => ({
+          processRssBytes: 44,
+          systemFreeBytes: 55,
+          systemTotalBytes: 66,
+        }),
+        sleep: async () => {},
+        writeStdout: (line) => {
+          outputs.push(line);
+        },
+      },
+    );
+
+    expect(readProcessTable).toHaveBeenCalledTimes(2);
+    expect(killCalls).toEqual([[701, "SIGTERM"]]);
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=before dry_run=false total_processes=1 reapable_processes=1 reapable_pids=701 system_free_bytes=55 system_total_bytes=66 process_rss_bytes=44/,
+      ),
+    );
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=after dry_run=false total_processes=0 reapable_processes=0 reapable_pids=- system_free_bytes=55 system_total_bytes=66 process_rss_bytes=44/,
+      ),
+    );
+    expect(lines).toContainEqual(expect.stringContaining("SIGTERM pid=701"));
+    expect(outputs).toContainEqual(expect.stringContaining("SIGTERM pid=701"));
+  });
+
+  it("escalates still-reapable processes to SIGKILL after the grace window", async () => {
+    const lines: string[] = [];
+    const outputs: string[] = [];
+    const killCalls: Array<[number, NodeJS.Signals]> = [];
+    const readProcessTable = vi
+      .fn<() => Promise<ProcessInfo[]>>()
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([]);
+
+    await runReaper(
+      { ...baseOptions, dryRun: false },
+      {
+        appendAuditLine: async (line) => {
+          lines.push(line);
+        },
+        isProcessAlive: () => false,
+        killProcess: (pid, signal) => {
+          killCalls.push([pid, signal]);
+        },
+        readProcessTable,
+        readRamEvidence: () => ({
+          processRssBytes: 77,
+          systemFreeBytes: 88,
+          systemTotalBytes: 99,
+        }),
+        sleep: async () => {},
+        writeStdout: (line) => {
+          outputs.push(line);
+        },
+      },
+    );
+
+    expect(readProcessTable).toHaveBeenCalledTimes(3);
+    expect(killCalls).toEqual([
+      [701, "SIGTERM"],
+      [701, "SIGKILL"],
+    ]);
+    expect(lines).toContainEqual(expect.stringContaining("SIGKILL pid=701"));
+    expect(outputs).toContainEqual(expect.stringContaining("SIGKILL pid=701"));
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=after dry_run=false total_processes=0 reapable_processes=0 reapable_pids=- system_free_bytes=88 system_total_bytes=99 process_rss_bytes=77/,
+      ),
     );
   });
 });

@@ -468,8 +468,9 @@ export class CmuxLayerProxy {
     }
   };
 
-  private readonly onDaemonError = () => {
-    // Swallow socket errors; the following "close" event drives reconnection.
+  private readonly onDaemonError = (error: Error) => {
+    this.logger.error("[cmuxlayer-proxy] daemon socket error", error);
+    // The following "close" event still drives reconnection.
   };
 
   private readonly onDaemonClose = () => {
@@ -500,6 +501,10 @@ export class CmuxLayerProxy {
       const pending = this.pendingRequests.get(key);
       if (!pending) {
         if (this.expiredRequestKeys.has(key)) {
+          this.logger.error(
+            "[cmuxlayer-proxy] late daemon response for expired request id dropped",
+            { id: message.id },
+          );
           return;
         }
         void this.writeAgent(message);

@@ -73,6 +73,30 @@ export interface McpConfigDriftReport {
   note: string;
 }
 
+export type RuntimeMode = "dist" | "source" | "launcher" | "unknown";
+
+export interface RuntimeProvenanceReport {
+  distEntrypoint: boolean;
+  entrypoint: string;
+  execPath: string;
+  mode: RuntimeMode;
+  nodeVersion: string;
+  ok: boolean;
+  note: string;
+}
+
+export interface DetectRuntimeProvenanceOptions {
+  argv?: readonly string[];
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+  nodeVersion?: string;
+}
+
+export interface McpReconnectProcedureReport {
+  automation: false;
+  note: string;
+}
+
 /** Lists candidate `.mcp.json` paths; best-effort callers may include missing files. */
 export type McpConfigPathLister = () => Promise<string[]> | string[];
 
@@ -108,6 +132,10 @@ export interface DoctorReport {
     durable: boolean;
     note: string;
   };
+  /** Running process provenance: source vs dist path for merged-vs-live checks. */
+  runtimeProvenance: RuntimeProvenanceReport;
+  /** Manual MCP reconnect probe; documented here so doctor output carries the runbook. */
+  mcpReconnectProcedure: McpReconnectProcedureReport;
   /** Read-only `.mcp.json` drift report; does NOT affect health. */
   mcpConfigDrift: McpConfigDriftReport;
 }
@@ -127,6 +155,8 @@ export interface RunDoctorOptions {
   listMcpConfigPaths?: McpConfigPathLister;
   /** Injectable `.mcp.json` file reader for read-only drift checks. */
   readMcpConfigFile?: McpConfigFileReader;
+  /** Injectable runtime provenance probe for tests. */
+  runtimeProvenance?: () => RuntimeProvenanceReport;
 }
 
 /**
@@ -234,6 +264,72 @@ export const realMcpConfigPathLister: McpConfigPathLister = async () => {
 
 export const realMcpConfigFileReader: McpConfigFileReader = (path) =>
   readFile(path, "utf-8");
+
+function normalizePathForRuntime(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
+export function detectRuntimeProvenance(
+  opts: DetectRuntimeProvenanceOptions = {},
+): RuntimeProvenanceReport {
+  const argv = opts.argv ?? process.argv;
+  const env = opts.env ?? process.env;
+  const entrypoint = argv[1] ?? "";
+  const normalizedEntrypoint = normalizePathForRuntime(entrypoint);
+  const execPath = opts.execPath ?? process.execPath;
+  const nodeVersion = opts.nodeVersion ?? process.version;
+  const brewBinEntrypoint =
+    normalizedEntrypoint === "cmuxlayer" ||
+    /\/(?:opt\/homebrew|usr\/local)\/bin\/cmuxlayer$/.test(
+      normalizedEntrypoint,
+    ) ||
+    /\/Cellar\/cmuxlayer\/[^/]+\/(?:libexec\/)?bin\/cmuxlayer$/.test(
+      normalizedEntrypoint,
+    );
+  const distEntrypoint =
+    /\/dist\/index\.js$/.test(normalizedEntrypoint) || brewBinEntrypoint;
+  const sourceEntrypoint = /\/src\/index\.ts$/.test(normalizedEntrypoint);
+  const launcherEntrypoint =
+    normalizedEntrypoint === "cmuxlayer-mcp" ||
+    normalizedEntrypoint.endsWith("/.golems/bin/cmuxlayer-mcp");
+
+  let mode: RuntimeMode = "unknown";
+  if (distEntrypoint) {
+    mode = "dist";
+  } else if (launcherEntrypoint) {
+    mode = "launcher";
+  } else if (sourceEntrypoint || env.CMUXLAYER_DEV === "1") {
+    mode = "source";
+  }
+
+  const note =
+    mode === "dist" && brewBinEntrypoint
+      ? "running brew-installed cmuxlayer bin; verify this path/version is the live MCP child after reconnect"
+      : mode === "dist"
+      ? "running dist/index.js; verify this path/version is the live MCP child after reconnect"
+      : mode === "source"
+        ? "running live source; useful for development but not the pinned dist runtime"
+        : mode === "launcher"
+          ? "running launcher path; launcher should exec brew dist unless development env overrides it"
+          : "runtime entrypoint is unknown; inspect argv/process manager before trusting live provenance";
+
+  return {
+    distEntrypoint,
+    entrypoint,
+    execPath,
+    mode,
+    nodeVersion,
+    ok: distEntrypoint,
+    note,
+  };
+}
+
+function mcpReconnectProcedure(): McpReconnectProcedureReport {
+  return {
+    automation: false,
+    note: "Manual probe: focus the target surface, run /mcp, choose cmuxlayer, choose Reconnect, verify terminal output, then run cmuxlayer doctor --json to confirm runtime provenance.",
+  };
+}
 
 async function checkTap(brew: BrewRunner): Promise<DoctorReport["tap"]> {
   const tapNote = `tap CASKS need \`brew trust ${TAP_NAME}\`; cmuxlayer is a formula, not gated`;
@@ -403,6 +499,9 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
 
   const tap = await checkTap(brew);
   const sleepGuard = await checkSleepGuard(pmset, launchctl);
+  const runtimeProvenance = (
+    opts.runtimeProvenance ?? (() => detectRuntimeProvenance({ env }))
+  )();
   const mcpConfigDrift = await checkMcpConfigDrift({
     listMcpConfigPaths: opts.listMcpConfigPaths,
     readMcpConfigFile: opts.readMcpConfigFile,
@@ -429,6 +528,8 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
       : { set: false, value: null, note: "unset (auto-discover)" },
     sleepGuard,
+    runtimeProvenance,
+    mcpReconnectProcedure: mcpReconnectProcedure(),
     mcpConfigDrift,
   };
 }
@@ -481,6 +582,13 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(
     `│ ${mark(report.sleepGuard.durable)} sleep guard: ${report.sleepGuard.note}`,
   );
+
+  lines.push(
+    `│ ${mark(report.runtimeProvenance.ok)} runtime provenance: ${report.runtimeProvenance.mode} ${report.runtimeProvenance.entrypoint || "(unknown entrypoint)"}`,
+  );
+  lines.push(`│      ${report.runtimeProvenance.note}`);
+
+  lines.push(`│ — MCP reconnect probe: ${report.mcpReconnectProcedure.note}`);
 
   if (report.mcpConfigDrift.drifted.length === 0) {
     lines.push(

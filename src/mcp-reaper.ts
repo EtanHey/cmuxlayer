@@ -29,7 +29,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, appendFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { homedir } from "node:os";
+import { freemem, homedir, totalmem } from "node:os";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -49,12 +49,29 @@ export interface SelectReapableOptions {
   knownServerNames?: readonly string[];
 }
 
-interface CliOptions {
+export interface RunReaperOptions {
   dryRun: boolean;
   graceSeconds: number;
   logFile: string;
   minAgeSeconds: number;
   knownServerNames: readonly string[];
+}
+
+export interface RamEvidence {
+  processRssBytes: number;
+  systemFreeBytes: number;
+  systemTotalBytes: number;
+}
+
+export interface RunReaperDeps {
+  appendAuditLine?: (line: string) => Promise<void>;
+  isProcessAlive?: IsProcessAlive;
+  killProcess?: KillProcess;
+  readProcessTable?: () => Promise<ProcessInfo[]>;
+  readRamEvidence?: () => RamEvidence;
+  sleep?: (ms: number) => Promise<void>;
+  writeStderr?: (line: string) => void;
+  writeStdout?: (line: string) => void;
 }
 
 export interface SignalAttempt {
@@ -315,7 +332,7 @@ function envDryRun(value: string | undefined): boolean {
   return !["0", "false", "no"].includes(value.trim().toLowerCase());
 }
 
-export function parseCliOptions(argv: readonly string[]): CliOptions {
+export function parseCliOptions(argv: readonly string[]): RunReaperOptions {
   let dryRun = envDryRun(process.env.REAPER_DRY_RUN);
   let minAgeSeconds = parseIntegerEnv(
     process.env.REAPER_MIN_AGE_SECONDS,
@@ -402,16 +419,17 @@ async function appendLogLine(logFile: string, line: string): Promise<void> {
 }
 
 async function logSignalFailures(
-  logFile: string,
   attempts: readonly SignalAttempt[],
+  appendAuditLine: (line: string) => Promise<void>,
+  writeStderr: (line: string) => void,
 ): Promise<void> {
   for (const attempt of attempts) {
     if (attempt.ok) {
       continue;
     }
     const line = `SIGNAL_FAILED signal=${attempt.signal} pid=${attempt.pid} code=${attempt.errorCode ?? "UNKNOWN"} message=${attempt.errorMessage ?? ""}`;
-    console.error(line);
-    await appendLogLine(logFile, line);
+    writeStderr(line);
+    await appendAuditLine(line);
   }
 }
 
@@ -419,57 +437,121 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
-async function runReaper(opts: CliOptions): Promise<void> {
-  const processes = await readProcessTable();
+function readRamEvidence(): RamEvidence {
+  return {
+    processRssBytes: process.memoryUsage().rss,
+    systemFreeBytes: freemem(),
+    systemTotalBytes: totalmem(),
+  };
+}
+
+function selectReapableProcesses(
+  processes: readonly ProcessInfo[],
+  opts: RunReaperOptions,
+): ProcessInfo[] {
   const reapablePids = new Set(
     selectReapablePids(processes, {
       knownServerNames: opts.knownServerNames,
       minAgeSeconds: opts.minAgeSeconds,
     }),
   );
-  const reapable = processes.filter((proc) => reapablePids.has(proc.pid));
+  return processes.filter((proc) => reapablePids.has(proc.pid));
+}
+
+function formatAuditSnapshot(
+  phase: "before" | "after",
+  opts: RunReaperOptions,
+  processes: readonly ProcessInfo[],
+  reapable: readonly ProcessInfo[],
+  ram: RamEvidence,
+): string {
+  const pids = reapable.map((proc) => proc.pid).join(",") || "-";
+  return [
+    "AUDIT",
+    `phase=${phase}`,
+    `dry_run=${opts.dryRun ? "true" : "false"}`,
+    `total_processes=${processes.length}`,
+    `reapable_processes=${reapable.length}`,
+    `reapable_pids=${pids}`,
+    `system_free_bytes=${ram.systemFreeBytes}`,
+    `system_total_bytes=${ram.systemTotalBytes}`,
+    `process_rss_bytes=${ram.processRssBytes}`,
+  ].join(" ");
+}
+
+export async function runReaper(
+  opts: RunReaperOptions,
+  deps: RunReaperDeps = {},
+): Promise<void> {
+  const readTable = deps.readProcessTable ?? readProcessTable;
+  const readRam = deps.readRamEvidence ?? readRamEvidence;
+  const appendAuditLine =
+    deps.appendAuditLine ?? ((line: string) => appendLogLine(opts.logFile, line));
+  const writeStdout = deps.writeStdout ?? ((line: string) => console.log(line));
+  const writeStderr = deps.writeStderr ?? ((line: string) => console.error(line));
+  const sleepFor = deps.sleep ?? sleep;
+  const killProcess = deps.killProcess ?? process.kill;
+  const isAlive = deps.isProcessAlive ?? processAlive;
+
+  const processes = await readTable();
+  const reapable = selectReapableProcesses(processes, opts);
 
   if (reapable.length === 0) {
-    console.log("No reapable ppid=1 idle node MCP orphans found.");
+    writeStdout("No reapable ppid=1 idle node MCP orphans found.");
     return;
   }
 
+  const initialReapablePids = new Set(reapable.map((proc) => proc.pid));
+  await appendAuditLine(
+    formatAuditSnapshot("before", opts, processes, reapable, readRam()),
+  );
+
   for (const proc of reapable) {
     const line = `${opts.dryRun ? "DRY_RUN would terminate" : "SIGTERM"} ${formatProcess(proc)}`;
-    console.log(line);
-    await appendLogLine(opts.logFile, line);
+    writeStdout(line);
+    await appendAuditLine(line);
   }
 
   if (opts.dryRun) {
+    const afterProcesses = await readTable();
+    const afterReapable = selectReapableProcesses(afterProcesses, opts);
+    await appendAuditLine(
+      formatAuditSnapshot("after", opts, afterProcesses, afterReapable, readRam()),
+    );
     return;
   }
 
   await logSignalFailures(
-    opts.logFile,
-    signalProcessBatch(reapable, "SIGTERM"),
+    signalProcessBatch(reapable, "SIGTERM", killProcess),
+    appendAuditLine,
+    writeStderr,
   );
 
-  await sleep(opts.graceSeconds * 1000);
+  await sleepFor(opts.graceSeconds * 1000);
 
-  const afterGrace = await readProcessTable();
-  const stillReapablePids = new Set(
-    selectReapablePids(afterGrace, {
-      knownServerNames: opts.knownServerNames,
-      minAgeSeconds: opts.minAgeSeconds,
-    }),
-  );
+  const afterGrace = await readTable();
+  const stillReapable = selectReapableProcesses(afterGrace, opts);
+  const stillReapablePids = new Set(stillReapable.map((proc) => proc.pid));
   const killable = afterGrace.filter(
-    (proc) => reapablePids.has(proc.pid) && stillReapablePids.has(proc.pid),
+    (proc) =>
+      initialReapablePids.has(proc.pid) && stillReapablePids.has(proc.pid),
   );
 
   for (const proc of killable) {
     const line = `SIGKILL ${formatProcess(proc)}`;
-    console.log(line);
-    await appendLogLine(opts.logFile, line);
+    writeStdout(line);
+    await appendAuditLine(line);
   }
   await logSignalFailures(
-    opts.logFile,
-    signalProcessBatch(killable, "SIGKILL", process.kill, processAlive),
+    signalProcessBatch(killable, "SIGKILL", killProcess, isAlive),
+    appendAuditLine,
+    writeStderr,
+  );
+
+  const finalProcesses = killable.length > 0 ? await readTable() : afterGrace;
+  const finalReapable = selectReapableProcesses(finalProcesses, opts);
+  await appendAuditLine(
+    formatAuditSnapshot("after", opts, finalProcesses, finalReapable, readRam()),
   );
 }
 
