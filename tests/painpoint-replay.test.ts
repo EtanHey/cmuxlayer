@@ -3,8 +3,10 @@ import { basename, extname } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRouteTable } from "../src/agent-facade.js";
 import { evaluateAgentHealth } from "../src/agent-health.js";
+import { createServer } from "../src/server.js";
 import { reposEquivalent } from "../src/repo-workspace.js";
 import { parseScreen } from "../src/screen-parser.js";
+import type { ExecFn } from "../src/cmux-client.js";
 import { classifySurfaceSessionRoute } from "../src/state-manager.js";
 import type {
   AgentRecord,
@@ -44,6 +46,25 @@ type PainpointFixture = {
     explicit_workspace: string | null;
   };
   records?: Partial<AgentRecord>[];
+  inline_length?: number;
+  payload?: string;
+};
+
+type ToolCallResult = {
+  structuredContent?: unknown;
+  content: Array<{ text: string }>;
+  isError?: boolean;
+};
+
+type RegisteredTool = {
+  handler(
+    args: Record<string, unknown>,
+    extra: Record<string, unknown>,
+  ): Promise<ToolCallResult>;
+};
+
+type ServerWithRegisteredTools = {
+  _registeredTools: Record<string, RegisteredTool | undefined>;
 };
 
 const fixtureDir = new URL("./fixtures/painpoints/", import.meta.url);
@@ -78,6 +99,29 @@ const fixtureNames = readdirSync(fixtureDir)
   .sort();
 
 const fixtures = fixtureNames.map(readPainpointFixture);
+
+function getTool(server: unknown, name: string): RegisteredTool {
+  const tool = (server as ServerWithRegisteredTools)._registeredTools[name];
+  if (!tool) throw new Error(`Tool not found: ${name}`);
+  return tool;
+}
+
+function parseToolResult<T>(result: ToolCallResult): T {
+  if (result.isError) {
+    throw new Error(
+      result.content.map((entry) => entry.text).join("\n") ||
+        "Tool returned an error",
+    );
+  }
+  return (result.structuredContent ?? JSON.parse(result.content[0]!.text)) as T;
+}
+
+function parseErroredToolResult<T>(result: ToolCallResult): T {
+  if (!result.isError) {
+    throw new Error("Tool result was expected to be an error");
+  }
+  return (result.structuredContent ?? JSON.parse(result.content[0]!.text)) as T;
+}
 
 function legacyClassifierShape(fixture: PainpointFixture): string {
   if (fixture.read_error?.error_code === "pane_died") {
@@ -254,15 +298,96 @@ describe("Phase 0 painpoint replay corpus", () => {
       continue;
     }
 
-    const testFn =
-      fixture.id === "claude-ask-user-question-overlay" ||
-      fixture.id === "claude-permission-confirmation" ||
-      fixture.id === "bare-shell-and-bare-gemini-prompt" ||
-      fixture.id === "empty-dead-pane-submit" ||
-      fixture.id === "boot-prompt-typed-not-submitted"
-        ? it
-        : it.todo;
-    testFn(
+    if (fixture.id === "long-inline-prompt-wedge") {
+      it(`${fixture.id} refuses over-cap inline input before keystrokes are sent`, async () => {
+        const calls: string[][] = [];
+        const exec: ExecFn = async (_cmd, args) => {
+          calls.push([...args]);
+          return { stdout: "{}", stderr: "" };
+        };
+        const server = createServer({
+          exec,
+          skipAgentLifecycle: true,
+        });
+
+        const result = await getTool(server, "send_input").handler(
+          {
+            surface: "surface:long-inline",
+            text: "x".repeat(fixture.inline_length ?? 1801),
+          },
+          {},
+        );
+        const parsed = parseErroredToolResult<{ ok: boolean; error?: string }>(
+          result,
+        );
+
+        expect(parsed.ok).toBe(false);
+        expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS");
+        expect(calls).toEqual([]);
+      });
+      continue;
+    }
+
+    if (fixture.id === "multiline-payload-premature-submit") {
+      it(`${fixture.id} pastes multiline payload as one message and presses Enter once`, async () => {
+        const pastedTexts: string[] = [];
+        const keys: string[] = [];
+        const sentTexts: string[] = [];
+        const exec: ExecFn = async (_cmd, args) => {
+          const command = args[1];
+          if (command === "read-screen") {
+            return {
+              stdout: JSON.stringify({
+                surface_ref: "surface:multiline",
+                text: "OpenAI Codex\nModel: gpt-5.5\n\ncodex> ",
+                lines: 4,
+              }),
+              stderr: "",
+            };
+          }
+          if (command === "set-buffer") {
+            pastedTexts.push(args.at(-1) ?? "");
+            return { stdout: "{}", stderr: "" };
+          }
+          if (command === "paste-buffer") {
+            return { stdout: "{}", stderr: "" };
+          }
+          if (command === "send-key") {
+            keys.push(args.at(-1) ?? "");
+            return { stdout: "{}", stderr: "" };
+          }
+          if (command === "send") {
+            sentTexts.push(args.at(-1) ?? "");
+            return { stdout: "{}", stderr: "" };
+          }
+          return { stdout: "{}", stderr: "" };
+        };
+        const server = createServer({
+          exec,
+          skipAgentLifecycle: true,
+        });
+
+        const result = await getTool(server, "send_input").handler(
+          {
+            surface: "surface:multiline",
+            text: fixture.payload ?? "line one\nline two\nline three",
+            press_enter: true,
+          },
+          {},
+        );
+        const parsed = parseToolResult<{ ok: boolean }>(result);
+
+        expect(parsed.ok).toBe(true);
+        expect(pastedTexts).toEqual([
+          fixture.payload ?? "line one\nline two\nline three",
+        ]);
+        expect(sentTexts).toEqual([]);
+        expect(keys).toEqual(["return"]);
+      });
+      continue;
+    }
+
+    it(
       `${fixture.id} classifies as ${fixture.expected_state} via the canonical control-plane state machine`,
       () => {
         expect(legacyClassifierShape(fixture)).toBe(fixture.expected_state);
