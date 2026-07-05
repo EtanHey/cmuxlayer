@@ -30,6 +30,12 @@ import {
   toPublicAgent,
 } from "./agent-facade.js";
 import { evaluateAgentHealth } from "./agent-health.js";
+import {
+  AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
+  AGENT_HEALTH_MONITOR_MAX_AGE_MS,
+  buildAgentHealthInput,
+  type AgentHealthInputOverrides,
+} from "./agent-health-input.js";
 import type {
   AgentRecord,
   AgentRole,
@@ -54,7 +60,6 @@ import {
   parseScreen,
 } from "./screen-parser.js";
 import {
-  channelDirDeletedAfterCreate,
   dispatch,
   ensureInboxFile,
   inboxPath,
@@ -223,7 +228,8 @@ const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 /** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
-const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = 60_000;
+const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS =
+  AGENT_HEALTH_MONITOR_MAX_AGE_MS;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 /** Agent states that are safe to close without `force`: the task is over. */
 const TERMINAL_AGENT_STATES = new Set<AgentState>(["done", "error"]);
@@ -1262,6 +1268,7 @@ export function createServerContext(
 function formatLifecycleChannelContent(
   event: AgentLifecycleEvent,
   agent: AgentRecord,
+  healthSummary?: string,
 ): string {
   switch (event) {
     case "spawned":
@@ -1272,12 +1279,15 @@ function formatLifecycleChannelContent(
       return agent.error
         ? `cmux agent errored: ${agent.repo} (${agent.agent_id}) - ${agent.error}`
         : `cmux agent errored: ${agent.repo} (${agent.agent_id})`;
+    case "health":
+      return `cmux agent health changed: ${agent.repo} (${agent.agent_id}) health=${healthSummary ?? "unknown"} state=${agent.state}`;
   }
 }
 
 function buildLifecycleChannelMeta(
   event: AgentLifecycleEvent,
   agent: AgentRecord,
+  healthSummary?: string,
 ): Record<string, string> {
   const meta: Record<string, string> = {
     source: "cmux-agent-status",
@@ -1299,6 +1309,9 @@ function buildLifecycleChannelMeta(
   }
   if (agent.cli_session_path) {
     meta.cli_session_path = agent.cli_session_path;
+  }
+  if (event === "health" && healthSummary) {
+    meta.health_summary = healthSummary;
   }
 
   return meta;
@@ -2701,72 +2714,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
-    overrides?: {
-      monitor_alive?: boolean | null;
-      stale_count?: number;
-      screen_status?: string | null;
-      screen_actions?: string[] | null;
-      surface_workspace_id?: string | null;
-      surface_title?: string | null;
-      topology?: { column: number | null; column_count: number | null } | null;
-      closure_artifact_verified?: boolean | null;
-      harvestability?: ReturnType<AgentEngine["assessHarvestability"]> | null;
-      inbox_channel_dir_deleted?: boolean | null;
-    },
+    overrides?: AgentHealthInputOverrides,
   ) => {
-    const harvestability =
-      overrides?.harvestability !== undefined
-        ? overrides.harvestability
-        : lifecycleHealthEngine?.assessHarvestability(agent) ?? null;
-    const closureArtifactVerified =
-      overrides?.closure_artifact_verified !== undefined
-        ? overrides.closure_artifact_verified
-        : harvestability?.closure_artifact_verified ?? null;
-    const topology =
-      overrides?.topology !== undefined
-        ? overrides.topology
-        : await resolveSurfaceColumn(
-            agent.surface_id,
-            agent.workspace_id ?? undefined,
+    const input = await buildAgentHealthInput(
+      agent,
+      {
+        inboxOpts,
+        monitorMaxAgeMs: INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
+        dispatchAckTimeoutMs: AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
+        assessHarvestability: (target) =>
+          lifecycleHealthEngine?.assessHarvestability(target),
+        resolveTopology: (target) =>
+          resolveSurfaceColumn(
+            target.surface_id,
+            target.workspace_id ?? undefined,
+          ),
+        readParsedSurface: async (target) => {
+          const screen = await readParsedSurface(
+            target.surface_id,
+            target.workspace_id ?? undefined,
           );
-    const alive =
-      overrides?.monitor_alive ??
-      monitorAlive(agent.agent_id, INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS, inboxOpts);
-    const inboxChannelDirDeleted =
-      overrides?.inbox_channel_dir_deleted ??
-      (!alive && channelDirDeletedAfterCreate(agent.agent_id, inboxOpts));
-    const staleCount =
-      overrides?.stale_count ??
-      pendingDispatches(agent.agent_id, 120000, inboxOpts).length;
-    const parsedScreen =
-      overrides?.screen_status === undefined ||
-      overrides?.screen_actions === undefined
-        ? await readParsedSurface(agent.surface_id, agent.workspace_id ?? undefined)
-        : null;
-    const screenStatus =
-      overrides?.screen_status !== undefined
-        ? overrides.screen_status
-        : parsedScreen?.parsed.status;
-    const screenActions =
-      overrides?.screen_actions !== undefined
-        ? overrides.screen_actions
-        : parsedScreen?.parsed.actions;
-    const surfaceWorkspaceId =
-      overrides?.surface_workspace_id !== undefined
-        ? overrides.surface_workspace_id
-        : await resolveSurfaceWorkspace(agent.surface_id);
-    return evaluateAgentHealth(agent, {
-      monitor_alive: alive,
-      inbox_channel_dir_deleted: inboxChannelDirDeleted,
-      stale_count: staleCount,
-      screen_status: screenStatus,
-      screen_actions: screenActions,
-      surface_workspace_id: surfaceWorkspaceId,
-      surface_title: overrides?.surface_title,
-      topology,
-      closure_artifact_verified: closureArtifactVerified,
-      harvestability,
-    });
+          return screen
+            ? {
+                status: screen.parsed.status,
+                actions: screen.parsed.actions,
+              }
+            : null;
+        },
+        resolveSurfaceWorkspace: (target) =>
+          resolveSurfaceWorkspace(target.surface_id),
+      },
+      overrides,
+    );
+    return evaluateAgentHealth(agent, input);
   };
 
   const agentForSpawnHealth = (
@@ -4571,7 +4551,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
           inboxOpts,
         );
-        const pending = pendingDispatches(args.agent_id, 120000, inboxOpts);
+        const pending = pendingDispatches(
+          args.agent_id,
+          AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
+          inboxOpts,
+        );
         const nudge: {
           attempted: boolean;
           sent: boolean;
@@ -4657,14 +4641,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .int()
         .min(1000)
         .optional()
-        .default(120000)
+        .default(AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS)
         .describe("Treat un-acked dispatches older than this as stale/wedged"),
       heartbeat_max_age_ms: z
         .number()
         .int()
         .min(1000)
         .optional()
-        .default(60000)
+        .default(AGENT_HEALTH_MONITOR_MAX_AGE_MS)
         .describe(
           "Monitor is considered alive if it heartbeated within this window",
         ),
@@ -4786,6 +4770,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
       agent: AgentRecord,
+      healthSummary?: string,
     ): Promise<void> => {
       if (!enableClaudeChannels || !server.server.transport) {
         return;
@@ -4795,8 +4780,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await server.server.notification({
         method: CLAUDE_CHANNEL_NOTIFICATION,
         params: {
-          content: formatLifecycleChannelContent(event, agent),
-          meta: buildLifecycleChannelMeta(event, agent),
+          content: formatLifecycleChannelContent(event, agent, healthSummary),
+          meta: buildLifecycleChannelMeta(event, agent, healthSummary),
         },
       });
     };
@@ -4842,6 +4827,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             (disableSpawnPreflight ? async () => {} : undefined),
           sessionIdentityResolver: context.sessionIdentityResolver,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
+          inboxOpts,
           launchCommandSender: async ({ surface, workspace, command }) => {
             await sendLauncherCommandToSurface({ surface, workspace, command });
           },

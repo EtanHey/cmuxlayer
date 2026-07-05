@@ -610,23 +610,23 @@ export class AgentRegistry {
    * Non-terminal agents with dead surfaces are already handled by reconcileSurfaces()
    * (marked as error during reconstitute), then caught here as terminal.
    *
-   * Returns the IDs of purged agents for sidebar cleanup.
+   * Returns purged agent records for sidebar cleanup.
    */
-  purgeAllTerminal(): string[] {
-    const purgedIds: string[] = [];
+  purgeAllTerminal(): AgentRecord[] {
+    const purgedAgents: AgentRecord[] = [];
 
     for (const [id, agent] of this.agents) {
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }
       if (TERMINAL_STATES.has(agent.state)) {
+        purgedAgents.push(agent);
         const removedAgentId = this.deleteAgentAndAliases(id);
         this.stateMgr.removeState(removedAgentId);
-        purgedIds.push(removedAgentId);
       }
     }
 
-    return purgedIds;
+    return purgedAgents;
   }
 
   /**

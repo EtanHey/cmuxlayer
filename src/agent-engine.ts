@@ -79,6 +79,12 @@ import {
   resolveSpawnModelPolicy,
   type SpawnModelPolicy,
 } from "./model-policy.js";
+import {
+  evaluateAgentHealth,
+  type AgentHealth,
+} from "./agent-health.js";
+import { buildAgentHealthInput } from "./agent-health-input.js";
+import type { InboxOpts } from "./inbox.js";
 
 export interface SpawnAgentParams {
   repo: string;
@@ -204,9 +210,10 @@ export interface AgentEngineOptions {
     workspace?: string;
     command: string;
   }) => Promise<void>;
+  inboxOpts?: InboxOpts;
 }
 
-export type AgentLifecycleEvent = "spawned" | "done" | "errored";
+export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
 
 const INTERACTIVE_STATES = new Set<AgentState>(["ready", "idle"]);
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
@@ -242,6 +249,7 @@ interface SidebarStatusSnapshot {
   statusValue: string;
   surfaceId: string | null;
   workspaceId: string | null;
+  healthSignature: string;
 }
 
 export interface SweepTimingOptions {
@@ -428,6 +436,7 @@ interface AgentEngineClient {
   notifyLifecycleEvent(
     event: AgentLifecycleEvent,
     agent: AgentRecord,
+    healthSummary?: string,
   ): Promise<void>;
 }
 
@@ -446,6 +455,7 @@ const LIFECYCLE_LOGS = {
   spawned: { message: "spawned", level: "info" },
   done: { message: "done", level: "success" },
   errored: { message: "errored", level: "error" },
+  health: { message: "health", level: "warning" },
 } as const;
 
 /**
@@ -682,6 +692,7 @@ export class AgentEngine {
     workspace?: string,
   ) => RoleSurfaceIds;
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
+  private inboxOpts?: InboxOpts;
   private sessionIdentityResolver: SessionIdentityResolver;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -694,6 +705,8 @@ export class AgentEngine {
   private progressSnapshot: string | null = null;
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
   private loggedEvents = new Set<string>();
+  /** e.g. "a1:done", "a1:health:unhealthy(...)" */
+  private notifiedEvents = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
   constructor(
@@ -707,6 +720,7 @@ export class AgentEngine {
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
+    this.inboxOpts = opts?.inboxOpts;
     this.sessionIdentityResolver =
       opts?.sessionIdentityResolver ??
       ((agent) => this.findTranscriptSessionIdentity(agent));
@@ -2160,7 +2174,101 @@ export class AgentEngine {
     }
   }
 
-  private async emitLifecycleEvent(
+  private compactSidebarValue(value: string | null | undefined): string {
+    const normalized = (value ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!normalized) return "-";
+    return normalized.length > 160
+      ? `${normalized.slice(0, 157).trimEnd()}...`
+      : normalized;
+  }
+
+  private formatHealthSummary(health: AgentHealth): string {
+    if (health.issue_codes.length === 0) return health.status;
+    return `${health.status}(${health.issue_codes.join(",")})`;
+  }
+
+  private formatReportSummary(harvestability: WorkerHarvestability): string {
+    if (!harvestability.report_path) return "n/a";
+    if (harvestability.closure_artifact_verified === true) return "verified";
+    if (harvestability.report_exists === false) return "missing";
+    if (harvestability.report_fresh === false) return "stale";
+    return "unverified";
+  }
+
+  private formatPrSummary(harvestability: WorkerHarvestability): string {
+    if (!harvestability.pr_loop_required) return "n/a";
+    return harvestability.pr_loop_satisfied === true
+      ? "satisfied"
+      : "incomplete";
+  }
+
+  private extractNamedBlocker(agent: AgentRecord): string | null {
+    const text = [agent.error, agent.task_summary]
+      .filter((value): value is string => Boolean(value?.trim()))
+      .join(" ");
+    const match = text.match(
+      /\b(?:blocked by|blocked on|waiting on|waits on)\s+([A-Za-z0-9_.:@/-]+)/i,
+    );
+    return match?.[1]?.replace(/[),.;:]+$/g, "") ?? null;
+  }
+
+  private formatBlockedSummary(
+    agent: AgentRecord,
+    health: AgentHealth,
+  ): string {
+    const namedBlocker = this.extractNamedBlocker(agent);
+    if (namedBlocker) return namedBlocker;
+    if (health.issue_codes.includes("agent_wedged")) {
+      return "self:agent_wedged";
+    }
+    if (health.issue_codes.includes("recoverable_blocker_requires_action")) {
+      return "recoverable_action";
+    }
+    return "-";
+  }
+
+  private buildSidebarStatusValue(
+    agent: AgentRecord,
+    health: AgentHealth,
+    harvestability: WorkerHarvestability,
+  ): string {
+    const role = inferRecordRoleOrNull(agent) ?? "unknown";
+    const worktree = agent.worktree_path ?? agent.launch_cwd ?? null;
+    return [
+      agent.repo,
+      `role=${role}`,
+      `state=${agent.state}`,
+      `health=${this.formatHealthSummary(health)}`,
+      `blocked=${this.formatBlockedSummary(agent, health)}`,
+      `last_prompt=${this.compactSidebarValue(agent.task_summary)}`,
+      `worktree=${this.compactSidebarValue(worktree)}`,
+      `branch=${this.compactSidebarValue(agent.worktree_branch)}`,
+      `report=${this.formatReportSummary(harvestability)}`,
+      `pr=${this.formatPrSummary(harvestability)}`,
+    ].join(" | ");
+  }
+
+  private healthSignature(health: AgentHealth): string {
+    return this.formatHealthSummary(health);
+  }
+
+  private clearAgentLifecycleMemory(agentId: string): void {
+    const prefix = `${agentId}:`;
+    for (const key of this.loggedEvents) {
+      if (key.startsWith(prefix)) {
+        this.loggedEvents.delete(key);
+      }
+    }
+    for (const key of this.notifiedEvents) {
+      if (key.startsWith(prefix)) {
+        this.notifiedEvents.delete(key);
+      }
+    }
+  }
+
+  private async logLifecycleEvent(
     agent: AgentRecord,
     event: AgentLifecycleEvent,
   ): Promise<void> {
@@ -2175,14 +2283,56 @@ export class AgentEngine {
       source: "cmuxlayer",
     });
 
+    this.loggedEvents.add(eventKey);
+  }
+
+  private async notifyLifecycleEvent(
+    agent: AgentRecord,
+    event: AgentLifecycleEvent,
+    signature?: string,
+  ): Promise<void> {
+    const eventSuffix = signature === undefined ? "" : `:${signature}`;
+    const eventKey = `${agent.agent_id}:${event}${eventSuffix}`;
+    if (this.notifiedEvents.has(eventKey)) {
+      return;
+    }
+
     try {
       // Channel delivery is best-effort and must not break the sweep loop.
-      await this.client.notifyLifecycleEvent(event, agent);
+      if (signature === undefined) {
+        await this.client.notifyLifecycleEvent(event, agent);
+      } else {
+        await this.client.notifyLifecycleEvent(event, agent, signature);
+      }
+      if (event === "health") {
+        const healthPrefix = `${agent.agent_id}:health:`;
+        for (const key of this.notifiedEvents) {
+          if (key.startsWith(healthPrefix)) {
+            this.notifiedEvents.delete(key);
+          }
+        }
+      }
+      this.notifiedEvents.add(eventKey);
     } catch {
       // Ignore Claude channel push failures; logs and sidebar state remain canonical.
     }
+  }
 
-    this.loggedEvents.add(eventKey);
+  private shouldNotifyDone(harvestability: WorkerHarvestability): boolean {
+    return harvestability.closeable;
+  }
+
+  private shouldNotifyHealthChange(
+    prev: SidebarStatusSnapshot | undefined,
+    health: AgentHealth,
+  ): boolean {
+    if (!prev) return false;
+    const nextSignature = this.healthSignature(health);
+    if (prev.healthSignature === nextSignature) return false;
+    return (
+      health.status === "unhealthy" ||
+      prev.healthSignature.startsWith("unhealthy")
+    );
   }
 
   /**
@@ -2203,28 +2353,79 @@ export class AgentEngine {
       const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
       const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
       const agent = taskDoneResult.agent;
-      const { agent_id: agentId, repo, state, surface_id } = agent;
-      const statusValue =
-        state === "error" ? `${repo}: error` : `${repo}: ${state}`;
+      const { agent_id: agentId, state, surface_id } = agent;
+      const harvestability = this.assessHarvestability(agent);
+      const healthScreenContexts = new Map<string, SweepAgentContext>();
+      const healthScreenContextFor = (
+        targetAgent: AgentRecord,
+      ): SweepAgentContext => {
+        if (targetAgent.agent_id === agent.agent_id) return sweepCtx;
+        const existing = healthScreenContexts.get(targetAgent.agent_id);
+        if (existing) return existing;
+        const next: SweepAgentContext = {};
+        healthScreenContexts.set(targetAgent.agent_id, next);
+        return next;
+      };
+      const healthInput = await buildAgentHealthInput(
+        agent,
+        {
+          inboxOpts: this.inboxOpts,
+          readParsedSurface: async (targetAgent) => {
+            const screenText =
+              targetAgent.agent_id === agent.agent_id &&
+              taskDoneResult.screenText !== undefined
+                ? taskDoneResult.screenText
+                : (
+                    await this.readSweepScreen(
+                      targetAgent,
+                      healthScreenContextFor(targetAgent),
+                    )
+                  ).text;
+            const parsed = parseScreen(screenText);
+            return {
+              status: parsed.status,
+              actions: parsed.actions,
+            };
+          },
+        },
+        { harvestability },
+      );
+      const health = evaluateAgentHealth(agent, healthInput);
+      const healthSignature = this.healthSignature(health);
+      const statusValue = this.buildSidebarStatusValue(
+        agent,
+        health,
+        harvestability,
+      );
       const statusSnapshot: SidebarStatusSnapshot = {
         statusValue,
         surfaceId: surface_id,
         workspaceId: agent.workspace_id ?? null,
+        healthSignature,
       };
+      const prev = this.sidebarSnapshot.get(agentId);
 
       // Lifecycle log: spawned (first encounter)
-      if (!this.sidebarSnapshot.has(agentId)) {
-        await this.emitLifecycleEvent(agent, "spawned");
+      if (!prev) {
+        await this.logLifecycleEvent(agent, "spawned");
       }
 
       // Lifecycle log: done
       if (state === "done") {
-        await this.emitLifecycleEvent(agent, "done");
+        await this.logLifecycleEvent(agent, "done");
+        if (this.shouldNotifyDone(harvestability)) {
+          await this.notifyLifecycleEvent(agent, "done");
+        }
       }
 
       // Lifecycle log: error
       if (state === "error") {
-        await this.emitLifecycleEvent(agent, "errored");
+        await this.logLifecycleEvent(agent, "errored");
+        await this.notifyLifecycleEvent(agent, "errored");
+      }
+
+      if (this.shouldNotifyHealthChange(prev, health)) {
+        await this.notifyLifecycleEvent(agent, "health", healthSignature);
       }
 
       const archived = await this.maybeArchiveDoneAgent(agent);
@@ -2240,11 +2441,11 @@ export class AgentEngine {
         this.registry.remove(agentId);
         this.stateMgr.removeState(agentId);
         this.sidebarSnapshot.delete(agentId);
+        this.clearAgentLifecycleMemory(agentId);
         continue;
       }
 
       // Status diff — only push if changed
-      const prev = this.sidebarSnapshot.get(agentId);
       const statusChanged =
         !prev ||
         prev.statusValue !== statusSnapshot.statusValue ||
@@ -2300,7 +2501,7 @@ export class AgentEngine {
               await this.client.sendKey(surface_id, "return", {});
             } else {
               await this.client.log(
-                `context-limit: depth ${agent.spawn_depth} agent ${repo} degraded; leaving pane running for orchestrator decision`,
+                `context-limit: depth ${agent.spawn_depth} agent ${agent.repo} degraded; leaving pane running for orchestrator decision`,
                 { level: "warning", source: "cmuxlayer" },
               );
             }
@@ -2325,6 +2526,7 @@ export class AgentEngine {
           // Best-effort sidebar cleanup
         }
         this.sidebarSnapshot.delete(agentId);
+        this.clearAgentLifecycleMemory(agentId);
       }
     }
 
@@ -2366,11 +2568,12 @@ export class AgentEngine {
       this.startupPurgePending = false;
       const purgedIds = this.registry.purgeAllTerminal();
       // Seed sidebar snapshot so syncSidebar clears their cmux entries
-      for (const id of purgedIds) {
-        this.sidebarSnapshot.set(id, {
+      for (const purgedAgent of purgedIds) {
+        this.sidebarSnapshot.set(purgedAgent.agent_id, {
           statusValue: "__purged__",
-          surfaceId: null,
-          workspaceId: null,
+          surfaceId: purgedAgent.surface_id,
+          workspaceId: purgedAgent.workspace_id ?? null,
+          healthSignature: "__purged__",
         });
       }
     }

@@ -1472,7 +1472,7 @@ describe("AgentEngine", () => {
         expect(mockClient.clearStatus).not.toHaveBeenCalled();
         expect(mockClient.setStatus).toHaveBeenCalledWith(
           "worker-archived-before-status",
-          "brainlayer: done",
+          "brainlayer | role=worker | state=done | health=unhealthy(inbox_monitor_not_alive,closure_without_artifact) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
           expect.objectContaining({
             surface: "surface:archived-before-status",
           }),
