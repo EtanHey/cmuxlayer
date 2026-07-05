@@ -296,10 +296,10 @@ export function detectRuntimeProvenance(
   let mode: RuntimeMode = "unknown";
   if (distEntrypoint) {
     mode = "dist";
-  } else if (sourceEntrypoint || env.CMUXLAYER_DEV === "1") {
-    mode = "source";
   } else if (launcherEntrypoint) {
     mode = "launcher";
+  } else if (sourceEntrypoint || env.CMUXLAYER_DEV === "1") {
+    mode = "source";
   }
 
   const note =

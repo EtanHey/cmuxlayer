@@ -356,6 +356,58 @@ describe("runDoctor — report shape", () => {
     expect(report.healthy).toBe(true);
   });
 
+  it("keeps launcher runtime provenance ahead of the development env override", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: { CMUXLAYER_DEV: "1" },
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+          ],
+          env: { CMUXLAYER_DEV: "1" },
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: false,
+      entrypoint: "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+      mode: "launcher",
+      ok: false,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/launcher path/i);
+    expect(report.healthy).toBe(true);
+  });
+
+  it("reports unknown runtime provenance without failing the doctor", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/tmp/cmuxlayer-wrapper",
+          ],
+          env: {},
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: false,
+      entrypoint: "/tmp/cmuxlayer-wrapper",
+      mode: "unknown",
+      ok: false,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/unknown/i);
+    expect(report.healthy).toBe(true);
+  });
+
   it("includes a manual MCP reconnect probe procedure in the doctor report", async () => {
     const report = await runDoctorForTest({
       version: "0.3.1",

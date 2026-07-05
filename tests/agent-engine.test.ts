@@ -5605,6 +5605,59 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("treats kill(0) permission errors as live during graceful stop", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          killCalls.push([pid, signal ?? 0]);
+          if (signal === 0) {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-grace-unknown",
+            state: "working",
+            surface_id: "surface:grace-unknown",
+            pid: 45678,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:grace-unknown")];
+        await engine.getRegistry().reconstitute();
+
+        await expect(engine.stopAgent("agent-grace-unknown")).rejects.toThrow(
+          /process still alive/i,
+        );
+
+        expect(killCalls).toContainEqual([45678, 0]);
+        expect(mockClient.sendKey).toHaveBeenCalledWith(
+          "surface:grace-unknown",
+          "c-c",
+          expect.anything(),
+        );
+        expect(stateMgr.readState("agent-grace-unknown")).toMatchObject({
+          state: "working",
+          quality: "degraded",
+          error: expect.stringMatching(/process still alive/i),
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
     it("does not mark naturally completed agents as user-killed", async () => {
       stateMgr.writeState(
         makeRecord({

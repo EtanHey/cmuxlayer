@@ -3257,6 +3257,10 @@ export class AgentEngine {
     return liveness === "gone" || liveness === "unknown";
   }
 
+  private isProcessConfirmedGone(pid: number | null | undefined): boolean {
+    return this.processLiveness(pid) === "gone";
+  }
+
   private isTerminalDeadRegistryGhost(agent: AgentRecord): boolean {
     if (!TERMINAL_STATES.has(agent.state)) {
       return false;
@@ -3319,8 +3323,11 @@ export class AgentEngine {
   private async readStopPostCondition(
     agent: AgentRecord,
     paneRef: string | null,
+    treatUnknownProcessAsGone: boolean,
   ): Promise<StopPostConditionResult> {
-    const processGone = this.isProcessGone(agent.pid);
+    const processGone = treatUnknownProcessAsGone
+      ? this.isProcessGone(agent.pid)
+      : this.isProcessConfirmedGone(agent.pid);
     const [surfaceGone, paneGone] = await Promise.all([
       this.isSurfaceGone(agent.surface_id),
       this.isPaneGone(paneRef, agent.workspace_id),
@@ -3332,9 +3339,14 @@ export class AgentEngine {
     agent: AgentRecord,
     paneRef: string | null,
     expectPaneGone: boolean,
+    treatUnknownProcessAsGone: boolean,
   ): Promise<StopPostConditionResult> {
     const deadline = Date.now() + this.stopPostConditionTimeoutMs;
-    let result = await this.readStopPostCondition(agent, paneRef);
+    let result = await this.readStopPostCondition(
+      agent,
+      paneRef,
+      treatUnknownProcessAsGone,
+    );
     while (
       !(
         result.processGone &&
@@ -3346,7 +3358,11 @@ export class AgentEngine {
       await new Promise((resolve) =>
         setTimeout(resolve, STOP_POST_CONDITION_POLL_MS),
       );
-      result = await this.readStopPostCondition(agent, paneRef);
+      result = await this.readStopPostCondition(
+        agent,
+        paneRef,
+        treatUnknownProcessAsGone,
+      );
     }
     return result;
   }
@@ -3437,6 +3453,7 @@ export class AgentEngine {
       agent,
       stopClosePolicy.paneRef,
       stopClosePolicy.collapsePane,
+      force === true,
     );
     if (
       !stopResult.processGone ||

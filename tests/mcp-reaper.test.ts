@@ -416,6 +416,53 @@ describe("runReaper audit evidence", () => {
     expect(lines).toContainEqual(expect.stringContaining("SIGTERM pid=701"));
     expect(outputs).toContainEqual(expect.stringContaining("SIGTERM pid=701"));
   });
+
+  it("escalates still-reapable processes to SIGKILL after the grace window", async () => {
+    const lines: string[] = [];
+    const outputs: string[] = [];
+    const killCalls: Array<[number, NodeJS.Signals]> = [];
+    const readProcessTable = vi
+      .fn<() => Promise<ProcessInfo[]>>()
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([reapable])
+      .mockResolvedValueOnce([]);
+
+    await runReaper(
+      { ...baseOptions, dryRun: false },
+      {
+        appendAuditLine: async (line) => {
+          lines.push(line);
+        },
+        isProcessAlive: () => false,
+        killProcess: (pid, signal) => {
+          killCalls.push([pid, signal]);
+        },
+        readProcessTable,
+        readRamEvidence: () => ({
+          processRssBytes: 77,
+          systemFreeBytes: 88,
+          systemTotalBytes: 99,
+        }),
+        sleep: async () => {},
+        writeStdout: (line) => {
+          outputs.push(line);
+        },
+      },
+    );
+
+    expect(readProcessTable).toHaveBeenCalledTimes(3);
+    expect(killCalls).toEqual([
+      [701, "SIGTERM"],
+      [701, "SIGKILL"],
+    ]);
+    expect(lines).toContainEqual(expect.stringContaining("SIGKILL pid=701"));
+    expect(outputs).toContainEqual(expect.stringContaining("SIGKILL pid=701"));
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /AUDIT phase=after dry_run=false total_processes=0 reapable_processes=0 reapable_pids=- system_free_bytes=88 system_total_bytes=99 process_rss_bytes=77/,
+      ),
+    );
+  });
 });
 
 describe("PROCESS_TABLE_PS_ARGS", () => {

@@ -669,7 +669,7 @@ describe("CmuxLayerProxy", () => {
     daemons.push(daemon);
     await daemon.start();
     const logger = { error: vi.fn() };
-    const { input, collector } = createProxy(path, {
+    const { input, collector, proxy } = createProxy(path, {
       logger,
       requestTimeoutMs: 30,
     });
@@ -700,6 +700,13 @@ describe("CmuxLayerProxy", () => {
         String(call[0]).includes("late daemon response"),
       ),
     );
+    expect(
+      (
+        proxy as unknown as {
+          expiredRequestKeys: Set<string>;
+        }
+      ).expiredRequestKeys.has("2"),
+    ).toBe(false);
   });
 
   it("keeps agent stdio open while the daemon is offline", async () => {

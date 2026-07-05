@@ -121,4 +121,32 @@ describe("CmuxPersistentSocket V1 demux", () => {
       socket.disconnect();
     }
   });
+
+  it("rejects every pending V2 request when an uncorrelatable object frame is malformed", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("malformed-v2-only");
+    const received: string[] = [];
+    await startLineServer(path, (line, conn) => {
+      received.push(line);
+      if (received.length === 2) {
+        conn.write('{"id":\n');
+      }
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      const first = socket.call("list_workspaces");
+      const second = socket.call("list_panes");
+
+      await expect(first).rejects.toMatchObject({ code: "protocol_error" });
+      await expect(second).rejects.toMatchObject({ code: "protocol_error" });
+      expect(received).toHaveLength(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
 });
