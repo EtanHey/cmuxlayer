@@ -264,6 +264,51 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("notifies when a wedged holder is already unhealthy on the first sweep", async () => {
+    const inboxDir = join(TEST_DIR, "initial-wedged-inbox");
+    const agentId = "initial-wedged-holder";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-wedged",
+        role: "worker",
+        task_summary: "Drain existing stale dispatch",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    dispatch(
+      agentId,
+      {
+        id: "already-stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    );
+  });
+
   it("marks a wedged holder unhealthy and notifies with the health issue summary", async () => {
     const inboxDir = join(TEST_DIR, "wedged-inbox");
     const agentId = "wedged-holder";
@@ -447,9 +492,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -470,9 +517,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -514,9 +563,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();

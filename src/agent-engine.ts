@@ -2326,7 +2326,7 @@ export class AgentEngine {
     prev: SidebarStatusSnapshot | undefined,
     health: AgentHealth,
   ): boolean {
-    if (!prev) return false;
+    if (!prev) return health.status === "unhealthy";
     const nextSignature = this.healthSignature(health);
     if (prev.healthSignature === nextSignature) return false;
     return (
@@ -2475,8 +2475,8 @@ export class AgentEngine {
           surface: surface_id,
           workspace: agent.workspace_id ?? undefined,
         });
-        this.sidebarSnapshot.set(agentId, statusSnapshot);
       }
+      this.sidebarSnapshot.set(agentId, statusSnapshot);
 
       // Quality tracking: check context usage for non-terminal agents
       // AIDEV-NOTE: Uses parseScreen for model-aware context_pct (handles Claude, Codex, Gemini).

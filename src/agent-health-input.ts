@@ -66,15 +66,17 @@ export async function buildAgentHealthInput(
       ? overrides.topology
       : (await deps.resolveTopology?.(agent)) ?? null;
   const alive =
-    overrides.monitor_alive ??
-    monitorAlive(
-      agent.agent_id,
-      deps.monitorMaxAgeMs ?? AGENT_HEALTH_MONITOR_MAX_AGE_MS,
-      deps.inboxOpts,
-    );
+    overrides.monitor_alive !== undefined
+      ? overrides.monitor_alive
+      : monitorAlive(
+          agent.agent_id,
+          deps.monitorMaxAgeMs ?? AGENT_HEALTH_MONITOR_MAX_AGE_MS,
+          deps.inboxOpts,
+        );
   const inboxChannelDirDeleted =
-    overrides.inbox_channel_dir_deleted ??
-    (!alive && channelDirDeletedAfterCreate(agent.agent_id, deps.inboxOpts));
+    overrides.inbox_channel_dir_deleted !== undefined
+      ? overrides.inbox_channel_dir_deleted
+      : !alive && channelDirDeletedAfterCreate(agent.agent_id, deps.inboxOpts);
   const staleCount =
     overrides.stale_count ??
     pendingDispatches(
@@ -85,9 +87,14 @@ export async function buildAgentHealthInput(
   const needsScreen =
     overrides.screen_status === undefined ||
     overrides.screen_actions === undefined;
-  const parsedScreen = needsScreen
-    ? await deps.readParsedSurface?.(agent)
-    : null;
+  let parsedScreen: ParsedSurfaceHealthInput | null | undefined = null;
+  if (needsScreen) {
+    try {
+      parsedScreen = await deps.readParsedSurface?.(agent);
+    } catch {
+      parsedScreen = null;
+    }
+  }
   const screenStatus =
     overrides.screen_status !== undefined
       ? overrides.screen_status
