@@ -67,7 +67,20 @@ type ServerWithRegisteredTools = {
   _registeredTools: Record<string, RegisteredTool | undefined>;
 };
 
+const SEND_INPUT_CHUNK_THRESHOLD = 500;
+const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
+const SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT = parseMaxInlineCharsForTest(
+  process.env.CMUXLAYER_MAX_INLINE_CHARS,
+);
+
 const fixtureDir = new URL("./fixtures/painpoints/", import.meta.url);
+
+function parseMaxInlineCharsForTest(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= SEND_INPUT_CHUNK_THRESHOLD
+    ? parsed
+    : DEFAULT_SEND_INPUT_MAX_INLINE_CHARS;
+}
 
 function readPainpointFixture(fileName: string): PainpointFixture {
   const raw = readFileSync(new URL(fileName, fixtureDir), "utf8");
@@ -300,6 +313,12 @@ describe("Phase 0 painpoint replay corpus", () => {
 
     if (fixture.id === "long-inline-prompt-wedge") {
       it(`${fixture.id} refuses over-cap inline input before keystrokes are sent`, async () => {
+        const overCapText = "x".repeat(
+          Math.max(
+            fixture.inline_length ?? 0,
+            SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT + 1,
+          ),
+        );
         const calls: string[][] = [];
         const exec: ExecFn = async (_cmd, args) => {
           calls.push([...args]);
@@ -313,7 +332,7 @@ describe("Phase 0 painpoint replay corpus", () => {
         const result = await getTool(server, "send_input").handler(
           {
             surface: "surface:long-inline",
-            text: "x".repeat(fixture.inline_length ?? 1801),
+            text: overCapText,
           },
           {},
         );
@@ -322,6 +341,9 @@ describe("Phase 0 painpoint replay corpus", () => {
         );
 
         expect(parsed.ok).toBe(false);
+        expect(parsed.error).toContain(
+          `CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT}`,
+        );
         expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS");
         expect(calls).toEqual([]);
       });
