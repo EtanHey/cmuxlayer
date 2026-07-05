@@ -4205,6 +4205,7 @@ describe("tool handler integration", () => {
     let launcherSent = false;
     let updateMenuSkipped = false;
     let promptSent = false;
+    let downAttempts = 0;
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
 
@@ -4249,6 +4250,12 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key")) {
         const key = String(args.at(-1) ?? "");
+        if (key === "down") {
+          downAttempts += 1;
+          if (downAttempts === 1) {
+            throw new Error("socket timeout");
+          }
+        }
         sentKeys.push(key);
         if (key === "return" && sentKeys.at(-2) === "down") {
           updateMenuSkipped = true;
@@ -4325,6 +4332,7 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(downAttempts).toBe(2);
       expect(sentKeys).toEqual(expect.arrayContaining(["down", "return"]));
       expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
     } finally {

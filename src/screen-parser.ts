@@ -255,6 +255,7 @@ function normalizeText(text: string): string {
 export function isCodexUpdateMenuScreen(text: string): boolean {
   const normalized = normalizeText(text);
   return (
+    (CODEX_BOOT_PANEL_RE.test(normalized) || CODEX_HEADER_RE.test(normalized)) &&
     CODEX_UPDATE_MENU_RE.test(normalized) &&
     CODEX_UPDATE_MENU_SKIP_RE.test(normalized) &&
     CODEX_UPDATE_MENU_RELEASE_NOTES_RE.test(normalized)

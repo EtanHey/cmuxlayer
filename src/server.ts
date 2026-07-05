@@ -1988,15 +1988,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           updateWasSeen = true;
-          codexUpdateMenuDismissed = true;
           consecutiveMatches.clear();
-          await client.sendKey(opts.surface, "down", {
-            workspace: opts.workspace,
-          });
+          await sendKeyWithRetry(opts.surface, "down", opts.workspace);
           await delay(SEND_INPUT_ENTER_DELAY_MS);
-          await client.sendKey(opts.surface, "return", {
-            workspace: opts.workspace,
-          });
+          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+          codexUpdateMenuDismissed = true;
           const dismissedAt = Date.now();
           deadline = Math.max(deadline, dismissedAt + postUpdateReadyBudgetMs());
           await delay(BOOT_PROMPT_READY_POLL_MS);

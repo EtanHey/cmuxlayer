@@ -144,6 +144,26 @@ This is copied prose, not a live Codex TUI menu.
     expect(parsed.control_state).toBe("ready");
   });
 
+  it("does not classify prose with Codex update release-note lines as an update menu", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Reviewer note:
+Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+Skip until next version
+
+This is copied documentation, not a live Codex TUI menu.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("recognizes permission prompts without numbered options", () => {
     const parsed = parseScreen(`
 Claude Code
