@@ -660,7 +660,7 @@ describe("CmuxLayerProxy", () => {
     });
   });
 
-  it("logs late daemon responses for expired request ids before dropping them", async () => {
+  it("keeps expired request ids quarantined after repeated late responses", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("late-expired-response");
     const daemon = new FakeDaemon(path, {
@@ -700,13 +700,30 @@ describe("CmuxLayerProxy", () => {
         String(call[0]).includes("late daemon response"),
       ),
     );
+    writeFrame(daemon.connections[0].socket, {
+      jsonrpc: "2.0",
+      id: 2,
+      result: { stale: true },
+    });
+    await waitFor(
+      () =>
+        logger.error.mock.calls.filter((call) =>
+          String(call[0]).includes("late daemon response"),
+        ).length >= 2,
+    );
+    await expect(
+      collector.waitForMessage(
+        (message) => isResponseFor(2)(message) && "result" in message,
+        100,
+      ),
+    ).rejects.toThrow(/timed out/);
     expect(
       (
         proxy as unknown as {
           expiredRequestKeys: Set<string>;
         }
-      ).expiredRequestKeys.has("2"),
-    ).toBe(false);
+      ).expiredRequestKeys.has("number:2"),
+    ).toBe(true);
   });
 
   it("keeps agent stdio open while the daemon is offline", async () => {

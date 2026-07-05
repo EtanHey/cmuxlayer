@@ -505,7 +505,6 @@ export class CmuxLayerProxy {
             "[cmuxlayer-proxy] late daemon response for expired request id dropped",
             { id: message.id },
           );
-          this.expiredRequestKeys.delete(key);
           return;
         }
         void this.writeAgent(message);
