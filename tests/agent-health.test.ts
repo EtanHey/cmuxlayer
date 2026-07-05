@@ -224,6 +224,33 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("closure_without_artifact");
   });
 
+  it("does not mark non-done agents unhealthy for degraded closure evidence", () => {
+    const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
+      monitor_alive: true,
+      harvestability: {
+        closeable: false,
+        closure_artifact_verified: null,
+        report_path: null,
+        done_marker: null,
+        report_exists: null,
+        report_fresh: null,
+        report_final_line: null,
+        pr_loop_required: false,
+        pr_loop_satisfied: null,
+        kept_open: null,
+        evidence_channel: {
+          done_source: "none",
+          degraded: true,
+          reason: "missing completion transcript",
+        },
+        issue_codes: ["degraded_evidence_channel"],
+        issues: ["missing completion transcript"],
+      },
+    });
+
+    expect(health.issue_codes).not.toContain("degraded_evidence_channel");
+  });
+
   it("marks recoverable permission-parking blockers as action-required health failures", () => {
     const health = evaluateAgentHealth(makeRecord(), {
       monitor_alive: true,

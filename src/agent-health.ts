@@ -259,7 +259,12 @@ export function evaluateAgentHealth(
       "KEPT_OPEN requires reason, owner, and next check",
     );
   }
-  if (input.harvestability?.evidence_channel.degraded === true) {
+  if (
+    agent.state === "done" &&
+    role !== "orchestrator" &&
+    role !== "ic" &&
+    input.harvestability?.evidence_channel.degraded === true
+  ) {
     addIssue(
       issueCodes,
       issues,

@@ -754,7 +754,6 @@ export class AgentEngine {
   }
 
   assessHarvestability(agent: AgentRecord): WorkerHarvestability {
-    const evidenceChannel = this.readHarvestabilityEvidenceChannel(agent);
     const issueCodes: string[] = [];
     const issues: string[] = [];
     const addIssue = (code: string, message: string): void => {
@@ -763,13 +762,12 @@ export class AgentEngine {
     };
 
     const role = agent.role ?? inferRecordRoleOrNull(agent);
-    if (agent.state !== "done" || role === "orchestrator") {
-      if (evidenceChannel.degraded) {
-        addIssue(
-          "degraded_evidence_channel",
-          evidenceChannel.reason ?? "done evidence channel is degraded",
-        );
-      }
+    const neutralEvidenceChannel: HarvestabilityEvidenceChannel = {
+      done_source: agent.task_done_detected_at ? "screen" : "none",
+      degraded: false,
+      reason: null,
+    };
+    if (agent.state !== "done" || role === "orchestrator" || role === "ic") {
       return {
         closeable: false,
         closure_artifact_verified: null,
@@ -781,12 +779,13 @@ export class AgentEngine {
         pr_loop_required: false,
         pr_loop_satisfied: null,
         kept_open: null,
-        evidence_channel: evidenceChannel,
+        evidence_channel: neutralEvidenceChannel,
         issue_codes: issueCodes,
         issues,
       };
     }
 
+    const evidenceChannel = this.readHarvestabilityEvidenceChannel(agent);
     const goal = this.readClosureGoalContract(agent.goal_file ?? null);
     const reportText = goal.reportPath
       ? this.readTextFile(goal.reportPath)
@@ -794,9 +793,9 @@ export class AgentEngine {
     const reportExists = goal.reportPath ? reportText !== null : null;
     const reportFresh =
       goal.reportPath && reportText !== null
-        ? this.reportIsFreshForDoneDetection(
+        ? this.reportIsFreshForGoalContract(
             goal.reportPath,
-            agent.task_done_detected_at ?? null,
+            agent.goal_file ?? null,
           )
         : null;
     const reportFinalLine = reportText
@@ -837,7 +836,7 @@ export class AgentEngine {
     } else if (reportFresh === false) {
       addIssue(
         "report_stale",
-        "worker report was last modified before task_done_detected_at",
+        "worker report was last modified before the goal contract file",
       );
     } else if (!closureArtifactVerified) {
       addIssue(
@@ -961,13 +960,47 @@ export class AgentEngine {
   }
 
   private extractReportPath(goalText: string, goalFile: string): string | null {
-    const rawPath = this.extractCodeSpans(goalText).find(
-      (candidate) =>
-        /\.md$/i.test(candidate) ||
-        /(?:^|[/\\])reports[/\\].+\.md$/i.test(candidate),
-    );
+    const lines = goalText.split(/\r?\n/);
+    const candidates: Array<{ rawPath: string; score: number; index: number }> =
+      [];
+    let index = 0;
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const line = lines[lineIndex] ?? "";
+      for (const rawPath of this.extractCodeSpans(line)) {
+        if (!this.isMarkdownContractPath(rawPath)) continue;
+        const context = lines
+          .slice(Math.max(0, lineIndex - 3), lineIndex + 1)
+          .join("\n");
+        const reportsSegment = /(?:^|[/\\])reports[/\\].+\.md$/i.test(rawPath);
+        const reportContext =
+          /\breport(?:[_ -]?path)?\b/i.test(context) ||
+          /\bwrite\s+(?:the\s+)?report\b/i.test(context);
+        const basenameIncludesReport = /(?:^|[/\\])[^/\\]*report[^/\\]*\.md$/i.test(
+          rawPath,
+        );
+        candidates.push({
+          rawPath,
+          score:
+            (reportContext ? 100 : 0) +
+            (reportsSegment ? 20 : 0) +
+            (basenameIncludesReport ? 10 : 0),
+          index,
+        });
+        index += 1;
+      }
+    }
+    const rawPath = candidates
+      .sort((a, b) => b.score - a.score || b.index - a.index)
+      .at(0)?.rawPath;
     if (!rawPath) return null;
     return this.resolveContractPath(rawPath, goalFile);
+  }
+
+  private isMarkdownContractPath(rawPath: string): boolean {
+    return (
+      /\.md$/i.test(rawPath) ||
+      /(?:^|[/\\])reports[/\\].+\.md$/i.test(rawPath)
+    );
   }
 
   private resolveContractPath(rawPath: string, goalFile: string): string {
@@ -1009,16 +1042,16 @@ export class AgentEngine {
     );
   }
 
-  private reportIsFreshForDoneDetection(
+  private reportIsFreshForGoalContract(
     reportPath: string,
-    taskDoneDetectedAt: string | null,
+    goalFile: string | null,
   ): boolean | null {
-    if (!taskDoneDetectedAt) return null;
-    const doneDetectedMs = Date.parse(taskDoneDetectedAt);
-    if (Number.isNaN(doneDetectedMs)) return null;
+    if (!goalFile) return null;
     const reportMtimeMs = safeMtimeMs(reportPath);
+    const goalMtimeMs = safeMtimeMs(goalFile);
     if (reportMtimeMs <= 0) return null;
-    return reportMtimeMs >= doneDetectedMs;
+    if (goalMtimeMs <= 0) return null;
+    return reportMtimeMs >= goalMtimeMs;
   }
 
   private extractLineValue(lines: string[], label: string): string | null {
@@ -1107,11 +1140,7 @@ export class AgentEngine {
 
   private isPrLoopSatisfied(reportText: string): boolean {
     if (!reportText.trim()) return false;
-    const explicitlyHandedOff =
-      /\b(?:handoff|handed off|successor transfer|explicitly handed off)\b/i.test(
-        reportText,
-      );
-    if (explicitlyHandedOff) return true;
+    if (this.hasCompletedPrLoopHandoff(reportText)) return true;
 
     const hasPrReference =
       /github\.com\/\S+\/pull\/\d+/i.test(reportText) ||
@@ -1122,6 +1151,31 @@ export class AgentEngine {
         reportText,
       ) || /\bPR\s+(?:status|state)\s*:\s*(?:merged|closed)\b/i.test(reportText);
     return hasPrReference && reviewOrMergeComplete;
+  }
+
+  private hasCompletedPrLoopHandoff(reportText: string): boolean {
+    return reportText
+      .split(/\r?\n/)
+      .some((line) => this.isCompletedPrLoopHandoffLine(line));
+  }
+
+  private isCompletedPrLoopHandoffLine(line: string): boolean {
+    const normalized = line.trim().toLowerCase();
+    if (
+      !/\b(?:handoff|handed off|successor transfer)\b/.test(normalized) ||
+      /\b(?:no|not|never|without|none|pending|todo|missing|incomplete|not yet)\b/.test(
+        normalized,
+      )
+    ) {
+      return false;
+    }
+    return [
+      /\b(?:explicitly\s+)?handed off\b/,
+      /\bsuccessor transfer\s*:\s*(?:complete|completed|done|recorded|sent|posted|delivered)\b/,
+      /\bhandoff\s*:\s*(?:complete|completed|done|recorded|sent|posted|delivered)\b/,
+      /\bhandoff\b.*\b(?:complete|completed|done|recorded|sent|posted|delivered)\b/,
+      /\bhandoff\b.*\bto\s+[-\w ]+\b/,
+    ].some((pattern) => pattern.test(normalized));
   }
 
   private hasOutputDoneEvidence(cli: CliType, text: string): boolean {
