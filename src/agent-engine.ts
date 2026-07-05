@@ -1593,15 +1593,15 @@ export class AgentEngine {
   private canUseTranscriptSessionResolver(agent: AgentRecord): boolean {
     if (!TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state)) return false;
     if (!JSONL_HARNESSES.has(agent.cli)) return false;
-    if (agent.task_summary.trim().length === 0) return false;
-    return (
-      this.hasCustomSessionIdentityResolver ||
-      Boolean(
-        agent.launcher_name ||
-          agent.launch_cwd?.trim() ||
-          agent.worktree_path?.trim(),
-      )
+    const hasManagedLaunchContext = Boolean(
+      agent.launcher_name ||
+        agent.launch_cwd?.trim() ||
+        agent.worktree_path?.trim(),
     );
+    if (agent.task_summary.trim().length === 0 && !hasManagedLaunchContext) {
+      return false;
+    }
+    return this.hasCustomSessionIdentityResolver || hasManagedLaunchContext;
   }
 
   private screenShowsPendingBootPrompt(
