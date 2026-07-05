@@ -58,6 +58,16 @@ function makeSurface(ref: string): CmuxSurface {
   return { ref, title: "", type: "terminal", index: 0, selected: false };
 }
 
+function makeWorkspace(ref: string) {
+  return {
+    ref,
+    title: ref,
+    index: 0,
+    selected: false,
+    pinned: false,
+  };
+}
+
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   return {
     agent_id: "codex-brainlayer-1710388800",
@@ -264,6 +274,68 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("feeds topology and surface workspace truth into sidebar health", async () => {
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:actual")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:actual",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:actual",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:actual",
+      window_ref: "window:1",
+      pane_ref: "pane:actual",
+      surfaces: [
+        {
+          ref: "surface:42",
+          title: "worker lane",
+          type: "terminal",
+          index: 0,
+          selected: false,
+        },
+      ],
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "workspace-drift",
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:registry",
+        cli_session_id: "session-workspace-drift",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("workspace-drift", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(registry_surface_workspace_mismatch)";
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "workspace-drift",
+      `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a`,
+      expect.objectContaining({
+        surface: "surface:42",
+        workspace: "workspace:registry",
+      }),
+    );
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: "workspace-drift" }),
+      healthSummary,
+    );
+  });
+
   it("notifies when a wedged holder is already unhealthy on the first sweep", async () => {
     const inboxDir = join(TEST_DIR, "initial-wedged-inbox");
     const agentId = "initial-wedged-holder";
@@ -400,6 +472,67 @@ describe("Sidebar Sync", () => {
       expect.objectContaining({ agent_id: agentId }),
       healthSummary,
     );
+  });
+
+  it("retries health notifications when channel delivery fails", async () => {
+    const inboxDir = join(TEST_DIR, "wedged-retry-inbox");
+    const agentId = "wedged-retry-holder";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-wedged-retry",
+        role: "worker",
+        task_summary: "Retry health channel",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    dispatch(
+      agentId,
+      {
+        id: "stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+    mockClient.notifyLifecycleEvent.mockRejectedValueOnce(
+      new Error("channel down"),
+    );
+
+    await engine.runSweep();
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthCalls = mockClient.notifyLifecycleEvent.mock.calls.filter(
+      (call) => call[0] === "health",
+    );
+    expect(healthCalls).toHaveLength(2);
+    expect(healthCalls[0]).toEqual([
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    ]);
+    expect(healthCalls[1]).toEqual([
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    ]);
   });
 
   it("does not emit done notifications until a worker has verified terminal evidence", async () => {

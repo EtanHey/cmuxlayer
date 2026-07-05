@@ -84,6 +84,11 @@ import {
   type AgentHealth,
 } from "./agent-health.js";
 import { buildAgentHealthInput } from "./agent-health-input.js";
+import {
+  collectSurfaceTopology,
+  EMPTY_SURFACE_TOPOLOGY,
+  healthTopologyOverrides,
+} from "./surface-topology.js";
 import type { InboxOpts } from "./inbox.js";
 
 export interface SpawnAgentParams {
@@ -2290,11 +2295,11 @@ export class AgentEngine {
     agent: AgentRecord,
     event: AgentLifecycleEvent,
     signature?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const eventSuffix = signature === undefined ? "" : `:${signature}`;
     const eventKey = `${agent.agent_id}:${event}${eventSuffix}`;
     if (this.notifiedEvents.has(eventKey)) {
-      return;
+      return true;
     }
 
     try {
@@ -2313,8 +2318,10 @@ export class AgentEngine {
         }
       }
       this.notifiedEvents.add(eventKey);
+      return true;
     } catch {
       // Ignore Claude channel push failures; logs and sidebar state remain canonical.
+      return false;
     }
   }
 
@@ -2343,6 +2350,7 @@ export class AgentEngine {
     const agents = this.registry.list();
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
+    const surfaceTopology = await collectSurfaceTopology(this.client);
 
     for (const originalAgent of agents) {
       const sweepCtx: SweepAgentContext = {};
@@ -2370,6 +2378,9 @@ export class AgentEngine {
         agent,
         {
           inboxOpts: this.inboxOpts,
+          resolveTopology: async (targetAgent) =>
+            surfaceTopology?.topologyBySurface.get(targetAgent.surface_id) ??
+            EMPTY_SURFACE_TOPOLOGY,
           readParsedSurface: async (targetAgent) => {
             try {
               const screenText =
@@ -2391,8 +2402,14 @@ export class AgentEngine {
               return null;
             }
           },
+          resolveSurfaceWorkspace: async (targetAgent) =>
+            surfaceTopology?.workspaceBySurface.get(targetAgent.surface_id) ??
+            null,
         },
-        { harvestability },
+        {
+          ...healthTopologyOverrides(agent, surfaceTopology),
+          harvestability,
+        },
       );
       const health = evaluateAgentHealth(agent, healthInput);
       const healthSignature = this.healthSignature(health);
@@ -2428,8 +2445,14 @@ export class AgentEngine {
         await this.notifyLifecycleEvent(agent, "errored");
       }
 
-      if (this.shouldNotifyHealthChange(prev, health)) {
-        await this.notifyLifecycleEvent(agent, "health", healthSignature);
+      const shouldNotifyHealth = this.shouldNotifyHealthChange(prev, health);
+      let healthNotificationDelivered = true;
+      if (shouldNotifyHealth) {
+        healthNotificationDelivered = await this.notifyLifecycleEvent(
+          agent,
+          "health",
+          healthSignature,
+        );
       }
 
       const archived = await this.maybeArchiveDoneAgent(agent);
@@ -2476,7 +2499,13 @@ export class AgentEngine {
           workspace: agent.workspace_id ?? undefined,
         });
       }
-      this.sidebarSnapshot.set(agentId, statusSnapshot);
+      this.sidebarSnapshot.set(agentId, {
+        ...statusSnapshot,
+        healthSignature:
+          shouldNotifyHealth && !healthNotificationDelivered
+            ? (prev?.healthSignature ?? "pending_health_notification")
+            : statusSnapshot.healthSignature,
+      });
 
       // Quality tracking: check context usage for non-terminal agents
       // AIDEV-NOTE: Uses parseScreen for model-aware context_pct (handles Claude, Codex, Gemini).

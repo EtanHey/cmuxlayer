@@ -108,6 +108,12 @@ import {
   type ControlHealth,
 } from "./control-health.js";
 import {
+  collectSurfaceTopology as collectCmuxSurfaceTopology,
+  EMPTY_SURFACE_TOPOLOGY,
+  healthTopologyOverrides,
+  type SurfaceTopology,
+} from "./surface-topology.js";
+import {
   formatMcpProfileEnv,
   prepareWorktree,
   type McpProfile,
@@ -2606,93 +2612,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return null;
   };
 
-  type SurfaceTopology = { column: number | null; column_count: number | null };
-  type SurfaceTopologySnapshot = {
-    workspaceBySurface: Map<string, string>;
-    titleBySurface: Map<string, string>;
-    topologyBySurface: Map<string, SurfaceTopology>;
-  };
-  const emptySurfaceTopology: SurfaceTopology = {
-    column: null,
-    column_count: null,
-  };
-
   const collectSurfaceTopology = async (
     workspace?: string,
-  ): Promise<SurfaceTopologySnapshot | null> => {
-    try {
-      const workspaceRefs = workspace
-        ? [workspace]
-        : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
-      const snapshot: SurfaceTopologySnapshot = {
-        workspaceBySurface: new Map(),
-        titleBySurface: new Map(),
-        topologyBySurface: new Map(),
-      };
-
-      for (const workspaceRef of workspaceRefs) {
-        const panes = await client.listPanes({ workspace: workspaceRef });
-        if (!panes.panes || panes.panes.length === 0) {
-          continue;
-        }
-        const columnIndex = deriveColumnIndex(panes.panes);
-        const columnCount = new Set(columnIndex.values()).size;
-        const rawGroups = await Promise.all(
-          panes.panes.map(async (pane) => {
-            const group = await client.listPaneSurfaces({
-              workspace: workspaceRef,
-              pane: pane.ref,
-            });
-            return {
-              ...group,
-              workspace_ref: group.workspace_ref ?? workspaceRef,
-              pane_ref: group.pane_ref ?? pane.ref,
-            };
-          }),
-        );
-        const partitioned = partitionPaneSurfacesByMembership(
-          panes.panes,
-          rawGroups,
-          {
-            workspace_ref: panes.workspace_ref ?? workspaceRef,
-            window_ref: panes.window_ref,
-          },
-        );
-        for (const group of partitioned) {
-          for (const surface of group.surfaces) {
-            snapshot.workspaceBySurface.set(
-              surface.ref,
-              group.workspace_ref ?? workspaceRef,
-            );
-            snapshot.titleBySurface.set(surface.ref, surface.title);
-            snapshot.topologyBySurface.set(surface.ref, {
-              column: columnIndex.get(group.pane_ref) ?? null,
-              column_count: columnCount,
-            });
-          }
-        }
-      }
-
-      return snapshot;
-    } catch {
-      return null;
-    }
-  };
-
-  const healthTopologyOverrides = (
-    agent: AgentRecord,
-    snapshot: SurfaceTopologySnapshot | null,
-  ) =>
-    snapshot
-      ? {
-          topology:
-            snapshot.topologyBySurface.get(agent.surface_id) ??
-            emptySurfaceTopology,
-          surface_workspace_id:
-            snapshot.workspaceBySurface.get(agent.surface_id) ?? null,
-          surface_title: snapshot.titleBySurface.get(agent.surface_id) ?? null,
-        }
-      : {};
+  ) => collectCmuxSurfaceTopology(client, workspace);
 
   // Resolve a surface's 0-based column + the workspace column_count using the
   // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
@@ -2705,7 +2627,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): Promise<SurfaceTopology> =>
     (await collectSurfaceTopology(workspace))?.topologyBySurface.get(
       surfaceRef,
-    ) ?? emptySurfaceTopology;
+    ) ?? EMPTY_SURFACE_TOPOLOGY;
 
   const resolveSurfaceWorkspace = async (
     surfaceRef: string,
