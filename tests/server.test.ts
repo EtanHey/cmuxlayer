@@ -7,6 +7,7 @@ import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { dispatch, writeHeartbeat } from "../src/inbox.js";
 
 // Core low-level and metadata tools.
 const EXPECTED_TOOLS = [
@@ -93,7 +94,7 @@ describe("Claude channels", () => {
     rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
   });
 
-  it("emits lifecycle notifications over the MCP transport when enabled", async () => {
+  it("emits attention-worthy lifecycle notifications over the MCP transport when enabled", async () => {
     vi.useFakeTimers();
     rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -179,19 +180,171 @@ describe("Claude channels", () => {
       await advanceTimers(5000);
     }
 
+    stateMgr.transition("a1", "error", { error: "crashed" });
+
+    if (typeof advanceAsync === "function") {
+      await advanceAsync.call(vi, 5000);
+    } else {
+      await advanceTimers(5000);
+    }
+
     const notifications = messages.filter(
       (message) =>
         "method" in message &&
         message.method === "notifications/claude/channel",
     );
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]).toEqual(
+    const events = notifications.map((message) => {
+      const params = message.params as { meta?: { event?: string } };
+      return params.meta?.event;
+    });
+    expect(events).toContain("errored");
+    expect(events).toContain("health");
+    expect(events).not.toContain("spawned");
+    const erroredNotification = notifications.find((message) => {
+      const params = message.params as { meta?: { event?: string } };
+      return params.meta?.event === "errored";
+    });
+    expect(erroredNotification).toEqual(
       expect.objectContaining({
         params: expect.objectContaining({
           meta: expect.objectContaining({
-            event: "spawned",
+            event: "errored",
             agent_id: "a1",
             repo: "brainlayer",
+            state: "error",
+          }),
+        }),
+      }),
+    );
+
+    await server.close();
+    await clientTransport.close();
+  });
+
+  it("includes health issue summary in health channel notifications", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-05T12:00:00.000Z"));
+    rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    const inboxDir = join(CHANNEL_TEST_DIR, "inbox");
+    const stateMgr = new StateManager(CHANNEL_TEST_DIR);
+    stateMgr.writeState({
+      agent_id: "wedged-holder",
+      surface_id: "surface:42",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-wedged",
+      task_summary: "Drain the inbox",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-05T12:00:00Z",
+      updated_at: "2026-07-05T12:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      role: "worker",
+    });
+
+    const mockClient = {
+      listWorkspaces: vi
+        .fn()
+        .mockResolvedValue({ workspaces: [{ ref: "workspace:1" }] }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:42",
+            title: "agent",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+      log: vi.fn().mockResolvedValue(undefined),
+      setStatus: vi.fn().mockResolvedValue(undefined),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:42",
+        text: "$ ",
+        lines: 5,
+        scrollback_used: false,
+      }),
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      setProgress: vi.fn().mockResolvedValue(undefined),
+      newSplit: vi.fn(),
+    };
+    writeHeartbeat("wedged-holder", { baseDir: inboxDir });
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir: CHANNEL_TEST_DIR,
+      inboxBaseDir: inboxDir,
+      enableClaudeChannels: true,
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const messages: any[] = [];
+    clientTransport.onmessage = (message) => {
+      messages.push(message);
+    };
+
+    await server.connect(serverTransport);
+    const advanceAsync = (vi as any).advanceTimersByTimeAsync;
+    if (typeof advanceAsync === "function") {
+      await advanceAsync.call(vi, 5000);
+    } else {
+      await advanceTimers(5000);
+    }
+
+    dispatch(
+      "wedged-holder",
+      {
+        id: "stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+
+    if (typeof advanceAsync === "function") {
+      await advanceAsync.call(vi, 5000);
+    } else {
+      await advanceTimers(5000);
+    }
+
+    const healthNotification = messages.find((message) => {
+      const params = message.params as { meta?: { event?: string } };
+      return (
+        "method" in message &&
+        message.method === "notifications/claude/channel" &&
+        params.meta?.event === "health"
+      );
+    });
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    expect(healthNotification).toEqual(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          content: expect.stringContaining(healthSummary),
+          meta: expect.objectContaining({
+            event: "health",
+            agent_id: "wedged-holder",
+            health_summary: healthSummary,
           }),
         }),
       }),

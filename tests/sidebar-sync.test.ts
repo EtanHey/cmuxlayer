@@ -3,19 +3,24 @@
  * Tests syncSidebar(), runSweep(), and lifecycle log events.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 
-function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
+type MockClient = CmuxClient & {
+  notifyLifecycleEvent: ReturnType<typeof vi.fn>;
+};
+
+function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
   return {
     newSplit: vi.fn().mockResolvedValue({
       workspace: "ws:1",
@@ -46,11 +51,21 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     log: vi.fn().mockResolvedValue(undefined),
     notifyLifecycleEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
-  } as unknown as CmuxClient;
+  } as unknown as MockClient;
 }
 
 function makeSurface(ref: string): CmuxSurface {
   return { ref, title: "", type: "terminal", index: 0, selected: false };
+}
+
+function makeWorkspace(ref: string) {
+  return {
+    ref,
+    title: ref,
+    index: 0,
+    selected: false,
+    pinned: false,
+  };
 }
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
@@ -79,9 +94,10 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 
 describe("Sidebar Sync", () => {
   let stateMgr: StateManager;
-  let mockClient: CmuxClient;
+  let mockClient: MockClient;
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
+  let inboxOpts: { baseDir: string };
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -89,10 +105,12 @@ describe("Sidebar Sync", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
+    inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
+      inboxOpts,
     });
   });
 
@@ -101,29 +119,490 @@ describe("Sidebar Sync", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("calls setStatus for an active agent with state-derived icon and color", async () => {
+  it("calls setStatus with compact sidebar truth for an active agent", async () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
         workspace_id: "workspace:coach",
+        cli_session_id: "session-a1",
+        task_summary: "Read and follow GOAL-p8-sidebar.md",
+        role: "worker",
+        worktree_path:
+          "/Users/etanheyman/Gits/cmuxlayer.wt/cmuxlayer-worker-p8",
+        worktree_branch: "p8-sidebar",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "a1",
-      "brainlayer: working",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Read and follow GOAL-p8-sidebar.md | worktree=/Users/etanheyman/Gits/cmuxlayer.wt/cmuxlayer-worker-p8 | branch=p8-sidebar | report=n/a | pr=n/a",
       expect.objectContaining({
         icon: "bolt.fill",
         color: "#3B82F6",
         workspace: "workspace:coach",
         surface: "surface:42",
       }),
+    );
+  });
+
+  it("discriminates health by state instead of marking every missing-session row unhealthy", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "booting-agent",
+        state: "booting",
+        surface_id: "surface:1",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: null,
+        task_summary: "Boot worker",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "working-agent",
+        state: "working",
+        surface_id: "surface:2",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: null,
+        task_summary: "Run worker",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:1"), makeSurface("surface:2")];
+    writeHeartbeat("booting-agent", inboxOpts);
+    writeHeartbeat("working-agent", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "booting-agent",
+      "brainlayer | role=worker | state=booting | health=healthy | blocked=- | last_prompt=Boot worker | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "working-agent",
+      "brainlayer | role=worker | state=working | health=unhealthy(missing_cli_session_id,non_resumable) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+  });
+
+  it("clears stale workspace-scoped sidebar rows during startup purge after restart", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "stale-done-agent",
+        state: "done",
+        surface_id: "surface:recycled",
+        workspace_id: "workspace:previous-session",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:recycled")];
+    await engine.getRegistry().reconstitute();
+    engine.enableStartupPurge();
+
+    await engine.runSweep();
+
+    expect(mockClient.clearStatus).toHaveBeenCalledWith("stale-done-agent", {
+      workspace: "workspace:previous-session",
+    });
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      "stale-done-agent",
+      expect.any(String),
+      expect.any(Object),
+    );
+  });
+
+  it("does not emit channel notifications for initial spawned rows", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "working",
+        surface_id: "surface:42",
+        cli_session_id: "session-a1",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
+  });
+
+  it("continues sidebar sync when health screen reads fail", async () => {
+    mockClient.readScreen.mockRejectedValue(new Error("cmux read failed"));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "working",
+        surface_id: "surface:1",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-a1",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a2",
+        state: "working",
+        surface_id: "surface:2",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-a2",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:1"), makeSurface("surface:2")];
+    writeHeartbeat("a1", inboxOpts);
+    writeHeartbeat("a2", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await expect(engine.runSweep()).resolves.toBeUndefined();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a1",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ surface: "surface:1" }),
+    );
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a2",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ surface: "surface:2" }),
+    );
+  });
+
+  it("feeds topology and surface workspace truth into sidebar health", async () => {
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:actual")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:actual",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:actual",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:actual",
+      window_ref: "window:1",
+      pane_ref: "pane:actual",
+      surfaces: [
+        {
+          ref: "surface:42",
+          title: "worker lane",
+          type: "terminal",
+          index: 0,
+          selected: false,
+        },
+      ],
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "workspace-drift",
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:registry",
+        cli_session_id: "session-workspace-drift",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("workspace-drift", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(registry_surface_workspace_mismatch)";
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "workspace-drift",
+      `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a`,
+      expect.objectContaining({
+        surface: "surface:42",
+        workspace: "workspace:registry",
+      }),
+    );
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: "workspace-drift" }),
+      healthSummary,
+    );
+  });
+
+  it("scopes sidebar health screen reads to the agent workspace", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "scoped-read",
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-scoped-read",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("scoped-read", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.readScreen).toHaveBeenCalledWith(
+      "surface:42",
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+  });
+
+  it("notifies when a wedged holder is already unhealthy on the first sweep", async () => {
+    const inboxDir = join(TEST_DIR, "initial-wedged-inbox");
+    const agentId = "initial-wedged-holder";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-wedged",
+        role: "worker",
+        task_summary: "Drain existing stale dispatch",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    dispatch(
+      agentId,
+      {
+        id: "already-stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    );
+  });
+
+  it("marks a wedged holder unhealthy and notifies with the health issue summary", async () => {
+    const inboxDir = join(TEST_DIR, "wedged-inbox");
+    const agentId = "wedged-holder";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-wedged",
+        role: "worker",
+        task_summary: "Keep draining inbox dispatches",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      agentId,
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Keep draining inbox dispatches | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+
+    (mockClient.setStatus as ReturnType<typeof vi.fn>).mockClear();
+    mockClient.notifyLifecycleEvent.mockClear();
+    dispatch(
+      agentId,
+      {
+        id: "stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      agentId,
+      `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=self:agent_wedged | last_prompt=Keep draining inbox dispatches | worktree=- | branch=- | report=n/a | pr=n/a`,
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    );
+
+    mockClient.notifyLifecycleEvent.mockClear();
+    ack(agentId, "stale-dispatch", "done", { baseDir: inboxDir });
+
+    await engine.runSweep();
+
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      "healthy",
+    );
+
+    mockClient.notifyLifecycleEvent.mockClear();
+    dispatch(
+      agentId,
+      {
+        id: "stale-dispatch-2",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "second stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+
+    await engine.runSweep();
+
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    );
+  });
+
+  it("retries health notifications when channel delivery fails", async () => {
+    const inboxDir = join(TEST_DIR, "wedged-retry-inbox");
+    const agentId = "wedged-retry-holder";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-wedged-retry",
+        role: "worker",
+        task_summary: "Retry health channel",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    dispatch(
+      agentId,
+      {
+        id: "stale-dispatch",
+        ts_ms: Date.now() - 180_000,
+        from: "lead",
+        tag: "dispatch",
+        task: "stale work item",
+      },
+      { baseDir: inboxDir },
+    );
+    mockClient.notifyLifecycleEvent.mockRejectedValueOnce(
+      new Error("channel down"),
+    );
+
+    await engine.runSweep();
+    await engine.runSweep();
+
+    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthCalls = mockClient.notifyLifecycleEvent.mock.calls.filter(
+      (call) => call[0] === "health",
+    );
+    expect(healthCalls).toHaveLength(2);
+    expect(healthCalls[0]).toEqual([
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    ]);
+    expect(healthCalls[1]).toEqual([
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      healthSummary,
+    ]);
+  });
+
+  it("does not emit done notifications until a worker has verified terminal evidence", async () => {
+    const goalPath = join(TEST_DIR, "phase-8-goal.md");
+    const reportPath = join(TEST_DIR, "phase-8-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Phase 8 Goal",
+        "",
+        "Write the report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "The final report line must be exactly:",
+        "",
+        "`DONE_P8_WORKER`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "done-worker",
+        state: "done",
+        surface_id: "surface:42",
+        goal_file: goalPath,
+        role: "worker",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("done-worker", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
+      "done",
+      expect.objectContaining({ agent_id: "done-worker" }),
+    );
+
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_P8_WORKER\n", "utf8");
+
+    await engine.runSweep();
+
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+      "done",
+      expect.objectContaining({ agent_id: "done-worker" }),
     );
   });
 
@@ -137,6 +616,7 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -153,7 +633,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.setStatus).toHaveBeenCalledTimes(2);
     expect(mockClient.setStatus).toHaveBeenLastCalledWith(
       "a1",
-      "brainlayer: working",
+      "brainlayer | role=worker | state=working | health=unhealthy(missing_cli_session_id,non_resumable) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({
         workspace: "workspace:coach",
         surface: "surface:99",
@@ -167,9 +647,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -190,9 +672,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -234,9 +718,11 @@ describe("Sidebar Sync", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        cli_session_id: "session-a1",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -245,14 +731,7 @@ describe("Sidebar Sync", () => {
       "spawned: brainlayer",
       expect.objectContaining({ level: "info", source: "cmuxlayer" }),
     );
-    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
-      "spawned",
-      expect.objectContaining({
-        agent_id: "a1",
-        repo: "brainlayer",
-        state: "working",
-      }),
-    );
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
   });
 
   it("logs done event when agent reaches done state", async () => {
@@ -279,13 +758,9 @@ describe("Sidebar Sync", () => {
       "done: brainlayer",
       expect.objectContaining({ level: "success", source: "cmuxlayer" }),
     );
-    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
       "done",
-      expect.objectContaining({
-        agent_id: "a1",
-        repo: "brainlayer",
-        state: "done",
-      }),
+      expect.objectContaining({ agent_id: "a1" }),
     );
   });
 
@@ -307,7 +782,7 @@ describe("Sidebar Sync", () => {
       "errored: brainlayer",
       expect.objectContaining({ level: "error", source: "cmuxlayer" }),
     );
-    expect((mockClient as any).notifyLifecycleEvent).toHaveBeenCalledWith(
+    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
       "errored",
       expect.objectContaining({
         agent_id: "a1",
@@ -340,12 +815,10 @@ describe("Sidebar Sync", () => {
     );
     expect(doneCalls).toHaveLength(1);
 
-    const channelCalls = (
-      (mockClient as any).notifyLifecycleEvent as ReturnType<typeof vi.fn>
-    ).mock.calls;
+    const channelCalls = mockClient.notifyLifecycleEvent.mock.calls;
     const spawnedChannelCalls = channelCalls.filter((c) => c[0] === "spawned");
-    expect(spawnedChannelCalls).toHaveLength(1);
+    expect(spawnedChannelCalls).toHaveLength(0);
     const doneChannelCalls = channelCalls.filter((c) => c[0] === "done");
-    expect(doneChannelCalls).toHaveLength(1);
+    expect(doneChannelCalls).toHaveLength(0);
   });
 });
