@@ -788,7 +788,9 @@ export class CmuxSocketClient {
       if (!(error instanceof CmuxSocketError && error.code === "not_found")) {
         throw error;
       }
-      workspace = (await this.identify(opts.surface)).caller?.workspace_ref;
+      const identified = await this.identify(opts.surface);
+      workspace =
+        identified.caller?.workspace_ref ?? identified.focused?.workspace_ref;
     }
 
     if (!workspace) return undefined;

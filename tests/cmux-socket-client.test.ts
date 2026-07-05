@@ -793,6 +793,63 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     }
   });
 
+  it("falls back to the focused workspace when a surface cannot be mapped", async () => {
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+    const savedSurfaceList = MOCK_RESPONSES["surface.list"];
+    const savedIdentify = MOCK_RESPONSES["system.identify"];
+
+    MOCK_RESPONSES["workspace.list"] = {
+      workspaces: [
+        {
+          id: MOCK_WORKSPACE_ID,
+          ref: "workspace:1",
+          title: "Caller WS",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+        {
+          id: MOCK_SECOND_WORKSPACE_ID,
+          ref: "workspace:2",
+          title: "Focused WS",
+          index: 1,
+          selected: false,
+          pinned: false,
+        },
+      ],
+    };
+    MOCK_RESPONSES["surface.list"] = (req) => ({
+      workspace_ref: String(req.params.workspace_id ?? ""),
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: [],
+    });
+    MOCK_RESPONSES["system.identify"] = {
+      focused: {
+        workspace_ref: "workspace:2",
+        surface_ref: "surface:focused",
+        pane_ref: "pane:focused",
+      },
+    };
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.notify({
+        title: "Done",
+        surface: "surface:unmapped",
+      });
+
+      expect(lastV1Command).toBe(
+        `notify --title Done --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+    } finally {
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+      MOCK_RESPONSES["surface.list"] = savedSurfaceList;
+      MOCK_RESPONSES["system.identify"] = savedIdentify;
+    }
+  });
+
   it("renameTab sends V2 tab.action with rename params", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
