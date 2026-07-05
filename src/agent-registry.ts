@@ -96,6 +96,12 @@ export class AgentRegistry {
       // socket/listing failure must not mark every active agent as disappeared.
       return;
     }
+    if (surfaces.length === 0) {
+      // An empty topology is indistinguishable from a degraded cmux/app-server
+      // listing path. Do not mass-mark agents dead until a non-empty scan proves
+      // their specific surfaces are absent.
+      return;
+    }
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
 
     // Phase 1: Mark agents with disappeared surfaces as error
@@ -197,7 +203,17 @@ export class AgentRegistry {
   }
 
   async hasLiveSurface(surfaceId: string): Promise<boolean> {
-    const surfaces = await this.surfaceProvider();
+    let surfaces: CmuxSurface[];
+    try {
+      surfaces = await this.surfaceProvider();
+    } catch {
+      // "Live" here means "not proven absent" for liveness guards.
+      return true;
+    }
+    if (surfaces.length === 0) {
+      // Empty enumeration is inconclusive until a non-empty scan proves absence.
+      return true;
+    }
     return surfaces.some((surface) => surface.ref === surfaceId);
   }
 
@@ -619,7 +635,15 @@ export class AgentRegistry {
    * Agents whose surface is still alive are kept (user may want to inspect output).
    */
   async purgeTerminal(): Promise<number> {
-    const surfaces = await this.surfaceProvider();
+    let surfaces: CmuxSurface[];
+    try {
+      surfaces = await this.surfaceProvider();
+    } catch {
+      return 0;
+    }
+    if (surfaces.length === 0) {
+      return 0;
+    }
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
     let purged = 0;
 

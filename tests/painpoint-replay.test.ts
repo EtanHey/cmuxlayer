@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { describe, expect, it } from "vitest";
+import { buildRouteTable } from "../src/agent-facade.js";
 import { evaluateAgentHealth } from "../src/agent-health.js";
 import { reposEquivalent } from "../src/repo-workspace.js";
 import { parseScreen } from "../src/screen-parser.js";
@@ -42,6 +43,7 @@ type PainpointFixture = {
     focused_workspace: string;
     explicit_workspace: string | null;
   };
+  records?: Partial<AgentRecord>[];
 };
 
 const fixtureDir = new URL("./fixtures/painpoints/", import.meta.url);
@@ -126,6 +128,32 @@ function recordFromFixture(record: Partial<AgentRecord>): AgentRecord {
   };
 }
 
+function classifyRegistryGhostDuplicateFixture(
+  fixture: PainpointFixture,
+): string {
+  const records = fixture.records?.map(recordFromFixture) ?? [];
+  const liveSurfaceRefs = new Set(
+    records
+      .map((record) => record.surface_id)
+      .filter((surfaceId) => surfaceId !== "surface:missing"),
+  );
+
+  const hasMissingSurfaceRecord = records.some(
+    (record) => !liveSurfaceRefs.has(record.surface_id),
+  );
+  let hasConflictingRoutes = false;
+  try {
+    buildRouteTable(records);
+  } catch (error) {
+    hasConflictingRoutes =
+      error instanceof Error && /Conflicting routes/.test(error.message);
+  }
+
+  return hasMissingSurfaceRecord || hasConflictingRoutes
+    ? "poisoned_registry"
+    : "unknown";
+}
+
 describe("Phase 0 painpoint replay corpus", () => {
   it("loads every required painpoint fixture", () => {
     expect(fixtures.map((fixture) => fixture.id)).toEqual([
@@ -208,6 +236,18 @@ describe("Phase 0 painpoint replay corpus", () => {
             surface_workspace_id: spawn.focused_workspace,
           }).issue_codes,
         ).toContain("registry_surface_workspace_mismatch");
+      });
+      continue;
+    }
+
+    if (fixture.id === "registry-ghost-duplicate-surface") {
+      it(`${fixture.id} classifies as ${fixture.expected_state} via registry route guards`, () => {
+        const records = fixture.records?.map(recordFromFixture) ?? [];
+        expect(records.length).toBeGreaterThan(0);
+        expect(() => buildRouteTable(records)).toThrow(/Conflicting routes/);
+        expect(classifyRegistryGhostDuplicateFixture(fixture)).toBe(
+          fixture.expected_state,
+        );
       });
       continue;
     }

@@ -63,6 +63,21 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("does not collapse surface listing failures into an absent surface", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWorkspaces.mockRejectedValueOnce(new Error("socket unavailable"));
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+
+    await expect((runtime as any).registry.hasLiveSurface("surface:1")).resolves.toBe(
+      true,
+    );
+
+    runtime.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
   it("scopes bridge turns, interrupts, and screen reads to the agent workspace", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });

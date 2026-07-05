@@ -34,6 +34,18 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let launchSent = false;
   let agentMessageSubmitted = false;
   let surfaceLive = true;
+  const listedSurface = () =>
+    surfaceLive
+      ? {
+          paneRef: "pane:1",
+          surfaceRef: "surface:new",
+          title: "agent-pane",
+        }
+      : {
+          paneRef: "pane:witness",
+          surfaceRef: "surface:post-close-witness",
+          title: "witness-pane",
+        };
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
       surfaceLive = true;
@@ -51,46 +63,57 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       }
     }
     if (args.includes("list-workspaces")) {
-      return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "ws:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
     }
     if (args.includes("list-panes")) {
+      const listed = listedSurface();
       return {
         stdout: JSON.stringify({
           workspace_ref: "ws:1",
           window_ref: "window:1",
-          panes: surfaceLive
-            ? [
-                {
-                  ref: "pane:1",
-                  index: 0,
-                  focused: true,
-                  surface_count: 1,
-                  surface_refs: ["surface:new"],
-                  selected_surface_ref: "surface:new",
-                },
-              ]
-            : [],
+          panes: [
+            {
+              ref: listed.paneRef,
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: [listed.surfaceRef],
+              selected_surface_ref: listed.surfaceRef,
+            },
+          ],
         }),
         stderr: "",
       };
     }
     if (args.includes("list-pane-surfaces")) {
+      const listed = listedSurface();
       return {
         stdout: JSON.stringify({
           workspace_ref: "ws:1",
           window_ref: "window:1",
-          pane_ref: "pane:1",
-          surfaces: surfaceLive
-            ? [
-                {
-                  ref: "surface:new",
-                  title: "agent-pane",
-                  type: "terminal",
-                  index: 0,
-                  selected: true,
-                },
-              ]
-            : [],
+          pane_ref: listed.paneRef,
+          surfaces: [
+            {
+              ref: listed.surfaceRef,
+              title: listed.title,
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
         }),
         stderr: "",
       };

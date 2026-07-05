@@ -117,8 +117,8 @@ describe("close_surface cleans up agent registry", () => {
     const before = registry.get("agent-on-closed-surface");
     expect(before?.state).toBe("working");
 
-    // Simulate surface being closed — remove from live surfaces
-    liveSurfaces = [];
+    // Simulate surface being closed with a successful non-empty topology scan.
+    liveSurfaces = [makeSurface("surface:live")];
 
     // After reconcile, agent should be marked error
     await registry.reconcile();
@@ -144,7 +144,7 @@ describe("close_surface cleans up agent registry", () => {
     stateMgr.writeState(doneRecord);
     stateMgr.writeState(errorRecord);
 
-    const surfaceProvider = async () => [] as CmuxSurface[];
+    const surfaceProvider = async () => [makeSurface("surface:live")];
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     await registry.reconstitute();
 
