@@ -35,36 +35,45 @@ export async function collectSurfaceTopology(
   client: SurfaceTopologyClient,
   workspace?: string,
 ): Promise<SurfaceTopologySnapshot | null> {
+  let workspaceRefs: string[];
   try {
-    const workspaceRefs = workspace
+    workspaceRefs = workspace
       ? [workspace]
       : (await client.listWorkspaces()).workspaces.map((ws) => ws.ref);
-    const snapshot: SurfaceTopologySnapshot = {
-      workspaceBySurface: new Map(),
-      titleBySurface: new Map(),
-      topologyBySurface: new Map(),
-    };
+  } catch {
+    return null;
+  }
 
-    for (const workspaceRef of workspaceRefs) {
+  const snapshot: SurfaceTopologySnapshot = {
+    workspaceBySurface: new Map(),
+    titleBySurface: new Map(),
+    topologyBySurface: new Map(),
+  };
+
+  for (const workspaceRef of workspaceRefs) {
+    try {
       const panes = await client.listPanes({ workspace: workspaceRef });
-      if (!panes.panes || panes.panes.length === 0) {
-        continue;
-      }
+      if (!panes.panes || panes.panes.length === 0) continue;
+
       const columnIndex = deriveColumnIndex(panes.panes);
       const columnCount = new Set(columnIndex.values()).size;
-      const rawGroups = await Promise.all(
-        panes.panes.map(async (pane) => {
+      const rawGroups: CmuxPaneSurfaces[] = [];
+      for (const pane of panes.panes) {
+        try {
           const group = await client.listPaneSurfaces({
             workspace: workspaceRef,
             pane: pane.ref,
           });
-          return {
+          rawGroups.push({
             ...group,
             workspace_ref: group.workspace_ref ?? workspaceRef,
             pane_ref: group.pane_ref ?? pane.ref,
-          };
-        }),
-      );
+          });
+        } catch {
+          // Panes can close between listPanes and listPaneSurfaces. Keep the
+          // rest of the snapshot usable instead of dropping every agent's health input.
+        }
+      }
       const partitioned = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
         workspace_ref: panes.workspace_ref ?? workspaceRef,
         window_ref: panes.window_ref,
@@ -82,12 +91,12 @@ export async function collectSurfaceTopology(
           });
         }
       }
+    } catch {
+      // A single bad workspace should not erase topology already collected for others.
     }
-
-    return snapshot;
-  } catch {
-    return null;
   }
+
+  return snapshot;
 }
 
 export function healthTopologyOverrides(

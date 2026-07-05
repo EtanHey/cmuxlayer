@@ -1258,6 +1258,7 @@ export class AgentEngine {
         ? await this.readSweepScreen(agent, ctx)
         : await this.client.readScreen(agent.surface_id, {
             lines: BOOT_SESSION_CAPTURE_LINES,
+            workspace: agent.workspace_id ?? undefined,
           });
       return !this.screenContradictsTranscriptDone(agent.cli, screen.text);
     } catch {
@@ -1271,6 +1272,7 @@ export class AgentEngine {
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
+        workspace: agent.workspace_id ?? undefined,
       });
       return this.hasOutputDoneEvidence(agent.cli, screen.text);
     } catch {
@@ -1339,6 +1341,7 @@ export class AgentEngine {
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
+        workspace: agent.workspace_id ?? undefined,
       });
       const evidence = this.readReadyEvidence(agent, screen.text);
       if (
@@ -1813,6 +1816,7 @@ export class AgentEngine {
     ctx.screen ??= this.client
       .readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
+        workspace: agent.workspace_id ?? undefined,
       })
       .then((screen) => {
         this.currentSweepScreenSignatures.set(
@@ -2514,7 +2518,12 @@ export class AgentEngine {
         try {
           const screenText =
             taskDoneResult.screenText ??
-            (await this.client.readScreen(surface_id, { lines: 5 })).text;
+            (
+              await this.client.readScreen(surface_id, {
+                lines: 5,
+                workspace: agent.workspace_id ?? undefined,
+              })
+            ).text;
           const parsed = parseScreen(tailScreenLines(screenText, 5));
           const contextPct = parsed.context_pct;
           if (

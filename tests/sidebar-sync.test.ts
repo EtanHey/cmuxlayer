@@ -336,6 +336,28 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("scopes sidebar health screen reads to the agent workspace", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "scoped-read",
+        state: "working",
+        surface_id: "surface:42",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-scoped-read",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    writeHeartbeat("scoped-read", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.readScreen).toHaveBeenCalledWith(
+      "surface:42",
+      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    );
+  });
+
   it("notifies when a wedged holder is already unhealthy on the first sweep", async () => {
     const inboxDir = join(TEST_DIR, "initial-wedged-inbox");
     const agentId = "initial-wedged-holder";

@@ -2970,7 +2970,7 @@ To continue this session, run codex resume ${sessionId}`,
         expect(mockClient.moveSurface).not.toHaveBeenCalled();
         expect(mockClient.readScreen).toHaveBeenCalledWith(
           "surface:claude-screen-ready",
-          { lines: 80 },
+          { lines: 80, workspace: "ws:screen-ready" },
         );
       } finally {
         vi.useRealTimers();
