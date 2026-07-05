@@ -213,9 +213,11 @@ export class CmuxPersistentSocket {
 
       try {
         const parsed = JSON.parse(line) as Partial<V2Response>;
-        const entry =
-          typeof parsed.id === "string" ? this.pending.get(parsed.id) : null;
-        if (entry && typeof parsed.id === "string") {
+        if (typeof parsed.id === "string") {
+          const entry = this.pending.get(parsed.id);
+          if (!entry) {
+            continue;
+          }
           clearTimeout(entry.timer);
           this.pending.delete(parsed.id);
           entry.resolve(parsed as V2Response);
@@ -224,6 +226,10 @@ export class CmuxPersistentSocket {
         }
       } catch (error) {
         if (this.isJsonLikeFrame(line)) {
+          if (line.trimStart().startsWith("[") && this.pendingV1.length > 0) {
+            this.resolveNextV1(line);
+            continue;
+          }
           this.rejectMalformedFrame(line, error);
         } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);

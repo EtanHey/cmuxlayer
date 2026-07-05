@@ -3252,6 +3252,15 @@ export class AgentEngine {
     }
   }
 
+  private isProcessMissingError(error: unknown): boolean {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ESRCH"
+    );
+  }
+
   private isProcessGone(pid: number | null | undefined): boolean {
     const liveness = this.processLiveness(pid);
     return liveness === "gone" || liveness === "unknown";
@@ -3426,11 +3435,14 @@ export class AgentEngine {
       route.workspace_id,
     );
 
+    let forceSignalAccepted = force === true && !agent.pid;
     if (force && agent.pid) {
       try {
         process.kill(agent.pid, "SIGKILL");
-      } catch {
-        // Process may already be dead — that's fine
+        forceSignalAccepted = true;
+      } catch (error) {
+        forceSignalAccepted = this.isProcessMissingError(error);
+        // Process may already be dead; other failures must preserve tracking.
       }
     } else {
       // Graceful: send Ctrl+C
@@ -3453,7 +3465,7 @@ export class AgentEngine {
       agent,
       stopClosePolicy.paneRef,
       stopClosePolicy.collapsePane,
-      force === true,
+      force === true && forceSignalAccepted,
     );
     if (
       !stopResult.processGone ||

@@ -5605,6 +5605,55 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("preserves tracking when force SIGKILL is not permitted", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          killCalls.push([pid, signal ?? 0]);
+          throw Object.assign(new Error("operation not permitted"), {
+            code: "EPERM",
+          });
+        }) as typeof process.kill);
+
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-force-eperm",
+            state: "working",
+            surface_id: "surface:force-eperm",
+            pid: 56789,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:force-eperm")];
+        await engine.getRegistry().reconstitute();
+
+        await expect(engine.stopAgent("agent-force-eperm", true)).rejects.toThrow(
+          /process still alive/i,
+        );
+
+        expect(killCalls).toContainEqual([56789, "SIGKILL"]);
+        expect(killCalls).toContainEqual([56789, 0]);
+        expect(stateMgr.readState("agent-force-eperm")).toMatchObject({
+          state: "working",
+          quality: "degraded",
+          error: expect.stringMatching(/process still alive/i),
+        });
+        expect(engine.getAgentState("agent-force-eperm")).toMatchObject({
+          state: "working",
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
     it("treats kill(0) permission errors as live during graceful stop", async () => {
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);

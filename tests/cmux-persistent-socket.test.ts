@@ -122,6 +122,27 @@ describe("CmuxPersistentSocket V1 demux", () => {
     }
   });
 
+  it("passes through bracket-prefixed plain V1 replies", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("bracket-v1");
+    await startLineServer(path, (_line, conn) => {
+      conn.write("[busy] retry later\n");
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      await expect(socket.sendLine("set_status first active")).resolves.toBe(
+        "[busy] retry later",
+      );
+    } finally {
+      socket.disconnect();
+    }
+  });
+
   it("rejects every pending V2 request when an uncorrelatable object frame is malformed", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("malformed-v2-only");
@@ -145,6 +166,44 @@ describe("CmuxPersistentSocket V1 demux", () => {
       await expect(first).rejects.toMatchObject({ code: "protocol_error" });
       await expect(second).rejects.toMatchObject({ code: "protocol_error" });
       expect(received).toHaveLength(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("does not let late V2 responses complete a queued V1 request after malformed V2 rejection", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("late-v2-after-malformed");
+    const v2Ids: string[] = [];
+    await startLineServer(path, (line, conn) => {
+      if (line.startsWith("{")) {
+        const parsed = JSON.parse(line) as { id: string };
+        v2Ids.push(parsed.id);
+        if (v2Ids.length === 2) {
+          conn.write('{"id":\n');
+        }
+        return;
+      }
+      conn.write(
+        `${JSON.stringify({ id: v2Ids[0], ok: true, result: { stale: true } })}\n`,
+      );
+      conn.write("OK\n");
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      const first = socket.call("list_workspaces");
+      const second = socket.call("list_panes");
+      await expect(first).rejects.toMatchObject({ code: "protocol_error" });
+      await expect(second).rejects.toMatchObject({ code: "protocol_error" });
+
+      await expect(socket.sendLine("set_status after malformed")).resolves.toBe(
+        "OK",
+      );
     } finally {
       socket.disconnect();
     }
