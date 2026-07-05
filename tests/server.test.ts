@@ -4345,6 +4345,143 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
+  it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after dismissal", async () => {
+    vi.useRealTimers();
+    const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
+    process.env.REPOGOLEM_ALLOW_MODEL = "1";
+    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
+    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked.md");
+    const updateMenu = [
+      ">_ OpenAI Codex",
+      "",
+      "Update available!",
+      "See full release notes:",
+      "https://github.com/openai/codex/releases/latest",
+      "See https://github.com/openai/codex for installation options.",
+      "",
+      "> Release notes",
+      "  Skip until next version",
+    ].join("\n");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot that should be blocked", "utf8");
+
+    let launcherSent = false;
+    const sentKeys: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "cmuxlayer",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key")) {
+        sentKeys.push(String(args.at(-1) ?? ""));
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text.includes("cmuxlayerCodex")) {
+          launcherSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text: launcherSent ? updateMenu : "$ ",
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (
+      server as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (
+              args: Record<string, unknown>,
+              context: unknown,
+            ) => Promise<{
+              structuredContent?: Record<string, unknown>;
+              content: Array<{ text: string }>;
+            }>;
+          }
+        >;
+      }
+    )._registeredTools["spawn_agent"];
+
+    try {
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 500,
+        },
+        {},
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error_code).toBe("blocked_by_update_menu");
+      expect(parsed.recovery).toContain("Skip until next version");
+      expect(sentKeys.slice(-2)).toEqual(["down", "return"]);
+    } finally {
+      if (previousAllowModel === undefined) {
+        delete process.env.REPOGOLEM_ALLOW_MODEL;
+      } else {
+        process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("new_split times out when a CLI auto-update marker never clears", async () => {
     vi.useFakeTimers();
     const previousUpdateMax = process.env.CMUXLAYER_BOOT_PROMPT_UPDATE_MAX_MS;

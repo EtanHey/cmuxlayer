@@ -64,7 +64,7 @@ function readPainpointFixture(fileName: string): PainpointFixture {
     id,
     expected_state: expectedById[id] ?? "unknown",
     phase_home:
-      id === "bare-shell-and-bare-gemini-prompt"
+      id === "bare-shell-and-bare-gemini-prompt" || id === "codex-update-menu"
         ? "phase-3-spawn-readiness-monitor-boot"
         : "phase-1-delivery-safety-gate",
     source_evidence: [fileName],

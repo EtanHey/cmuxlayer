@@ -118,10 +118,28 @@ Select a model for the next worker:
   });
 
   it("recognizes the Codex update menu as an interactive overlay", () => {
+    // Reconstructed from local Codex CLI 0.142.5 binary strings; fixture stays screen-only.
     const parsed = parseScreen(readFixture("painpoints/codex-update-menu.txt"));
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes a Codex update menu with a sparkle-prefixed update line", () => {
+    const parsed = parseScreen(`
+>_ OpenAI Codex
+
+\u2728 Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+
+> Release notes
+  Skip until next version
+`);
+
+    expect(parsed.agent_type).toBe("codex");
     expect(parsed.errors).toContain("interactive_prompt");
     expect(parsed.control_state).toBe("interactive_overlay");
   });

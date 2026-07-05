@@ -2066,7 +2066,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       } catch (error) {
-        if (error instanceof BootPromptTimeoutError) {
+        if (
+          error instanceof BootPromptTimeoutError ||
+          error instanceof BootPromptUpdateMenuBlockedError
+        ) {
           throw error;
         }
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
