@@ -1,4 +1,5 @@
 import type { AgentRecord } from "./agent-types.js";
+import type { WorkerHarvestability } from "./agent-engine.js";
 import { inferRecordRoleOrNull } from "./layout-policy.js";
 
 export type AgentHealthStatus = "healthy" | "unhealthy";
@@ -14,6 +15,9 @@ export type AgentHealthIssueCode =
   | "registry_screen_disagreement"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
+  | "pr_loop_incomplete"
+  | "kept_open_contract_incomplete"
+  | "degraded_evidence_channel"
   | "recoverable_blocker_requires_action"
   | "missing_managed_lead_agent_id"
   | "ambiguous_repo_cwd_label"
@@ -35,6 +39,7 @@ export interface AgentHealthInput {
   surface_workspace_id?: string | null;
   surface_title?: string | null;
   closure_artifact_verified?: boolean | null;
+  harvestability?: WorkerHarvestability | null;
   screen_actions?: string[] | null;
   topology?: AgentTopologyHealthInput | null;
 }
@@ -230,6 +235,42 @@ export function evaluateAgentHealth(
       issues,
       "closure_without_artifact",
       "worker closure is not backed by a verified DONE marker, BLOCKED/NOT_GREEN handoff, or successor transfer",
+    );
+  }
+  if (
+    input.harvestability?.pr_loop_required === true &&
+    input.harvestability.pr_loop_satisfied === false
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "pr_loop_incomplete",
+      "PR-loop worker did not record merged/reviewed status or an explicit handoff",
+    );
+  }
+  if (
+    input.harvestability?.kept_open?.present === true &&
+    input.harvestability.kept_open.complete === false
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "kept_open_contract_incomplete",
+      "KEPT_OPEN requires reason, owner, and next check",
+    );
+  }
+  if (
+    agent.state === "done" &&
+    role !== "orchestrator" &&
+    role !== "ic" &&
+    input.harvestability?.evidence_channel.degraded === true
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "degraded_evidence_channel",
+      input.harvestability.evidence_channel.reason ??
+        "done evidence channel is degraded",
     );
   }
 

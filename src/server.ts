@@ -1365,6 +1365,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   let lifecycleRefreshManagedMetadata:
     | ((agentId?: string) => Promise<void>)
     | null = null;
+  let lifecycleHealthEngine: AgentEngine | null = null;
   const refreshManagedMetadataBestEffort = async (
     agentId?: string,
   ): Promise<void> => {
@@ -2709,16 +2710,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_title?: string | null;
       topology?: { column: number | null; column_count: number | null } | null;
       closure_artifact_verified?: boolean | null;
+      harvestability?: ReturnType<AgentEngine["assessHarvestability"]> | null;
       inbox_channel_dir_deleted?: boolean | null;
     },
   ) => {
+    const harvestability =
+      overrides?.harvestability !== undefined
+        ? overrides.harvestability
+        : lifecycleHealthEngine?.assessHarvestability(agent) ?? null;
     const closureArtifactVerified =
       overrides?.closure_artifact_verified !== undefined
         ? overrides.closure_artifact_verified
-        : agent.state === "done" &&
-            (agent.role ?? "worker") !== "orchestrator"
-          ? Boolean(agent.task_done_detected_at)
-          : null;
+        : harvestability?.closure_artifact_verified ?? null;
     const topology =
       overrides?.topology !== undefined
         ? overrides.topology
@@ -2762,6 +2765,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface_title: overrides?.surface_title,
       topology,
       closure_artifact_verified: closureArtifactVerified,
+      harvestability,
     });
   };
 
@@ -4844,6 +4848,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       );
     context.lifecycleSweepEngine = engine;
+    lifecycleHealthEngine = engine;
 
     const resolveSpawnRecord = (
       agentId: string,
@@ -5805,7 +5810,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 12. wait_for
     server.tool(
       "wait_for",
-      "Block until an agent reaches a target registry state and return health. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography. This does not yet watch report files or DONE markers; if a collab goal defines a report path/DONE marker, verify that file separately and treat registry/file or registry/screen disagreement as health evidence.",
+      "Block until an agent reaches a target registry state and return health. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography. When the agent has a file-backed goal contract, returned health includes artifact-backed harvestability by reading the referenced report and DONE marker.",
       {
         agent_id: z.string().describe("Agent ID from spawn_agent"),
         target_state: z
@@ -5878,7 +5883,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 13. wait_for_all
     server.tool(
       "wait_for_all",
-      "Block until ALL agents reach a target registry state OR any agent errors, returning per-agent health with partial results. This does not yet watch report files or DONE markers; collab leads must verify required output files separately.",
+      "Block until ALL agents reach a target registry state OR any agent errors, returning per-agent health with partial results. When agents have file-backed goal contracts, returned health includes artifact-backed harvestability by reading referenced reports and DONE markers.",
       {
         agent_ids: z.array(z.string()).describe("Array of agent IDs"),
         target_state: z
@@ -5943,7 +5948,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 14. get_agent_state
     server.tool(
       "get_agent_state",
-      "Get the full registry state of an agent, including cli_session_id/resume data and health. Health may flag missing sessions, dead inbox monitors, topology drift, or registry/screen disagreement.",
+      "Get the full registry state of an agent, including cli_session_id/resume data, health, and artifact-backed harvestability. Health may flag missing sessions, dead inbox monitors, topology drift, registry/screen disagreement, or unverified worker closure artifacts.",
       {
         agent_id: z.string().describe("Agent ID"),
       },
@@ -5955,17 +5960,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!state)
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const topology = await collectSurfaceTopology();
+          const harvestability = engine.assessHarvestability(state);
           const health = await evaluateServerAgentHealth(state, {
             ...healthTopologyOverrides(state, topology),
+            harvestability,
           });
           const formatted =
             formatAgentState(state) +
+            `\nharvestability: ${
+              harvestability.closeable ? "closeable" : "not closeable"
+            }` +
             `\nhealth: ${health.status}${
               health.issues.length > 0
                 ? ` (${health.issues.join("; ")})`
                 : ""
             }`;
-          const payload = { ...toAgentStatePayload(state), health };
+          const payload = {
+            ...toAgentStatePayload(state),
+            harvestability,
+            health,
+          };
           return okFormatted(
             formatted,
             payload as unknown as Record<string, unknown>,
