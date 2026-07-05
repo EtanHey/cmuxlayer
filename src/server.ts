@@ -209,6 +209,8 @@ const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
 const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
+const BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS =
+  BOOT_PROMPT_READY_POLL_MS * 3;
 const BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS = BOOT_PROMPT_READY_POLL_MS * 3;
 
 function bootPromptUpdateMaxMs(): number {
@@ -1961,6 +1963,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
     let codexUpdateMenuDismissed = false;
+    let codexUpdateMenuDismissedAt: number | null = null;
     const updateMaxMs = bootPromptUpdateMaxMs();
     const postUpdateReadyBudgetMs = () =>
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
@@ -1982,6 +1985,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
           if (codexUpdateMenuDismissed) {
+            const elapsedSinceDismissMs =
+              codexUpdateMenuDismissedAt === null
+                ? BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
+                : now - codexUpdateMenuDismissedAt;
+            if (
+              elapsedSinceDismissMs < BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
+            ) {
+              consecutiveMatches.clear();
+              await delay(BOOT_PROMPT_READY_POLL_MS);
+              continue;
+            }
             throw new BootPromptUpdateMenuBlockedError(
               `Boot prompt delivery blocked by Codex update menu on ${opts.surface}`,
               tailLines(lastText, 10),
@@ -1994,7 +2008,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await sendKeyWithRetry(opts.surface, "return", opts.workspace);
           codexUpdateMenuDismissed = true;
           const dismissedAt = Date.now();
-          deadline = Math.max(deadline, dismissedAt + postUpdateReadyBudgetMs());
+          codexUpdateMenuDismissedAt = dismissedAt;
+          deadline = Math.max(
+            deadline,
+            dismissedAt + postUpdateReadyBudgetMs(),
+            dismissedAt +
+              BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS +
+              BOOT_PROMPT_READY_POLL_MS,
+          );
           await delay(BOOT_PROMPT_READY_POLL_MS);
           continue;
         }
