@@ -1,0 +1,16 @@
+# RECONSTRUCTED fixture, 2026-07-05.
+# Source evidence: local Codex CLI 0.142.5 native binary strings include
+# "Update available!", "See full release notes:",
+# "https://github.com/openai/codex/releases/latest",
+# "See https://github.com/openai/codex for installation options.",
+# and "Skip until next version".
+
+>_ OpenAI Codex
+
+Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+See https://github.com/openai/codex for installation options.
+
+> Release notes
+  Skip until next version

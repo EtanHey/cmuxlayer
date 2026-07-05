@@ -188,6 +188,11 @@ const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
+const CODEX_UPDATE_MENU_RE = /(?:^|\n)\s*Update available!\s*(?:\n|$)/i;
+const CODEX_UPDATE_MENU_SKIP_RE =
+  /(?:^|\n)\s*(?:[>❯]\s*)?Skip until next version\s*(?:\n|$)/i;
+const CODEX_UPDATE_MENU_RELEASE_NOTES_RE =
+  /(?:^|\n)\s*(?:See full release notes:|https:\/\/github\.com\/openai\/codex\/releases(?:\/latest)?)\s*(?:\n|$)/i;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
@@ -245,6 +250,15 @@ function stripAnsi(text: string): string {
 
 function normalizeText(text: string): string {
   return stripAnsi(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+export function isCodexUpdateMenuScreen(text: string): boolean {
+  const normalized = normalizeText(text);
+  return (
+    CODEX_UPDATE_MENU_RE.test(normalized) &&
+    CODEX_UPDATE_MENU_SKIP_RE.test(normalized) &&
+    CODEX_UPDATE_MENU_RELEASE_NOTES_RE.test(normalized)
+  );
 }
 
 function stripOrphanTtyControlTrailer(line: string): string {
@@ -309,6 +323,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
   if (
     CODEX_HEADER_RE.test(text) ||
     (CODEX_BOOT_PANEL_RE.test(text) && CODEX_PANEL_MODEL_RE.test(text)) ||
+    isCodexUpdateMenuScreen(text) ||
     CODEX_WORKING_RE.test(text) ||
     CODEX_RESUME_RE.test(text)
   ) {
@@ -591,6 +606,14 @@ function parseErrors(text: string): string[] {
   }
 
   if (!errors.includes("permission_prompt") && hasInteractivePromptBlock(text)) {
+    errors.push("interactive_prompt");
+  }
+
+  if (
+    !errors.includes("permission_prompt") &&
+    !errors.includes("interactive_prompt") &&
+    isCodexUpdateMenuScreen(text)
+  ) {
     errors.push("interactive_prompt");
   }
 

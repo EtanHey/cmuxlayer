@@ -4180,6 +4180,163 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
+  it("spawn_agent skips the interactive Codex update menu before delivering the boot prompt", async () => {
+    vi.useRealTimers();
+    const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
+    process.env.REPOGOLEM_ALLOW_MODEL = "1";
+    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
+    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu.md");
+    const prompt = "boot after skipping update menu";
+    const updateMenu = [
+      ">_ OpenAI Codex",
+      "",
+      "Update available!",
+      "See full release notes:",
+      "https://github.com/openai/codex/releases/latest",
+      "See https://github.com/openai/codex for installation options.",
+      "",
+      "> Release notes",
+      "  Skip until next version",
+    ].join("\n");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+
+    let launcherSent = false;
+    let updateMenuSkipped = false;
+    let promptSent = false;
+    const sentTexts: string[] = [];
+    const sentKeys: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "cmuxlayer",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key")) {
+        const key = String(args.at(-1) ?? "");
+        sentKeys.push(key);
+        if (key === "return" && sentKeys.at(-2) === "down") {
+          updateMenuSkipped = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        sentTexts.push(text);
+        if (text.includes("cmuxlayerCodex")) {
+          launcherSent = true;
+        } else if (text === prompt) {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        let text = "$ ";
+        if (launcherSent && !updateMenuSkipped) {
+          text = updateMenu;
+        } else if (launcherSent && updateMenuSkipped && !promptSent) {
+          text = "codex> ";
+        } else if (promptSent) {
+          text =
+            "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (
+      server as {
+        _registeredTools: Record<
+          string,
+          {
+            handler: (
+              args: Record<string, unknown>,
+              context: unknown,
+            ) => Promise<{
+              structuredContent?: Record<string, unknown>;
+              content: Array<{ text: string }>;
+            }>;
+          }
+        >;
+      }
+    )._registeredTools["spawn_agent"];
+
+    try {
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 500,
+        },
+        {},
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(sentKeys).toEqual(expect.arrayContaining(["down", "return"]));
+      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+    } finally {
+      if (previousAllowModel === undefined) {
+        delete process.env.REPOGOLEM_ALLOW_MODEL;
+      } else {
+        process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
+      }
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("new_split times out when a CLI auto-update marker never clears", async () => {
     vi.useFakeTimers();
     const previousUpdateMax = process.env.CMUXLAYER_BOOT_PROMPT_UPDATE_MAX_MS;

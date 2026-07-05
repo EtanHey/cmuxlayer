@@ -117,6 +117,33 @@ Select a model for the next worker:
     expect(parsed.control_state).toBe("interactive_overlay");
   });
 
+  it("recognizes the Codex update menu as an interactive overlay", () => {
+    const parsed = parseScreen(readFixture("painpoints/codex-update-menu.txt"));
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("does not classify prose with isolated Codex update strings as an update menu", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Standup notes:
+Update available!
+Skip until next version
+
+This is copied prose, not a live Codex TUI menu.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("recognizes permission prompts without numbered options", () => {
     const parsed = parseScreen(`
 Claude Code
