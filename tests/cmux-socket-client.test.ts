@@ -784,7 +784,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
         surface: "surface:target",
       });
       expect(lastV1Command).toBe(
-        `notify --title Done --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+        "notify --title Done --workspace workspace:2 --surface surface:target",
       );
     } finally {
       MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
@@ -841,7 +841,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
       });
 
       expect(lastV1Command).toBe(
-        `notify --title Done --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+        "notify --title Done --workspace workspace:2 --surface surface:unmapped",
       );
     } finally {
       MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;

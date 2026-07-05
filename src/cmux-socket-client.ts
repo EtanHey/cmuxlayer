@@ -575,8 +575,9 @@ export class CmuxSocketClient {
     }
     if (opts?.subtitle) args.push(this.rawV1Arg("--subtitle"), opts.subtitle);
     if (opts?.body) args.push(this.rawV1Arg("--body"), opts.body);
-    const tabId = await this.resolveSidebarTabId(opts);
-    if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
+    const workspace = await this.resolveSidebarWorkspace(opts);
+    if (workspace) args.push(this.rawV1Arg("--workspace"), workspace);
+    if (opts?.surface) args.push(this.rawV1Arg("--surface"), opts.surface);
     await this.sendV1Args("notify", args);
   }
 
@@ -778,23 +779,29 @@ export class CmuxSocketClient {
     workspace?: string;
     surface?: string;
   }): Promise<string | undefined> {
-    if (opts?.workspace) return this.resolveWorkspaceTabId(opts.workspace);
+    const workspace = await this.resolveSidebarWorkspace(opts);
+    if (!workspace) return undefined;
+    return this.resolveWorkspaceTabId(workspace);
+  }
+
+  private async resolveSidebarWorkspace(opts?: {
+    workspace?: string;
+    surface?: string;
+  }): Promise<string | undefined> {
+    if (opts?.workspace) return opts.workspace;
     if (!opts?.surface) return undefined;
 
-    let workspace: string | undefined;
     try {
-      workspace = await this.resolveWorkspace(opts.surface);
+      return await this.resolveWorkspace(opts.surface);
     } catch (error) {
       if (!(error instanceof CmuxSocketError && error.code === "not_found")) {
         throw error;
       }
       const identified = await this.identify(opts.surface);
-      workspace =
-        identified.caller?.workspace_ref ?? identified.focused?.workspace_ref;
+      return (
+        identified.caller?.workspace_ref ?? identified.focused?.workspace_ref
+      );
     }
-
-    if (!workspace) return undefined;
-    return this.resolveWorkspaceTabId(workspace);
   }
 
   private async resolveWorkspaceTabId(workspace: string): Promise<string> {
