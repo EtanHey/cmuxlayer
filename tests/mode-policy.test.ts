@@ -49,12 +49,18 @@ describe("isMutatingTool", () => {
     expect(isMutatingTool("browser_surface")).toBe(true);
   });
 
-  it("returns false for list_surfaces", () => {
-    expect(isMutatingTool("list_surfaces")).toBe(false);
+  it("returns true for lifecycle and tab mutation tools", () => {
+    expect(isMutatingTool("rename_tab")).toBe(true);
+    expect(isMutatingTool("move_surface")).toBe(true);
+    expect(isMutatingTool("reorder_surface")).toBe(true);
+    expect(isMutatingTool("send_to")).toBe(true);
+    expect(isMutatingTool("send_to_agent")).toBe(true);
+    expect(isMutatingTool("stop_agent")).toBe(true);
+    expect(isMutatingTool("kill")).toBe(true);
   });
 
-  it("returns false for rename_tab (metadata, not mutation)", () => {
-    expect(isMutatingTool("rename_tab")).toBe(false);
+  it("returns false for list_surfaces", () => {
+    expect(isMutatingTool("list_surfaces")).toBe(false);
   });
 });
 
@@ -91,10 +97,14 @@ describe("assertMutationAllowed", () => {
     expect(() => assertMutationAllowed("close_surface", "manual")).toThrow(
       /manual/i,
     );
+    expect(() => assertMutationAllowed("rename_tab", "manual")).toThrow(
+      /manual/i,
+    );
+    expect(() => assertMutationAllowed("send_to", "manual")).toThrow(/manual/i);
+    expect(() => assertMutationAllowed("kill", "manual")).toThrow(/manual/i);
   });
 
   it("allows metadata tools in manual mode", () => {
-    expect(() => assertMutationAllowed("rename_tab", "manual")).not.toThrow();
     expect(() => assertMutationAllowed("set_status", "manual")).not.toThrow();
     expect(() => assertMutationAllowed("set_progress", "manual")).not.toThrow();
   });

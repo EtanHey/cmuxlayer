@@ -15,11 +15,26 @@ const READ_ONLY_TOOLS = new Set([
 /** Tools that mutate state — blocked in manual mode */
 const MUTATING_TOOLS = new Set([
   "select_workspace",
+  "create_workspace",
+  "new_split",
+  "new_surface",
+  "move_surface",
+  "reorder_surface",
   "send_input",
   "send_command",
   "send_key",
+  "rename_tab",
   "close_surface",
   "browser_surface",
+  "spawn_agent",
+  "new_worktree_split",
+  "spawn_in_workspace",
+  "stop_agent",
+  "send_to",
+  "send_to_agent",
+  "supersede_agent_goal",
+  "interact",
+  "kill",
 ]);
 
 const VALID_CONTROL_MODES = new Set<string>(["autonomous", "manual"]);

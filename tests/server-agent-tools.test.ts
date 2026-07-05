@@ -2992,6 +2992,48 @@ codex>
     expect(parsed.health.issue_codes).toContain("registry_screen_disagreement");
   });
 
+  it("interact interrupt sends the key in the agent workspace", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const interact = (server as any)._registeredTools["interact"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    mockExec.mockClear();
+
+    const result = await interact.handler(
+      { agent: agentId, action: "interrupt" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const sendKeyCalls = mockExec.mock.calls.filter(
+      ([, args]) => Array.isArray(args) && args.includes("send-key"),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(sendKeyCalls).toHaveLength(1);
+    expect(sendKeyCalls[0][1]).toEqual(
+      expect.arrayContaining([
+        "send-key",
+        "--surface",
+        "surface:new",
+        "--workspace",
+        "workspace:1",
+        "ctrl-c",
+      ]),
+    );
+  });
+
   it("send_to sanitizes and chunks delivery through the agent surface", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -3791,6 +3833,116 @@ codex>
     expect(agent).toHaveProperty("spawn_depth");
     expect(agent).toHaveProperty("created_at");
     expect(agent).toHaveProperty("quality");
+  });
+
+  it("my_agents marks a row when screen data is unavailable", async () => {
+    const readError = new Error("screen read timed out");
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", title: "Main", selected: true }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:screen-fail"],
+                selected_surface_ref: "surface:screen-fail",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [
+              {
+                ref: "surface:screen-fail",
+                title: "screen fail",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("read-screen")) {
+        throw readError;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createLifecycleServer(mockExec);
+    const engine = testLifecycleEngine(server);
+    const record: AgentRecord = {
+      agent_id: "screenFailClaude-session1",
+      surface_id: "surface:screen-fail",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "opus",
+      cli: "claude",
+      cli_session_id: null,
+      cli_session_path: null,
+      launcher_name: "cmuxlayerClaude",
+      task_summary: "screen unavailable",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-05T00:00:00.000Z",
+      updated_at: "2026-07-05T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      auto_archive_on_done: false,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+      boot_prompt_pending: false,
+      launch_cwd: null,
+      mcp_profile: null,
+      worktree_path: null,
+      worktree_branch: null,
+    };
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+    const myAgents = registeredTestTool(server, "my_agents");
+
+    const result = await myAgents.handler({}, {});
+    const data = parseToolResult(result);
+    const agents = data.agents as Array<Record<string, unknown>>;
+
+    expect(data.ok).toBe(true);
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      agent_id: record.agent_id,
+      screen_unavailable: true,
+      error_code: "screen_unavailable",
+      screen_error: "screen read timed out",
+      token_count: null,
+      context_pct: null,
+      cost: null,
+    });
   });
 
   it("my_agents includes resume_command when a session id is captured", async () => {

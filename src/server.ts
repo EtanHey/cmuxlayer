@@ -11,7 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
-import { parseReservedModeKey } from "./mode-policy.js";
+import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
@@ -90,8 +90,10 @@ import type {
   CmuxNewSurfaceResult,
   CmuxPane,
   CmuxSurface,
+  CmuxStatusEntry,
   CmuxTerminalMetadata,
   CmuxWorkspace,
+  ControlMode,
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
@@ -315,6 +317,22 @@ class DeliverySafetyGateError extends Error {
   }
 }
 
+class ManualModeMutationError extends Error {
+  readonly error_code = "manual_mode";
+  readonly control = "manual";
+
+  constructor(
+    readonly tool: string,
+    readonly surface: string,
+    readonly workspace?: string,
+  ) {
+    super(
+      `Tool "${tool}" is blocked for surface ${surface}: surface is in manual mode`,
+    );
+    this.name = "ManualModeMutationError";
+  }
+}
+
 class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
@@ -383,6 +401,26 @@ function readErrorText(error: unknown): string {
   return String(error);
 }
 
+function controlModeFromStatusEntries(entries: unknown): ControlMode {
+  if (!Array.isArray(entries)) {
+    return "autonomous";
+  }
+  const entry = entries.find((candidate): candidate is CmuxStatusEntry => {
+    if (typeof candidate !== "object" || candidate === null) {
+      return false;
+    }
+    const maybeEntry = candidate as Partial<CmuxStatusEntry>;
+    return maybeEntry.key === "mode.control";
+  });
+  return entry?.value === "manual" || entry?.value === "autonomous"
+    ? entry.value
+    : "autonomous";
+}
+
+function screenUnavailableMessage(error: unknown): string {
+  return readErrorText(error).replace(/^Error\ncmux read-screen failed:\s*/i, "");
+}
+
 function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
   const text = readErrorText(error).toLowerCase();
   const surfaceLower = surface.toLowerCase();
@@ -432,7 +470,17 @@ function okFormatted(
 
 function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
-  const payload = { ok: false, error: message, ...extra };
+  const modeExtra =
+    error instanceof ManualModeMutationError
+      ? {
+          error_code: error.error_code,
+          tool: error.tool,
+          surface: error.surface,
+          ...(error.workspace ? { workspace: error.workspace } : {}),
+          control: error.control,
+        }
+      : {};
+  const payload = { ok: false, error: message, ...modeExtra, ...extra };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
@@ -571,6 +619,15 @@ interface SurfaceWorkingDirectoryMaps {
   workspaceCwdByRef: Map<string, string>;
 }
 
+interface TerminalMetadataLoadResult {
+  terminalBySurface: Map<string, CmuxTerminalMetadata>;
+  degraded?: {
+    terminal_metadata: true;
+    error_code: "terminal_metadata_unavailable";
+    error: string;
+  };
+}
+
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -594,12 +651,12 @@ function paneWorkingDirectoryKey(
 
 async function loadTerminalMetadataBySurface(
   client: CmuxLayerClient,
-): Promise<Map<string, CmuxTerminalMetadata>> {
+): Promise<TerminalMetadataLoadResult> {
   const metadataClient = client as CmuxLayerClient & {
     listTerminalMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
   };
   if (typeof metadataClient.listTerminalMetadata !== "function") {
-    return new Map();
+    return { terminalBySurface: new Map() };
   }
 
   try {
@@ -614,9 +671,16 @@ async function loadTerminalMetadataBySurface(
         bySurface.set(surfaceRef, terminal);
       }
     }
-    return bySurface;
-  } catch {
-    return new Map();
+    return { terminalBySurface: bySurface };
+  } catch (error) {
+    return {
+      terminalBySurface: new Map(),
+      degraded: {
+        terminal_metadata: true,
+        error_code: "terminal_metadata_unavailable",
+        error: readErrorText(error),
+      },
+    };
   }
 }
 
@@ -1394,6 +1458,61 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // Health/read paths should not fail just because a refresh scan failed.
     }
   };
+  const resolveModeWorkspace = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<string | undefined> => {
+    if (workspace) {
+      return workspace;
+    }
+    try {
+      const identified = await client.identify(surface);
+      return (
+        identified.caller?.workspace_ref ?? identified.focused?.workspace_ref
+      );
+    } catch {
+      return undefined;
+    }
+  };
+  const readSurfaceControlMode = async (
+    surface: string,
+    workspace?: string,
+  ): Promise<{ control: ControlMode; workspace?: string }> => {
+    const statusClient = client as CmuxLayerClient & {
+      listStatus?: (opts?: { workspace?: string }) => Promise<unknown>;
+    };
+    if (typeof statusClient.listStatus !== "function") {
+      return { control: "autonomous", workspace };
+    }
+    const modeWorkspace = await resolveModeWorkspace(surface, workspace);
+    if (!modeWorkspace) {
+      return { control: "autonomous" };
+    }
+    try {
+      const entries = await statusClient.listStatus({ workspace: modeWorkspace });
+      return {
+        control: controlModeFromStatusEntries(entries),
+        workspace: modeWorkspace,
+      };
+    } catch {
+      return { control: "autonomous", workspace: modeWorkspace };
+    }
+  };
+  const assertSurfaceMutationAllowed = async (
+    toolName: string,
+    surface: string,
+    workspace?: string,
+  ): Promise<void> => {
+    const mode = await readSurfaceControlMode(surface, workspace);
+    try {
+      assertMutationAllowed(toolName, mode.control);
+    } catch (error) {
+      if (mode.control === "manual") {
+        throw new ManualModeMutationError(toolName, surface, mode.workspace);
+      }
+      throw error;
+    }
+  };
 
   const server = new McpServer(
     {
@@ -1519,8 +1638,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const withSurfaceWrite = async <T>(
     surface: string,
     fn: () => Promise<T>,
-    owner = `surface-write:${randomUUID()}`,
+    opts: {
+      toolName?: string;
+      workspace?: string;
+      owner?: string;
+    } = {},
   ): Promise<T> => {
+    if (opts.toolName) {
+      await assertSurfaceMutationAllowed(opts.toolName, surface, opts.workspace);
+    }
+    const owner = opts.owner ?? `surface-write:${randomUUID()}`;
     acquireSurfaceWrite(surface, owner);
     try {
       return await fn();
@@ -2320,7 +2447,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: opts.workspace,
         });
       }
-    });
+    }, { toolName: "send_command", workspace: opts.workspace });
   };
 
   const deliverBootPrompt = async (opts: {
@@ -2367,23 +2494,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let sentChunks = 0;
 
     try {
-      const delivery = await withSurfaceWrite(opts.surface, async () =>
-        deliverInputChunks({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          chunks,
-          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-          press_enter: true,
-          source_event: "boot_prompt",
-          onChunkDelivered: (count) => {
-            sentChunks = count;
-          },
-          verify_submit: true,
-          submit_verify_timeout_ms: opts.timeout_ms
-            ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
-            : undefined,
-        }),
+      const delivery = await withSurfaceWrite(
+        opts.surface,
+        async () =>
+          deliverInputChunks({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: true,
+            source_event: "boot_prompt",
+            onChunkDelivered: (count) => {
+              sentChunks = count;
+            },
+            verify_submit: true,
+            submit_verify_timeout_ms: opts.timeout_ms
+              ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
+              : undefined,
+          }),
+        { toolName: "boot_prompt", workspace: opts.workspace },
       );
       return { ...delivery, prompt_text: rawPrompt };
     } catch (error) {
@@ -2912,9 +3042,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return enrichedSurface;
           }),
         );
-        const terminalBySurface = await loadTerminalMetadataBySurface(client);
+        const terminalMetadata = await loadTerminalMetadataBySurface(client);
         const workingDirectoryMaps: SurfaceWorkingDirectoryMaps = {
-          terminalBySurface,
+          terminalBySurface: terminalMetadata.terminalBySurface,
           paneByWorkspaceAndRef,
           workspaceCwdByRef,
         };
@@ -2950,6 +3080,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
         if (args.workspace) {
           data.workspace_ref = args.workspace;
+        }
+        if (terminalMetadata.degraded) {
+          data.metadata_degraded = terminalMetadata.degraded;
         }
         const formatted = formatListSurfaces(
           responseSurfaces as Array<{
@@ -3079,6 +3212,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           (await resolveWorkspaceForRepo(
             inferRepoFromLauncherTitle(args.title),
           ));
+        if (args.surface) {
+          await assertSurfaceMutationAllowed("new_split", args.surface);
+        }
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
             throw new Error(
@@ -3428,6 +3564,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        await assertSurfaceMutationAllowed("move_surface", args.surface);
         const result = await client.moveSurface({
           surface: args.surface,
           pane: args.pane,
@@ -3467,6 +3604,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        await assertSurfaceMutationAllowed("reorder_surface", args.surface);
         const result = await client.reorderSurface({
           surface: args.surface,
           index: args.index,
@@ -3604,7 +3742,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_event: "send_input",
             verify_submit: shouldVerifySubmit,
           });
-        });
+        }, { toolName: "send_input", workspace: args.workspace });
 
         const identity = resolveTargetIdentity(stateMgr, args.surface);
         const data = {
@@ -3726,7 +3864,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_event: "send_command",
             verify_submit: bootPromptPath ? false : shouldVerifySubmit,
           });
-        });
+        }, { toolName: "send_command", workspace: args.workspace });
 
         let bootPromptDelivery:
           | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -3821,7 +3959,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const key = normalizeKeyName(args.key);
         await withSurfaceWrite(args.surface, async () => {
           await sendKeyWithRetry(args.surface, key, args.workspace);
-        });
+        }, { toolName: "send_key", workspace: args.workspace });
         const data = { surface: args.surface, key };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
@@ -3999,7 +4137,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await client.renameTab(args.surface, finalTitle, {
             workspace: args.workspace,
           });
-        });
+        }, { toolName: "rename_tab", workspace: args.workspace });
         const data = { surface: args.surface, title: finalTitle };
         return okFormatted(formatOk("rename_tab", data), data);
       } catch (e) {
@@ -4130,6 +4268,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.destructive,
     async (args) => {
       try {
+        await assertSurfaceMutationAllowed(
+          "close_surface",
+          args.surface,
+          args.workspace,
+        );
         let staleRegistryDoneConsolidated:
           | { agent_id: string; previous_state: AgentState; done_signal: string }
           | undefined;
@@ -4407,6 +4550,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             break;
         }
 
+        if (args.surface) {
+          await assertSurfaceMutationAllowed(
+            "browser_surface",
+            args.surface,
+            args.workspace,
+          );
+        }
         const result = await client.browser(browserArgs);
         // browser_surface actions map to cmux browser-surface subcommands
         const data = { action: args.action, surface: args.surface, result };
@@ -4721,12 +4871,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           readScreen: (surface, readOpts) =>
             client.readScreen(surface, readOpts),
           send: (surface, text, sendOpts) =>
-            withSurfaceWrite(surface, () =>
-              client.send(surface, text, sendOpts),
+            withSurfaceWrite(
+              surface,
+              () => client.send(surface, text, sendOpts),
+              { toolName: "agent_engine", workspace: sendOpts?.workspace },
             ),
           sendKey: (surface, key, keyOpts) =>
-            withSurfaceWrite(surface, () =>
-              client.sendKey(surface, key, keyOpts),
+            withSurfaceWrite(
+              surface,
+              () => client.sendKey(surface, key, keyOpts),
+              { toolName: "send_key", workspace: keyOpts?.workspace },
             ),
           setProgress: (value, progressOpts) =>
             client.setProgress(value, progressOpts),
@@ -4738,8 +4892,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           listPaneSurfaces: (surfaceOpts) =>
             client.listPaneSurfaces(surfaceOpts),
           closeSurface: (surface, closeOpts) =>
-            withSurfaceWrite(surface, () =>
-              client.closeSurface(surface, closeOpts),
+            withSurfaceWrite(
+              surface,
+              () => client.closeSurface(surface, closeOpts),
+              { toolName: "close_surface", workspace: closeOpts?.workspace },
             ),
           notifyLifecycleEvent,
         },
@@ -4981,29 +5137,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
 
-      return withSurfaceWrite(route.surface_id, async () => {
-        await assertDeliveryTargetIsSafe(
-          route.surface_id,
-          route.workspace_id ?? undefined,
-        );
-        return deliverInputChunks({
-          surface: route.surface_id,
+      return withSurfaceWrite(
+        route.surface_id,
+        async () => {
+          await assertDeliveryTargetIsSafe(
+            route.surface_id,
+            route.workspace_id ?? undefined,
+          );
+          return deliverInputChunks({
+            surface: route.surface_id,
+            workspace: route.workspace_id ?? undefined,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: args.press_enter,
+            source_event: args.source_event,
+            source_agent: args.agent_id,
+            // Verify every relay to an interactive agent — not just long ones.
+            // A short relay (the common agent-to-agent case) to a frozen
+            // terminal must be caught, never reported as ok. allow_busy sends to
+            // a non-interactive (working) agent stay unverified to avoid
+            // false-failing a legitimate interjection.
+            verify_submit:
+              args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
+          });
+        },
+        {
+          toolName: args.source_event,
           workspace: route.workspace_id ?? undefined,
-          chunks,
-          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-          press_enter: args.press_enter,
-          source_event: args.source_event,
-          source_agent: args.agent_id,
-          // Verify every relay to an interactive agent — not just long ones.
-          // A short relay (the common agent-to-agent case) to a frozen
-          // terminal must be caught, never reported as ok. allow_busy sends to
-          // a non-interactive (working) agent stay unverified to avoid
-          // false-failing a legitimate interjection.
-          verify_submit:
-            args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
-        });
-      });
+        },
+      );
     };
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
@@ -6021,6 +6184,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.destructive,
       async (args) => {
         try {
+          const current = engine.getAgentState(args.agent_id);
+          if (current) {
+            await assertSurfaceMutationAllowed(
+              "stop_agent",
+              current.surface_id,
+              current.workspace_id ?? undefined,
+            );
+          }
           await engine.stopAgent(args.agent_id, args.force);
           const state = engine.getAgentState(args.agent_id);
           const data = {
@@ -6420,8 +6591,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
-              await withSurfaceWrite(agent.surface_id, () =>
-                client.sendKey(agent.surface_id, "c-c", {}),
+              await withSurfaceWrite(
+                agent.surface_id,
+                () =>
+                  client.sendKey(agent.surface_id, "c-c", {
+                    workspace: agent.workspace_id ?? undefined,
+                  }),
+                {
+                  toolName: "interact",
+                  workspace: agent.workspace_id ?? undefined,
+                },
               );
               const d = { agent_id: args.agent, action: "interrupt" };
               return okFormatted(formatOk("interact:interrupt", d), d);
@@ -6557,6 +6736,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Kill each agent, collecting results
           for (const agentId of targetIds) {
             try {
+              const current = engine.getAgentState(agentId);
+              if (current) {
+                await assertSurfaceMutationAllowed(
+                  "kill",
+                  current.surface_id,
+                  current.workspace_id ?? undefined,
+                );
+              }
               await engine.stopAgent(agentId, args.force);
               killed.push(agentId);
             } catch (e) {
@@ -6614,6 +6801,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const enriched = await Promise.all(
             agents.map(async (agent) => {
               let screenData: ParsedScreenResult | null = null;
+              let screenFailure:
+                | {
+                    screen_unavailable: true;
+                    error_code: "screen_unavailable";
+                    screen_error: string;
+                  }
+                | null = null;
               try {
                 const screen = await Promise.race([
                   client.readScreen(agent.surface_id, { lines: 20 }),
@@ -6632,8 +6826,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ),
                   resolveHarnessStateForSurface(stateMgr, agent.surface_id),
                 );
-              } catch {
+              } catch (error) {
                 // Surface may be closed, unavailable, or timed out
+                screenFailure = {
+                  screen_unavailable: true,
+                  error_code: "screen_unavailable",
+                  screen_error: screenUnavailableMessage(error),
+                };
               }
 
               const resumeCommand = resumeCommandForAgent(agent);
@@ -6656,6 +6855,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 spawn_depth: agent.spawn_depth,
                 created_at: agent.created_at,
                 quality: agent.quality,
+                ...(screenFailure ?? {}),
               };
             }),
           );
