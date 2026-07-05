@@ -1278,6 +1278,46 @@ describe("AgentEngine", () => {
       }
     });
 
+    it("treats post-spawn live-surface listing failures as inconclusive", async () => {
+      const guardedRegistry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:post-spawn"),
+      ]);
+      vi.spyOn(guardedRegistry, "hasLiveSurface").mockRejectedValue(
+        new Error("surface listing failed"),
+      );
+      const guardedEngine = new AgentEngine(stateMgr, guardedRegistry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "worker-post-spawn",
+            state: "booting",
+            surface_id: "surface:post-spawn",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        guardedRegistry.set(
+          "worker-post-spawn",
+          stateMgr.readState("worker-post-spawn")!,
+        );
+
+        const engineInternals = guardedEngine as unknown as {
+          assertPostSpawnLiveness(agentId: string): Promise<void>;
+        };
+        await expect(
+          engineInternals.assertPostSpawnLiveness("worker-post-spawn"),
+        ).resolves.toBeUndefined();
+        expect(
+          guardedEngine.getAgentState("worker-post-spawn")?.error ?? null,
+        ).toBeNull();
+      } finally {
+        guardedEngine.dispose();
+      }
+    });
+
     it("marks TASK_DONE for any cli and role without using the auto-archive gate", async () => {
       vi.useFakeTimers();
       try {

@@ -10,6 +10,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -255,6 +256,84 @@ function resolveCurrentTestAgentId(
     .filter((name) => name !== "events" && !name.startsWith("Gits"));
   expect(entries).toHaveLength(1);
   return entries[0]!;
+}
+
+function makeServerAgentRecord(
+  overrides: Partial<AgentRecord> = {},
+): AgentRecord {
+  return {
+    agent_id: "codex-golems-000000",
+    surface_id: "surface:new",
+    workspace_id: "ws:1",
+    state: "done",
+    repo: "golems",
+    model: "gpt-5.5",
+    cli: "codex",
+    cli_session_id: null,
+    cli_session_path: null,
+    task_summary: "fixture worker",
+    pid: null,
+    version: 1,
+    created_at: "2026-07-05T07:00:00.000Z",
+    updated_at: "2026-07-05T07:00:00.000Z",
+    error: null,
+    parent_agent_id: null,
+    spawn_depth: 0,
+    role: "worker",
+    auto_archive_on_done: false,
+    task_done_candidate_at: null,
+    task_done_detected_at: "2026-07-05T07:00:00.000Z",
+    deletion_intent: false,
+    quality: "unknown",
+    max_cost_per_agent: null,
+    crash_recover: false,
+    respawn_attempts: 0,
+    user_killed: false,
+    boot_prompt_pending: false,
+    goal_file: null,
+    launch_cwd: null,
+    mcp_profile: null,
+    worktree_path: null,
+    worktree_branch: null,
+    ...overrides,
+  };
+}
+
+type TestToolResult = {
+  structuredContent?: Record<string, unknown>;
+  content: Array<{ text: string }>;
+};
+
+type RegisteredTestTool = {
+  handler(args: Record<string, unknown>, context: unknown): Promise<TestToolResult>;
+};
+
+type TestLifecycleEngine = {
+  stateMgr: { writeState(record: AgentRecord): void };
+  getRegistry(): { set(agentId: string, record: AgentRecord): void };
+};
+
+function registeredTestTool(server: unknown, name: string): RegisteredTestTool {
+  const registry = (
+    server as {
+      _registeredTools: Record<string, RegisteredTestTool>;
+    }
+  )._registeredTools;
+  return registry[name]!;
+}
+
+function testLifecycleEngine(server: unknown): TestLifecycleEngine {
+  const interact = registeredTestTool(server, "interact") as RegisteredTestTool & {
+    _engine: TestLifecycleEngine;
+  };
+  return interact._engine;
+}
+
+function parseToolResult(result: TestToolResult): Record<string, unknown> {
+  return (
+    result.structuredContent ??
+    (JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>)
+  );
 }
 
 describe("agent lifecycle tool registration", () => {
@@ -1904,6 +1983,332 @@ describe("agent lifecycle tool handlers", () => {
       status: "unhealthy",
       issue_codes: expect.arrayContaining(["closure_without_artifact"]),
     });
+  });
+
+  it("get_agent_state verifies the report artifact before marking a done worker closeable", async () => {
+    const goalPath = join(TEST_DIR, "phase-7-goal.md");
+    const reportPath = join(TEST_DIR, "phase-7-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Phase 7 Goal",
+        "",
+        "Write the report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "The final report line must be exactly:",
+        "",
+        "`DONE_P7_HARVESTABILITY`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-harvestability";
+    const doneWithTimestamp = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+    });
+    engine.stateMgr.writeState(doneWithTimestamp);
+    engine.getRegistry().set(agentId, doneWithTimestamp);
+
+    const missingResult = await getState.handler({ agent_id: agentId }, {});
+    const missing = parseToolResult(missingResult);
+    expect(missing.harvestability).toMatchObject({
+      closeable: false,
+      closure_artifact_verified: false,
+      report_path: reportPath,
+      done_marker: "DONE_P7_HARVESTABILITY",
+    });
+    expect(
+      (missing.health as { issue_codes: string[] }).issue_codes,
+    ).toContain("closure_without_artifact");
+
+    writeFileSync(
+      reportPath,
+      "Status: COMPLETE\nDONE_P7_HARVESTABILITY\n",
+      "utf8",
+    );
+    const verifiedResult = await getState.handler(
+      { agent_id: agentId },
+      {},
+    );
+    const verified = parseToolResult(verifiedResult);
+    expect(verified.harvestability).toMatchObject({
+      closeable: true,
+      closure_artifact_verified: true,
+      report_path: reportPath,
+      done_marker: "DONE_P7_HARVESTABILITY",
+    });
+    expect(
+      (verified.health as { issue_codes: string[] }).issue_codes,
+    ).not.toContain("closure_without_artifact");
+  });
+
+  it("get_agent_state keeps PR-loop workers uncloseable until PR status or handoff is recorded", async () => {
+    const goalPath = join(TEST_DIR, "pr-loop-goal.md");
+    const reportPath = join(TEST_DIR, "pr-loop-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# PR Loop Goal",
+        "",
+        "Report:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "End with:",
+        "",
+        "`DONE_PR_LOOP_WORKER`",
+        "",
+        "Run `/pr-loop` after implementation.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_PR_LOOP_WORKER\n", "utf8");
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-pr-loop";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+      task_summary: "pr-loop implementation worker",
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: false,
+      closure_artifact_verified: true,
+      pr_loop_required: true,
+    });
+    expect((parsed.health as { issue_codes: string[] }).issue_codes).toContain(
+      "pr_loop_incomplete",
+    );
+  });
+
+  it("get_agent_state ignores reviewer-pairing boilerplate and negated PR-loop mentions", async () => {
+    const goalPath = join(TEST_DIR, "non-pr-loop-goal.md");
+    const reportPath = join(TEST_DIR, "non-pr-loop-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Non PR Deliverable Goal",
+        "",
+        "Report:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "End with:",
+        "",
+        "`DONE_NO_PR_WORKER`",
+        "",
+        "Claude reviewer pairs before pr-loop.",
+        "No pr loop deliverable for this worker.",
+        "Do not open a PR in this lane.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_NO_PR_WORKER\n", "utf8");
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-no-pr-loop";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+      task_summary: "worker with no pr loop phrase in the title",
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: true,
+      closure_artifact_verified: true,
+      pr_loop_required: false,
+      pr_loop_satisfied: null,
+    });
+    expect(
+      (parsed.health as { issue_codes: string[] }).issue_codes,
+    ).not.toContain("pr_loop_incomplete");
+  });
+
+  it("get_agent_state rejects stale reports written before task_done_detected_at", async () => {
+    const goalPath = join(TEST_DIR, "stale-report-goal.md");
+    const reportPath = join(TEST_DIR, "stale-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Stale Report Goal",
+        "",
+        "Write report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "Final line:",
+        "",
+        "`DONE_STALE_REPORT`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_STALE_REPORT\n", "utf8");
+    const olderThanDone = new Date("2026-07-05T06:59:00.000Z");
+    utimesSync(reportPath, olderThanDone, olderThanDone);
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-stale-report";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+      task_done_detected_at: "2026-07-05T07:00:00.000Z",
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: false,
+      closure_artifact_verified: false,
+      report_fresh: false,
+    });
+    expect(
+      (parsed.harvestability as { issue_codes: string[] }).issue_codes,
+    ).toContain("report_stale");
+    expect(
+      (parsed.health as { issue_codes: string[] }).issue_codes,
+    ).toContain("closure_without_artifact");
+  });
+
+  it("get_agent_state anchors KEPT_OPEN owner and next check to the KEPT_OPEN block", async () => {
+    const goalPath = join(TEST_DIR, "kept-open-block-goal.md");
+    const reportPath = join(TEST_DIR, "kept-open-block-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Kept Open Goal",
+        "",
+        "Write report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "Final line:",
+        "",
+        "`DONE_KEEP_OPEN_BLOCK`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      reportPath,
+      [
+        "owner: stale lead metadata",
+        "next check: not part of kept-open",
+        "",
+        "Status: needs human follow-up",
+        "KEPT_OPEN: waiting for reviewer handoff",
+        "DONE_KEEP_OPEN_BLOCK",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-kept-open-block";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: false,
+      closure_artifact_verified: true,
+      kept_open: {
+        present: true,
+        reason: "waiting for reviewer handoff",
+        owner: null,
+        next_check: null,
+        complete: false,
+      },
+    });
+    expect(
+      (parsed.health as { issue_codes: string[] }).issue_codes,
+    ).toContain("kept_open_contract_incomplete");
+  });
+
+  it("get_agent_state reports degraded evidence when done relies on screen fallback after harness read failure", async () => {
+    const goalPath = join(TEST_DIR, "degraded-goal.md");
+    const reportPath = join(TEST_DIR, "degraded-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Degraded Evidence Goal",
+        "",
+        "Write report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "Final report line:",
+        "",
+        "`DONE_DEGRADED_EVIDENCE`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      reportPath,
+      "Status: COMPLETE\nDONE_DEGRADED_EVIDENCE\n",
+      "utf8",
+    );
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-degraded";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      cli_session_id: "019eab06-57d6-72b1-b3a8-6cf98a30a3f6",
+      cli_session_path: join(TEST_DIR, "missing-codex-session.jsonl"),
+      goal_file: goalPath,
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: true,
+      closure_artifact_verified: true,
+      evidence_channel: {
+        done_source: "screen",
+        degraded: true,
+      },
+    });
+    expect((parsed.health as { issue_codes: string[] }).issue_codes).toContain(
+      "degraded_evidence_channel",
+    );
   });
 
   it("get_agent_state does not require closure artifacts for errored workers", async () => {

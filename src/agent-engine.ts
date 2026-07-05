@@ -4,9 +4,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
@@ -110,6 +110,38 @@ export interface SpawnAgentResult {
   model_policy?: SpawnModelPolicy;
   cwd?: string;
   mcp_env?: string;
+}
+
+export type HarvestabilityDoneSource = "transcript" | "screen" | "none";
+
+export interface HarvestabilityEvidenceChannel {
+  done_source: HarvestabilityDoneSource;
+  degraded: boolean;
+  reason: string | null;
+}
+
+export interface KeptOpenContract {
+  present: boolean;
+  reason: string | null;
+  owner: string | null;
+  next_check: string | null;
+  complete: boolean;
+}
+
+export interface WorkerHarvestability {
+  closeable: boolean;
+  closure_artifact_verified: boolean | null;
+  report_path: string | null;
+  done_marker: string | null;
+  report_exists: boolean | null;
+  report_fresh: boolean | null;
+  report_final_line: string | null;
+  pr_loop_required: boolean;
+  pr_loop_satisfied: boolean | null;
+  kept_open: KeptOpenContract | null;
+  evidence_channel: HarvestabilityEvidenceChannel;
+  issue_codes: string[];
+  issues: string[];
 }
 
 type CreatedAgentSurface = (CmuxNewSplitResult | CmuxNewSurfaceResult) & {
@@ -719,6 +751,377 @@ export class AgentEngine {
 
   getRegistry(): AgentRegistry {
     return this.registry;
+  }
+
+  assessHarvestability(agent: AgentRecord): WorkerHarvestability {
+    const evidenceChannel = this.readHarvestabilityEvidenceChannel(agent);
+    const issueCodes: string[] = [];
+    const issues: string[] = [];
+    const addIssue = (code: string, message: string): void => {
+      if (!issueCodes.includes(code)) issueCodes.push(code);
+      if (!issues.includes(message)) issues.push(message);
+    };
+
+    const role = agent.role ?? inferRecordRoleOrNull(agent);
+    if (agent.state !== "done" || role === "orchestrator") {
+      if (evidenceChannel.degraded) {
+        addIssue(
+          "degraded_evidence_channel",
+          evidenceChannel.reason ?? "done evidence channel is degraded",
+        );
+      }
+      return {
+        closeable: false,
+        closure_artifact_verified: null,
+        report_path: null,
+        done_marker: null,
+        report_exists: null,
+        report_fresh: null,
+        report_final_line: null,
+        pr_loop_required: false,
+        pr_loop_satisfied: null,
+        kept_open: null,
+        evidence_channel: evidenceChannel,
+        issue_codes: issueCodes,
+        issues,
+      };
+    }
+
+    const goal = this.readClosureGoalContract(agent.goal_file ?? null);
+    const reportText = goal.reportPath
+      ? this.readTextFile(goal.reportPath)
+      : null;
+    const reportExists = goal.reportPath ? reportText !== null : null;
+    const reportFresh =
+      goal.reportPath && reportText !== null
+        ? this.reportIsFreshForDoneDetection(
+            goal.reportPath,
+            agent.task_done_detected_at ?? null,
+          )
+        : null;
+    const reportFinalLine = reportText
+      ? this.extractFinalNonEmptyLine(reportText)
+      : null;
+    const closureArtifactVerified =
+      Boolean(goal.reportPath) &&
+      Boolean(goal.doneMarker) &&
+      reportText !== null &&
+      reportFresh !== false &&
+      reportFinalLine === goal.doneMarker;
+    const keptOpen = reportText ? this.extractKeptOpenContract(reportText) : null;
+    const prLoopRequired = this.isPrLoopRequired(
+      agent,
+      goal.goalText,
+      reportText,
+    );
+    const prLoopSatisfied = prLoopRequired
+      ? this.isPrLoopSatisfied(reportText ?? "")
+      : null;
+
+    if (!agent.goal_file || goal.goalReadFailed) {
+      addIssue(
+        "terminal_contract_missing",
+        "worker has no readable file-backed terminal contract",
+      );
+    }
+    if (!goal.reportPath || !goal.doneMarker) {
+      addIssue(
+        "terminal_contract_missing",
+        "worker terminal contract does not name a report path and DONE marker",
+      );
+    } else if (!reportExists) {
+      addIssue(
+        "report_missing",
+        `worker report file is missing: ${goal.reportPath}`,
+      );
+    } else if (reportFresh === false) {
+      addIssue(
+        "report_stale",
+        "worker report was last modified before task_done_detected_at",
+      );
+    } else if (!closureArtifactVerified) {
+      addIssue(
+        "done_marker_mismatch",
+        `worker report final line is ${reportFinalLine ?? "empty"}, expected ${goal.doneMarker}`,
+      );
+    }
+    if (keptOpen?.present) {
+      addIssue(
+        "kept_open",
+        `worker requested KEPT_OPEN${keptOpen.reason ? `: ${keptOpen.reason}` : ""}`,
+      );
+      if (!keptOpen.complete) {
+        addIssue(
+          "kept_open_contract_incomplete",
+          "KEPT_OPEN requires reason, owner, and next check",
+        );
+      }
+    }
+    if (prLoopRequired && prLoopSatisfied === false) {
+      addIssue(
+        "pr_loop_incomplete",
+        "PR-loop worker did not record merged/reviewed status or an explicit handoff",
+      );
+    }
+    if (evidenceChannel.degraded) {
+      addIssue(
+        "degraded_evidence_channel",
+        evidenceChannel.reason ?? "done evidence channel is degraded",
+      );
+    }
+
+    return {
+      closeable:
+        closureArtifactVerified &&
+        !keptOpen?.present &&
+        (!prLoopRequired || prLoopSatisfied === true),
+      closure_artifact_verified: closureArtifactVerified,
+      report_path: goal.reportPath,
+      done_marker: goal.doneMarker,
+      report_exists: reportExists,
+      report_fresh: reportFresh,
+      report_final_line: reportFinalLine,
+      pr_loop_required: prLoopRequired,
+      pr_loop_satisfied: prLoopSatisfied,
+      kept_open: keptOpen,
+      evidence_channel: evidenceChannel,
+      issue_codes: issueCodes,
+      issues,
+    };
+  }
+
+  private readHarvestabilityEvidenceChannel(
+    agent: AgentRecord,
+  ): HarvestabilityEvidenceChannel {
+    const session = this.loadGroundTruthSession(agent);
+    if (session?.state.done) {
+      return { done_source: "transcript", degraded: false, reason: null };
+    }
+    const expectsHarness =
+      harnessJsonlEnabled() &&
+      JSONL_HARNESSES.has(agent.cli) &&
+      Boolean(agent.cli_session_path || agent.cli_session_id);
+    const doneSource: HarvestabilityDoneSource = agent.task_done_detected_at
+      ? "screen"
+      : "none";
+    if (expectsHarness && !session) {
+      return {
+        done_source: doneSource,
+        degraded: true,
+        reason:
+          "harness JSONL session is missing or unreadable; done evidence fell back to screen parsing",
+      };
+    }
+    return { done_source: doneSource, degraded: false, reason: null };
+  }
+
+  private readClosureGoalContract(goalFile: string | null): {
+    goalText: string | null;
+    reportPath: string | null;
+    doneMarker: string | null;
+    goalReadFailed: boolean;
+  } {
+    if (!goalFile) {
+      return {
+        goalText: null,
+        reportPath: null,
+        doneMarker: null,
+        goalReadFailed: false,
+      };
+    }
+    const goalText = this.readTextFile(goalFile);
+    if (goalText === null) {
+      return {
+        goalText: null,
+        reportPath: null,
+        doneMarker: null,
+        goalReadFailed: true,
+      };
+    }
+    return {
+      goalText,
+      reportPath: this.extractReportPath(goalText, goalFile),
+      doneMarker: this.extractDoneMarker(goalText),
+      goalReadFailed: false,
+    };
+  }
+
+  private readTextFile(path: string): string | null {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
+  private extractCodeSpans(text: string): string[] {
+    return [...text.matchAll(/`([^`\r\n]+)`/g)]
+      .map((match) => match[1]?.trim() ?? "")
+      .filter((candidate) => candidate.length > 0);
+  }
+
+  private extractReportPath(goalText: string, goalFile: string): string | null {
+    const rawPath = this.extractCodeSpans(goalText).find(
+      (candidate) =>
+        /\.md$/i.test(candidate) ||
+        /(?:^|[/\\])reports[/\\].+\.md$/i.test(candidate),
+    );
+    if (!rawPath) return null;
+    return this.resolveContractPath(rawPath, goalFile);
+  }
+
+  private resolveContractPath(rawPath: string, goalFile: string): string {
+    const stripped = rawPath.trim().replace(/^file:\/\//, "");
+    if (isAbsolute(stripped)) return stripped;
+
+    const candidates: string[] = [];
+    let currentDir = dirname(goalFile);
+    for (let i = 0; i < 6; i += 1) {
+      candidates.push(resolve(currentDir, stripped));
+      const parent = dirname(currentDir);
+      if (parent === currentDir) break;
+      currentDir = parent;
+    }
+    candidates.push(resolve(process.cwd(), stripped));
+
+    return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+  }
+
+  private extractDoneMarker(goalText: string): string | null {
+    return (
+      this.extractCodeSpans(goalText)
+        .reverse()
+        .find(
+          (candidate) =>
+            /^[A-Z0-9_:-]+$/.test(candidate) &&
+            /(?:DONE|NOT_GREEN|BLOCKED|KEPT_OPEN)/.test(candidate),
+        ) ?? null
+    );
+  }
+
+  private extractFinalNonEmptyLine(text: string): string {
+    return (
+      text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .at(-1) ?? ""
+    );
+  }
+
+  private reportIsFreshForDoneDetection(
+    reportPath: string,
+    taskDoneDetectedAt: string | null,
+  ): boolean | null {
+    if (!taskDoneDetectedAt) return null;
+    const doneDetectedMs = Date.parse(taskDoneDetectedAt);
+    if (Number.isNaN(doneDetectedMs)) return null;
+    const reportMtimeMs = safeMtimeMs(reportPath);
+    if (reportMtimeMs <= 0) return null;
+    return reportMtimeMs >= doneDetectedMs;
+  }
+
+  private extractLineValue(lines: string[], label: string): string | null {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^\\s*${escaped}\\s*:\\s*(.+)$`, "i");
+    for (const line of lines) {
+      const match = line.match(re);
+      if (match) return match[1]?.trim() ?? null;
+    }
+    return null;
+  }
+
+  private extractKeptOpenContract(text: string): KeptOpenContract | null {
+    const lines = text.split(/\r?\n/);
+    const keptOpenIndex = lines.findIndex((line) =>
+      /^\s*KEPT_OPEN:[^\r\n]+$/i.test(line),
+    );
+    if (keptOpenIndex < 0) return null;
+    const keptOpenLine = lines[keptOpenIndex] ?? "";
+    const reason =
+      keptOpenLine.match(/^\s*KEPT_OPEN:([^\r\n]+)$/i)?.[1]?.trim() || null;
+    const blockLines: string[] = [];
+    for (const line of lines.slice(keptOpenIndex + 1)) {
+      const trimmed = line.trim();
+      if (!trimmed) break;
+      if (
+        /^[A-Z0-9_:-]+$/.test(trimmed) &&
+        /(?:DONE|NOT_GREEN|BLOCKED)/.test(trimmed)
+      ) {
+        break;
+      }
+      blockLines.push(line);
+    }
+    const owner = this.extractLineValue(blockLines, "owner");
+    const nextCheck =
+      this.extractLineValue(blockLines, "next check") ??
+      this.extractLineValue(blockLines, "next_check");
+    return {
+      present: true,
+      reason,
+      owner,
+      next_check: nextCheck,
+      complete: Boolean(reason && owner && nextCheck),
+    };
+  }
+
+  private isPrLoopRequired(
+    agent: AgentRecord,
+    goalText: string | null,
+    reportText: string | null,
+  ): boolean {
+    return [agent.task_summary, goalText, reportText]
+      .filter(Boolean)
+      .join("\n")
+      .split(/\r?\n/)
+      .some((line) => this.isPrDeliverableEvidenceLine(line));
+  }
+
+  private isPrDeliverableEvidenceLine(line: string): boolean {
+    const normalized = line.trim().toLowerCase();
+    if (!normalized || this.isPrDeliverableExcludedLine(normalized)) {
+      return false;
+    }
+    return [
+      /\bpr_deliverable\s*:\s*(?:true|yes|required|1)\b/i,
+      /\bpr deliverable\s*:\s*(?:true|yes|required)\b/i,
+      /\brun\s+`?\/pr-loop`?\b/i,
+      /\b(?:open|create)\s+(?:a\s+)?pr\b/i,
+      /\bpush,?\s+(?:and\s+)?open\s+(?:a\s+)?pr\b/i,
+      /\byour\s+pr\b/i,
+    ].some((pattern) => pattern.test(line));
+  }
+
+  private isPrDeliverableExcludedLine(normalizedLine: string): boolean {
+    return (
+      /\breviewer\s+pairs?\s+before\s+pr[-_ ]?loop\b/.test(normalizedLine) ||
+      /\bbefore\s+pr[-_ ]?loop\b/.test(normalizedLine) ||
+      /\b(?:no|not|never|without|do\s+not|don't|does\s+not|doesn't)\b.{0,80}\b(?:pr[-_ ]?loop|\/pr-loop|pr\b)\b/.test(
+        normalizedLine,
+      ) ||
+      /\b(?:pr[-_ ]?loop|\/pr-loop|pr\b)\b.{0,80}\b(?:not\s+required|not\s+needed|unnecessary|not\s+a\s+deliverable|phrase)\b/.test(
+        normalizedLine,
+      )
+    );
+  }
+
+  private isPrLoopSatisfied(reportText: string): boolean {
+    if (!reportText.trim()) return false;
+    const explicitlyHandedOff =
+      /\b(?:handoff|handed off|successor transfer|explicitly handed off)\b/i.test(
+        reportText,
+      );
+    if (explicitlyHandedOff) return true;
+
+    const hasPrReference =
+      /github\.com\/\S+\/pull\/\d+/i.test(reportText) ||
+      /\bPR\s*#?\d+\b/i.test(reportText) ||
+      /\bPR\s+(?:url|status|state)\s*:/i.test(reportText);
+    const reviewOrMergeComplete =
+      /\b(?:merged|review(?:ed)?\s+(?:complete|passed|done)|review\/merge loop complete)\b/i.test(
+        reportText,
+      ) || /\bPR\s+(?:status|state)\s*:\s*(?:merged|closed)\b/i.test(reportText);
+    return hasPrReference && reviewOrMergeComplete;
   }
 
   private hasOutputDoneEvidence(cli: CliType, text: string): boolean {
@@ -2031,7 +2434,13 @@ export class AgentEngine {
     }
 
     const registered = this.registry.get(agentId) !== null;
-    const surfaceLive = await this.registry.hasLiveSurface(agent.surface_id);
+    let surfaceLive = true;
+    try {
+      surfaceLive = await this.registry.hasLiveSurface(agent.surface_id);
+    } catch {
+      // A failed topology read is inconclusive, not proof the spawn is dead.
+      return;
+    }
     if (registered && surfaceLive) {
       return;
     }
