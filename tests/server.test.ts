@@ -442,6 +442,42 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("create_workspace refuses a manual-mode caller workspace before creating", async () => {
+    const mockClient = {
+      createWorkspace: vi.fn().mockResolvedValue({
+        workspace: "workspace:7",
+        title: "red-team",
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:manual", selected: true }],
+      }),
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["create_workspace"];
+
+    const result = await tool.handler({ title: "red-team" }, {} as any);
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "create_workspace",
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.createWorkspace).not.toHaveBeenCalled();
+  });
+
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;
@@ -1288,6 +1324,88 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("list_surfaces reports degraded terminal metadata when debug-terminals fails", async () => {
+    const workspaceCwd = "/Users/etanheyman/Gits/golems";
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "golems",
+                index: 0,
+                selected: true,
+                pinned: false,
+                current_directory: workspaceCwd,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:worker",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:adopted"],
+                selected_surface_ref: "surface:adopted",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:worker",
+            surfaces: [
+              {
+                ref: "surface:adopted",
+                title: "adopted-pane-binding",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("debug-terminals")) {
+        throw new Error("debug-terminals unavailable");
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    const result = await tool.handler({ verbose: true }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.metadata_degraded).toMatchObject({
+      terminal_metadata: true,
+      error_code: "terminal_metadata_unavailable",
+    });
+    expect(parsed.metadata_degraded.error).toMatch(/debug-terminals unavailable/);
+    expect(parsed.surfaces[0]).toMatchObject({
+      current_directory: workspaceCwd,
+      working_directory_source: "workspace_fallback",
+      working_directory_fallback: true,
+    });
+  });
+
   it("read_screen handler calls cmux read-screen", async () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -1722,23 +1840,33 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should preflight the screen, send text, and press enter. Raw uncached
-    // surfaces do not get submit_verified:true from prompt clearing alone.
-    expect(mockExec).toHaveBeenCalledTimes(3);
+    // Should try to resolve mode scope, fail open when no workspace is known,
+    // preflight the screen, send text, and press enter. Raw uncached surfaces do
+    // not get submit_verified:true from prompt clearing alone.
+    expect(mockExec).toHaveBeenCalledTimes(4);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["read-screen"]),
+      expect.arrayContaining(["identify", "--surface", "surface:1"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["read-screen"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
+      expect.arrayContaining(["send"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      4,
+      "cmux",
       expect.arrayContaining(["send-key"]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["list-status"]),
     );
   });
 
@@ -1754,21 +1882,30 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(3);
+    expect(mockExec).toHaveBeenCalledTimes(4);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+      expect.arrayContaining(["identify", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:6"]),
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      4,
+      "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["list-status"]),
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -1797,6 +1934,45 @@ describe("tool handler integration", () => {
     expect(result.content[0].text).toContain("delivering to surface:7");
     expect(result.content[0].text).not.toContain("FAILED");
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("send_input background refuses a manual-mode target before enqueueing", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:bg-manual",
+        workspace: "workspace:bg-manual",
+        text: "echo no",
+        background: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "send_input",
+      surface: "surface:bg-manual",
+      control: "manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:bg-manual",
+    });
+    expect(mockClient.send).not.toHaveBeenCalled();
   });
 
   it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
@@ -2392,6 +2568,129 @@ describe("tool handler integration", () => {
     expect(mockClient.send).not.toHaveBeenCalled();
   });
 
+  it("send_input refuses a manual-mode target before sending", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:manual",
+        text: "$ ",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:manual",
+        workspace: "workspace:manual",
+        text: "echo no",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "send_input",
+      surface: "surface:manual",
+      control: "manual",
+    });
+    expect(parsed.error).toMatch(/manual mode/i);
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("send_input allows a no-workspace target when workspace identity is unavailable", async () => {
+    const mockClient = {
+      identify: vi.fn().mockRejectedValue(new Error("identify unavailable")),
+      listStatus: vi
+        .fn()
+        .mockResolvedValue([{ key: "mode.control", value: "manual" }]),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:no-workspace",
+        text: "$ ",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:no-workspace",
+        text: "echo allowed",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.identify).toHaveBeenCalledWith("surface:no-workspace");
+    expect(mockClient.listStatus).not.toHaveBeenCalled();
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:no-workspace",
+      "echo allowed",
+      { workspace: undefined },
+    );
+  });
+
+  it("send_input allows an autonomous-mode target", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "autonomous" },
+      ]),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:auto",
+        text: "$ ",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:auto",
+        workspace: "workspace:auto",
+        text: "echo ok",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:auto",
+      "echo ok",
+      { workspace: "workspace:auto" },
+    );
+  });
+
   it("send_input can deliver long text in the background and expose status via read_screen", async () => {
     vi.useFakeTimers();
     mockExec = vi.fn().mockImplementation((_cmd, args) => {
@@ -2629,6 +2928,27 @@ describe("tool handler integration", () => {
       | ((value: { stdout: string; stderr: string }) => void)
       | null = null;
     mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("identify")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            caller: { workspace_ref: "workspace:1" },
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-status")) {
+        return Promise.resolve({ stdout: "[]", stderr: "" });
+      }
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:1",
+            text: "$ ",
+            lines: 1,
+          }),
+          stderr: "",
+        });
+      }
       if (args.includes("send") && !releaseSend) {
         return new Promise((resolve) => {
           releaseSend = resolve;
@@ -2645,8 +2965,8 @@ describe("tool handler integration", () => {
       { surface: "surface:1", text: "echo first" },
       {} as any,
     );
-    for (let attempt = 0; attempt < 10 && !releaseSend; attempt += 1) {
-      await Promise.resolve();
+    for (let attempt = 0; attempt < 20 && !releaseSend; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(releaseSend).toBeTruthy();
 
@@ -3934,6 +4254,10 @@ describe("tool handler integration", () => {
     mockExec = vi
       .fn()
       .mockResolvedValueOnce({
+        stdout: "[]",
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
@@ -3984,6 +4308,10 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["list-status", "--workspace", "workspace:1"]),
+    );
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -4137,6 +4465,98 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("ENOENT");
     expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("new_split gates a surface anchor by its source workspace", async () => {
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:source" },
+      }),
+      listStatus: vi.fn().mockImplementation(async (opts?: { workspace?: string }) =>
+        opts?.workspace === "workspace:source"
+          ? [{ key: "mode.control", value: "manual" }]
+          : [{ key: "mode.control", value: "autonomous" }],
+      ),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:dest",
+        surface: "surface:new",
+        pane: "pane:new",
+        title: "New",
+        type: "terminal",
+      }),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        surface: "surface:source",
+        workspace: "workspace:dest",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "new_split",
+      surface: "surface:source",
+    });
+    expect(mockClient.identify).toHaveBeenCalledWith("surface:source");
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:source",
+    });
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+  });
+
+  it("new_split refuses a manual target workspace before creating a pane", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:manual",
+        surface: "surface:new",
+        pane: "pane:new",
+        title: "New",
+        type: "terminal",
+      }),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        workspace: "workspace:manual",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "new_split",
+      workspace: "workspace:manual",
+      control: "manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
 
   it("new_split reports boot prompt timeout with surface and last screen lines", async () => {
@@ -6014,6 +6434,54 @@ describe("tool handler integration", () => {
       pane: "pane:2",
       workspace: "workspace:1",
     });
+  });
+
+  it("move_surface gates the moved surface by its source workspace", async () => {
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({
+        caller: { workspace_ref: "workspace:source" },
+      }),
+      listStatus: vi.fn().mockImplementation(async (opts?: { workspace?: string }) =>
+        opts?.workspace === "workspace:source"
+          ? [{ key: "mode.control", value: "manual" }]
+          : [{ key: "mode.control", value: "autonomous" }],
+      ),
+      moveSurface: vi.fn().mockResolvedValue({
+        ok: true,
+        workspace: "workspace:dest",
+        surface: "surface:source",
+        pane: "pane:dest",
+      }),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["move_surface"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:source",
+        pane: "pane:dest",
+        workspace: "workspace:dest",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "move_surface",
+      surface: "surface:source",
+    });
+    expect(mockClient.identify).toHaveBeenCalledWith("surface:source");
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:source",
+    });
+    expect(mockClient.moveSurface).not.toHaveBeenCalled();
   });
 
   it("reorder_surface handler calls cmux reorder-surface", async () => {

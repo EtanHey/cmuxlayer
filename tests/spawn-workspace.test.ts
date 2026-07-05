@@ -114,6 +114,7 @@ function makeWorkspaceClient() {
     setProgress: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),
     identify: vi.fn().mockResolvedValue({}),
+    listStatus: vi.fn().mockResolvedValue([]),
     browser: vi.fn().mockResolvedValue({}),
   };
   return client;
@@ -206,6 +207,47 @@ describe("workspace spawn tools", () => {
     ).toEqual(["workspace:grid", "workspace:grid"]);
   });
 
+  it("spawn_in_workspace refuses a manual-mode caller workspace before creating", async () => {
+    const client = makeWorkspaceClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [{ ref: "workspace:manual", title: "Manual", selected: true }],
+    });
+    client.listStatus.mockResolvedValue([
+      { key: "mode.control", value: "manual" },
+    ]);
+    const server = createServer({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "red-team",
+        agents: [
+          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+        ],
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "spawn_in_workspace",
+      workspace: "workspace:manual",
+    });
+    expect(client.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
+    });
+    expect(client.createWorkspace).not.toHaveBeenCalled();
+    expect(client.newSplit).not.toHaveBeenCalled();
+  });
+
   it("spawn_in_workspace with reuse_workspace skips workspace creation", async () => {
     const client = makeWorkspaceClient();
     const server = createServer({
@@ -235,6 +277,45 @@ describe("workspace spawn tools", () => {
       workspace: "workspace:existing",
       type: "terminal",
     });
+  });
+
+  it("spawn_in_workspace refuses a manual-mode reused workspace before selecting", async () => {
+    const client = makeWorkspaceClient();
+    client.listStatus.mockResolvedValue([
+      { key: "mode.control", value: "manual" },
+    ]);
+    const server = createServer({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "ignored-title",
+        reuse_workspace: "workspace:existing",
+        agents: [
+          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+        ],
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "spawn_in_workspace",
+      workspace: "workspace:existing",
+    });
+    expect(client.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:existing",
+    });
+    expect(client.selectWorkspace).not.toHaveBeenCalled();
+    expect(client.newSplit).not.toHaveBeenCalled();
   });
 
   it("same-repo child spawn inherits parent workspace and reports wrong actual workspace as unhealthy", async () => {
