@@ -225,6 +225,45 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
   });
 
+  it("continues sidebar sync when health screen reads fail", async () => {
+    mockClient.readScreen.mockRejectedValue(new Error("cmux read failed"));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "working",
+        surface_id: "surface:1",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-a1",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a2",
+        state: "working",
+        surface_id: "surface:2",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-a2",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:1"), makeSurface("surface:2")];
+    writeHeartbeat("a1", inboxOpts);
+    writeHeartbeat("a2", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await expect(engine.runSweep()).resolves.toBeUndefined();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a1",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ surface: "surface:1" }),
+    );
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a2",
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({ surface: "surface:2" }),
+    );
+  });
+
   it("marks a wedged holder unhealthy and notifies with the health issue summary", async () => {
     const inboxDir = join(TEST_DIR, "wedged-inbox");
     const agentId = "wedged-holder";

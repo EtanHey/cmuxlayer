@@ -2371,21 +2371,25 @@ export class AgentEngine {
         {
           inboxOpts: this.inboxOpts,
           readParsedSurface: async (targetAgent) => {
-            const screenText =
-              targetAgent.agent_id === agent.agent_id &&
-              taskDoneResult.screenText !== undefined
-                ? taskDoneResult.screenText
-                : (
-                    await this.readSweepScreen(
-                      targetAgent,
-                      healthScreenContextFor(targetAgent),
-                    )
-                  ).text;
-            const parsed = parseScreen(screenText);
-            return {
-              status: parsed.status,
-              actions: parsed.actions,
-            };
+            try {
+              const screenText =
+                targetAgent.agent_id === agent.agent_id &&
+                taskDoneResult.screenText !== undefined
+                  ? taskDoneResult.screenText
+                  : (
+                      await this.readSweepScreen(
+                        targetAgent,
+                        healthScreenContextFor(targetAgent),
+                      )
+                    ).text;
+              const parsed = parseScreen(screenText);
+              return {
+                status: parsed.status,
+                actions: parsed.actions,
+              };
+            } catch {
+              return null;
+            }
           },
         },
         { harvestability },
