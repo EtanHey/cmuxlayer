@@ -4396,6 +4396,138 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBeGreaterThanOrEqual(2);
   }, 10_000);
 
+  it("new_split preserves enough post-update time for low-confidence ready prompts", async () => {
+    vi.useRealTimers();
+    const promptPath = join(CHANNEL_TEST_DIR, "split-update-gemini.md");
+    const prompt = "boot after gemini update";
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, prompt, "utf8");
+
+    let launcherSends = 0;
+    let promptSent = false;
+    let returnPresses = 0;
+    let reads = 0;
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "cmuxlayer",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "cmuxlayerGemini",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 0,
+                surface_refs: [],
+                selected_surface_ref: null,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text.includes("cmuxlayerGemini")) {
+          launcherSends += 1;
+        } else if (text === prompt) {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        reads += 1;
+        const text =
+          launcherSends === 0 && reads === 1
+            ? "Updating Gemini via npm install -g @google/gemini-cli"
+            : launcherSends === 0 && reads === 2
+              ? "Please restart Gemini\netan@mac % "
+              : promptSent
+                ? "Gemini CLI\n✦ Working..."
+                : "Gemini CLI\n>\n";
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:2",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    try {
+      const result = await tool.handler(
+        {
+          direction: "right",
+          title: "cmuxlayerGemini",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 50,
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.boot_prompt_delivered).toBe(true);
+      expect(launcherSends).toBe(1);
+      expect(returnPresses).toBeGreaterThanOrEqual(2);
+    } finally {
+      await server.close();
+    }
+  }, 10_000);
+
   it("new_surface relaunches a launcher-title terminal after update drops to shell", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "surface-update-relaunch.md");
@@ -5993,6 +6125,124 @@ describe("tool handler integration", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/selector.*required/i);
     expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("list_agents tolerates malformed workspace enumeration instead of throwing", async () => {
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({}),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+      readScreen: vi.fn(),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir: join(CHANNEL_TEST_DIR, "malformed-workspaces"),
+      controlHealthIntervalMs: 0,
+    });
+    const tool = (server as any)._registeredTools["list_agents"];
+
+    try {
+      const result = await tool.handler({}, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.agents).toEqual([]);
+      expect(parsed.count).toBe(0);
+      expect(mockClient.listPanes).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("list_agents does not mark persisted agents disappeared when workspace enumeration is malformed", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "malformed-workspaces-persisted");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:kept",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "keep me registered",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({}),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:kept",
+        text: "Codex\n>",
+        lines: 30,
+        scrollback_used: false,
+      }),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      controlHealthIntervalMs: 0,
+    });
+    const tool = (server as any)._registeredTools["list_agents"];
+
+    try {
+      const result = await tool.handler({}, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.count).toBe(1);
+      expect(parsed.agents[0]).toMatchObject({
+        agent_id: "worker-1",
+        repo: "cmuxlayer",
+        model: "gpt-5.4",
+        state: "working",
+      });
+      expect(stateMgr.readState("worker-1")).toMatchObject({
+        state: "working",
+        error: null,
+      });
+      expect(mockClient.listPanes).toHaveBeenCalledWith({
+        workspace: "workspace:1",
+      });
+    } finally {
+      await server.close();
+    }
   });
 });
 

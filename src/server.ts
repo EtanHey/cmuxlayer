@@ -82,6 +82,7 @@ import {
 import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
+  CmuxPane,
   CmuxSurface,
   CmuxTerminalMetadata,
   CmuxWorkspace,
@@ -113,6 +114,27 @@ type ToolReturn = {
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
+
+class SurfaceEnumerationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SurfaceEnumerationError";
+  }
+}
+
+function requireSurfaceEnumerationArray<T>(
+  value: unknown,
+  label: string,
+): T[] {
+  if (Array.isArray(value)) return value as T[];
+  throw new SurfaceEnumerationError(
+    `Malformed cmux surface enumeration: ${label} is not an array`,
+  );
+}
+
+function isSurfaceEnumerationError(error: unknown): boolean {
+  return error instanceof SurfaceEnumerationError;
+}
 
 /** ToolAnnotations for MCP spec compliance */
 const ANNOTATIONS = {
@@ -186,6 +208,7 @@ const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
 const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
+const BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS = BOOT_PROMPT_READY_POLL_MS * 3;
 
 function bootPromptUpdateMaxMs(): number {
   const raw = Number(process.env.CMUXLAYER_BOOT_PROMPT_UPDATE_MAX_MS);
@@ -1920,6 +1943,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
     const updateMaxMs = bootPromptUpdateMaxMs();
+    const postUpdateReadyBudgetMs = () =>
+      Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
 
     while (Date.now() < deadline || updateStartedAt !== null) {
       try {
@@ -1955,7 +1980,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         if (updateStartedAt !== null) {
-          deadline += Math.max(now - updateStartedAt, updateElapsedMs);
+          const updateDuration = Math.max(now - updateStartedAt, updateElapsedMs);
+          deadline = Math.max(
+            deadline + updateDuration,
+            now + postUpdateReadyBudgetMs(),
+          );
           updateStartedAt = null;
           updateElapsedMs = 0;
         }
@@ -1978,7 +2007,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           consecutiveMatches.clear();
           const relaunchStartedAt = Date.now();
           await opts.onUpdateShellRelaunch();
-          deadline += Date.now() - relaunchStartedAt;
+          const relaunchEndedAt = Date.now();
+          deadline = Math.max(
+            deadline + (relaunchEndedAt - relaunchStartedAt),
+            relaunchEndedAt + postUpdateReadyBudgetMs(),
+          );
           continue;
         }
 
@@ -4551,22 +4584,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // --- Agent Lifecycle Tools (Phase 5) ---
 
   if (!skipAgentLifecycle) {
-    const surfaceProvider = async () => {
+    let registry: AgentRegistry | null = null;
+    let lastLifecycleSurfaces: CmuxSurface[] | null = null;
+    const readLifecycleSurfaces = async () => {
       const workspaces = await client.listWorkspaces();
+      const workspaceList = requireSurfaceEnumerationArray<CmuxWorkspace>(
+        workspaces.workspaces,
+        "workspaces.workspaces",
+      );
       const panesByWorkspace = await Promise.all(
-        workspaces.workspaces.map(async (ws) => ({
+        workspaceList.map(async (ws) => ({
           ref: ws.ref,
           panes: await client.listPanes({ workspace: ws.ref }),
         })),
       );
       const surfaceGroupsByWorkspace = await Promise.all(
         panesByWorkspace.map(async ({ ref, panes }) => {
+          const paneList = requireSurfaceEnumerationArray<CmuxPane>(
+            panes.panes,
+            `panes.panes for ${ref}`,
+          );
           const rawGroups = await Promise.all(
-            panes.panes.map((p) =>
+            paneList.map((p) =>
               client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
             ),
           );
-          return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+          return partitionPaneSurfacesByMembership(paneList, rawGroups, {
             workspace_ref: panes.workspace_ref ?? ref,
             window_ref: panes.window_ref,
           });
@@ -4581,7 +4624,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         })),
       );
     };
-    const registry =
+    const surfaceProvider = async () => {
+      try {
+        const surfaces = await readLifecycleSurfaces();
+        lastLifecycleSurfaces = surfaces;
+        return surfaces;
+      } catch (error) {
+        if (!isSurfaceEnumerationError(error)) {
+          throw error;
+        }
+        if (lastLifecycleSurfaces) {
+          return lastLifecycleSurfaces;
+        }
+        if (!registry || registry.list().length === 0) {
+          return [];
+        }
+        throw error;
+      }
+    };
+    registry =
       context.lifecycleRegistry ?? new AgentRegistry(stateMgr, surfaceProvider);
     context.lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
@@ -5790,17 +5851,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.readOnly,
       async (args) => {
-        try {
-          const merged = await registry.listMerged(discovery, {
-            filter: {
-              state: args.state,
-              repo: args.repo,
-              model: args.model,
-            },
-          });
+        const filter = {
+          state: args.state,
+          repo: args.repo,
+          model: args.model,
+        };
+        const buildListAgentsResponse = async (records: AgentRecord[]) => {
           const topology = await collectSurfaceTopology();
           const agents = await Promise.all(
-            merged.map(async (agent) => ({
+            records.map(async (agent) => ({
               ...toPublicAgent(agent),
               health: await evaluateServerAgentHealth(agent, {
                 ...healthTopologyOverrides(agent, topology),
@@ -5813,7 +5872,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           const formatted = formatListAgents(agents, agents.length);
           return okFormatted(formatted, data);
+        };
+
+        try {
+          const merged = await registry.listMerged(discovery, {
+            filter,
+          });
+          return await buildListAgentsResponse(merged);
         } catch (e) {
+          if (isSurfaceEnumerationError(e)) {
+            try {
+              return await buildListAgentsResponse(registry.list(filter));
+            } catch (fallbackError) {
+              return err(fallbackError);
+            }
+          }
           return err(e);
         }
       },
