@@ -54,8 +54,9 @@ import {
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import {
+  CLI_INPUT_PROMPT_PREFIXES,
+  lineStartsWithCliInputPrompt,
   matchReadyPattern,
-  readyPatternRequiresAgentIdentity,
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
@@ -181,7 +182,7 @@ const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
-const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
+const BOOT_SESSION_TRANSCRIPT_CAPTURE_WINDOW_MS = 30_000;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
@@ -876,25 +877,16 @@ export class AgentEngine {
       waitForReadyPatternMatches.delete(agent.agent_id);
       return { agent };
     }
-    if (agent.boot_prompt_pending) {
-      waitForReadyPatternMatches.delete(agent.agent_id);
-      return { agent };
-    }
-
     try {
       const screen = await this.client.readScreen(agent.surface_id, {
         lines: BOOT_SESSION_CAPTURE_LINES,
       });
-      const match = matchReadyPattern(agent.cli, screen.text);
-      const hasReadyIdentity =
-        !readyPatternRequiresAgentIdentity(agent.cli) ||
-        screenHasReadyAgentIdentity(
-          agent.cli,
-          screen.text,
-          parseScreen(screen.text),
-        );
-      const ready = match.matched && hasReadyIdentity;
-      if (!ready) {
+      const evidence = this.readReadyEvidence(agent, screen.text);
+      if (
+        !evidence.ready ||
+        (targetState === "ready" &&
+          this.screenShowsPendingBootPrompt(agent, screen.text))
+      ) {
         waitForReadyPatternMatches.delete(agent.agent_id);
         return { agent };
       }
@@ -902,16 +894,23 @@ export class AgentEngine {
       const count =
         (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       waitForReadyPatternMatches.set(agent.agent_id, count);
-      if (count < Math.max(1, match.consecutive)) {
+      if (count < Math.max(1, evidence.consecutive)) {
         return { agent };
       }
 
-      const transitionAgent =
+      let transitionAgent =
         targetState === "ready"
           ? await this.maybeCaptureBootSessionId(agent, {
               screen: Promise.resolve(screen),
             })
           : agent;
+      if (targetState === "ready" && transitionAgent.boot_prompt_pending) {
+        transitionAgent = this.stateMgr.updateRecord(
+          transitionAgent.agent_id,
+          { boot_prompt_pending: false },
+        );
+        this.registry.set(transitionAgent.agent_id, transitionAgent);
+      }
       let updated = this.stateMgr.transition(
         transitionAgent.agent_id,
         targetState,
@@ -1116,10 +1115,130 @@ export class AgentEngine {
   }
 
   private isBootCaptureWindowOpen(agent: AgentRecord): boolean {
+    return agent.state === "booting";
+  }
+
+  private canUseTranscriptSessionResolver(agent: AgentRecord): boolean {
     if (agent.state !== "booting") return false;
     const since = Date.parse(agent.updated_at);
     if (Number.isNaN(since)) return false;
-    return Date.now() - since <= BOOT_SESSION_CAPTURE_WINDOW_MS;
+    return Date.now() - since <= BOOT_SESSION_TRANSCRIPT_CAPTURE_WINDOW_MS;
+  }
+
+  private screenShowsPendingBootPrompt(
+    agent: AgentRecord,
+    screenText: string,
+  ): boolean {
+    if (!agent.boot_prompt_pending) {
+      return false;
+    }
+    const prompt = agent.task_summary.trim();
+    if (!prompt) {
+      return !this.isBootPromptPendingStale(agent);
+    }
+    const promptLines = prompt
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const promptTailSource = promptLines.at(-1) ?? prompt;
+    const tail = promptTailSource.slice(
+      -Math.min(80, promptTailSource.length),
+    );
+    return this.screenInputRegionContainsPromptTail(
+      agent.cli,
+      screenText,
+      tail,
+    );
+  }
+
+  private screenInputRegionContainsPromptTail(
+    cli: CliType,
+    screenText: string,
+    tail: string,
+  ): boolean {
+    if (!tail) return false;
+
+    const lines = screenText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return false;
+
+    const start = this.currentScreenRegionStart(cli, lines);
+
+    const region = lines.slice(start);
+    const compactTail = tail.replace(/\s+/g, "");
+
+    return region.some((line, index) => {
+      if (!this.lineCanSeedInputPromptScan(cli, line)) return false;
+      const candidate = region.slice(index).join("\n");
+      return (
+        candidate.includes(tail) ||
+        (compactTail.length > 0 &&
+          candidate.replace(/\s+/g, "").includes(compactTail))
+      );
+    });
+  }
+
+  private currentScreenRegionStart(cli: CliType, lines: string[]): number {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (this.lineIsCurrentScreenRegionAnchor(cli, lines[index] ?? "")) {
+        return index + 1;
+      }
+    }
+    return 0;
+  }
+
+  private lineIsCurrentScreenRegionAnchor(cli: CliType, line: string): boolean {
+    const trimmed = line.trim();
+    switch (cli) {
+      case "claude":
+        return /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?/i.test(
+          trimmed,
+        );
+      case "codex":
+        return (
+          /\bOpenAI\s+Codex\b/i.test(trimmed) ||
+          /\bModel:\s*gpt-/i.test(trimmed)
+        );
+      case "cursor":
+        return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
+      case "gemini":
+        return /^Gemini CLI$/i.test(trimmed) || /^gemini>\s*$/i.test(trimmed);
+      case "kiro":
+        return /^Kiro\b/i.test(trimmed) || /^kiro>\s*$/i.test(trimmed);
+    }
+  }
+
+  private lineCanSeedInputPromptScan(cli: CliType, line: string): boolean {
+    if (lineStartsWithCliInputPrompt(cli, line)) return true;
+    const trimmed = line.trim();
+    return (CLI_INPUT_PROMPT_PREFIXES[cli] ?? []).some(
+      (prefix) => trimmed === prefix,
+    );
+  }
+
+  private isBootPromptPendingStale(agent: AgentRecord): boolean {
+    const since = Date.parse(agent.updated_at);
+    if (Number.isNaN(since)) return false;
+    return Date.now() - since >= BOOT_PROMPT_PENDING_STALE_MS;
+  }
+
+  private readReadyEvidence(
+    agent: AgentRecord,
+    screenText: string,
+  ): {
+    ready: boolean;
+    consecutive: number;
+  } {
+    const parsed = parseScreen(screenText);
+    const match = matchReadyPattern(agent.cli, screenText);
+    return {
+      ready:
+        match.matched &&
+        screenHasReadyAgentIdentity(agent.cli, screenText, parsed),
+      consecutive: match.consecutive,
+    };
   }
 
   private harnessCwdForAgent(agent: AgentRecord): string {
@@ -1254,13 +1373,15 @@ export class AgentEngine {
       return agent;
     }
 
-    try {
-      const transcriptSessionId = this.sessionIdentityResolver(agent);
-      if (transcriptSessionId) {
-        return this.finalizeCapturedSession(agent, transcriptSessionId);
+    if (this.canUseTranscriptSessionResolver(agent)) {
+      try {
+        const transcriptSessionId = this.sessionIdentityResolver(agent);
+        if (transcriptSessionId) {
+          return this.finalizeCapturedSession(agent, transcriptSessionId);
+        }
+      } catch {
+        return agent;
       }
-    } catch {
-      return agent;
     }
 
     try {
@@ -1296,27 +1417,16 @@ export class AgentEngine {
       return agent;
     }
     if (agent.boot_prompt_pending) {
-      const since = Date.parse(agent.updated_at);
-      if (
-        Number.isNaN(since) ||
-        Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
-      ) {
-        this.readyPatternMatches.delete(agent.agent_id);
-        return agent;
-      }
-
       try {
         const screen = await this.readSweepScreen(agent, ctx);
-        const parsed = parseScreen(screen.text);
-        const match = matchReadyPattern(agent.cli, screen.text);
+        const evidence = this.readReadyEvidence(agent, screen.text);
         if (
-          match.matched &&
-          (!readyPatternRequiresAgentIdentity(agent.cli) ||
-            screenHasReadyAgentIdentity(agent.cli, screen.text, parsed))
+          evidence.ready &&
+          !this.screenShowsPendingBootPrompt(agent, screen.text)
         ) {
           const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
           this.readyPatternMatches.set(agent.agent_id, count);
-          if (count < Math.max(1, match.consecutive)) {
+          if (count < Math.max(1, evidence.consecutive)) {
             return agent;
           }
 
@@ -1343,6 +1453,14 @@ export class AgentEngine {
         // Fall through to the explicit interrupted-delivery error below.
       }
 
+      const since = Date.parse(agent.updated_at);
+      if (
+        !Number.isNaN(since) &&
+        Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
+      ) {
+        return agent;
+      }
+
       try {
         this.stateMgr.updateRecord(agent.agent_id, {
           boot_prompt_pending: false,
@@ -1359,15 +1477,15 @@ export class AgentEngine {
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
-      const match = matchReadyPattern(agent.cli, screen.text);
-      if (!match.matched) {
+      const evidence = this.readReadyEvidence(agent, screen.text);
+      if (!evidence.ready) {
         this.readyPatternMatches.delete(agent.agent_id);
         return agent;
       }
 
       const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       this.readyPatternMatches.set(agent.agent_id, count);
-      if (count < Math.max(1, match.consecutive)) {
+      if (count < Math.max(1, evidence.consecutive)) {
         return agent;
       }
 

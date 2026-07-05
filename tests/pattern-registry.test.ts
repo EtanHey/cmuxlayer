@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
+  CLI_INPUT_PROMPT_PREFIXES,
   CLI_READY_PATTERNS,
+  lineStartsWithCliInputPrompt,
   matchReadyPattern,
   screenHasActiveAgentMarker,
   type PatternMatch,
@@ -50,6 +52,41 @@ describe("CLI_READY_PATTERNS", () => {
         ).toBeGreaterThanOrEqual(2);
       }
     }
+  });
+});
+
+describe("CLI_INPUT_PROMPT_PREFIXES", () => {
+  it("recognizes typed composer lines for each supported CLI", () => {
+    expect(lineStartsWithCliInputPrompt("claude", "❯ Do the task")).toBe(true);
+    expect(lineStartsWithCliInputPrompt("codex", "› Do the task")).toBe(true);
+    expect(lineStartsWithCliInputPrompt("cursor", "cursor> Do the task")).toBe(
+      true,
+    );
+    expect(lineStartsWithCliInputPrompt("cursor", "→ Do the task")).toBe(true);
+    expect(lineStartsWithCliInputPrompt("gemini", "gemini> Do the task")).toBe(
+      true,
+    );
+    expect(lineStartsWithCliInputPrompt("kiro", "kiro> Do the task")).toBe(
+      true,
+    );
+  });
+
+  it("keeps every supported CLI in the input prompt prefix map", () => {
+    expect(Object.keys(CLI_INPUT_PROMPT_PREFIXES).sort()).toEqual(
+      Object.keys(CLI_READY_PATTERNS).sort(),
+    );
+  });
+
+  it("does not treat an empty ready prompt as typed composer text", () => {
+    expect(lineStartsWithCliInputPrompt("gemini", "> ")).toBe(false);
+    expect(lineStartsWithCliInputPrompt("codex", "›")).toBe(false);
+  });
+
+  it("does not treat Markdown blockquotes as typed composer text", () => {
+    expect(lineStartsWithCliInputPrompt("claude", "> Do the task")).toBe(false);
+    expect(lineStartsWithCliInputPrompt("codex", "> Do the task")).toBe(false);
+    expect(lineStartsWithCliInputPrompt("gemini", "> Do the task")).toBe(false);
+    expect(lineStartsWithCliInputPrompt("kiro", "> Do the task")).toBe(false);
   });
 });
 
@@ -103,6 +140,24 @@ describe("matchReadyPattern", () => {
         "CLAUDE_COUNTER:1",
       ].join("\n"),
     );
+    expect(result.matched).toBe(false);
+  });
+
+  it("matches Gemini ready when stale active text is above the current prompt", () => {
+    const result = matchReadyPattern(
+      "gemini",
+      ["Gemini CLI", "Thinking...", "Previous response", ">"].join("\n"),
+    );
+
+    expect(result.matched).toBe(true);
+  });
+
+  it("does not match Gemini ready when active text follows the prompt", () => {
+    const result = matchReadyPattern(
+      "gemini",
+      ["Gemini CLI", ">", "Thinking..."].join("\n"),
+    );
+
     expect(result.matched).toBe(false);
   });
 

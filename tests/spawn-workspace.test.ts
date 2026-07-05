@@ -180,6 +180,7 @@ describe("workspace spawn tools", () => {
         repo: "brainlayer",
         cli: "claude",
         monitor_boot: {
+          status: "bootstrapped",
           heartbeat_written: true,
           heartbeat_source: "server_boot",
           monitor_command: expect.any(String),

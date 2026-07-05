@@ -612,6 +612,7 @@ function inferControlState(
   status: ParsedScreenStatus,
   errors: string[],
   agentType: ParsedScreenAgentType,
+  text: string,
 ): ParsedScreenResult["control_state"] {
   if (errors.includes("permission_prompt")) {
     return "permission_prompt";
@@ -625,7 +626,20 @@ function inferControlState(
   if (status === "idle" && agentType !== "unknown") {
     return "ready";
   }
+  if (status === "idle" && agentType === "unknown" && hasShellPrompt(text)) {
+    return "shell";
+  }
   return "unknown";
+}
+
+function hasShellPrompt(text: string): boolean {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const last = lines.at(-1);
+  if (!last) return false;
+  return /^(?:>|❯|>>>|[$%#])$/.test(last) || /[$#]$/.test(last);
 }
 
 function parseModelAndCost(
@@ -948,7 +962,7 @@ export function parseScreen(text: string): ParsedScreenResult {
   const result: ParsedScreenResult = {
     agent_type: agentType,
     status,
-    control_state: inferControlState(status, errors, agentType),
+    control_state: inferControlState(status, errors, agentType, normalized),
     token_count: tokenCount,
     context_pct: contextPct,
     context_window: contextWindow,

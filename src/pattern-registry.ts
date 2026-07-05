@@ -20,6 +20,14 @@ export interface PatternMatch {
   consecutive: number;
 }
 
+export const CLI_INPUT_PROMPT_PREFIXES: Record<CliType, readonly string[]> = {
+  claude: ["❯"],
+  codex: ["codex>", "›", "❯"],
+  cursor: ["cursor>", "→"],
+  gemini: ["gemini>"],
+  kiro: ["kiro>"],
+};
+
 const CLAUDE_READY_RE =
   /What can I help you with\?|╭─|(?=[\s\S]*(?:Claude Code|CLAUDE_COUNTER|bypass permissions on|🤖))(?=[\s\S]*(?:^|\n)\s*(?:>|❯)\s*$)/m;
 const CLAUDE_ACTIVE_RE =
@@ -48,6 +56,11 @@ const CODEX_READY_RE = new RegExp(
   "im",
 );
 const CODEX_ACTIVE_RE = /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b|Working\s*\(/i;
+const GEMINI_ACTIVE_RE =
+  /(?:^|\n)\s*(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?\s*$/im;
+const GEMINI_ACTIVE_LINE_RE =
+  /^(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?$/i;
+const GEMINI_READY_PROMPT_LINE_RE = /^>\s*$/;
 
 export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {
   claude: {
@@ -90,10 +103,39 @@ export function matchReadyPattern(
       entry.pattern.test(screenContent) &&
       (cli !== "claude" || !CLAUDE_ACTIVE_RE.test(screenContent)) &&
       (cli !== "codex" || !CODEX_ACTIVE_RE.test(screenContent)) &&
+      (cli !== "gemini" ||
+        !hasGeminiActiveMarkerAfterLastPrompt(screenContent)) &&
       (cli !== "cursor" || !CURSOR_ACTIVE_RE.test(screenContent)),
     confidence: entry.confidence,
     consecutive: entry.consecutive,
   };
+}
+
+function hasGeminiActiveMarkerAfterLastPrompt(screenContent: string): boolean {
+  const lines = screenContent.split(/\r?\n/).map((line) => line.trim());
+  let lastPromptIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (GEMINI_READY_PROMPT_LINE_RE.test(lines[index] ?? "")) {
+      lastPromptIndex = index;
+      break;
+    }
+  }
+  if (lastPromptIndex === -1) return GEMINI_ACTIVE_RE.test(screenContent);
+  return lines
+    .slice(lastPromptIndex + 1)
+    .some((line) => GEMINI_ACTIVE_LINE_RE.test(line));
+}
+
+export function lineStartsWithCliInputPrompt(
+  cli: CliType,
+  line: string,
+): boolean {
+  const trimmed = line.trimStart();
+  const prefixes = CLI_INPUT_PROMPT_PREFIXES[cli] ?? [];
+  return prefixes.some((prefix) => {
+    if (!trimmed.startsWith(prefix)) return false;
+    return trimmed.slice(prefix.length).trim().length > 0;
+  });
 }
 
 export function screenHasActiveAgentMarker(
@@ -119,9 +161,7 @@ export function screenHasActiveAgentMarker(
     case "cursor":
       return CURSOR_ACTIVE_RE.test(screenText);
     case "gemini":
-      return /(?:^|\n)\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im.test(
-        screenText,
-      );
+      return GEMINI_ACTIVE_RE.test(screenText);
     case "kiro":
       return false;
   }
@@ -152,10 +192,11 @@ export function screenHasReadyAgentIdentity(
     case "kiro":
       return /(?:^|\n)\s*kiro>\s*$/im.test(screenText);
     case "gemini":
-      return false;
+      return /(?:^|\n)\s*(?:Gemini CLI|gemini>)\s*$/im.test(screenText);
   }
 }
 
 export function readyPatternRequiresAgentIdentity(cli: CliType): boolean {
-  return cli !== "gemini" && cli !== "kiro";
+  void cli;
+  return true;
 }

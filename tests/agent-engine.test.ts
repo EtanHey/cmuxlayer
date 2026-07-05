@@ -2209,6 +2209,145 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
+    it("captures session identity after the initial boot window for a long-stuck ready pane", async () => {
+      vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
+      const sessionId = "019f0010-1111-7222-8333-444455556666";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-late",
+          repo: "cmuxlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          surface_id: "surface:late-session",
+          state: "booting",
+          task_summary: "Fix late session capture",
+          created_at: "2026-06-25T08:00:00.000Z",
+          updated_at: "2026-06-25T08:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:late-session")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:late-session",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.4",
+          `To continue this session, run codex resume ${sessionId}`,
+          "",
+          "›",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("cmuxlayerCodex-019f0010")).toMatchObject({
+        agent_id: "cmuxlayerCodex-019f0010",
+        state: "ready",
+        cli_session_id: sessionId,
+        cli_session_path: null,
+      });
+      expect(engine.resolveAgentRoute("cmuxlayerCodex-019f0010")).toMatchObject({
+        session_id: sessionId,
+        resumable: true,
+      });
+    });
+
+    it("does not bind a late blank-prompt boot record to an unattributed transcript", async () => {
+      vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
+      const sessionId = "019f0020-1111-7222-8333-444455556666";
+      const transcriptResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: "/Users/etanheyman/.codex/sessions/unrelated.jsonl",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: transcriptResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-blank",
+          repo: "cmuxlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          surface_id: "surface:blank-session",
+          state: "booting",
+          task_summary: "",
+          created_at: "2026-06-25T08:00:00.000Z",
+          updated_at: "2026-06-25T08:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:blank-session")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:blank-session",
+        text: ["OpenAI Codex", "Model: gpt-5.4", "", "›"].join("\n"),
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(transcriptResolver).not.toHaveBeenCalled();
+      expect(engine.getAgentState("cmuxlayerCodex-pending-blank")).toMatchObject({
+        agent_id: "cmuxlayerCodex-pending-blank",
+        state: "ready",
+        cli_session_id: null,
+      });
+      expect(engine.getAgentState("cmuxlayerCodex-019f0020")).toBeNull();
+    });
+
+    it("does not bind a late prompted boot record to an unrelated transcript", async () => {
+      vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
+      const sessionId = "019f0021-1111-7222-8333-444455556666";
+      const transcriptResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: "/Users/etanheyman/.codex/sessions/unrelated-prompted.jsonl",
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: transcriptResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-prompted",
+          repo: "cmuxlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          surface_id: "surface:prompted-session",
+          state: "booting",
+          task_summary: "Fix launcher resumability",
+          created_at: "2026-06-25T08:00:00.000Z",
+          updated_at: "2026-06-25T08:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:prompted-session")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:prompted-session",
+        text: ["OpenAI Codex", "Model: gpt-5.4", "", "›"].join("\n"),
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(transcriptResolver).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCodex-pending-prompted"),
+      ).toMatchObject({
+        agent_id: "cmuxlayerCodex-pending-prompted",
+        state: "ready",
+        cli_session_id: null,
+      });
+      expect(engine.getAgentState("cmuxlayerCodex-019f0021")).toBeNull();
+    });
+
     it("uses the saved launch cwd when capturing worktree transcript sessions", async () => {
       vi.setSystemTime(new Date("2026-06-19T05:00:30.000Z"));
       const home = join(TEST_DIR, "home");
@@ -2854,7 +2993,52 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
-    it("resolves Gemini ready from consecutive screen-truth prompts", async () => {
+    it("resolves a prompt-pending booting agent once a real ready screen no longer shows the prompt", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "codex-pending-ready",
+            state: "booting",
+            surface_id: "surface:codex-pending-ready",
+            workspace_id: "ws:codex-pending-ready",
+            cli: "codex",
+            role: "worker",
+            boot_prompt_pending: true,
+            task_summary: "Read and follow the phase 3 plan",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:codex-pending-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:codex-pending-ready",
+          text: [
+            "OpenAI Codex",
+            "Model: gpt-5.5",
+            "",
+            "›",
+          ].join("\n"),
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("codex-pending-ready", "ready", 1_500);
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(engine.getAgentState("codex-pending-ready")).toMatchObject({
+          state: "ready",
+          boot_prompt_pending: false,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve Gemini ready from bare prompt screen truth without identity", async () => {
       vi.useFakeTimers();
       try {
         stateMgr.writeState(
@@ -2875,15 +3059,131 @@ To continue this session, run codex resume ${sessionId}`,
         });
         await engine.getRegistry().reconstitute();
 
-        const pending = engine.waitFor("gemini-screen-ready", "ready", 2_500);
+        const pending = engine.waitFor("gemini-screen-ready", "ready", 1_000);
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("booting");
+        expect(engine.getAgentState("gemini-screen-ready")?.state).toBe(
+          "booting",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("resolves Gemini ready from consecutive identity-backed screen-truth prompts", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-identity-screen-ready",
+            state: "booting",
+            surface_id: "surface:gemini-identity-screen-ready",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-identity-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-identity-screen-ready",
+          text: "Gemini CLI\nready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "gemini-identity-screen-ready",
+          "ready",
+          2_500,
+        );
         await vi.advanceTimersByTimeAsync(3_000);
         const result = await pending;
 
         expect(result.matched).toBe(true);
         expect(result.source).toBe("screen");
         expect(result.state).toBe("ready");
-        expect(engine.getAgentState("gemini-screen-ready")?.state).toBe(
+        expect(
+          engine.getAgentState("gemini-identity-screen-ready")?.state,
+        ).toBe("ready");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve Gemini ready from identity-backed active screen truth", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "gemini-thinking-screen-ready",
+            state: "booting",
+            surface_id: "surface:gemini-thinking-screen-ready",
+            cli: "gemini",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:gemini-thinking-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:gemini-thinking-screen-ready",
+          text: "Gemini CLI\n> \nThinking...",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "gemini-thinking-screen-ready",
           "ready",
+          1_000,
+        );
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("booting");
+        expect(
+          engine.getAgentState("gemini-thinking-screen-ready")?.state,
+        ).toBe("booting");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not resolve Kiro ready from a bare prompt without Kiro identity", async () => {
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "kiro-bare-screen-ready",
+            state: "booting",
+            surface_id: "surface:kiro-bare-screen-ready",
+            cli: "kiro",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:kiro-bare-screen-ready")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:kiro-bare-screen-ready",
+          text: "ready\n> ",
+          lines: 80,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor("kiro-bare-screen-ready", "ready", 1_000);
+        await vi.advanceTimersByTimeAsync(1_500);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("booting");
+        expect(engine.getAgentState("kiro-bare-screen-ready")?.state).toBe(
+          "booting",
         );
       } finally {
         vi.useRealTimers();
@@ -3023,7 +3323,7 @@ To continue this session, run codex resume ${sessionId}`,
         liveSurfaces = [makeSurface("surface:gemini-sweep-progress")];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:gemini-sweep-progress",
-          text: "ready\n> ",
+          text: "Gemini CLI\nready\n> ",
           lines: 80,
           scrollback_used: false,
         });
@@ -3051,7 +3351,7 @@ To continue this session, run codex resume ${sessionId}`,
 
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:gemini-sweep-progress",
-          text: "ready\n> ",
+          text: "Gemini CLI\nready\n> ",
           lines: 80,
           scrollback_used: false,
         });
@@ -3993,13 +4293,19 @@ To continue this session, run codex resume ${sessionId}`,
           surface_id: "surface:42",
           cli: "codex",
           boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
           updated_at: new Date().toISOString(),
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:42",
-        text: "codex> ",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "codex> Read and follow docs.local/phase-3.md",
+        ].join("\n"),
         lines: 20,
         scrollback_used: false,
       });
@@ -4008,6 +4314,421 @@ To continue this session, run codex resume ${sessionId}`,
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-boot")?.state).toBe("booting");
+    });
+
+    it("does not clear prompt-pending when the Codex composer line is above the footer", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-composer-footer",
+          state: "booting",
+          surface_id: "surface:composer-footer",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:composer-footer")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:composer-footer",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "› Read and follow docs.local/phase-3.md",
+          "gpt-5.5 xhigh · ~/Gits/cmuxlayer",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-composer-footer")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
+    });
+
+    it("does not clear prompt-pending when the visible prompt tail wraps onto continuation lines", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-wrapped-composer",
+          state: "booting",
+          surface_id: "surface:wrapped-composer",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:wrapped-composer")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:wrapped-composer",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "› Read and follow docs.local/",
+          "phase-3.md",
+          "gpt-5.5 xhigh · ~/Gits/cmuxlayer",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-wrapped-composer")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
+    });
+
+    it("does not clear prompt-pending when a narrow pane wraps the prompt outside the tail window", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-narrow-wrapped-composer",
+          state: "booting",
+          surface_id: "surface:narrow-wrapped-composer",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:narrow-wrapped-composer")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:narrow-wrapped-composer",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "› Read",
+          "and follow",
+          "docs.local/",
+          "phase-3.md",
+          "gpt-5.5 xhigh",
+          "~/Gits/cmuxlayer",
+          "99% context left",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("agent-boot-narrow-wrapped-composer"),
+      ).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
+    });
+
+    it("does not clear prompt-pending when the composer marker wraps before the prompt text", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-marker-only-wrapped-composer",
+          state: "booting",
+          surface_id: "surface:marker-only-wrapped-composer",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:marker-only-wrapped-composer")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:marker-only-wrapped-composer",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "›",
+          "Read and follow",
+          "docs.local/phase-3.md",
+          "gpt-5.5 xhigh",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("agent-boot-marker-only-wrapped-composer"),
+      ).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+      });
+    });
+
+    it.each([
+      ["cursor", "Cursor Agent\ncursor> Read and follow docs.local/phase-3.md"],
+      [
+        "cursor",
+        "Cursor Agent\nAuto\n→ Read and follow docs.local/phase-3.md",
+      ],
+      [
+        "gemini",
+        "Gemini CLI\ngemini> Read and follow docs.local/phase-3.md\n> ",
+      ],
+      ["kiro", "Kiro\nkiro> Read and follow docs.local/phase-3.md"],
+    ] as const)(
+      "does not clear prompt-pending for %s composer prefixes",
+      async (cli, screenText) => {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `agent-boot-${cli}-composer`,
+            state: "booting",
+            surface_id: `surface:${cli}-composer`,
+            cli,
+            boot_prompt_pending: true,
+            task_summary: "Read and follow docs.local/phase-3.md",
+            updated_at: new Date().toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface(`surface:${cli}-composer`)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: `surface:${cli}-composer`,
+          text: screenText,
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+        await engine.runSweep();
+
+        expect(engine.getAgentState(`agent-boot-${cli}-composer`)).toMatchObject(
+          {
+            state: "booting",
+            boot_prompt_pending: true,
+          },
+        );
+      },
+    );
+
+    it.each([
+      [
+        "claude",
+        [
+          "❯ Read and follow docs.local/phase-3.md",
+          "Prompt accepted.",
+          "Claude Code",
+          "What can I help you with?",
+          "❯",
+        ].join("\n"),
+      ],
+      [
+        "cursor",
+        [
+          "cursor> Read and follow docs.local/phase-3.md",
+          "Prompt accepted.",
+          "Cursor Agent",
+          "→ Plan, search, build anything",
+          "Auto",
+        ].join("\n"),
+      ],
+      [
+        "gemini",
+        [
+          "gemini> Read and follow docs.local/phase-3.md",
+          "Prompt accepted.",
+          "Gemini CLI",
+          ">",
+        ].join("\n"),
+      ],
+      [
+        "kiro",
+        [
+          "kiro> Read and follow docs.local/phase-3.md",
+          "Prompt accepted.",
+          "kiro>",
+        ].join("\n"),
+      ],
+    ] as const)(
+      "treats stale %s prompt text before the latest identity marker as cleared",
+      async (cli, screenText) => {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `agent-boot-${cli}-scrollback-ready`,
+            state: "booting",
+            surface_id: `surface:${cli}-scrollback-ready`,
+            cli,
+            boot_prompt_pending: true,
+            task_summary: "Read and follow docs.local/phase-3.md",
+            updated_at: new Date().toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface(`surface:${cli}-scrollback-ready`)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: `surface:${cli}-scrollback-ready`,
+          text: screenText,
+          lines: 20,
+          scrollback_used: false,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+        await engine.runSweep();
+
+        expect(
+          engine.getAgentState(`agent-boot-${cli}-scrollback-ready`),
+        ).toMatchObject({
+          state: "ready",
+          boot_prompt_pending: false,
+        });
+      },
+    );
+
+    it("promotes prompt-pending booting agents once a real ready prompt shows the prompt is gone", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-prompt-cleared",
+          state: "booting",
+          surface_id: "surface:cleared",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cleared")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cleared",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-prompt-cleared")).toMatchObject({
+        state: "ready",
+        boot_prompt_pending: false,
+      });
+    });
+
+    it("does not clear fresh prompt-pending agents when stored prompt text is unknown", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-empty-summary-fresh",
+          state: "booting",
+          surface_id: "surface:empty-summary-fresh",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:empty-summary-fresh")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:empty-summary-fresh",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-empty-summary-fresh")).toMatchObject(
+        {
+          state: "booting",
+          boot_prompt_pending: true,
+        },
+      );
+    });
+
+    it("recovers stale prompt-pending booting agents with no stored prompt text once ready evidence is visible", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-empty-summary-ready",
+          state: "booting",
+          surface_id: "surface:empty-summary-ready",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "",
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:empty-summary-ready")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:empty-summary-ready",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-empty-summary-ready")).toMatchObject(
+        {
+          state: "ready",
+          boot_prompt_pending: false,
+        },
+      );
+    });
+
+    it("does not treat old scrollback prompt text as pending once the current prompt is ready", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-boot-prompt-scrollback",
+          state: "booting",
+          surface_id: "surface:scrollback",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:scrollback")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:scrollback",
+        text: [
+          "OpenAI Codex",
+          "codex> Read and follow docs.local/phase-3.md",
+          "Task accepted.",
+          "",
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          "›",
+        ].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-boot-prompt-scrollback")).toMatchObject(
+        {
+          state: "ready",
+          boot_prompt_pending: false,
+        },
+      );
     });
 
     it("marks stale pending boot prompt agents as errored", async () => {
@@ -4112,7 +4833,7 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
-    it("recovers stale pending Gemini boot prompt without requiring identity parsing", async () => {
+    it("recovers stale pending Gemini boot prompt with identity-backed readiness", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-gemini-boot-ready",
@@ -4126,7 +4847,7 @@ To continue this session, run codex resume ${sessionId}`,
       liveSurfaces = [makeSurface("surface:gemini")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:gemini",
-        text: "> ",
+        text: "Gemini CLI\n> ",
         lines: 20,
         scrollback_used: false,
       });
@@ -4146,7 +4867,7 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
-    it("promotes low-confidence CLI prompts after consecutive matches", async () => {
+    it("does not promote low-confidence bare prompts without agent identity", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-gemini",
@@ -4169,7 +4890,37 @@ To continue this session, run codex resume ${sessionId}`,
       expect(engine.getAgentState("agent-gemini")?.state).toBe("booting");
 
       await engine.runSweep();
-      expect(engine.getAgentState("agent-gemini")?.state).toBe("ready");
+      expect(engine.getAgentState("agent-gemini")?.state).toBe("booting");
+    });
+
+    it("promotes low-confidence CLI prompts after consecutive identity-backed matches", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-gemini-identity",
+          state: "booting",
+          surface_id: "surface:gemini-identity",
+          cli: "gemini",
+          task_summary: "",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:gemini-identity")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:gemini-identity",
+        text: "Gemini CLI\nready\n> ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini-identity")?.state).toBe(
+        "booting",
+      );
+
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-gemini-identity")?.state).toBe(
+        "ready",
+      );
     });
 
     it("throws for non-existent agent", async () => {

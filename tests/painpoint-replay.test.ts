@@ -196,7 +196,8 @@ describe("Phase 0 painpoint replay corpus", () => {
 
     const testFn =
       fixture.id === "claude-ask-user-question-overlay" ||
-      fixture.id === "claude-permission-confirmation"
+      fixture.id === "claude-permission-confirmation" ||
+      fixture.id === "bare-shell-and-bare-gemini-prompt"
         ? it
         : it.todo;
     testFn(

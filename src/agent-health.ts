@@ -10,6 +10,7 @@ export type AgentHealthIssueCode =
   | "inbox_channel_dir_deleted"
   | "inbox_monitor_not_alive"
   | "stale_inbox_dispatches"
+  | "agent_wedged"
   | "registry_screen_disagreement"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
@@ -171,13 +172,22 @@ export function evaluateAgentHealth(
     );
   }
 
-  if ((input.stale_count ?? 0) > 0) {
+  const staleCount = input.stale_count ?? 0;
+  if (staleCount > 0) {
     addIssue(
       issueCodes,
       issues,
       "stale_inbox_dispatches",
       "agent has unacked inbox dispatches past the ACK timeout",
     );
+    if (input.monitor_alive === true) {
+      addIssue(
+        issueCodes,
+        issues,
+        "agent_wedged",
+        "agent monitor is alive but dispatches remain unacked past the ACK timeout; treat as wedged rather than dead",
+      );
+    }
   }
 
   const screenActive =

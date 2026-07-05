@@ -879,6 +879,7 @@ function screenShowsPendingInput(
 }
 
 type MonitorBootResult = {
+  status: "bootstrapped" | "monitor-not-ready";
   heartbeat_written: boolean;
   heartbeat_source: "server_boot";
   monitor_command: string;
@@ -1283,12 +1284,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ensureInboxFile(agentId, inboxOpts);
       writeHeartbeat(agentId, inboxOpts, "server_boot");
       return {
+        status: "bootstrapped",
         heartbeat_written: true,
         heartbeat_source: "server_boot",
         monitor_command: monitorCommand,
       };
     } catch (e) {
       return {
+        status: "monitor-not-ready",
         heartbeat_written: false,
         heartbeat_source: "server_boot",
         monitor_command: monitorCommand,

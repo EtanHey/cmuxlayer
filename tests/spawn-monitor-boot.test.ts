@@ -143,6 +143,7 @@ describe("spawn monitor boot", () => {
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.monitor_boot).toEqual({
+      status: "bootstrapped",
       heartbeat_written: true,
       heartbeat_source: "server_boot",
       monitor_command: expect.stringContaining(parsed.agent_id),
@@ -206,6 +207,7 @@ describe("spawn monitor boot", () => {
       const parsed = parseToolResult(result);
       expect(parsed.ok).toBe(true);
       expect(parsed.monitor_boot).toEqual({
+        status: "monitor-not-ready",
         heartbeat_written: false,
         heartbeat_source: "server_boot",
         monitor_command: expect.stringContaining(parsed.agent_id),
@@ -246,6 +248,7 @@ describe("spawn monitor boot", () => {
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
     expect(parsed.monitor_alive).toBe(false);
+    expect(parsed.health.issue_codes).toContain("inbox_monitor_not_alive");
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(true);
     expect(sendCalls(exec)).toHaveLength(beforeDispatchSendCount + 1);
