@@ -87,4 +87,38 @@ describe("CmuxPersistentSocket V1 demux", () => {
       socket.disconnect();
     }
   });
+
+  it("rejects malformed object frames as V2 errors before unrelated queued V1 commands", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("malformed-v2");
+    const received: string[] = [];
+    await startLineServer(path, (line, conn) => {
+      received.push(line);
+      if (received.length === 2) {
+        conn.write('{"id":\n');
+        conn.write("OK\n");
+      }
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      const v1 = socket.sendLine("set_status first active");
+      const v2 = socket.call("list_panes");
+
+      await expect(v2).rejects.toMatchObject({ code: "protocol_error" });
+      await expect(v1).resolves.toBe("OK");
+      expect(received).toHaveLength(2);
+      expect(received).toContain("set_status first active");
+      const v2Request = received.find((line) => line.startsWith("{"));
+      expect(JSON.parse(v2Request ?? "")).toMatchObject({
+        method: "list_panes",
+      });
+    } finally {
+      socket.disconnect();
+    }
+  });
 });

@@ -305,6 +305,32 @@ describe("runDoctor — report shape", () => {
     expect(report.healthy).toBe(true);
   });
 
+  it("treats the Homebrew cmuxlayer bin entrypoint as trusted dist provenance", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.1",
+      env: {},
+      brew: makeBrew({}),
+      runtimeProvenance: () =>
+        detectRuntimeProvenance({
+          argv: [
+            "/opt/homebrew/opt/node/bin/node",
+            "/opt/homebrew/bin/cmuxlayer",
+          ],
+          env: {},
+          execPath: "/opt/homebrew/opt/node/bin/node",
+        }),
+    });
+
+    expect(report.runtimeProvenance).toMatchObject({
+      distEntrypoint: true,
+      entrypoint: "/opt/homebrew/bin/cmuxlayer",
+      mode: "dist",
+      ok: true,
+    });
+    expect(report.runtimeProvenance.note).toMatch(/brew-installed cmuxlayer/i);
+    expect(report.healthy).toBe(true);
+  });
+
   it("surfaces live source runtime provenance without failing the doctor", async () => {
     const report = await runDoctorForTest({
       version: "0.3.1",

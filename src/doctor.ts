@@ -278,7 +278,16 @@ export function detectRuntimeProvenance(
   const normalizedEntrypoint = normalizePathForRuntime(entrypoint);
   const execPath = opts.execPath ?? process.execPath;
   const nodeVersion = opts.nodeVersion ?? process.version;
-  const distEntrypoint = /\/dist\/index\.js$/.test(normalizedEntrypoint);
+  const brewBinEntrypoint =
+    normalizedEntrypoint === "cmuxlayer" ||
+    /\/(?:opt\/homebrew|usr\/local)\/bin\/cmuxlayer$/.test(
+      normalizedEntrypoint,
+    ) ||
+    /\/Cellar\/cmuxlayer\/[^/]+\/(?:libexec\/)?bin\/cmuxlayer$/.test(
+      normalizedEntrypoint,
+    );
+  const distEntrypoint =
+    /\/dist\/index\.js$/.test(normalizedEntrypoint) || brewBinEntrypoint;
   const sourceEntrypoint = /\/src\/index\.ts$/.test(normalizedEntrypoint);
   const launcherEntrypoint =
     normalizedEntrypoint === "cmuxlayer-mcp" ||
@@ -294,7 +303,9 @@ export function detectRuntimeProvenance(
   }
 
   const note =
-    mode === "dist"
+    mode === "dist" && brewBinEntrypoint
+      ? "running brew-installed cmuxlayer bin; verify this path/version is the live MCP child after reconnect"
+      : mode === "dist"
       ? "running dist/index.js; verify this path/version is the live MCP child after reconnect"
       : mode === "source"
         ? "running live source; useful for development but not the pinned dist runtime"

@@ -195,6 +195,14 @@ export class CmuxPersistentSocket {
     this.pendingV1 = [];
   }
 
+  private rejectPendingV2(error: CmuxSocketError): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    this.pending.clear();
+  }
+
   private processBuffer(): void {
     let newlineIdx: number;
     while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
@@ -235,6 +243,11 @@ export class CmuxPersistentSocket {
       `Malformed cmux socket frame: ${detail}; frame=${line.slice(0, 120)}`,
       "protocol_error",
     );
+    if (line.trimStart().startsWith("{") && this.pending.size > 0) {
+      this.rejectPendingV2(socketError);
+      return;
+    }
+
     const entry = this.pendingV1.shift();
     if (entry) {
       clearTimeout(entry.timer);
@@ -244,7 +257,7 @@ export class CmuxPersistentSocket {
     }
 
     if (this.pending.size > 0) {
-      this.rejectAllPending(socketError);
+      this.rejectPendingV2(socketError);
     }
   }
 
