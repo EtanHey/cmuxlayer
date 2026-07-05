@@ -575,12 +575,8 @@ export class CmuxSocketClient {
     }
     if (opts?.subtitle) args.push(this.rawV1Arg("--subtitle"), opts.subtitle);
     if (opts?.body) args.push(this.rawV1Arg("--body"), opts.body);
-    if (opts?.workspace) {
-      args.push(this.rawV1Arg("--workspace"), opts.workspace);
-    }
-    if (opts?.surface) {
-      args.push(this.rawV1Arg("--surface"), opts.surface);
-    }
+    const tabId = await this.resolveSidebarTabId(opts);
+    if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
     await this.sendV1Args("notify", args);
   }
 
@@ -782,11 +778,19 @@ export class CmuxSocketClient {
     workspace?: string;
     surface?: string;
   }): Promise<string | undefined> {
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
+    if (opts?.workspace) return this.resolveWorkspaceTabId(opts.workspace);
+    if (!opts?.surface) return undefined;
+
+    let workspace: string | undefined;
+    try {
+      workspace = await this.resolveWorkspace(opts.surface);
+    } catch (error) {
+      if (!(error instanceof CmuxSocketError && error.code === "not_found")) {
+        throw error;
+      }
+      workspace = (await this.identify(opts.surface)).caller?.workspace_ref;
+    }
+
     if (!workspace) return undefined;
     return this.resolveWorkspaceTabId(workspace);
   }
