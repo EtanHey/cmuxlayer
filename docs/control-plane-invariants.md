@@ -32,6 +32,11 @@ recovery, and sidebar/reporting decisions.
 | `stale_surface` | Registry route points to a surface not in the live list, or live surface has a different occupant/session. | Route is repaired from session index or resync, or delivery refuses clearly. | Partially modelled as delivery-time stale-ref guard (`src/server.ts:4703-4745`) plus durable surface/session index (`src/state-manager.ts:34-45`, `src/state-manager.ts:83-130`). |
 | `poisoned_registry` | Registry records conflict, duplicate routes disagree, ghosts remain after vanished surfaces, or stale `error` state would suppress wakeups. | Reconcile/evict repairs to one route per agent, or poisoned records are isolated/refused. | Not modelled as a state. `dispatch_to_agent` bypasses lifecycle because stale `error` records previously killed wakeups (`src/server.ts:4278-4286`, `src/server.ts:4307-4313`); duplicate route rejection exists in tests (`tests/agent-facade.test.ts:95-111`). |
 
+## Surface Topology Evidence
+
+An empty/failed surface listing is inconclusive (`unknown`); only a non-empty topology lacking a
+specific surface proves absence; stale records reap on the next non-empty scan.
+
 ## Allowed Transitions
 
 Allowed transitions are intentionally narrower than current ad hoc state movement:

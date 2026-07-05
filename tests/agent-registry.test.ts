@@ -77,8 +77,8 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      // Surface provider returns no surfaces — surface:99 is gone
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      // Non-empty surface enumeration proves surface:99 is gone.
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
@@ -97,7 +97,7 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
@@ -120,7 +120,7 @@ describe("AgentRegistry", () => {
     });
 
     it("returns null for unknown agent", async () => {
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
@@ -213,7 +213,7 @@ describe("AgentRegistry", () => {
       await registry.reconstitute();
 
       // Surface disappears
-      surfaces = [];
+      surfaces = [makeSurface("surface:2")];
       await registry.reconcile();
 
       const agent = registry.get("agent-alive");
@@ -244,6 +244,28 @@ describe("AgentRegistry", () => {
       await registry.reconcile();
 
       const agent = registry.get("agent-live");
+      expect(agent!.state).toBe("working");
+      expect(agent!.error).toBeNull();
+    });
+
+    it("does not mark live agents disappeared when surface enumeration is empty", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-live-empty-scan",
+          surface_id: "surface:1",
+          state: "working",
+        }),
+      );
+
+      let surfaces = [makeSurface("surface:1")];
+      const surfaceProvider = async () => surfaces;
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+
+      surfaces = [];
+      await registry.reconcile();
+
+      const agent = registry.get("agent-live-empty-scan");
       expect(agent!.state).toBe("working");
       expect(agent!.error).toBeNull();
     });
@@ -393,7 +415,63 @@ describe("AgentRegistry", () => {
     });
   });
 
+  describe("hasLiveSurface", () => {
+    it("treats empty surface enumeration as inconclusive", async () => {
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [] as CmuxSurface[],
+      );
+
+      await expect(registry.hasLiveSurface("surface:maybe-live")).resolves.toBe(
+        true,
+      );
+    });
+
+    it("treats surface enumeration failures as inconclusive", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => {
+        throw new Error("socket unavailable");
+      });
+
+      await expect(registry.hasLiveSurface("surface:maybe-live")).resolves.toBe(
+        true,
+      );
+    });
+
+    it("returns false only when a non-empty topology lacks the surface", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:other"),
+      ]);
+
+      await expect(registry.hasLiveSurface("surface:missing")).resolves.toBe(
+        false,
+      );
+    });
+  });
+
   describe("purgeTerminal", () => {
+    it("does not purge terminal workers when surface enumeration is empty", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "terminal-worker-empty-scan",
+          state: "done",
+          surface_id: "surface:maybe-live",
+          role: "worker",
+        }),
+      );
+
+      const surfaceProvider = async () => [] as CmuxSurface[];
+      const registry = new AgentRegistry(stateMgr, surfaceProvider);
+      await registry.reconstitute();
+
+      const purged = await registry.purgeTerminal();
+
+      expect(purged).toBe(0);
+      expect(registry.get("terminal-worker-empty-scan")).toMatchObject({
+        agent_id: "terminal-worker-empty-scan",
+        state: "done",
+      });
+    });
+
     it("keeps absent terminal lead roles while purging absent terminal workers", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -420,7 +498,7 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
@@ -450,7 +528,7 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
@@ -469,7 +547,7 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      const surfaceProvider = async () => [] as CmuxSurface[];
+      const surfaceProvider = async () => [makeSurface("surface:live")];
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
       const renamed = stateMgr.renameState("agent-pending", "agent-final");

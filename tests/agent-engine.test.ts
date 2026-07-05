@@ -392,6 +392,7 @@ describe("AgentEngine", () => {
         });
 
         expect(stateMgr.readState(result.agent_id)?.state).toBe("booting");
+        liveSurfaces = [makeSurface("surface:other-live")];
 
         await vi.runOnlyPendingTimersAsync();
 
@@ -1788,7 +1789,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(mockClient.newSplit).toHaveBeenCalled();
@@ -1831,7 +1832,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(mockClient.send).toHaveBeenCalledWith(
@@ -1864,7 +1865,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(mockClient.send).toHaveBeenCalledWith(
@@ -1895,7 +1896,7 @@ describe("AgentEngine", () => {
         user_killed: true,
       });
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(mockClient.newSplit).not.toHaveBeenCalled();
@@ -1946,7 +1947,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
       await engine.runSweep();
 
@@ -1980,7 +1981,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(mockClient.send).not.toHaveBeenCalled();
@@ -2010,7 +2011,7 @@ describe("AgentEngine", () => {
       liveSurfaces = [makeSurface("surface:dead")];
       await engine.getRegistry().reconstitute();
 
-      liveSurfaces = [];
+      liveSurfaces = [makeSurface("surface:other")];
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-preflight")).toMatchObject({
@@ -4142,7 +4143,7 @@ To continue this session, run codex resume ${sessionId}`,
         liveSurfaces = [makeSurface("surface:gone-during-wait")];
         await engine.getRegistry().reconstitute();
 
-        liveSurfaces = [];
+        liveSurfaces = [makeSurface("surface:other")];
         const pending = engine.waitFor(
           "agent-surface-gone",
           "done",
@@ -5175,6 +5176,9 @@ To continue this session, run codex resume ${sessionId}`,
       (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
         async (surface: string) => {
           liveSurfaces = liveSurfaces.filter((item) => item.ref !== surface);
+          if (liveSurfaces.length === 0) {
+            liveSurfaces = [makeSurface("surface:post-close-witness")];
+          }
         },
       );
     });
