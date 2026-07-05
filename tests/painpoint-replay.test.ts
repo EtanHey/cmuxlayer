@@ -14,9 +14,15 @@ import type {
 type PainpointFixture = {
   id: string;
   expected_state: string;
+  secondary_state?: string;
   phase_home: string;
   source_evidence: string[];
   screen_text?: string;
+  submitted_text?: string;
+  read_error?: {
+    message: string;
+    error_code: string;
+  };
   assertions?: string[];
   agent_record?: Partial<AgentRecord>;
   live_surfaces?: Array<{ ref: string }>;
@@ -71,7 +77,19 @@ const fixtureNames = readdirSync(fixtureDir)
 const fixtures = fixtureNames.map(readPainpointFixture);
 
 function legacyClassifierShape(fixture: PainpointFixture): string {
+  if (fixture.read_error?.error_code === "pane_died") {
+    return "dead";
+  }
+
   if (fixture.screen_text !== undefined) {
+    if (
+      fixture.agent_record?.boot_prompt_pending === true &&
+      fixture.submitted_text !== undefined &&
+      fixture.screen_text.includes(fixture.submitted_text)
+    ) {
+      return "composer_dirty";
+    }
+
     const parsed = parseScreen(fixture.screen_text);
     return parsed.control_state ?? `legacy:${parsed.agent_type}:${parsed.status}:${parsed.errors.join(",")}`;
   }
@@ -197,7 +215,9 @@ describe("Phase 0 painpoint replay corpus", () => {
     const testFn =
       fixture.id === "claude-ask-user-question-overlay" ||
       fixture.id === "claude-permission-confirmation" ||
-      fixture.id === "bare-shell-and-bare-gemini-prompt"
+      fixture.id === "bare-shell-and-bare-gemini-prompt" ||
+      fixture.id === "empty-dead-pane-submit" ||
+      fixture.id === "boot-prompt-typed-not-submitted"
         ? it
         : it.todo;
     testFn(

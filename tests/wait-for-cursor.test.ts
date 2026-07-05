@@ -15,6 +15,10 @@ const CURSOR_IDLE_SCREEN = readFileSync(
   join(process.cwd(), "tests/fixtures/cursor-2026-06-04-boot-ready.txt"),
   "utf8",
 );
+const CURSOR_DONE_SCREEN = readFileSync(
+  join(process.cwd(), "tests/fixtures/cursor-2026-06-04-task-done.txt"),
+  "utf8",
+);
 
 function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   return {
@@ -95,11 +99,13 @@ describe("wait_for Cursor terminal idle", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     engine.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("resolves done promptly when a Cursor agent reaches its terminal idle state", async () => {
+  it("does not resolve done from Cursor idle registry state without output evidence", async () => {
+    vi.useFakeTimers();
     const parsed = parseScreen(CURSOR_IDLE_SCREEN);
     expect(parsed.agent_type).toBe("cursor");
     expect(parsed.status).toBe("idle");
@@ -107,14 +113,65 @@ describe("wait_for Cursor terminal idle", () => {
     stateMgr.writeState(makeRecord({ state: parsed.status }));
     await engine.getRegistry().reconstitute();
 
-    const result = await engine.waitFor("cmuxlayerCursor-idle", "done", 50);
+    const pending = engine.waitFor("cmuxlayerCursor-idle", "done", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await pending;
 
-    expect(result.matched).toBe(true);
+    expect(result.matched).toBe(false);
     expect(result.state).toBe("idle");
-    expect(result.source).toBe("immediate");
+    expect(result.source).toBe("timeout");
     expect(result.agent).toMatchObject({
       agent_id: "cmuxlayerCursor-idle",
       state: "idle",
+    });
+  });
+
+  it("resolves done from a Cursor screen with a done signal", async () => {
+    vi.useFakeTimers();
+    const candidateAt = new Date("2026-06-04T22:01:10.000Z");
+    vi.setSystemTime(new Date(candidateAt.getTime() + 5_001));
+    const parsed = parseScreen(CURSOR_DONE_SCREEN);
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("done");
+    expect(parsed.done_signal).toBe("TASK_DONE");
+
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(
+      stateMgr,
+      registry,
+      makeMockClient({
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:cursor-idle",
+          text: CURSOR_DONE_SCREEN,
+          lines: 80,
+          scrollback_used: false,
+        }),
+      }),
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      },
+    );
+
+    stateMgr.writeState(
+      makeRecord({
+        state: "idle",
+        task_done_candidate_at: candidateAt.toISOString(),
+      }),
+    );
+    await engine.getRegistry().reconstitute();
+
+    const pending = engine.waitFor("cmuxlayerCursor-idle", "done", 1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await pending;
+
+    expect(result.matched).toBe(true);
+    expect(result.state).toBe("done");
+    expect(result.source).toBe("screen");
+    expect(result.agent).toMatchObject({
+      agent_id: "cmuxlayerCursor-idle",
+      state: "done",
     });
   });
 });

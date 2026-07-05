@@ -387,7 +387,7 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
-  it("verifies short send_to submissions once the input clears", async () => {
+  it("keeps cleared short send_to submissions uncertain without a hard error", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.completionMode = "idle";
@@ -403,12 +403,12 @@ describe("enter reliability", () => {
     const events = readEventLog().filter((event) => event.event_type === "send_to");
 
     expect(parsed.ok).toBe(true);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.retry_count).toBe(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
     expect(events).toHaveLength(1);
-    // A short relay is now verified: the input cleared from the prompt, so the
-    // submit landed even though Claude settled straight back to idle.
-    expect(events[0]?.submit_verified).toBe(true);
-    expect(events[0]?.retry_count).toBe(0);
+    expect(events[0]?.submit_verified).toBeNull();
+    expect(events[0]?.retry_count).toBe(1);
   });
 
   it("retries Enter for send_command on a Claude surface", async () => {
@@ -525,7 +525,7 @@ describe("enter reliability", () => {
     expect(events[0]?.submit_verified).toBeNull();
   });
 
-  it("verifies send_input to an uncached shell when the prompt clears", async () => {
+  it("does not verify send_input to an uncached shell from prompt clearing", async () => {
     const client = new FakeShellSurfaceClient();
     server = createReliabilityServer(client as any);
 
@@ -540,13 +540,13 @@ describe("enter reliability", () => {
     );
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBe(true);
+    expect(events[0]?.submit_verified).toBeNull();
   });
 
   it("uses the verified send path for interact(action=send)", async () => {

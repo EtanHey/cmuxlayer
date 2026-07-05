@@ -32,6 +32,7 @@ function parseResult(result: any): any {
 
 function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
   let launchSent = false;
+  let agentMessageSubmitted = false;
   let surfaceLive = true;
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
@@ -42,7 +43,12 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("send")) {
-      launchSent = true;
+      const text = String(args.at(-1) ?? "");
+      if (text.includes("Claude") || text.includes("Codex") || text.includes("Cursor")) {
+        launchSent = true;
+      } else {
+        agentMessageSubmitted = true;
+      }
     }
     if (args.includes("list-workspaces")) {
       return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
@@ -93,7 +99,11 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: launchSent ? "What can I help you with?\n>" : "$ ",
+          text: agentMessageSubmitted
+            ? "Claude Code\n✻ Working\n"
+            : launchSent
+              ? "What can I help you with?\n>"
+              : "$ ",
           lines: 20,
           scrollback_used: false,
         }),

@@ -252,6 +252,9 @@ export interface DeliveryRecord {
   chunk_delay_ms: number;
   chunks: string[];
   press_enter: boolean;
+  verify_submit: boolean;
+  submit_verified: boolean | null;
+  retry_count: number;
   rename_to_task?: string;
   started_at: string;
   completed_at?: string;
@@ -1387,6 +1390,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     completed_at: record.completed_at ?? null,
     failed_chunk: record.failed_chunk ?? null,
     error: record.error ?? null,
+    submit_verified: record.submit_verified,
+    retry_count: record.retry_count,
   });
 
   const collectServerRoleSurfaceIds = (
@@ -1732,8 +1737,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_event: DeliveryEventType;
     source_agent?: string | null;
     verify_submit: boolean;
-    allow_non_agent_clear?: boolean;
     require_working_status?: boolean;
+    timeout_ms?: number;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -1741,11 +1746,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return { submit_verified: null, retry_count: 0 };
     }
 
+    const timeoutMs = opts.timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
+    let sawClearedInput = false;
 
-    while (Date.now() - startedAt < SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS) {
+    while (Date.now() - startedAt < timeoutMs) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -1762,17 +1769,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
-      const hasClearedAgentComposer =
-        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
-        !hasPendingInput;
+      if (!hasPendingInput) {
+        sawClearedInput = true;
+      }
       if (opts.require_working_status) {
-        if (retried && hasClearedAgentComposer) {
-          // Slow-to-stream boot prompts can clear the composer before the CLI
-          // renders a parsed working marker; identity + cleared input is enough
-          // evidence after the recovery Return has been attempted.
-          return { submit_verified: true, retry_count: retryCount };
-        }
-
         if (!retried) {
           await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
           await sendKeyWithRetry(opts.surface, "return", opts.workspace);
@@ -1794,20 +1794,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         continue;
       }
 
-      if (
-        hasClearedAgentComposer ||
-        (opts.allow_non_agent_clear === true && !hasPendingInput)
-      ) {
-        // The submitted text is no longer echoed in the input box: the terminal
-        // accepted it and cleared the prompt. For agent surfaces this catches
-        // the common idle-after-submit case; raw shell clears are only accepted
-        // when the caller explicitly allows non-agent verification.
-        return { submit_verified: true, retry_count: retryCount };
-      }
-
-      // The submitted text is still pending in the input box. Retry Enter once,
-      // then keep polling; if it never clears (a frozen terminal) we fall
-      // through to the timeout below and report the relay as unverified.
+      // Pending input and cleared-but-idle composers are both ambiguous: the
+      // first Return may have been missed, or the CLI may have cleared input
+      // without starting the task. Retry Enter once, then keep polling for real
+      // working/thinking evidence. Cleared input alone is not submit proof.
       if (!retried) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         await sendKeyWithRetry(opts.surface, "return", opts.workspace);
@@ -1827,7 +1817,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
-    return { submit_verified: false, retry_count: retryCount };
+    return {
+      submit_verified:
+        sawClearedInput && !opts.require_working_status ? null : false,
+      retry_count: retryCount,
+    };
   };
 
   const deliverInputChunks = async (opts: {
@@ -1842,7 +1836,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_event?: DeliveryEventType;
     source_agent?: string | null;
     verify_submit?: boolean;
-    allow_non_agent_clear?: boolean;
+    submit_verify_timeout_ms?: number;
   }): Promise<{
     bytes: number;
     retry_count: number;
@@ -1892,7 +1886,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_event: opts.source_event ?? "send_command",
         source_agent: opts.source_agent,
         verify_submit: opts.verify_submit ?? false,
-        allow_non_agent_clear: opts.allow_non_agent_clear,
+        timeout_ms: opts.submit_verify_timeout_ms,
         require_working_status: opts.source_event === "boot_prompt",
       });
       submit_verified = verification.submit_verified;
@@ -1918,8 +1912,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     if (submit_verified === false) {
+      const timeoutMs =
+        opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
       throw new SubmitVerificationError(
-        `Enter submit could not be verified for ${opts.surface} within ${SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS}ms`,
+        `Enter submit could not be verified for ${opts.surface} within ${timeoutMs}ms`,
         retry_count,
       );
     }
@@ -1958,8 +1954,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const now = Date.now();
         const updateMarker =
           matchesCliUpdateMarker(screen.text) ||
-          (updateStartedAt !== null &&
-            matchesCliUpdateContinuationMarker(screen.text) &&
+          (matchesCliUpdateContinuationMarker(screen.text) &&
             !matchesShellPrompt(screen.text));
 
         if (updateMarker) {
@@ -2066,15 +2061,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
       if (snapshot) {
         lastText = snapshot.text;
-        const hasPendingInput = screenShowsPendingInput(
-          snapshot.text,
-          opts.text,
-        );
-        if (
-          isSubmitVerifiedStatus(snapshot.parsed.status) ||
-          (screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
-            !hasPendingInput)
-        ) {
+        if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
           return;
         }
       }
@@ -2181,6 +2168,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
   };
 
+  const probeAgentLaunchReadyOnce = async (opts: {
+    surface: string;
+    workspace?: string;
+  }): Promise<void> => {
+    try {
+      await client.readScreen(opts.surface, {
+        workspace: opts.workspace,
+        lines: 80,
+        scrollback: false,
+      });
+    } catch (error) {
+      if (isSurfaceGoneReadFailure(error, opts.surface)) {
+        throw new SurfaceGoneError(opts.surface, error);
+      }
+    }
+  };
+
   const sendLauncherCommandToSurface = async (opts: {
     surface: string;
     workspace?: string;
@@ -2198,7 +2202,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     });
     await withSurfaceWrite(opts.surface, async () => {
       try {
-        await deliverInputChunks({
+        const delivery = await deliverInputChunks({
           surface: opts.surface,
           workspace: opts.workspace,
           chunks,
@@ -2207,7 +2211,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "spawn_agent",
           verify_submit: true,
+          submit_verify_timeout_ms: SEND_INPUT_RECOVERY_ENTER_DELAY_MS,
         });
+        if (delivery.submit_verified !== true) {
+          // The command can clear from the shell without proving the launcher
+          // accepted it. Probe once to consume transient ready evidence, then
+          // let boot-prompt readiness own update/relaunch monitoring.
+          await probeAgentLaunchReadyOnce({
+            surface: opts.surface,
+            workspace: opts.workspace,
+          });
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/Enter submit could not be verified/.test(message)) {
@@ -2280,6 +2294,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             sentChunks = count;
           },
           verify_submit: true,
+          submit_verify_timeout_ms: opts.timeout_ms
+            ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
+            : undefined,
         }),
       );
       return { ...delivery, prompt_text: rawPrompt };
@@ -2442,7 +2459,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const run = async () => {
       try {
         await assertDeliveryTargetIsSafe(record.surface, record.workspace);
-        await deliverInputChunks({
+        const delivery = await deliverInputChunks({
           surface: record.surface,
           workspace: record.workspace,
           chunks: record.chunks,
@@ -2450,12 +2467,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           chunk_delay_ms: record.chunk_delay_ms,
           press_enter: record.press_enter,
           rename_to_task: record.rename_to_task,
+          source_event: "send_input",
+          verify_submit: record.verify_submit,
           onChunkDelivered: (sentChunks) => {
             record.sent_chunks = sentChunks;
           },
         });
+        record.submit_verified = delivery.submit_verified;
+        record.retry_count = delivery.retry_count;
         finishDelivery(record, "delivered");
       } catch (error) {
+        if (error instanceof SubmitVerificationError) {
+          record.submit_verified = false;
+          record.retry_count = error.retry_count;
+        } else if (error instanceof DeliverySafetyGateError) {
+          record.submit_verified = error.submit_verified;
+        }
         const message = error instanceof Error ? error.message : String(error);
         const failedChunk =
           error instanceof DeliveryError ? error.failed_chunk : undefined;
@@ -3528,6 +3555,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
             ? chunkTerminalInput(sanitizedText, args.chunk_size)
             : [sanitizedText];
+        const targetRecord = resolveLatestSurfaceAgentRecord(
+          stateMgr,
+          args.surface,
+        );
+        const shouldVerifySubmit =
+          args.press_enter &&
+          !!targetRecord &&
+          INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
         if (args.background) {
           const record: DeliveryRecord = {
@@ -3541,6 +3576,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             chunks,
             press_enter: args.press_enter,
+            verify_submit: shouldVerifySubmit,
+            submit_verified: null,
+            retry_count: 0,
             rename_to_task: args.rename_to_task,
             started_at: new Date().toISOString(),
           };
@@ -3552,6 +3590,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             delivered: false,
             delivery_id: record.delivery_id,
             status: record.status,
+            submit_verified: record.submit_verified,
+            retry_count: record.retry_count,
           };
           return okFormatted(
             formatDelivery("send_input", {
@@ -3563,13 +3603,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
-        const targetRecord = resolveLatestSurfaceAgentRecord(
-          stateMgr,
-          args.surface,
-        );
-        const shouldVerifySubmit =
-          args.press_enter &&
-          (!targetRecord || INTERACTIVE_AGENT_STATES.has(targetRecord.state));
         const delivery = await withSurfaceWrite(args.surface, async () => {
           await assertDeliveryTargetIsSafe(args.surface, args.workspace);
           return deliverInputChunks({
@@ -3582,7 +3615,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             rename_to_task: args.rename_to_task,
             source_event: "send_input",
             verify_submit: shouldVerifySubmit,
-            allow_non_agent_clear: !targetRecord,
           });
         });
 
@@ -5478,6 +5510,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               screen: e.screen,
             });
           }
+          if (e instanceof SubmitVerificationError) {
+            return err(e, {
+              submit_verified: false,
+              retry_count: e.retry_count,
+            });
+          }
           return err(e);
         }
       },
@@ -5656,6 +5694,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               screen: e.screen,
             });
           }
+          if (e instanceof SubmitVerificationError) {
+            return err(e, {
+              submit_verified: false,
+              retry_count: e.retry_count,
+            });
+          }
           return err(e);
         }
       },
@@ -5721,6 +5765,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
+            });
+          }
+          if (e instanceof SubmitVerificationError) {
+            return err(e, {
+              submit_verified: false,
+              retry_count: e.retry_count,
             });
           }
           return err(e);
@@ -6024,6 +6074,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               screen: e.screen,
             });
           }
+          if (e instanceof SubmitVerificationError) {
+            return err(e, {
+              submit_verified: false,
+              retry_count: e.retry_count,
+            });
+          }
           return err(e);
         }
       },
@@ -6088,6 +6144,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
+            });
+          }
+          if (e instanceof SubmitVerificationError) {
+            return err(e, {
+              submit_verified: false,
+              retry_count: e.retry_count,
             });
           }
           return err(e);

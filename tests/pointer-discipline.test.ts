@@ -72,6 +72,11 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
       return { stdout: "{}", stderr: "" };
     }
 
+    if (args.includes("paste-buffer")) {
+      promptPending = true;
+      return { stdout: "{}", stderr: "" };
+    }
+
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({

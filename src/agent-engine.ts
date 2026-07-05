@@ -242,22 +242,6 @@ type RefreshedTargetStateEvidenceSource = Exclude<
   "state"
 >;
 
-// AIDEV-NOTE: Cursor has no distinct "done" lifecycle state — it settles to
-// "idle" when a task completes. A wait_for(target="done") on a Cursor agent
-// would otherwise hang the full timeout (R-038(cmuxlayer-code: cursor-idle short-circuit): "300s hang on a done Cursor").
-// AIDEV-NOTE: This is distinct from weave-registry R-038 (wait_for(done) transcript ground-truth) and weave-registry R-039 (delta-wave coverage).
-// Treat a Cursor that has reached idle as satisfying a done wait. Narrowly
-// scoped to cli==="cursor" so Claude/Codex idle (awaiting input ≠ done) is
-// unaffected.
-function isCursorTerminalIdleTarget(
-  agent: AgentRecord,
-  targetState: AgentState,
-): boolean {
-  return (
-    targetState === "done" && agent.cli === "cursor" && agent.state === "idle"
-  );
-}
-
 function tailScreenLines(text: string, lines: number): string {
   return text.split(/\r?\n/).slice(-lines).join("\n");
 }
@@ -831,7 +815,6 @@ export class AgentEngine {
     agent: AgentRecord,
     targetState: AgentState,
   ): Promise<TargetStateEvidenceSource | null> {
-    if (isCursorTerminalIdleTarget(agent, targetState)) return "state";
     if (agent.state !== targetState) return null;
     if (!this.requiresOutputDoneEvidence(targetState)) return "state";
     if (await this.hasGroundTruthDone(agent)) return "transcript";

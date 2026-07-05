@@ -1569,8 +1569,9 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should preflight the screen, then send, press enter, and verify submit.
-    expect(mockExec).toHaveBeenCalledTimes(4);
+    // Should preflight the screen, send text, and press enter. Raw uncached
+    // surfaces do not get submit_verified:true from prompt clearing alone.
+    expect(mockExec).toHaveBeenCalledTimes(3);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
@@ -1585,11 +1586,6 @@ describe("tool handler integration", () => {
       3,
       "cmux",
       expect.arrayContaining(["send-key"]),
-    );
-    expect(mockExec).toHaveBeenNthCalledWith(
-      4,
-      "cmux",
-      expect.arrayContaining(["read-screen"]),
     );
   });
 
@@ -1878,7 +1874,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("send_command accepts a cleared Claude boot prompt before a working marker streams", async () => {
+  it("send_command does not verify a cleared Claude boot prompt without a working marker", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
@@ -1916,15 +1912,16 @@ describe("tool handler integration", () => {
         surface: "surface:1",
         command: "brainlayerClaude -s",
         boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 100,
       },
       {} as any,
     );
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("boot prompt submit evidence");
     expect(promptSent).toBe(true);
     expect(returnPresses).toBe(3);
   }, 10_000);
@@ -2337,6 +2334,92 @@ describe("tool handler integration", () => {
       status: "delivered",
       sent_chunks: 5,
       total_chunks: 5,
+    });
+  });
+
+  it("send_input background press_enter surfaces uncertain cleared submits", async () => {
+    vi.useFakeTimers();
+    const stateDir = join(tmpdir(), "cmuxlayer-background-submit-verify");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "agent-background-submit",
+      surface_id: "surface:agent-bg",
+      workspace_id: null,
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "Opus 4.8",
+      cli: "claude",
+      cli_session_id: null,
+      task_summary: "background submit verification",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-05T00:00:00.000Z",
+      updated_at: "2026-07-05T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+    mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:agent-bg",
+            text: "Claude Code\n> \nCLAUDE_COUNTER:1\n",
+            lines: 3,
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-workspaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({ workspaces: [] }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true, stateDir });
+    const registeredTools = (server as any)._registeredTools;
+    const sendTool = registeredTools["send_input"];
+    const readTool = registeredTools["read_screen"];
+
+    const result = await sendTool.handler(
+      {
+        surface: "surface:agent-bg",
+        text: "ping",
+        background: true,
+        press_enter: true,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe("delivering");
+    expect(parsed.submit_verified).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    const readAfterDelivery = await readTool.handler(
+      { surface: "surface:agent-bg", parsed_only: true },
+      {} as any,
+    );
+    const readAfterDeliveryParsed =
+      readAfterDelivery.structuredContent ??
+      JSON.parse(readAfterDelivery.content[0].text);
+    expect(readAfterDeliveryParsed.delivery).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      status: "delivered",
+      submit_verified: null,
+      retry_count: 1,
     });
   });
 

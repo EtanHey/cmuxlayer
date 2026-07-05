@@ -207,9 +207,8 @@ describe("false-green empty surface protection", () => {
     const result = await resultPromise;
 
     const parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
     expect(
       (mockExec as any).mock.calls.some(([, args]: [string, string[]]) =>
         args.includes("read-screen"),
