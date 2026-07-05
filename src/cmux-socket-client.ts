@@ -575,12 +575,9 @@ export class CmuxSocketClient {
     }
     if (opts?.subtitle) args.push(this.rawV1Arg("--subtitle"), opts.subtitle);
     if (opts?.body) args.push(this.rawV1Arg("--body"), opts.body);
-    if (opts?.workspace) {
-      args.push(this.rawV1Arg("--workspace"), opts.workspace);
-    }
-    if (opts?.surface) {
-      args.push(this.rawV1Arg("--surface"), opts.surface);
-    }
+    const workspace = await this.resolveMappedSidebarWorkspace(opts);
+    if (workspace) args.push(this.rawV1Arg("--workspace"), workspace);
+    if (opts?.surface) args.push(this.rawV1Arg("--surface"), opts.surface);
     await this.sendV1Args("notify", args);
   }
 
@@ -782,13 +779,47 @@ export class CmuxSocketClient {
     workspace?: string;
     surface?: string;
   }): Promise<string | undefined> {
-    const workspace =
-      opts?.workspace ??
-      (opts?.surface
-        ? (await this.identify(opts.surface)).caller?.workspace_ref
-        : undefined);
+    const workspace = await this.resolveSidebarWorkspace(opts);
     if (!workspace) return undefined;
     return this.resolveWorkspaceTabId(workspace);
+  }
+
+  private async resolveSidebarWorkspace(opts?: {
+    workspace?: string;
+    surface?: string;
+  }): Promise<string | undefined> {
+    if (opts?.workspace) return opts.workspace;
+    if (!opts?.surface) return undefined;
+
+    const mapped = await this.resolveMappedSidebarWorkspace(opts);
+    if (mapped) return mapped;
+
+    const identified = await this.identify(opts.surface);
+    return (
+      identified.caller?.workspace_ref ?? identified.focused?.workspace_ref
+    );
+  }
+
+  private async resolveMappedSidebarWorkspace(opts?: {
+    workspace?: string;
+    surface?: string;
+  }): Promise<string | undefined> {
+    if (opts?.workspace) return opts.workspace;
+    if (!opts?.surface) return undefined;
+
+    try {
+      return await this.resolveWorkspace(opts.surface);
+    } catch (error) {
+      if (
+        !(
+          error instanceof CmuxSocketError &&
+          (error.code === "not_found" || error.code === "method_not_found")
+        )
+      ) {
+        throw error;
+      }
+      return undefined;
+    }
   }
 
   private async resolveWorkspaceTabId(workspace: string): Promise<string> {

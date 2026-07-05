@@ -30,6 +30,15 @@ import { createCmuxClient } from "../src/cmux-client-factory.js";
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
 const MOCK_SOCKET_PATH = "/tmp/cmux-test-mock.sock";
 const MOCK_WORKSPACE_ID = "8481D6A0-CE17-4B7C-8695-7A722D30FEE2";
+const MOCK_SECOND_WORKSPACE_ID = "7335E54B-6E88-4B19-BE8C-71C39F4E9D10";
+
+interface MockV2Request {
+  id: string;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+type MockResponseHandler = (req: MockV2Request) => unknown;
 
 const MOCK_RESPONSES: Record<string, unknown> = {
   "system.ping": { pong: true },
@@ -114,6 +123,10 @@ const MOCK_RESPONSES: Record<string, unknown> = {
   },
 };
 
+function isMockResponseHandler(response: unknown): response is MockResponseHandler {
+  return typeof response === "function";
+}
+
 let mockServer: net.Server;
 let lastV1Command = "";
 let lastV2Request: { method: string; params: Record<string, unknown> } | null =
@@ -149,7 +162,7 @@ function startMockServer(): Promise<void> {
           if (!line.trim()) continue;
 
           try {
-            const req = JSON.parse(line);
+            const req = JSON.parse(line) as MockV2Request;
             const method = req.method as string;
             lastV2Request = { method, params: req.params ?? {} };
             mockEvents.push({
@@ -157,7 +170,11 @@ function startMockServer(): Promise<void> {
               method,
               params: req.params ?? {},
             });
-            const result = MOCK_RESPONSES[method];
+            const mockResponse = MOCK_RESPONSES[method];
+            const result =
+              isMockResponseHandler(mockResponse)
+                ? mockResponse(req)
+                : mockResponse;
 
             if (result !== undefined) {
               const resp =
@@ -187,6 +204,7 @@ function startMockServer(): Promise<void> {
                 "clear_status",
                 "set_progress",
                 "clear_progress",
+                "notify",
                 "log",
                 "list_status",
               ].includes(cmd)
@@ -680,6 +698,183 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(lastV1Command).toBe(
       `set_status agent active --tab=${MOCK_WORKSPACE_ID}`,
     );
+  });
+
+  it("resolves surface-targeted sidebar commands to the target surface workspace", async () => {
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+    const savedSurfaceList = MOCK_RESPONSES["surface.list"];
+    const savedIdentify = MOCK_RESPONSES["system.identify"];
+
+    MOCK_RESPONSES["workspace.list"] = {
+      workspaces: [
+        {
+          id: MOCK_WORKSPACE_ID,
+          ref: "workspace:1",
+          title: "Caller WS",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+        {
+          id: MOCK_SECOND_WORKSPACE_ID,
+          ref: "workspace:2",
+          title: "Target WS",
+          index: 1,
+          selected: false,
+          pinned: false,
+        },
+      ],
+    };
+    MOCK_RESPONSES["surface.list"] = (req) => {
+      const workspace = String(req.params.workspace_id ?? "");
+      return {
+        workspace_ref: workspace,
+        window_ref: workspace === "workspace:2" ? "window:2" : "window:1",
+        pane_ref: workspace === "workspace:2" ? "pane:2" : "pane:1",
+        surfaces:
+          workspace === "workspace:2"
+            ? [
+                {
+                  ref: "surface:target",
+                  title: "target",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [
+                {
+                  ref: "surface:caller",
+                  title: "caller",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ],
+      };
+    };
+    MOCK_RESPONSES["system.identify"] = {
+      caller: {
+        workspace_ref: "workspace:1",
+        surface_ref: "surface:caller",
+        pane_ref: "pane:1",
+      },
+    };
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.setStatus("agent", "active", {
+        surface: "surface:target",
+      });
+      expect(lastV1Command).toBe(
+        `set_status agent active --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+
+      await client.setProgress(0.5, {
+        label: "halfway",
+        surface: "surface:target",
+      });
+      expect(lastV1Command).toBe(
+        `set_progress 0.5 --label halfway --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+
+      await client.notify({
+        title: "Done",
+        surface: "surface:target",
+      });
+      expect(lastV1Command).toBe(
+        "notify --title Done --workspace workspace:2 --surface surface:target",
+      );
+    } finally {
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+      MOCK_RESPONSES["surface.list"] = savedSurfaceList;
+      MOCK_RESPONSES["system.identify"] = savedIdentify;
+    }
+  });
+
+  it("falls back to the focused workspace for tab commands when a surface cannot be mapped", async () => {
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+    const savedSurfaceList = MOCK_RESPONSES["surface.list"];
+    const savedIdentify = MOCK_RESPONSES["system.identify"];
+
+    MOCK_RESPONSES["workspace.list"] = {
+      workspaces: [
+        {
+          id: MOCK_WORKSPACE_ID,
+          ref: "workspace:1",
+          title: "Caller WS",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+        {
+          id: MOCK_SECOND_WORKSPACE_ID,
+          ref: "workspace:2",
+          title: "Focused WS",
+          index: 1,
+          selected: false,
+          pinned: false,
+        },
+      ],
+    };
+    MOCK_RESPONSES["surface.list"] = (req) => ({
+      workspace_ref: String(req.params.workspace_id ?? ""),
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: [],
+    });
+    MOCK_RESPONSES["system.identify"] = {
+      focused: {
+        workspace_ref: "workspace:2",
+        surface_ref: "surface:focused",
+        pane_ref: "pane:focused",
+      },
+    };
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.setStatus("agent", "active", {
+        surface: "surface:unmapped",
+      });
+      expect(lastV1Command).toBe(
+        `set_status agent active --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+
+      await client.notify({
+        title: "Done",
+        surface: "surface:unmapped",
+      });
+
+      expect(lastV1Command).toBe(
+        "notify --title Done --surface surface:unmapped",
+      );
+    } finally {
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+      MOCK_RESPONSES["surface.list"] = savedSurfaceList;
+      MOCK_RESPONSES["system.identify"] = savedIdentify;
+    }
+  });
+
+  it("preserves surface-only notify when workspace mapping is unsupported", async () => {
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+    MOCK_RESPONSES["workspace.list"] = undefined;
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.notify({
+        title: "Done",
+        surface: "surface:legacy",
+      });
+
+      expect(lastV1Command).toBe(
+        "notify --title Done --surface surface:legacy",
+      );
+    } finally {
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+    }
   });
 
   it("renameTab sends V2 tab.action with rename params", async () => {
