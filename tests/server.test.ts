@@ -2349,6 +2349,228 @@ describe("tool handler integration", () => {
     expect(promptSent).toBe(true);
   }, 10_000);
 
+  it("send_command treats a Codex › composer line as still pending", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "codex-pending.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "still typed here", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? [
+                  "OpenAI Codex",
+                  "Model: gpt-5.5 xhigh",
+                  "› still typed here",
+                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+                ].join("\n")
+              : [
+                  "OpenAI Codex",
+                  "Model: gpt-5.5 xhigh",
+                  "›",
+                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+                ].join("\n"),
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "still typed here"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerCodex -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 100,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
+  it("send_command verifies a cleared Claude composer with footer chrome and no token evidence", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "claude-footer-cleared.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? [
+                  "Claude Code",
+                  "What can I help you with?",
+                  "❯",
+                  "  ⎇ cmuxlayer/fix-submit | 🔧 13",
+                ].join("\n")
+              : "Claude Code\nWhat can I help you with?\n❯",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 700,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
+  it("send_command rejects a pending prompt whose payload ends with a bare blockquote marker", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "blockquote-pending.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "Review this\n>", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? "Claude Code\nWhat can I help you with?\n❯ Review this\n>"
+              : "Claude Code\nWhat can I help you with?\n❯",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "Review this\n>"
+      ) {
+        promptSent = true;
+      }
+      if (
+        args.includes("set-buffer") &&
+        String(args.at(-1) ?? "") === "Review this\n>"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 700,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
+  it("send_command rejects a pending metric-looking boot prompt instead of treating prompt text as submit evidence", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "metric-looking-pending.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "Use 500 tokens and budget $5.00", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? [
+                  "OpenAI Codex",
+                  "Model: gpt-5.5 xhigh",
+                  "› Use 500 tokens and budget $5.00",
+                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+                ].join("\n")
+              : [
+                  "OpenAI Codex",
+                  "Model: gpt-5.5 xhigh",
+                  "›",
+                  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+                ].join("\n"),
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "Use 500 tokens and budget $5.00"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerCodex -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 100,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Boot prompt delivery failed");
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
   it("send_command reports timeout with last screen lines and leaves launcher surface alive", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });

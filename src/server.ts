@@ -98,6 +98,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import {
+  CLI_INPUT_PROMPT_PREFIXES,
   matchReadyPattern,
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
@@ -998,24 +999,203 @@ type RawSubmitEvidenceMetrics = {
   cost: number | null;
 };
 
-const COMPOSER_PROMPT_LINE_RE =
-  /^\s*(?:codex>|cursor>|kiro>|>>>|❯|>)\s?(.*)$/i;
-const RAW_SCREEN_TOKENS_RE = /\b([0-9][0-9,]*)\s+tokens\b/gi;
-const RAW_SCREEN_COST_RE = /(?:💰\s*)?\$\s*([0-9]+(?:\.[0-9]+)?)/g;
+type ComposerPromptLineMatch = {
+  input: string;
+};
+
+const COMPOSER_PROMPT_PREFIXES = Array.from(
+  new Set(Object.values(CLI_INPUT_PROMPT_PREFIXES).flat()),
+).sort((a, b) => b.length - a.length);
+const RAW_SCREEN_TOKENS_LINE_RE =
+  /(?:^\s*|.*\s{2,})([0-9][0-9,]*)\s+tokens\s*$/i;
+const RAW_SCREEN_COST_LINE_RE =
+  /(?:^|\s)🤖\s*[^|\n]+?\s*\|\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)(?:\s|$)|^\s*💰\s*\$([0-9]+(?:\.[0-9]+)?)(?:\s|$)/i;
 
 function normalizeTerminalText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+function matchComposerPromptLine(line: string): ComposerPromptLineMatch | null {
+  const trimmedStart = line.trimStart();
+  for (const prefix of COMPOSER_PROMPT_PREFIXES) {
+    if (!trimmedStart.toLowerCase().startsWith(prefix.toLowerCase())) {
+      continue;
+    }
+    return { input: trimmedStart.slice(prefix.length).replace(/^\s/, "") };
+  }
+
+  return null;
+}
+
+function inferComposerCli(
+  screenText: string,
+  parsed: ParsedScreenResult = parseScreen(screenText),
+): CliType | null {
+  if (parsed.agent_type !== "unknown") {
+    return parsed.agent_type;
+  }
+  if (/(?:^|\n)\s*(?:Kiro\b|kiro>)/i.test(screenText)) {
+    return "kiro";
+  }
+  if (/(?:^|\n)\s*Gemini CLI\b|(?:^|\n)\s*gemini>/i.test(screenText)) {
+    return "gemini";
+  }
+  if (/(?:^|\n)\s*Cursor Agent\b|(?:^|\n)\s*cursor>/i.test(screenText)) {
+    return "cursor";
+  }
+  if (
+    /\bOpenAI\s+Codex\b/i.test(screenText) ||
+    /(?:^|\n)\s*(?:Model:\s*)?gpt-[0-9]/i.test(screenText)
+  ) {
+    return "codex";
+  }
+  if (
+    /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?/i.test(
+      screenText,
+    )
+  ) {
+    return "claude";
+  }
+
+  return null;
+}
+
+function lineIsCurrentComposerRegionAnchor(
+  cli: CliType | null,
+  line: string,
+): boolean {
+  const trimmed = line.trim();
+  switch (cli) {
+    case "claude":
+      return /Claude Code|bypass permissions on|What can I help you with\?/i.test(
+        trimmed,
+      );
+    case "codex":
+      return (
+        /\bOpenAI\s+Codex\b/i.test(trimmed) ||
+        /\bModel:\s*gpt-/i.test(trimmed)
+      );
+    case "cursor":
+      return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
+    case "gemini":
+      return /^Gemini CLI$/i.test(trimmed) || /^gemini>\s*$/i.test(trimmed);
+    case "kiro":
+      return /^Kiro\b/i.test(trimmed) || /^kiro>\s*$/i.test(trimmed);
+    case null:
+      return (
+        /Claude Code|bypass permissions on|What can I help you with\?/i.test(
+          trimmed,
+        ) ||
+        /\bOpenAI\s+Codex\b/i.test(trimmed) ||
+        /\bModel:\s*gpt-/i.test(trimmed) ||
+        /^Cursor Agent$/i.test(trimmed) ||
+        /^cursor>\s*$/i.test(trimmed) ||
+        /^Gemini CLI$/i.test(trimmed) ||
+        /^gemini>\s*$/i.test(trimmed) ||
+        /^Kiro\b/i.test(trimmed) ||
+        /^kiro>\s*$/i.test(trimmed)
+      );
+  }
+}
+
+function currentComposerRegionStart(
+  cli: CliType | null,
+  lines: string[],
+): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lineIsCurrentComposerRegionAnchor(cli, lines[index] ?? "")) {
+      return index + 1;
+    }
+  }
+  return 0;
+}
+
+function isComposerFooterOrChromeLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return true;
+  }
+  return (
+    /^(?:⎇|🤖)(?:\s|$)/.test(trimmed) ||
+    /^CLAUDE_COUNTER:/i.test(trimmed) ||
+    /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*/i.test(trimmed) ||
+    /^\d+(?:\.\d+)?%\s+(?:context\s+)?left\b/i.test(trimmed) ||
+    /^\/ commands\b/i.test(trimmed) ||
+    /^(?:Auto|Agent)(?:\s*·|$)/i.test(trimmed) ||
+    /^ctrl\+c to stop\b/i.test(trimmed) ||
+    /^bypass permissions on\b/i.test(trimmed) ||
+    /^⬡\s+Idle\b/i.test(trimmed) ||
+    /^v20\d{2}\.\d{2}\.\d{2}-[a-f0-9]+$/i.test(trimmed)
+  );
+}
+
+function isEligibleBareReadyPromptLine(
+  cli: CliType | null,
+  line: string,
+): boolean {
+  if (!/^\s*(?:>|>>>)\s*$/.test(line)) {
+    return false;
+  }
+  return cli === "claude" || cli === "gemini" || cli === "kiro";
+}
+
+function matchLegacyClaudePromptLine(
+  cli: CliType | null,
+  line: string,
+): ComposerPromptLineMatch | null {
+  if (cli !== "claude") {
+    return null;
+  }
+  const match = line.trimStart().match(/^>(?!>)\s?(.*)$/);
+  return match ? { input: match[1] ?? "" } : null;
+}
+
 function extractComposerInputRegion(screenText: string): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const match = lines[index]?.match(COMPOSER_PROMPT_LINE_RE);
+  const cli = inferComposerCli(screenText);
+  const start = currentComposerRegionStart(cli, lines);
+  let end = lines.length;
+  while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
+    end -= 1;
+  }
+
+  for (let index = end - 1; index >= start; index -= 1) {
+    const match = matchComposerPromptLine(lines[index] ?? "");
     if (!match) {
       continue;
     }
 
-    return [match[1] ?? "", ...lines.slice(index + 1)].join("\n").trimEnd();
+    const inputLines = [match.input];
+    for (const line of lines.slice(index + 1, end)) {
+      if (isComposerFooterOrChromeLine(line)) {
+        break;
+      }
+      inputLines.push(line);
+    }
+
+    return inputLines.join("\n").trimEnd();
+  }
+
+  for (let index = end - 1; index >= start; index -= 1) {
+    const match = matchLegacyClaudePromptLine(cli, lines[index] ?? "");
+    if (!match) {
+      continue;
+    }
+
+    const inputLines = [match.input];
+    for (const line of lines.slice(index + 1, end)) {
+      if (isComposerFooterOrChromeLine(line)) {
+        break;
+      }
+      inputLines.push(line);
+    }
+
+    return inputLines.join("\n").trimEnd();
+  }
+
+  const lastActiveLine = lines[end - 1] ?? "";
+  if (end > start && isEligibleBareReadyPromptLine(cli, lastActiveLine)) {
+    return "";
   }
 
   return null;
@@ -1031,8 +1211,14 @@ function screenShowsPendingInput(
   }
 
   const tail = trimmed.slice(-Math.min(80, trimmed.length));
+  const compactTail = tail.replace(/\s+/g, "");
   const composerInput = extractComposerInputRegion(screenText);
-  return composerInput !== null && composerInput.includes(tail);
+  return (
+    composerInput !== null &&
+    (composerInput.includes(tail) ||
+      (compactTail.length > 0 &&
+        composerInput.replace(/\s+/g, "").includes(compactTail)))
+  );
 }
 
 function parseRawSubmitEvidenceMetrics(
@@ -1040,13 +1226,21 @@ function parseRawSubmitEvidenceMetrics(
 ): RawSubmitEvidenceMetrics {
   const normalized = normalizeTerminalText(screenText);
   let tokenCount: number | null = null;
-  for (const match of normalized.matchAll(RAW_SCREEN_TOKENS_RE)) {
-    tokenCount = Number.parseInt(match[1].replaceAll(",", ""), 10);
-  }
-
   let cost: number | null = null;
-  for (const match of normalized.matchAll(RAW_SCREEN_COST_RE)) {
-    cost = Number.parseFloat(match[1]);
+
+  for (const line of normalized.split("\n")) {
+    const tokenMatch = line.match(RAW_SCREEN_TOKENS_LINE_RE);
+    if (tokenMatch) {
+      tokenCount = Number.parseInt(tokenMatch[1].replaceAll(",", ""), 10);
+    }
+
+    const costMatch = line.match(RAW_SCREEN_COST_LINE_RE);
+    if (costMatch) {
+      const rawCost = costMatch[1] ?? costMatch[2];
+      if (rawCost !== undefined) {
+        cost = Number.parseFloat(rawCost);
+      }
+    }
   }
 
   return { tokenCount, cost };
@@ -2383,7 +2577,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
 
+        const composerInput = extractComposerInputRegion(snapshot.text);
+        const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
         if (
+          composerInput !== null &&
+          !hasPendingInput &&
           hasRawSubmitEvidenceIncrease(
             parseRawSubmitEvidenceMetrics(snapshot.text),
             opts.baseline_metrics,
@@ -2392,11 +2590,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
 
-        const composerInput = extractComposerInputRegion(snapshot.text);
         const composerCleared =
           composerInput !== null &&
           composerInput.trim() === "" &&
-          !screenShowsPendingInput(snapshot.text, opts.text);
+          !hasPendingInput;
         if (
           composerCleared &&
           screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed)
