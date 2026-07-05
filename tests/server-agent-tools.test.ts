@@ -282,7 +282,7 @@ function makeServerAgentRecord(
     role: "worker",
     auto_archive_on_done: false,
     task_done_candidate_at: null,
-    task_done_detected_at: "2026-07-05T07:00:00.000Z",
+    task_done_detected_at: "2000-01-01T00:00:00.000Z",
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
@@ -2349,6 +2349,50 @@ describe("agent lifecycle tool handlers", () => {
     expect(
       (parsed.harvestability as { issue_codes: string[] }).issue_codes,
     ).toContain("report_stale");
+    expect(
+      (parsed.health as { issue_codes: string[] }).issue_codes,
+    ).toContain("closure_without_artifact");
+  });
+
+  it("get_agent_state does not treat non-DONE terminal markers as closeable", async () => {
+    const goalPath = join(TEST_DIR, "not-green-goal.md");
+    const reportPath = join(TEST_DIR, "not-green-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Not Green Goal",
+        "",
+        "Write report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "Final line:",
+        "",
+        "`NOT_GREEN_P7`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(reportPath, "Status: NOT_GREEN\nNOT_GREEN_P7\n", "utf8");
+
+    const server = createLifecycleServer(mockExec);
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-not-green";
+    const done = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+    });
+    engine.stateMgr.writeState(done);
+    engine.getRegistry().set(agentId, done);
+
+    const result = await getState.handler({ agent_id: agentId }, {});
+    const parsed = parseToolResult(result);
+    expect(parsed.harvestability).toMatchObject({
+      closeable: false,
+      closure_artifact_verified: false,
+      done_marker: null,
+    });
     expect(
       (parsed.health as { issue_codes: string[] }).issue_codes,
     ).toContain("closure_without_artifact");

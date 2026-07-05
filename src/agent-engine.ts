@@ -805,7 +805,7 @@ export class AgentEngine {
       Boolean(goal.reportPath) &&
       Boolean(goal.doneMarker) &&
       reportText !== null &&
-      reportFresh !== false &&
+      reportFresh === true &&
       reportFinalLine === goal.doneMarker;
     const keptOpen = reportText ? this.extractKeptOpenContract(reportText) : null;
     const prLoopRequired = this.isPrLoopRequired(
@@ -1027,7 +1027,7 @@ export class AgentEngine {
         .find(
           (candidate) =>
             /^[A-Z0-9_:-]+$/.test(candidate) &&
-            /(?:DONE|NOT_GREEN|BLOCKED|KEPT_OPEN)/.test(candidate),
+            /^DONE(?:[_:-]|$)/.test(candidate),
         ) ?? null
     );
   }
