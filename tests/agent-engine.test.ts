@@ -2250,6 +2250,60 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
+    it("captures transcript session identity after boot has already reached ready", async () => {
+      vi.setSystemTime(new Date("2026-07-05T19:20:30.000Z"));
+      const sessionId = "019f0100-051b-4c8a-b836-28ab64144c85";
+      const sessionPath =
+        "/Users/etanheyman/.claude/projects/-Users-etanheyman-Gits-cmuxlayer/019f0100-051b-4c8a-b836-28ab64144c85.jsonl";
+      const transcriptResolver = vi.fn(() => ({
+        session_id: sessionId,
+        path: sessionPath,
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: transcriptResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerClaude-pending-ready-jsonl",
+          repo: "cmuxlayer",
+          model: "claude-opus-4-8",
+          cli: "claude",
+          surface_id: "surface:ready-jsonl",
+          state: "ready",
+          task_summary: "Session-capture live probe",
+          created_at: "2026-07-05T19:16:13.285Z",
+          updated_at: "2026-07-05T19:17:17.739Z",
+          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+          worktree_path: "/Users/etanheyman/Gits/cmuxlayer",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:ready-jsonl")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:ready-jsonl",
+        text: "Claude Code\nWhat can I help you with?\n❯ ",
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(transcriptResolver).toHaveBeenCalledTimes(1);
+      expect(engine.getAgentState("cmuxlayerClaude-019f0100")).toMatchObject({
+        agent_id: "cmuxlayerClaude-019f0100",
+        state: "ready",
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+      });
+      expect(engine.resolveAgentRoute("cmuxlayerClaude-019f0100")).toMatchObject({
+        session_id: sessionId,
+        resumable: true,
+      });
+    });
+
     it("captures session identity after the initial boot window for a long-stuck ready pane", async () => {
       vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
       const sessionId = "019f0010-1111-7222-8333-444455556666";
@@ -2341,13 +2395,59 @@ To continue this session, run codex resume ${sessionId}`,
       expect(engine.getAgentState("cmuxlayerCodex-019f0020")).toBeNull();
     });
 
-    it("does not bind a late prompted boot record to an unrelated transcript", async () => {
+    it("captures a blank-prompt managed launch when transcript identity is launch-attributed", async () => {
       vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
-      const sessionId = "019f0021-1111-7222-8333-444455556666";
+      const sessionId = "019f0022-1111-7222-8333-444455556666";
+      const sessionPath = "/Users/etanheyman/.codex/sessions/promptless.jsonl";
       const transcriptResolver = vi.fn(() => ({
         session_id: sessionId,
-        path: "/Users/etanheyman/.codex/sessions/unrelated-prompted.jsonl",
+        path: sessionPath,
       }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: transcriptResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-promptless",
+          repo: "cmuxlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          surface_id: "surface:promptless-session",
+          state: "ready",
+          task_summary: "",
+          created_at: "2026-06-25T08:00:00.000Z",
+          updated_at: "2026-06-25T08:01:00.000Z",
+          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+          worktree_path: "/Users/etanheyman/Gits/cmuxlayer",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:promptless-session")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:promptless-session",
+        text: ["OpenAI Codex", "Model: gpt-5.4", "", "›"].join("\n"),
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(transcriptResolver).toHaveBeenCalledTimes(1);
+      expect(engine.getAgentState("cmuxlayerCodex-019f0022")).toMatchObject({
+        agent_id: "cmuxlayerCodex-019f0022",
+        state: "ready",
+        cli_session_id: sessionId,
+        cli_session_path: sessionPath,
+      });
+    });
+
+    it("does not bind a late prompted boot record to an unattributed transcript", async () => {
+      vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
+      const sessionId = "019f0021-1111-7222-8333-444455556666";
+      const transcriptResolver = vi.fn(() => null);
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
       engine = new AgentEngine(stateMgr, registry, mockClient, {
@@ -2378,7 +2478,7 @@ To continue this session, run codex resume ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(transcriptResolver).not.toHaveBeenCalled();
+      expect(transcriptResolver).toHaveBeenCalledTimes(1);
       expect(
         engine.getAgentState("cmuxlayerCodex-pending-prompted"),
       ).toMatchObject({
