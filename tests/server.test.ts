@@ -6164,6 +6164,86 @@ describe("tool handler integration", () => {
       await server.close();
     }
   });
+
+  it("list_agents does not mark persisted agents disappeared when workspace enumeration is malformed", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "malformed-workspaces-persisted");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-1",
+      surface_id: "surface:kept",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "keep me registered",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker",
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({}),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:kept",
+        text: "Codex\n>",
+        lines: 30,
+        scrollback_used: false,
+      }),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      controlHealthIntervalMs: 0,
+    });
+    const tool = (server as any)._registeredTools["list_agents"];
+
+    try {
+      const result = await tool.handler({}, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.count).toBe(1);
+      expect(parsed.agents[0]).toMatchObject({
+        agent_id: "worker-1",
+        repo: "cmuxlayer",
+        model: "gpt-5.4",
+        state: "working",
+      });
+      expect(stateMgr.readState("worker-1")).toMatchObject({
+        state: "working",
+        error: null,
+      });
+      expect(mockClient.listPanes).toHaveBeenCalledWith({
+        workspace: "workspace:1",
+      });
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("registry reconstitution error logging", () => {
