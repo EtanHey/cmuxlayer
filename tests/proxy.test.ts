@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ReadBuffer,
   serializeMessage,
@@ -309,6 +309,7 @@ describe("CmuxLayerProxy", () => {
       input,
       output,
       initialBackoffMs: 5,
+      logger: { error: vi.fn() },
       maxBackoffMs: 20,
       reconnectJitterRatio: 0,
       requestTimeoutMs: 500,
@@ -659,6 +660,48 @@ describe("CmuxLayerProxy", () => {
     });
   });
 
+  it("logs late daemon responses for expired request ids before dropping them", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("late-expired-response");
+    const daemon = new FakeDaemon(path, {
+      holdMethods: new Set(["tools/list"]),
+    });
+    daemons.push(daemon);
+    await daemon.start();
+    const logger = { error: vi.fn() };
+    const { input, collector } = createProxy(path, {
+      logger,
+      requestTimeoutMs: 30,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await collector.waitForMessage(isResponseFor(1));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+    await daemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 500),
+    ).resolves.toMatchObject({
+      id: 2,
+      error: expect.objectContaining({
+        code: -32001,
+        message: expect.stringMatching(/offline|timeout|retry/i),
+      }),
+    });
+
+    daemon.releaseHeld("tools/list");
+
+    await waitFor(() =>
+      logger.error.mock.calls.some((call) =>
+        String(call[0]).includes("late daemon response"),
+      ),
+    );
+  });
+
   it("keeps agent stdio open while the daemon is offline", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("stdio-open");
@@ -681,6 +724,29 @@ describe("CmuxLayerProxy", () => {
 
     expect(outputEnded).toBe(false);
     expect(input.destroyed).toBe(false);
+    expect(proxy.isRunning()).toBe(true);
+  });
+
+  it("logs daemon socket errors while leaving close-driven reconnect semantics intact", async () => {
+    const logger = { error: vi.fn() };
+    const fakeSocket = new PassThrough() as unknown as net.Socket;
+    const { proxy } = createProxy("unused-fake-socket", {
+      connect: () => {
+        queueMicrotask(() => fakeSocket.emit("connect"));
+        return fakeSocket;
+      },
+      logger,
+    });
+
+    await waitFor(() => fakeSocket.listenerCount("data") > 0);
+
+    const error = new Error("daemon link failed");
+    fakeSocket.emit("error", error);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon socket error",
+      error,
+    );
     expect(proxy.isRunning()).toBe(true);
   });
 });

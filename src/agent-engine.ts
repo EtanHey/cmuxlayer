@@ -91,6 +91,8 @@ import {
 } from "./surface-topology.js";
 import type { InboxOpts } from "./inbox.js";
 
+type ProcessLiveness = "alive" | "gone" | "unknown";
+
 export interface SpawnAgentParams {
   repo: string;
   model?: string;
@@ -3232,11 +3234,11 @@ export class AgentEngine {
     }
   }
 
-  private isProcessGone(pid: number | null | undefined): boolean {
-    if (!pid) return true;
+  private processLiveness(pid: number | null | undefined): ProcessLiveness {
+    if (!pid) return "gone";
     try {
       process.kill(pid, 0);
-      return false;
+      return "alive";
     } catch (error) {
       if (
         typeof error === "object" &&
@@ -3244,10 +3246,15 @@ export class AgentEngine {
         "code" in error &&
         (error as { code?: unknown }).code === "ESRCH"
       ) {
-        return true;
+        return "gone";
       }
-      return false;
+      return "unknown";
     }
+  }
+
+  private isProcessGone(pid: number | null | undefined): boolean {
+    const liveness = this.processLiveness(pid);
+    return liveness === "gone" || liveness === "unknown";
   }
 
   private isTerminalDeadRegistryGhost(agent: AgentRecord): boolean {
@@ -3266,9 +3273,13 @@ export class AgentEngine {
     const evicted: string[] = [];
 
     for (const agent of this.registry.list()) {
+      const processGone =
+        agent.pid !== null &&
+        agent.pid !== undefined &&
+        this.processLiveness(agent.pid) === "gone";
       if (
         !this.isTerminalDeadRegistryGhost(agent) &&
-        (!agent.pid || !this.isProcessGone(agent.pid))
+        !processGone
       ) {
         continue;
       }

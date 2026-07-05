@@ -214,11 +214,37 @@ export class CmuxPersistentSocket {
         } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
         }
-      } catch {
-        if (this.pendingV1.length > 0) {
+      } catch (error) {
+        if (this.isJsonLikeFrame(line)) {
+          this.rejectMalformedFrame(line, error);
+        } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
         }
       }
+    }
+  }
+
+  private isJsonLikeFrame(line: string): boolean {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith("{") || trimmed.startsWith("[");
+  }
+
+  private rejectMalformedFrame(line: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    const socketError = new CmuxSocketError(
+      `Malformed cmux socket frame: ${detail}; frame=${line.slice(0, 120)}`,
+      "protocol_error",
+    );
+    const entry = this.pendingV1.shift();
+    if (entry) {
+      clearTimeout(entry.timer);
+      entry.reject(socketError);
+      this.writeNextV1();
+      return;
+    }
+
+    if (this.pending.size > 0) {
+      this.rejectAllPending(socketError);
     }
   }
 

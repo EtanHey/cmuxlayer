@@ -5211,6 +5211,46 @@ To continue this session, run codex resume ${sessionId}`,
     });
   });
 
+  describe("evictDeadProcessAgents", () => {
+    it("keeps active agents registered when passive liveness is unknown", async () => {
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          if (signal === 0) {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-passive-unknown",
+            state: "working",
+            surface_id: "surface:passive-unknown",
+            pid: 34567,
+          }),
+        );
+        await engine.getRegistry().reconstitute();
+
+        expect(engine.evictDeadProcessAgents()).toEqual([]);
+        expect(killSpy).toHaveBeenCalledWith(34567, 0);
+        expect(stateMgr.readState("agent-passive-unknown")).toMatchObject({
+          state: "working",
+          pid: 34567,
+        });
+        expect(engine.getAgentState("agent-passive-unknown")).toMatchObject({
+          state: "working",
+          pid: 34567,
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+  });
+
   describe("stopAgent", () => {
     beforeEach(() => {
       (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
@@ -5523,6 +5563,43 @@ To continue this session, run codex resume ${sessionId}`,
         expect(killCalls).toContainEqual([12345, "SIGKILL"]);
         expect(killCalls).toContainEqual([12345, 0]);
         expect(stateMgr.readState("agent-force-live")?.state).not.toBe("done");
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("does not treat kill(0) permission errors as proof the process is still alive", async () => {
+      const killCalls: Array<[number, NodeJS.Signals | 0]> = [];
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+          killCalls.push([pid, signal ?? 0]);
+          if (signal === 0) {
+            throw Object.assign(new Error("operation not permitted"), {
+              code: "EPERM",
+            });
+          }
+          return true;
+        }) as typeof process.kill);
+
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-force-unknown",
+            state: "working",
+            surface_id: "surface:force-unknown",
+            pid: 23456,
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:force-unknown")];
+        await engine.getRegistry().reconstitute();
+
+        await engine.stopAgent("agent-force-unknown", true);
+
+        expect(killCalls).toContainEqual([23456, "SIGKILL"]);
+        expect(killCalls).toContainEqual([23456, 0]);
+        expect(stateMgr.readState("agent-force-unknown")).toBeNull();
+        expect(engine.getAgentState("agent-force-unknown")).toBeNull();
       } finally {
         killSpy.mockRestore();
       }
