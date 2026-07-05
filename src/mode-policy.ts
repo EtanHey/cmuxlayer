@@ -35,6 +35,7 @@ const MUTATING_TOOLS = new Set([
   "supersede_agent_goal",
   "interact",
   "kill",
+  "agent_engine",
 ]);
 
 const VALID_CONTROL_MODES = new Set<string>(["autonomous", "manual"]);

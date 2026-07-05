@@ -323,11 +323,13 @@ class ManualModeMutationError extends Error {
 
   constructor(
     readonly tool: string,
-    readonly surface: string,
+    readonly surface?: string,
     readonly workspace?: string,
   ) {
     super(
-      `Tool "${tool}" is blocked for surface ${surface}: surface is in manual mode`,
+      `Tool "${tool}" is blocked${
+        surface ? ` for surface ${surface}` : ""
+      }${workspace ? ` in workspace ${workspace}` : ""}: surface is in manual mode`,
     );
     this.name = "ManualModeMutationError";
   }
@@ -475,7 +477,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
       ? {
           error_code: error.error_code,
           tool: error.tool,
-          surface: error.surface,
+          ...(error.surface ? { surface: error.surface } : {}),
           ...(error.workspace ? { workspace: error.workspace } : {}),
           control: error.control,
         }
@@ -1498,6 +1500,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return { control: "autonomous", workspace: modeWorkspace };
     }
   };
+  const readWorkspaceControlMode = async (
+    workspace?: string,
+  ): Promise<{ control: ControlMode; workspace?: string }> => {
+    const statusClient = client as CmuxLayerClient & {
+      listStatus?: (opts?: { workspace?: string }) => Promise<unknown>;
+    };
+    if (!workspace || typeof statusClient.listStatus !== "function") {
+      return { control: "autonomous", workspace };
+    }
+    try {
+      const entries = await statusClient.listStatus({ workspace });
+      return {
+        control: controlModeFromStatusEntries(entries),
+        workspace,
+      };
+    } catch {
+      return { control: "autonomous", workspace };
+    }
+  };
   const assertSurfaceMutationAllowed = async (
     toolName: string,
     surface: string,
@@ -1509,6 +1530,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } catch (error) {
       if (mode.control === "manual") {
         throw new ManualModeMutationError(toolName, surface, mode.workspace);
+      }
+      throw error;
+    }
+  };
+  const assertWorkspaceMutationAllowed = async (
+    toolName: string,
+    workspace?: string,
+  ): Promise<void> => {
+    const mode = await readWorkspaceControlMode(workspace);
+    try {
+      assertMutationAllowed(toolName, mode.control);
+    } catch (error) {
+      if (mode.control === "manual") {
+        throw new ManualModeMutationError(toolName, undefined, mode.workspace);
       }
       throw error;
     }
@@ -3212,8 +3247,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           (await resolveWorkspaceForRepo(
             inferRepoFromLauncherTitle(args.title),
           ));
+        const shouldInferRole =
+          Boolean(args.role) ||
+          (!args.pane &&
+            !args.surface &&
+            canInferAgentRole({ title: args.title }));
+        const inferredRole = shouldInferRole
+          ? inferAgentRole({ role: args.role, title: args.title })
+          : null;
+        if (
+          inferredRole &&
+          (args.type ?? "terminal") === "terminal" &&
+          (args.pane || args.surface)
+        ) {
+          throw new Error(
+            "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
+          );
+        }
         if (args.surface) {
           await assertSurfaceMutationAllowed("new_split", args.surface);
+        } else if (targetWorkspace) {
+          await assertWorkspaceMutationAllowed("new_split", targetWorkspace);
         }
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
@@ -3228,22 +3282,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // pane/surface anchor). Captured right before creation, AFTER all
         // validation, so a rejected request has no focus side effects.
         let priorFocus: string | null = null;
-        const shouldInferRole =
-          Boolean(args.role) ||
-          (!args.pane &&
-            !args.surface &&
-            canInferAgentRole({ title: args.title }));
-        const inferredRole = shouldInferRole
-          ? inferAgentRole({ role: args.role, title: args.title })
-          : null;
         let actualPlacement: "split" | "surface" = "split";
         let actualDirection: string | null = args.direction;
         if (inferredRole && (args.type ?? "terminal") === "terminal") {
-          if (args.pane || args.surface) {
-            throw new Error(
-              "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
-            );
-          }
           const panes = await client.listPanes({ workspace: targetWorkspace });
           const rawPaneSurfaces = await Promise.all(
             panes.panes.map(async (pane) => {
@@ -3691,6 +3732,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
         if (args.background) {
+          await assertSurfaceMutationAllowed(
+            "send_input",
+            args.surface,
+            args.workspace,
+          );
           const record: DeliveryRecord = {
             delivery_id: randomUUID(),
             surface: args.surface,

@@ -1900,6 +1900,45 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("send_input background refuses a manual-mode target before enqueueing", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+      send: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:bg-manual",
+        workspace: "workspace:bg-manual",
+        text: "echo no",
+        background: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "send_input",
+      surface: "surface:bg-manual",
+      control: "manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:bg-manual",
+    });
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
   it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
     const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input");
     rmSync(stateDir, { recursive: true, force: true });
@@ -4179,6 +4218,10 @@ describe("tool handler integration", () => {
     mockExec = vi
       .fn()
       .mockResolvedValueOnce({
+        stdout: "[]",
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
@@ -4229,6 +4272,10 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["list-status", "--workspace", "workspace:1"]),
+    );
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -4429,6 +4476,49 @@ describe("tool handler integration", () => {
     expect(mockClient.identify).toHaveBeenCalledWith("surface:source");
     expect(mockClient.listStatus).toHaveBeenCalledWith({
       workspace: "workspace:source",
+    });
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+  });
+
+  it("new_split refuses a manual target workspace before creating a pane", async () => {
+    const mockClient = {
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+      newSplit: vi.fn().mockResolvedValue({
+        workspace: "workspace:manual",
+        surface: "surface:new",
+        pane: "pane:new",
+        title: "New",
+        type: "terminal",
+      }),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        workspace: "workspace:manual",
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "new_split",
+      workspace: "workspace:manual",
+      control: "manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
     });
     expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
