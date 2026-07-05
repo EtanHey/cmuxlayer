@@ -5410,11 +5410,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             existingSameLaneAgents.length > 0
               ? `Existing same-lane agent(s) are idle/ready in ${comparisonWorkspace ?? "unknown workspace"}; reuse or supersede unless a new lane is intentional. Pass force_new:true to suppress this warning.`
               : undefined;
+          const spawnPrompt = hasInlinePrompt(args.prompt)
+            ? args.prompt
+            : (bootPromptText ?? "");
           const result = await engine.spawnAgent({
             repo: args.repo,
             model: args.model,
             cli: args.cli,
-            prompt: args.prompt ?? bootPromptText ?? "",
+            prompt: spawnPrompt,
             boot_prompt_pending:
               hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: spawnWorkspace,

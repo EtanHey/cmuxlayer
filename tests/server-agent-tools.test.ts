@@ -1830,6 +1830,7 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         model: "codex",
         cli: "codex",
+        prompt: "",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 20,
       },
@@ -1850,6 +1851,7 @@ describe("agent lifecycle tool handlers", () => {
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(["booting", "ready"]).toContain(state.state);
     expect(state.error).toBeNull();
+    expect(state.task_summary).toBe("file prompt body");
     expect(state.cli_session_id).toBe(sessionId);
     expect(state.resumable).toBe(true);
     expect(state.health.issue_codes).not.toContain("missing_cli_session_id");
