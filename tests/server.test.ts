@@ -2203,7 +2203,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("send_command does not verify a cleared Claude boot prompt without a working marker", async () => {
+  it("send_command verifies a cleared stable Claude boot prompt without a working marker", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "slow-claude.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot prompt", "utf8");
@@ -2241,6 +2241,54 @@ describe("tool handler integration", () => {
         surface: "surface:1",
         command: "brainlayerClaude -s",
         boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 700,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
+    expect(returnPresses).toBeGreaterThanOrEqual(1);
+  }, 10_000);
+
+  it("send_command rejects a Claude boot prompt that remains visible in the composer", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "dirty-composer.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? "Claude Code\nWhat can I help you with?\n❯ boot prompt"
+              : "Claude Code\nWhat can I help you with?\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 100,
       },
       {} as any,
@@ -2250,9 +2298,55 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("boot prompt submit evidence");
+    expect(parsed.error).toContain("Boot prompt delivery failed");
     expect(promptSent).toBe(true);
-    expect(returnPresses).toBe(3);
+  }, 10_000);
+
+  it("send_command ignores transcript echoes when checking if a boot prompt is still pending", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "echoed-prompt.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? "Claude Code\n❯ boot prompt\n\nWhat can I help you with?\n❯"
+              : "Claude Code\nWhat can I help you with?\n>",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 700,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
   }, 10_000);
 
   it("send_command reports timeout with last screen lines and leaves launcher surface alive", async () => {

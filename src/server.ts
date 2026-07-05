@@ -993,6 +993,34 @@ function screenHasAnyAgentIdentity(
   );
 }
 
+type RawSubmitEvidenceMetrics = {
+  tokenCount: number | null;
+  cost: number | null;
+};
+
+const COMPOSER_PROMPT_LINE_RE =
+  /^\s*(?:codex>|cursor>|kiro>|>>>|❯|>)\s?(.*)$/i;
+const RAW_SCREEN_TOKENS_RE = /\b([0-9][0-9,]*)\s+tokens\b/gi;
+const RAW_SCREEN_COST_RE = /(?:💰\s*)?\$\s*([0-9]+(?:\.[0-9]+)?)/g;
+
+function normalizeTerminalText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function extractComposerInputRegion(screenText: string): string | null {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index]?.match(COMPOSER_PROMPT_LINE_RE);
+    if (!match) {
+      continue;
+    }
+
+    return [match[1] ?? "", ...lines.slice(index + 1)].join("\n").trimEnd();
+  }
+
+  return null;
+}
+
 function screenShowsPendingInput(
   screenText: string,
   submittedText: string,
@@ -1003,7 +1031,46 @@ function screenShowsPendingInput(
   }
 
   const tail = trimmed.slice(-Math.min(80, trimmed.length));
-  return screenText.includes(tail);
+  const composerInput = extractComposerInputRegion(screenText);
+  return composerInput !== null && composerInput.includes(tail);
+}
+
+function parseRawSubmitEvidenceMetrics(
+  screenText: string,
+): RawSubmitEvidenceMetrics {
+  const normalized = normalizeTerminalText(screenText);
+  let tokenCount: number | null = null;
+  for (const match of normalized.matchAll(RAW_SCREEN_TOKENS_RE)) {
+    tokenCount = Number.parseInt(match[1].replaceAll(",", ""), 10);
+  }
+
+  let cost: number | null = null;
+  for (const match of normalized.matchAll(RAW_SCREEN_COST_RE)) {
+    cost = Number.parseFloat(match[1]);
+  }
+
+  return { tokenCount, cost };
+}
+
+function hasRawSubmitEvidenceIncrease(
+  current: RawSubmitEvidenceMetrics,
+  baseline: RawSubmitEvidenceMetrics | null | undefined,
+): boolean {
+  if (
+    current.tokenCount !== null &&
+    (baseline?.tokenCount === null || baseline?.tokenCount === undefined
+      ? current.tokenCount > 0
+      : current.tokenCount > baseline.tokenCount)
+  ) {
+    return true;
+  }
+
+  return (
+    current.cost !== null &&
+    (baseline?.cost === null || baseline?.cost === undefined
+      ? current.cost > 0
+      : current.cost > baseline.cost)
+  );
 }
 
 type MonitorBootResult = {
@@ -2135,7 +2202,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     cli?: CliType;
     timeout_ms: number;
     onUpdateShellRelaunch?: () => Promise<void>;
-  }): Promise<void> => {
+  }): Promise<RawSubmitEvidenceMetrics | null> => {
     let deadline = Date.now() + opts.timeout_ms;
     let lastText = "";
     const consecutiveMatches = new Map<CliType, number>();
@@ -2265,7 +2332,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : 0;
           consecutiveMatches.set(candidate, count);
           if (count >= match.consecutive) {
-            return;
+            return parseRawSubmitEvidenceMetrics(screen.text);
           }
         }
       } catch (error) {
@@ -2299,9 +2366,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string;
     text: string;
     timeout_ms: number;
+    baseline_metrics?: RawSubmitEvidenceMetrics | null;
   }): Promise<void> => {
     const start = Date.now();
     let lastText = "";
+    let lastClearedComposerInput: string | null = null;
+    let stableClearedComposerPolls = 0;
 
     while (Date.now() - start < opts.timeout_ms) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
@@ -2311,6 +2381,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = snapshot.text;
         if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
           return;
+        }
+
+        if (
+          hasRawSubmitEvidenceIncrease(
+            parseRawSubmitEvidenceMetrics(snapshot.text),
+            opts.baseline_metrics,
+          )
+        ) {
+          return;
+        }
+
+        const composerInput = extractComposerInputRegion(snapshot.text);
+        const composerCleared =
+          composerInput !== null &&
+          composerInput.trim() === "" &&
+          !screenShowsPendingInput(snapshot.text, opts.text);
+        if (
+          composerCleared &&
+          screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed)
+        ) {
+          if (composerInput === lastClearedComposerInput) {
+            stableClearedComposerPolls += 1;
+          } else {
+            lastClearedComposerInput = composerInput;
+            stableClearedComposerPolls = 1;
+          }
+
+          if (stableClearedComposerPolls >= 2) {
+            return;
+          }
+        } else {
+          lastClearedComposerInput = null;
+          stableClearedComposerPolls = 0;
         }
       }
 
@@ -2510,7 +2613,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
 
-    await waitForBootPromptReady({
+    const baselineSubmitMetrics = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
       cli: opts.cli,
@@ -2566,6 +2669,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: opts.workspace,
             text: sanitizedText,
             timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+            baseline_metrics: baselineSubmitMetrics,
           });
           return {
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
