@@ -442,6 +442,42 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("create_workspace refuses a manual-mode caller workspace before creating", async () => {
+    const mockClient = {
+      createWorkspace: vi.fn().mockResolvedValue({
+        workspace: "workspace:7",
+        title: "red-team",
+      }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:manual", selected: true }],
+      }),
+      listStatus: vi.fn().mockResolvedValue([
+        { key: "mode.control", value: "manual" },
+      ]),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["create_workspace"];
+
+    const result = await tool.handler({ title: "red-team" }, {} as any);
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "create_workspace",
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.listStatus).toHaveBeenCalledWith({
+      workspace: "workspace:manual",
+    });
+    expect(mockClient.createWorkspace).not.toHaveBeenCalled();
+  });
+
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;

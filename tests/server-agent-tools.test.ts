@@ -433,6 +433,52 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.auto_archive_on_done).toBe(false);
   });
 
+  it("spawn_agent refuses a manual-mode caller workspace before spawning", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify([{ key: "mode.control", value: "manual" }]),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec as ExecFn);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "spawn_agent",
+      workspace: "workspace:1",
+    });
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "list-status",
+        "--workspace",
+        "workspace:1",
+      ]),
+    );
+    expect(
+      exec.mock.calls.some(
+        ([, args]) => Array.isArray(args) && args.includes("new-split"),
+      ),
+    ).toBe(false);
+  });
+
   it("spawn_agent inherits the selected workspace when workspace is omitted", async () => {
     const calls: string[] = [];
     const mockClient = {
@@ -1173,6 +1219,57 @@ describe("agent lifecycle tool handlers", () => {
         `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
+  });
+
+  it("new_worktree_split refuses a manual-mode caller workspace before worktree setup", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "cmuxlayer");
+    mkdirSync(repoRoot, { recursive: true });
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify([{ key: "mode.control", value: "manual" }]),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const worktreeExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const server = createTrackedServer({
+      exec: exec as ExecFn,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        worktree: { name: "sterile worker" },
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+      tool: "new_worktree_split",
+      workspace: "workspace:1",
+    });
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(
+      exec.mock.calls.some(
+        ([, args]) => Array.isArray(args) && args.includes("new-split"),
+      ),
+    ).toBe(false);
   });
 
   it("spawn_agent finalizes a pending Cursor prompt when the state directory is noncanonical", async () => {

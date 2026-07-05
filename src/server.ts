@@ -3181,6 +3181,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        await assertWorkspaceMutationAllowed(
+          "create_workspace",
+          await currentCallerWorkspace(),
+        );
         const result = await client.createWorkspace(args.title);
         const data = {
           workspace: result.workspace,
@@ -5344,12 +5348,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await preflightBootPromptFile(bootPromptPath);
           }
 
-          const worktree = await prepareSpawnWorktree(
-            args.repo,
-            args.worktree,
-            args.mcp_profile as McpProfile | undefined,
-          );
-
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
           const parentWorkspace = args.parent_agent_id
             ? (engine.getAgentState(args.parent_agent_id)?.workspace_id ??
@@ -5360,6 +5358,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             explicitWorkspace ??
             (args.parent_agent_id ? undefined : await currentCallerWorkspace());
           const comparisonWorkspace = spawnWorkspace ?? parentWorkspace;
+          await assertWorkspaceMutationAllowed("spawn_agent", comparisonWorkspace);
+          const worktree = await prepareSpawnWorktree(
+            args.repo,
+            args.worktree,
+            args.mcp_profile as McpProfile | undefined,
+          );
           const requestedRole = inferAgentRole({
             role: args.role,
             cli: args.cli,
@@ -5629,6 +5633,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           assertBootPromptMode(args.prompt, null);
+          const explicitWorkspace = await canonicalWorkspaceRef(args.workspace);
+          const mutationWorkspace =
+            explicitWorkspace ?? (await currentCallerWorkspace());
+          await assertWorkspaceMutationAllowed(
+            "new_worktree_split",
+            mutationWorkspace,
+          );
           const priorFocus = await focusTargetBeforeSplit(args.workspace);
           const worktree = await prepareSpawnWorktree(
             args.repo,
@@ -5769,6 +5780,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          await assertWorkspaceMutationAllowed(
+            "spawn_in_workspace",
+            args.reuse_workspace ?? (await currentCallerWorkspace()),
+          );
           const workspaceResult = args.reuse_workspace
             ? { workspace: args.reuse_workspace, title: args.workspace_title }
             : await client.createWorkspace(args.workspace_title);
