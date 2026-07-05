@@ -5347,6 +5347,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (bootPromptPath) {
             await preflightBootPromptFile(bootPromptPath);
           }
+          const bootPromptText = bootPromptPath
+            ? await readFile(bootPromptPath, "utf8")
+            : null;
 
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
           const parentWorkspace = args.parent_agent_id
@@ -5411,7 +5414,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             repo: args.repo,
             model: args.model,
             cli: args.cli,
-            prompt: args.prompt ?? "",
+            prompt: args.prompt ?? bootPromptText ?? "",
             boot_prompt_pending:
               hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
             workspace: spawnWorkspace,

@@ -228,7 +228,6 @@ const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
-const BOOT_SESSION_TRANSCRIPT_CAPTURE_WINDOW_MS = 30_000;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
@@ -249,6 +248,12 @@ const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(`resumable\\s+session:\\s*(${SESSION_ID_PATTERN})`, "i"),
 ] as const;
 const JSONL_HARNESSES = new Set<CliType>(["claude", "codex", "cursor"]);
+const TRANSCRIPT_SESSION_CAPTURE_STATES = new Set<AgentState>([
+  "booting",
+  "ready",
+  "working",
+  "idle",
+]);
 
 export { buildResumeCommand } from "./agent-command.js";
 
@@ -701,6 +706,7 @@ export class AgentEngine {
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
   private inboxOpts?: InboxOpts;
   private sessionIdentityResolver: SessionIdentityResolver;
+  private hasCustomSessionIdentityResolver: boolean;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
   private sweepTiming: SweepTimingOptions | null = null;
@@ -728,6 +734,8 @@ export class AgentEngine {
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
+    this.hasCustomSessionIdentityResolver =
+      opts?.sessionIdentityResolver !== undefined;
     this.sessionIdentityResolver =
       opts?.sessionIdentityResolver ??
       ((agent) => this.findTranscriptSessionIdentity(agent));
@@ -1583,10 +1591,17 @@ export class AgentEngine {
   }
 
   private canUseTranscriptSessionResolver(agent: AgentRecord): boolean {
-    if (agent.state !== "booting") return false;
-    const since = Date.parse(agent.updated_at);
-    if (Number.isNaN(since)) return false;
-    return Date.now() - since <= BOOT_SESSION_TRANSCRIPT_CAPTURE_WINDOW_MS;
+    if (!TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state)) return false;
+    if (!JSONL_HARNESSES.has(agent.cli)) return false;
+    if (agent.task_summary.trim().length === 0) return false;
+    return (
+      this.hasCustomSessionIdentityResolver ||
+      Boolean(
+        agent.launcher_name ||
+          agent.launch_cwd?.trim() ||
+          agent.worktree_path?.trim(),
+      )
+    );
   }
 
   private screenShowsPendingBootPrompt(
@@ -1834,7 +1849,7 @@ export class AgentEngine {
     agent: AgentRecord,
     ctx: SweepAgentContext,
   ): Promise<AgentRecord> {
-    if (agent.cli_session_id || !this.isBootCaptureWindowOpen(agent)) {
+    if (agent.cli_session_id) {
       return agent;
     }
 
@@ -1847,6 +1862,10 @@ export class AgentEngine {
       } catch {
         return agent;
       }
+    }
+
+    if (!this.isBootCaptureWindowOpen(agent)) {
+      return agent;
     }
 
     try {
