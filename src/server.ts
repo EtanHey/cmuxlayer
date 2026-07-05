@@ -183,8 +183,8 @@ const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
 const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
-const SEND_INPUT_CHUNK_THRESHOLD = 500;
-const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
+export const SEND_INPUT_CHUNK_THRESHOLD = 500;
+export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
@@ -202,7 +202,7 @@ const SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = parsePositiveIntegerMs(
   process.env.CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS,
   DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
 );
-function parseMaxInlineChars(
+export function parseMaxInlineChars(
   value: string | undefined,
   fallback: number,
 ): number {
@@ -211,7 +211,7 @@ function parseMaxInlineChars(
     ? parsed
     : fallback;
 }
-const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
+export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   process.env.CMUXLAYER_MAX_INLINE_CHARS,
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );

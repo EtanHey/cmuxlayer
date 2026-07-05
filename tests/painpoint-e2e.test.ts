@@ -9,7 +9,6 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentEngine } from "../src/agent-engine.js";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import {
@@ -17,28 +16,15 @@ import {
   selectReapablePids,
   type ProcessInfo,
 } from "../src/mcp-reaper.js";
-import { createServer } from "../src/server.js";
+import { createServer, type CreateServerOptions } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState, CliType } from "../src/agent-types.js";
-
-type ToolCallResult = {
-  structuredContent?: unknown;
-  content: Array<{ text: string }>;
-  isError?: boolean;
-};
-
-type RegisteredTool = {
-  handler(
-    args: Record<string, unknown>,
-    extra: Record<string, unknown>,
-  ): Promise<ToolCallResult>;
-  _engine?: AgentEngine;
-};
-
-type ServerWithRegisteredTools = {
-  close(): Promise<void>;
-  _registeredTools: Record<string, RegisteredTool | undefined>;
-};
+import {
+  closeToolServer,
+  getEngine,
+  getTool,
+  parseToolResult,
+} from "./helpers/mcp-tool-harness.js";
 
 type StatusCall = {
   key: string;
@@ -69,32 +55,6 @@ afterEach(async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
-function asToolServer(server: unknown): ServerWithRegisteredTools {
-  return server as ServerWithRegisteredTools;
-}
-
-function getTool(server: unknown, name: string): RegisteredTool {
-  const tool = asToolServer(server)._registeredTools[name];
-  if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool;
-}
-
-function getEngine(server: unknown): AgentEngine {
-  const engine = getTool(server, "interact")._engine;
-  if (!engine) throw new Error("Lifecycle engine not registered");
-  return engine;
-}
-
-function parseToolResult<T>(result: ToolCallResult): T {
-  if (result.isError) {
-    throw new Error(
-      result.content.map((entry) => entry.text).join("\n") ||
-        "Tool returned an error",
-    );
-  }
-  return (result.structuredContent ?? JSON.parse(result.content[0]!.text)) as T;
-}
 
 function makeRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -138,6 +98,7 @@ function paneArg(args: string[]): string {
 }
 
 function makeLifecycleExec(surfaceRefs: string[], opts?: {
+  emptyPanes?: boolean;
   screenBySurface?: Map<string, string>;
 }): {
   exec: ExecFn;
@@ -167,6 +128,16 @@ function makeLifecycleExec(surfaceRefs: string[], opts?: {
       };
     }
     if (command === "list-panes") {
+      if (opts?.emptyPanes) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
       const liveWorkerSurfaces = [...liveSurfaces].filter(
         (surface) => surface !== "surface:lead",
       );
@@ -289,7 +260,22 @@ function makeLifecycleExec(surfaceRefs: string[], opts?: {
 }
 
 async function closeServer(server: unknown): Promise<void> {
-  await asToolServer(server).close();
+  await closeToolServer(server);
+}
+
+function startEngineServer(
+  exec: ExecFn,
+  stateDir: string,
+  overrides: Omit<Partial<CreateServerOptions>, "exec" | "stateDir"> = {},
+) {
+  return createServer({
+    exec,
+    stateDir,
+    controlHealthIntervalMs: 0,
+    disableSpawnPreflight: true,
+    sessionIdentityResolver: () => null,
+    ...overrides,
+  });
 }
 
 describe("Phase 10 painpoint e2e replay", () => {
@@ -314,13 +300,7 @@ describe("Phase 10 painpoint e2e replay", () => {
       "surface:lead",
       ...agentIds.map((_agentId, index) => `surface:worker-${index}`),
     ]);
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -482,13 +462,7 @@ describe("Phase 10 painpoint e2e replay", () => {
       "surface:lead",
       "surface:pr-loop-worker",
     ]);
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -560,43 +534,8 @@ describe("Phase 10 painpoint e2e replay", () => {
         state: "done",
       }),
     );
-    const exec: ExecFn = async (_cmd, args) => {
-      const command = args[1];
-      if (command === "list-workspaces") {
-        return {
-          stdout: JSON.stringify({
-            workspaces: [
-              {
-                ref: "workspace:1",
-                title: "Main",
-                index: 0,
-                selected: true,
-                pinned: false,
-              },
-            ],
-          }),
-          stderr: "",
-        };
-      }
-      if (command === "list-panes") {
-        return {
-          stdout: JSON.stringify({
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            panes: [],
-          }),
-          stderr: "",
-        };
-      }
-      return { stdout: "{}", stderr: "" };
-    };
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const { exec } = makeLifecycleExec([], { emptyPanes: true });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -639,13 +578,7 @@ describe("Phase 10 painpoint e2e replay", () => {
         ],
       ]),
     });
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -704,13 +637,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     const { exec } = makeLifecycleExec([
       "surface:worker-without-artifact",
     ]);
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -761,13 +688,7 @@ describe("Phase 10 painpoint e2e replay", () => {
         }
         return true;
       }) as typeof process.kill);
-    const server = createServer({
-      exec,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = startEngineServer(exec, dir);
 
     try {
       const engine = getEngine(server);
@@ -819,12 +740,7 @@ describe("Phase 10 painpoint e2e replay", () => {
       }
       return { stdout: "{}", stderr: "" };
     };
-    const server = createServer({
-      exec,
-      skipAgentLifecycle: true,
-      stateDir: dir,
-      controlHealthIntervalMs: 0,
-    });
+    const server = startEngineServer(exec, dir, { skipAgentLifecycle: true });
 
     try {
       const send = getTool(server, "send_input");

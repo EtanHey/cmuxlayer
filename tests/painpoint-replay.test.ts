@@ -3,11 +3,16 @@ import { basename, extname } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRouteTable } from "../src/agent-facade.js";
 import { evaluateAgentHealth } from "../src/agent-health.js";
-import { createServer } from "../src/server.js";
+import { createServer, SEND_INPUT_MAX_INLINE_CHARS } from "../src/server.js";
 import { reposEquivalent } from "../src/repo-workspace.js";
 import { parseScreen } from "../src/screen-parser.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { classifySurfaceSessionRoute } from "../src/state-manager.js";
+import {
+  getTool,
+  parseErroredToolResult,
+  parseToolResult,
+} from "./helpers/mcp-tool-harness.js";
 import type {
   AgentRecord,
   AgentState,
@@ -50,37 +55,7 @@ type PainpointFixture = {
   payload?: string;
 };
 
-type ToolCallResult = {
-  structuredContent?: unknown;
-  content: Array<{ text: string }>;
-  isError?: boolean;
-};
-
-type RegisteredTool = {
-  handler(
-    args: Record<string, unknown>,
-    extra: Record<string, unknown>,
-  ): Promise<ToolCallResult>;
-};
-
-type ServerWithRegisteredTools = {
-  _registeredTools: Record<string, RegisteredTool | undefined>;
-};
-
-const SEND_INPUT_CHUNK_THRESHOLD = 500;
-const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
-const SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT = parseMaxInlineCharsForTest(
-  process.env.CMUXLAYER_MAX_INLINE_CHARS,
-);
-
 const fixtureDir = new URL("./fixtures/painpoints/", import.meta.url);
-
-function parseMaxInlineCharsForTest(value: string | undefined): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= SEND_INPUT_CHUNK_THRESHOLD
-    ? parsed
-    : DEFAULT_SEND_INPUT_MAX_INLINE_CHARS;
-}
 
 function readPainpointFixture(fileName: string): PainpointFixture {
   const raw = readFileSync(new URL(fileName, fixtureDir), "utf8");
@@ -112,29 +87,6 @@ const fixtureNames = readdirSync(fixtureDir)
   .sort();
 
 const fixtures = fixtureNames.map(readPainpointFixture);
-
-function getTool(server: unknown, name: string): RegisteredTool {
-  const tool = (server as ServerWithRegisteredTools)._registeredTools[name];
-  if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool;
-}
-
-function parseToolResult<T>(result: ToolCallResult): T {
-  if (result.isError) {
-    throw new Error(
-      result.content.map((entry) => entry.text).join("\n") ||
-        "Tool returned an error",
-    );
-  }
-  return (result.structuredContent ?? JSON.parse(result.content[0]!.text)) as T;
-}
-
-function parseErroredToolResult<T>(result: ToolCallResult): T {
-  if (!result.isError) {
-    throw new Error("Tool result was expected to be an error");
-  }
-  return (result.structuredContent ?? JSON.parse(result.content[0]!.text)) as T;
-}
 
 function legacyClassifierShape(fixture: PainpointFixture): string {
   if (fixture.read_error?.error_code === "pane_died") {
@@ -316,7 +268,7 @@ describe("Phase 0 painpoint replay corpus", () => {
         const overCapText = "x".repeat(
           Math.max(
             fixture.inline_length ?? 0,
-            SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT + 1,
+            SEND_INPUT_MAX_INLINE_CHARS + 1,
           ),
         );
         const calls: string[][] = [];
@@ -342,7 +294,7 @@ describe("Phase 0 painpoint replay corpus", () => {
 
         expect(parsed.ok).toBe(false);
         expect(parsed.error).toContain(
-          `CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS_AT_IMPORT}`,
+          `CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}`,
         );
         expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS");
         expect(calls).toEqual([]);
