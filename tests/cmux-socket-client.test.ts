@@ -793,7 +793,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     }
   });
 
-  it("falls back to the focused workspace when a surface cannot be mapped", async () => {
+  it("falls back to the focused workspace for tab commands when a surface cannot be mapped", async () => {
     const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
     const savedSurfaceList = MOCK_RESPONSES["surface.list"];
     const savedIdentify = MOCK_RESPONSES["system.identify"];
@@ -835,13 +835,20 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     try {
       const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 
+      await client.setStatus("agent", "active", {
+        surface: "surface:unmapped",
+      });
+      expect(lastV1Command).toBe(
+        `set_status agent active --tab=${MOCK_SECOND_WORKSPACE_ID}`,
+      );
+
       await client.notify({
         title: "Done",
         surface: "surface:unmapped",
       });
 
       expect(lastV1Command).toBe(
-        "notify --title Done --workspace workspace:2 --surface surface:unmapped",
+        "notify --title Done --surface surface:unmapped",
       );
     } finally {
       MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
