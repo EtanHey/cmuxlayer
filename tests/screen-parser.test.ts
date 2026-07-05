@@ -182,6 +182,32 @@ This is copied documentation, not a live Codex TUI menu.
     expect(parsed.control_state).toBe("ready");
   });
 
+  it("does not classify a pasted Codex update menu transcript above a Claude prompt as active", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+Here is the Codex screen I copied:
+
+>_ OpenAI Codex
+
+Update available!
+See full release notes:
+https://github.com/openai/codex/releases/latest
+See https://github.com/openai/codex for installation options.
+
+> Release notes
+  Skip until next version
+
+This is copied output, not the active TUI.
+
+❯
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("ready");
+  });
+
   it("recognizes permission prompts without numbered options", () => {
     const parsed = parseScreen(`
 Claude Code
