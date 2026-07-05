@@ -857,6 +857,26 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     }
   });
 
+  it("preserves surface-only notify when workspace mapping is unsupported", async () => {
+    const savedWorkspaceList = MOCK_RESPONSES["workspace.list"];
+    MOCK_RESPONSES["workspace.list"] = undefined;
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.notify({
+        title: "Done",
+        surface: "surface:legacy",
+      });
+
+      expect(lastV1Command).toBe(
+        "notify --title Done --surface surface:legacy",
+      );
+    } finally {
+      MOCK_RESPONSES["workspace.list"] = savedWorkspaceList;
+    }
+  });
+
   it("renameTab sends V2 tab.action with rename params", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
 

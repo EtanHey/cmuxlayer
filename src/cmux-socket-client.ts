@@ -810,7 +810,12 @@ export class CmuxSocketClient {
     try {
       return await this.resolveWorkspace(opts.surface);
     } catch (error) {
-      if (!(error instanceof CmuxSocketError && error.code === "not_found")) {
+      if (
+        !(
+          error instanceof CmuxSocketError &&
+          (error.code === "not_found" || error.code === "method_not_found")
+        )
+      ) {
         throw error;
       }
       return undefined;
