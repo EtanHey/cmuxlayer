@@ -1763,6 +1763,61 @@ export class AgentEngine {
     return { session_id: identity.session_id, path: identity.path ?? null };
   }
 
+  private rekeyAgentMapEntry<T>(
+    map: Map<string, T>,
+    previousAgentId: string,
+    nextAgentId: string,
+  ): void {
+    if (!map.has(previousAgentId)) return;
+    const value = map.get(previousAgentId);
+    map.delete(previousAgentId);
+    if (value !== undefined && !map.has(nextAgentId)) {
+      map.set(nextAgentId, value);
+    }
+  }
+
+  private rekeyAgentEventSet(
+    events: Set<string>,
+    previousAgentId: string,
+    nextAgentId: string,
+  ): void {
+    const previousPrefix = `${previousAgentId}:`;
+    const renamedKeys = [...events].filter((key) =>
+      key.startsWith(previousPrefix),
+    );
+    for (const key of renamedKeys) {
+      events.delete(key);
+      events.add(`${nextAgentId}:${key.slice(previousPrefix.length)}`);
+    }
+  }
+
+  private transferAgentRenameMemory(
+    previousAgentId: string,
+    nextAgentId: string,
+  ): void {
+    if (previousAgentId === nextAgentId) return;
+
+    const previousSidebarSnapshot = this.sidebarSnapshot.get(previousAgentId);
+    if (previousSidebarSnapshot && !this.sidebarSnapshot.has(nextAgentId)) {
+      this.sidebarSnapshot.set(nextAgentId, {
+        ...previousSidebarSnapshot,
+        statusValue: "__renamed__",
+      });
+    }
+    this.rekeyAgentMapEntry(
+      this.currentSweepScreenSignatures,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentMapEntry(
+      this.readyPatternMatches,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentEventSet(this.loggedEvents, previousAgentId, nextAgentId);
+    this.rekeyAgentEventSet(this.notifiedEvents, previousAgentId, nextAgentId);
+  }
+
   private finalizeCapturedSession(
     agent: AgentRecord,
     capturedIdentity: CapturedSessionIdentity | string,
@@ -1800,6 +1855,7 @@ export class AgentEngine {
         }
         updated = this.stateMgr.renameState(previousAgentId, collisionAgentId);
         this.registry.rename(previousAgentId, collisionAgentId, updated);
+        this.transferAgentRenameMemory(previousAgentId, collisionAgentId);
         return updated;
       }
       const sessionPath =
@@ -1816,6 +1872,7 @@ export class AgentEngine {
       index.removeAgent(updated.agent_id);
       index.persistRecord(canonicalFinal);
       this.registry.rename(updated.agent_id, finalAgentId, canonicalFinal);
+      this.transferAgentRenameMemory(updated.agent_id, finalAgentId);
       this.stateMgr.removeState(updated.agent_id);
       return canonicalFinal;
     }
@@ -1823,6 +1880,7 @@ export class AgentEngine {
     const previousAgentId = updated.agent_id;
     updated = this.stateMgr.renameState(previousAgentId, finalAgentId);
     this.registry.rename(previousAgentId, finalAgentId, updated);
+    this.transferAgentRenameMemory(previousAgentId, finalAgentId);
     return updated;
   }
 

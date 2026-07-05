@@ -821,4 +821,68 @@ describe("Sidebar Sync", () => {
     const doneChannelCalls = channelCalls.filter((c) => c[0] === "done");
     expect(doneChannelCalls).toHaveLength(0);
   });
+
+  it("does not re-emit spawned lifecycle events when late session capture renames an agent", async () => {
+    const sessionId = "019f0123-1111-7222-8333-444455556666";
+    const pendingId = "brainlayerCodex-pending-late-jsonl";
+    const finalId = "brainlayerCodex-019f0123";
+    let capturedIdentity: { session_id: string; path: string | null } | null =
+      null;
+    const transcriptResolver = vi.fn(() => capturedIdentity);
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts,
+      sessionIdentityResolver: transcriptResolver,
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingId,
+        state: "ready",
+        surface_id: "surface:late-jsonl",
+        repo: "brainlayer",
+        cli: "codex",
+        model: "gpt-5.4",
+        task_summary: "Fix late lifecycle rename",
+        launch_cwd: "/Users/etanheyman/Gits/brainlayer",
+        worktree_path: "/Users/etanheyman/Gits/brainlayer",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:late-jsonl")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.log).toHaveBeenCalledWith(
+      "spawned: brainlayer",
+      expect.objectContaining({ level: "info", source: "cmuxlayer" }),
+    );
+    mockClient.log.mockClear();
+    mockClient.setStatus.mockClear();
+    mockClient.clearStatus.mockClear();
+    capturedIdentity = {
+      session_id: sessionId,
+      path: "/tmp/codex-session.jsonl",
+    };
+
+    await engine.runSweep();
+
+    const spawnedCalls = mockClient.log.mock.calls.filter(
+      (call) =>
+        typeof call[0] === "string" && call[0].startsWith("spawned:"),
+    );
+    expect(spawnedCalls).toHaveLength(0);
+    expect(
+      mockClient.setStatus.mock.calls.some((call) => call[0] === finalId),
+    ).toBe(true);
+    expect(
+      mockClient.clearStatus.mock.calls.some((call) => call[0] === pendingId),
+    ).toBe(true);
+    expect(stateMgr.readState(pendingId)).toBeNull();
+    expect(stateMgr.readState(finalId)).toMatchObject({
+      agent_id: finalId,
+      cli_session_id: sessionId,
+    });
+  });
 });
