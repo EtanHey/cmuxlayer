@@ -380,7 +380,8 @@ describe("Claude channels", () => {
         params.meta?.event === "health"
       );
     });
-    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthSummary =
+      "unhealthy(stale_inbox_dispatches:blocking,agent_wedged:blocking)";
     expect(healthNotification).toEqual(
       expect.objectContaining({
         params: expect.objectContaining({

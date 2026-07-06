@@ -1244,12 +1244,14 @@ describe("resync_agents tool", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.orphaned).toEqual(["surface:325"]);
-    expect(parsed.diff.health_failures).toEqual([
+    expect(parsed.diff.health_failures).toEqual([]);
+    expect(parsed.diff.orphaned_health).toEqual([
       expect.objectContaining({
         surface_id: "surface:325",
         surface_title: "M1 LEAD VoiceLayerCodex",
-        status: "unhealthy",
+        status: "degraded",
         issue_codes: ["missing_managed_lead_agent_id"],
+        issue_severities: { missing_managed_lead_agent_id: "degraded" },
       }),
     ]);
   });
