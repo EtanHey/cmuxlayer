@@ -15,6 +15,7 @@ import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, readVersion } from "./version.js";
 import { StateManager } from "./state-manager.js";
+import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
   AgentEngine,
@@ -1746,6 +1747,13 @@ export interface CreateServerOptions {
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
+  /**
+   * Enable close forensics: ingest cmux's OWN app-level `tab_close` events from
+   * `~/.cmuxterm/events.jsonl` and attribute them each sweep. Omitted/false by
+   * default so tests never read the real cmux events file; the real MCP
+   * entrypoint (index.ts) passes `true`.
+   */
+  enableCloseForensics?: boolean;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -6006,6 +6014,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
+          closeForensicsRunner: opts?.enableCloseForensics
+            ? createDefaultCloseForensicsRunner({ stateMgr })
+            : null,
         },
       );
     context.lifecycleSweepEngine = engine;

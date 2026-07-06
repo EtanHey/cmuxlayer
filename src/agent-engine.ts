@@ -261,6 +261,14 @@ export interface AgentEngineOptions {
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
+  /**
+   * Best-effort close-forensics ingest, run at the tail of each sweep. It reads
+   * cmux's OWN event stream (`~/.cmuxterm/events.jsonl`) and attributes
+   * app-level `tab_close` deaths that never went through an MCP tool. Defaults
+   * to DISABLED (`null`) so bare construction never reads the real cmux file;
+   * production entrypoints inject the runner. Pass an explicit runner in tests.
+   */
+  closeForensicsRunner?: (() => { emitted: number }) | null;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -783,6 +791,9 @@ export class AgentEngine {
   private monitorRegistryNow?: () => number;
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
+  /** Best-effort close-forensics ingest; null when disabled. */
+  private closeForensicsRunner: (() => { emitted: number }) | null;
+  private closeForensicsSweepInFlight = false;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -811,6 +822,12 @@ export class AgentEngine {
     this.monitorRegistryPath = opts?.monitorRegistryPath;
     this.monitorRegistryNow = opts?.monitorRegistryNow;
     this.monitorRegistryNotify = opts?.monitorRegistryNotify ?? (async () => {});
+    // Default DISABLED: bare construction (tests, libraries) must never read the
+    // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
+    // runner (see app-server-runtime / server.ts createServer). `null` keeps it
+    // off; an explicit runner (tests) drives it deterministically.
+    this.closeForensicsRunner =
+      opts?.closeForensicsRunner !== undefined ? opts.closeForensicsRunner : null;
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -2885,8 +2902,28 @@ export class AgentEngine {
 
     await this.registry.purgeTerminal();
     await this.sweepMonitorRegistryBestEffort();
+    this.runCloseForensicsBestEffort();
     await this.syncSidebar();
     await this.drainOutboxBestEffort();
+  }
+
+  /**
+   * Ingest cmux's own app-level close events at the tail of a sweep and attribute
+   * them (see close-forensics.ts). Fully best-effort: the runner is self-guarding
+   * and never throws, and an in-flight guard prevents overlap if a sweep runs
+   * long. Forensics must never break lifecycle reconciliation.
+   */
+  private runCloseForensicsBestEffort(): void {
+    if (!this.closeForensicsRunner) return;
+    if (this.closeForensicsSweepInFlight) return;
+    this.closeForensicsSweepInFlight = true;
+    try {
+      this.closeForensicsRunner();
+    } catch {
+      // Never break the sweep on a forensics failure; it retries next sweep.
+    } finally {
+      this.closeForensicsSweepInFlight = false;
+    }
   }
 
   private async sweepMonitorRegistryBestEffort(): Promise<void> {

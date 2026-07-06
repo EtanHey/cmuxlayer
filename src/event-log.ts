@@ -7,6 +7,7 @@
 import { appendFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  CloseForensicsEvent,
   CloseTelemetryEvent,
   ControlHealthTelemetryEvent,
   DeliveryTelemetryEvent,
@@ -39,6 +40,16 @@ export class EventLog {
    * same events.jsonl as every other telemetry entry so forensics read one log.
    */
   appendClose(event: CloseTelemetryEvent): void {
+    this.appendEntry(event);
+  }
+
+  /**
+   * Record an ATTRIBUTED app-level close (cmux `tab_close`/`workspace_teardown`
+   * that carries no actor) into the same events.jsonl. Mirrors {@link appendClose}
+   * so a pane-death investigation still reads one log -- now including the deaths
+   * that never went through an MCP tool. See {@link CloseForensicsEvent}.
+   */
+  appendCloseForensics(event: CloseForensicsEvent): void {
     this.appendEntry(event);
   }
 

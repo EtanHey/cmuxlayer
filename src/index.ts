@@ -82,6 +82,7 @@ async function main() {
     outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
+    enableCloseForensics: true,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

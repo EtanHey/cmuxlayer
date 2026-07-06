@@ -185,6 +185,10 @@ export class StateManager {
     mkdirSync(baseDir, { recursive: true });
   }
 
+  getBaseDir(): string {
+    return this.baseDir;
+  }
+
   getEventLog(): EventLog {
     return this.eventLog;
   }
