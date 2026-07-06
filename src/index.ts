@@ -24,6 +24,7 @@ import { createServer } from "./server.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 import { readVersion } from "./version.js";
+import { drainOutbox } from "./outbox-drainer.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -67,7 +68,9 @@ async function main() {
   }
 
   const client = await createCmuxClient();
-  const server = createServer({ client });
+  // Wire the real outbox drainer into the live MCP server so this agent's
+  // periodic sweep flushes ~/.golems-zikaron/outbox.md to the notify path.
+  const server = createServer({ client, outboxDrain: () => drainOutbox() });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

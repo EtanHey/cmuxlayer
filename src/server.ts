@@ -1474,6 +1474,13 @@ export interface CreateServerOptions {
   controlHealthCollector?: () => Promise<ControlHealth>;
   /** Periodic control health sample interval. Defaults to env or 60000ms; 0 disables. */
   controlHealthIntervalMs?: number;
+  /**
+   * Best-effort outbox drain invoked at the tail of each agent-engine sweep.
+   * Omitted by default (no-op) so tests never touch the real outbox/network;
+   * the real MCP entrypoints pass `() => drainOutbox()` to actually flush
+   * `~/.golems-zikaron/outbox.md` to the notify path.
+   */
+  outboxDrain?: () => Promise<unknown>;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -5282,6 +5289,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           launchCommandSender: async ({ surface, workspace, command }) => {
             await sendLauncherCommandToSurface({ surface, workspace, command });
           },
+          outboxDrain: opts?.outboxDrain,
         },
       );
     context.lifecycleSweepEngine = engine;

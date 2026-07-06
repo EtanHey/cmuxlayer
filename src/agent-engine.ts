@@ -230,6 +230,14 @@ export interface AgentEngineOptions {
   inboxOpts?: InboxOpts;
   seatRegistry?: SeatRegistry | null;
   seatRegistryPath?: string;
+  /**
+   * Best-effort drain of the shared operator outbox, invoked at the end of each
+   * sweep so any live agent's cmuxlayer flushes `~/.golems-zikaron/outbox.md` to
+   * the notify path without an explicit trigger. Defaults to a NO-OP so bare
+   * construction (tests, libraries) never touches the real outbox or network;
+   * production entrypoints inject `() => drainOutbox()`.
+   */
+  outboxDrain?: () => Promise<unknown>;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -751,6 +759,10 @@ export class AgentEngine {
   private leadMonitorDeathTimers = new Map<string, LeadMonitorDeathTimer>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
+  /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
+  private outboxDrain: () => Promise<unknown>;
+  /** Guards against overlapping outbox drains if a sweep runs long. */
+  private outboxDrainInFlight = false;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -772,6 +784,10 @@ export class AgentEngine {
     this.sessionIdentityResolver =
       opts?.sessionIdentityResolver ??
       ((agent) => this.findTranscriptSessionIdentity(agent));
+    // Default no-op: constructing an engine (tests, libraries) must never touch
+    // the real outbox or network. Production entrypoints inject the real
+    // drainOutbox (see server.ts createServer / app-server-runtime).
+    this.outboxDrain = opts?.outboxDrain ?? (async () => {});
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -2900,6 +2916,30 @@ export class AgentEngine {
 
     await this.registry.purgeTerminal();
     await this.syncSidebar();
+    await this.drainOutboxBestEffort();
+  }
+
+  /**
+   * Drain the shared operator outbox to the notify path at the tail of a sweep.
+   * Best-effort: any failure is swallowed so a drain never breaks a sweep, and an
+   * in-flight guard prevents overlapping drains if a sweep runs long. Exactly-once
+   * (no double-send) is owned by drainOutbox's `.outbox-drained.json` sidecar.
+   *
+   * AIDEV-NOTE: with multiple live agents each running this sweep, the sidecar
+   * gives single-process exactly-once + best-effort cross-process dedup (a rare
+   * read-before-write race between two agents could double-send one entry). Full
+   * cross-process locking is intentionally out of scope for this best-effort path.
+   */
+  private async drainOutboxBestEffort(): Promise<void> {
+    if (this.outboxDrainInFlight) return;
+    this.outboxDrainInFlight = true;
+    try {
+      await this.outboxDrain();
+    } catch {
+      // Never break the sweep on a drain failure; it retries next sweep.
+    } finally {
+      this.outboxDrainInFlight = false;
+    }
   }
 
   private sweepStateSignature(): string {
