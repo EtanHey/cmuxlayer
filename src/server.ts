@@ -324,6 +324,24 @@ const SendToArgsSchema = z.object({
   allow_long_inline: z.boolean().optional().default(false),
 });
 
+const BroadcastRoleSchema = z.enum(["leads", "workers", "all"]);
+const BroadcastArgsSchema = z.object({
+  text: z.string(),
+  role: BroadcastRoleSchema.optional().default("leads"),
+  exclude: z.array(z.string()).optional().default([]),
+  workspace: z.string().optional(),
+  press_enter: z.boolean().optional().default(true),
+});
+type BroadcastRole = z.infer<typeof BroadcastRoleSchema>;
+type BroadcastReceipt = {
+  agent_id: string;
+  seat: string;
+  delivered: boolean;
+  submit_verified: boolean | null;
+  error?: string;
+  skipped?: string;
+};
+
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
 export interface DeliveryRecord {
@@ -1038,6 +1056,27 @@ function assertInlineInputAllowed(opts: {
   throw new Error(
     `${argName} is ${opts.value.length} characters, above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}. Pane keystrokes are capped to one-line pointers: write the payload to a file and send "Read and follow <path>" instead.${promptPathGuidance} To deliberately send raw inline text, pass allow_long_inline:true. CMUXLAYER_MAX_INLINE_CHARS may be set to a positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
   );
+}
+
+function assertBroadcastInlineInputAllowed(text: string): void {
+  if (text.length <= SEND_INPUT_MAX_INLINE_CHARS) {
+    return;
+  }
+
+  throw new Error(
+    `broadcast.text is ${text.length} characters, above CMUXLAYER_MAX_INLINE_CHARS=${SEND_INPUT_MAX_INLINE_CHARS}. ` +
+      `Broadcasts are capped to one-line pointers: write the payload to a file and broadcast "Read and follow <path>" instead. ` +
+      `CMUXLAYER_MAX_INLINE_CHARS may be set to a positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}.`,
+  );
+}
+
+function broadcastRoleMatches(
+  requestedRole: BroadcastRole,
+  agentRole: AgentRole | undefined,
+): boolean {
+  if (requestedRole === "all") return true;
+  if (requestedRole === "workers") return agentRole === "worker";
+  return agentRole === "orchestrator" || agentRole === "ic";
 }
 
 function assertBootPromptMode(
@@ -7155,6 +7194,174 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return err(fallbackError);
             }
           }
+          return err(e);
+        }
+      },
+    );
+
+    const resolveBroadcastCallerRefs = async (): Promise<Set<string>> => {
+      const refs = new Set<string>();
+      const add = (value: string | undefined): void => {
+        const trimmed = value?.trim();
+        if (trimmed) refs.add(trimmed);
+      };
+      add(process.env.CMUX_AGENT_ID);
+      add(process.env.CMUX_TAB_ID);
+      add(process.env.CMUX_SURFACE_ID);
+
+      for (const surface of [process.env.CMUX_SURFACE_ID, process.env.CMUX_TAB_ID]) {
+        if (!surface?.trim()) continue;
+        try {
+          const identified = await client.identify(surface.trim());
+          add(identified.caller?.surface_ref);
+          add(identified.focused?.surface_ref);
+        } catch {
+          // Caller identity is best-effort. Explicit env refs above still apply.
+        }
+      }
+      return refs;
+    };
+
+    const broadcastSkipReason = (agent: AgentRecord): string | null => {
+      if (TERMINAL_AGENT_STATES.has(agent.state)) {
+        return `dead:${agent.state}`;
+      }
+      if (!INTERACTIVE_AGENT_STATES.has(agent.state)) {
+        return `not_interactive:${agent.state}`;
+      }
+      return null;
+    };
+
+    const agentSeatLabel = (agent: AgentRecord): string =>
+      agent.seat_id?.trim() ||
+      agent.task_summary?.trim() ||
+      agent.surface_id ||
+      agent.agent_id;
+
+    server.tool(
+      "broadcast",
+      `Fan out a short pointer-style message to registered agents by role using the same guarded delivery path as send_to. Defaults to role=leads (orchestrator + ic). Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters; for larger payloads write a file and broadcast "Read and follow <path>". Returns per-agent receipts so one failed target never hides the rest.`,
+      {
+        text: BroadcastArgsSchema.shape.text.describe(
+          `Message to broadcast. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters; write larger payloads to a file and broadcast "Read and follow <path>".`,
+        ),
+        role: BroadcastArgsSchema.shape.role.describe(
+          "Target role set: leads means orchestrator + ic; workers means worker; all means every registered agent.",
+        ),
+        exclude: BroadcastArgsSchema.shape.exclude.describe(
+          "Agent IDs to skip in addition to the caller's own agent.",
+        ),
+        workspace: BroadcastArgsSchema.shape.workspace.describe(
+          "Optional workspace ref/id to scope targets. Omit to broadcast across all workspaces.",
+        ),
+        press_enter: BroadcastArgsSchema.shape.press_enter.describe(
+          "Press enter after sending the text to each target.",
+        ),
+      },
+      ANNOTATIONS.mutating,
+      async (rawArgs) => {
+        try {
+          const parsedArgs = BroadcastArgsSchema.safeParse(rawArgs);
+          if (!parsedArgs.success) {
+            return err(
+              new Error(formatToolValidationError("broadcast", parsedArgs.error)),
+            );
+          }
+          const args = parsedArgs.data;
+          assertBroadcastInlineInputAllowed(args.text);
+
+          const scopedWorkspace = await canonicalWorkspaceRef(args.workspace);
+          const excludedAgentIds = new Set(args.exclude);
+          const callerRefs = await resolveBroadcastCallerRefs();
+          const workspaceMatches = (agent: AgentRecord): boolean =>
+            !scopedWorkspace ||
+            agent.workspace_id === scopedWorkspace ||
+            agent.workspace_id === args.workspace;
+          const isCaller = (agent: AgentRecord): boolean =>
+            callerRefs.has(agent.agent_id) || callerRefs.has(agent.surface_id);
+
+          const collectTargets = async (): Promise<AgentRecord[]> => {
+            try {
+              return await registry.listMerged(discovery);
+            } catch (e) {
+              if (isSurfaceEnumerationError(e)) {
+                return registry.list();
+              }
+              throw e;
+            }
+          };
+
+          const targets = (await collectTargets()).filter(
+            (agent) =>
+              broadcastRoleMatches(args.role, agent.role) &&
+              workspaceMatches(agent) &&
+              !excludedAgentIds.has(agent.agent_id) &&
+              !isCaller(agent),
+          );
+
+          const receipts: BroadcastReceipt[] = [];
+          for (const agent of targets) {
+            const skipped = broadcastSkipReason(agent);
+            if (skipped) {
+              receipts.push({
+                agent_id: agent.agent_id,
+                seat: agentSeatLabel(agent),
+                delivered: false,
+                submit_verified: null,
+                skipped,
+              });
+              continue;
+            }
+
+            try {
+              const delivery = await deliverAgentInput({
+                agent_id: agent.agent_id,
+                text: args.text,
+                press_enter: args.press_enter,
+                source_event: "send_to",
+              });
+              receipts.push({
+                agent_id: agent.agent_id,
+                seat: agentSeatLabel(agent),
+                delivered: true,
+                submit_verified: delivery.submit_verified,
+              });
+            } catch (e) {
+              receipts.push({
+                agent_id: agent.agent_id,
+                seat: agentSeatLabel(agent),
+                delivered: false,
+                submit_verified:
+                  e instanceof SubmitVerificationError
+                    ? false
+                    : e instanceof DeliverySafetyGateError
+                      ? e.submit_verified
+                      : null,
+                error: e instanceof Error ? e.message : String(e),
+              });
+            }
+          }
+
+          const deliveredCount = receipts.filter(
+            (receipt) => receipt.delivered,
+          ).length;
+          const skippedCount = receipts.filter(
+            (receipt) => receipt.skipped,
+          ).length;
+          const failedCount = receipts.length - deliveredCount - skippedCount;
+          const data = {
+            role: args.role,
+            target_count: receipts.length,
+            delivered_count: deliveredCount,
+            failed_count: failedCount,
+            skipped_count: skippedCount,
+            receipts: receipts as unknown as Record<string, unknown>[],
+          };
+          return okFormatted(
+            `broadcast ${args.role}: ${deliveredCount} delivered, ${failedCount} failed, ${skippedCount} skipped`,
+            data,
+          );
+        } catch (e) {
           return err(e);
         }
       },
