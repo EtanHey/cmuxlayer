@@ -10,6 +10,23 @@ import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
 
+type InputDeliveryTestModule = typeof import("../src/server.js") & {
+  SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
+  splitTextByUtf8ByteLimit: (text: string, maxBytes: number) => string[];
+  buildInputDeliveryBatches: (
+    chunks: string[],
+    maxPasteBytes?: number,
+  ) => Array<{
+    text: string;
+    firstChunkNumber: number;
+    deliveredChunkCounts: number[];
+  }>;
+};
+
+async function loadInputDeliveryTestModule(): Promise<InputDeliveryTestModule> {
+  return (await import("../src/server.js")) as InputDeliveryTestModule;
+}
+
 // Core low-level and metadata tools.
 const EXPECTED_TOOLS = [
   "list_surfaces",
@@ -158,6 +175,74 @@ describe("submit evidence parser", () => {
         "still typing",
       ),
     ).toBe(true);
+  });
+});
+
+describe("input delivery batching helpers", () => {
+  it("splitTextByUtf8ByteLimit keeps multi-byte characters within byte limits", async () => {
+    const { splitTextByUtf8ByteLimit } = await loadInputDeliveryTestModule();
+
+    const parts = splitTextByUtf8ByteLimit("ab😊cd", 6);
+
+    expect(parts).toEqual(["ab😊", "cd"]);
+    expect(
+      parts.every((part) => Buffer.byteLength(part, "utf-8") <= 6),
+    ).toBe(true);
+  });
+
+  it("splitTextByUtf8ByteLimit keeps exact-boundary text in one part", async () => {
+    const { splitTextByUtf8ByteLimit } = await loadInputDeliveryTestModule();
+
+    expect(splitTextByUtf8ByteLimit("ab😊", 6)).toEqual(["ab😊"]);
+  });
+
+  it("splitTextByUtf8ByteLimit splits oversized text into three parts", async () => {
+    const { splitTextByUtf8ByteLimit } = await loadInputDeliveryTestModule();
+
+    expect(splitTextByUtf8ByteLimit("abcdefghijkl", 4)).toEqual([
+      "abcd",
+      "efgh",
+      "ijkl",
+    ]);
+  });
+
+  it("buildInputDeliveryBatches preserves chunk metadata across coalesced batches", async () => {
+    const { buildInputDeliveryBatches } = await loadInputDeliveryTestModule();
+
+    expect(buildInputDeliveryBatches(["aa", "bb", "cc"], 4)).toEqual([
+      {
+        text: "aabb",
+        firstChunkNumber: 1,
+        deliveredChunkCounts: [1, 2],
+      },
+      {
+        text: "cc",
+        firstChunkNumber: 3,
+        deliveredChunkCounts: [3],
+      },
+    ]);
+  });
+
+  it("buildInputDeliveryBatches records oversized split metadata", async () => {
+    const { buildInputDeliveryBatches } = await loadInputDeliveryTestModule();
+
+    expect(buildInputDeliveryBatches(["abcdefghijkl"], 4)).toEqual([
+      {
+        text: "abcd",
+        firstChunkNumber: 1,
+        deliveredChunkCounts: [],
+      },
+      {
+        text: "efgh",
+        firstChunkNumber: 1,
+        deliveredChunkCounts: [],
+      },
+      {
+        text: "ijkl",
+        firstChunkNumber: 1,
+        deliveredChunkCounts: [1],
+      },
+    ]);
   });
 });
 
@@ -2976,6 +3061,103 @@ describe("tool handler integration", () => {
         (text) => Buffer.byteLength(text, "utf-8") <= 16_000,
       ),
     ).toBe(true);
+  });
+
+  it("send_input caps oversized requested chunk_size in background delivery records", async () => {
+    vi.useFakeTimers();
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:1",
+            text: "$ ",
+            lines: 1,
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-workspaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({ workspaces: [] }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const sendTool = registeredTools["send_input"];
+    const readTool = registeredTools["read_screen"];
+
+    const result = await sendTool.handler(
+      {
+        surface: "surface:1",
+        text: "x".repeat(35_000),
+        chunk_size: 50_000,
+        allow_long_inline: true,
+        background: true,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+
+    const readWhileDelivering = await readTool.handler(
+      { surface: "surface:1", parsed_only: true },
+      {} as any,
+    );
+    const readWhileDeliveringParsed =
+      readWhileDelivering.structuredContent ??
+      JSON.parse(readWhileDelivering.content[0].text);
+    expect(readWhileDeliveringParsed.delivery).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      status: "delivering",
+      chunk_size: 16_000,
+      total_chunks: 3,
+    });
+  });
+
+  it("send_input forces paste for every split batch of one multiline logical chunk", async () => {
+    const typedChunks: string[] = [];
+    const pastedChunks: string[] = [];
+    const mockClient = {
+      send: vi.fn().mockImplementation((_surface: string, text: string) => {
+        typedChunks.push(text);
+        return Promise.resolve();
+      }),
+      pasteText: vi.fn().mockImplementation(
+        (_surface: string, text: string) => {
+          pastedChunks.push(text);
+          return Promise.resolve();
+        },
+      ),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const text = `${"a".repeat(16_000)}\n${"b".repeat(10)}`;
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text,
+        chunk_size: 50_000,
+        allow_long_inline: true,
+        press_enter: false,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(typedChunks).toEqual([]);
+    expect(pastedChunks.length).toBeGreaterThan(1);
+    expect(pastedChunks.join("")).toBe(text);
   });
 
   it("send_input submits chunked multiline text as one receiver message", async () => {

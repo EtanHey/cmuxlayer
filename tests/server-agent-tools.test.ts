@@ -1136,6 +1136,11 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.boot_prompt_delivered).toBe(true);
     expect(chunks.length).toBeGreaterThan(0);
     expect(chunks.every((chunk) => chunk.trim().length > 0)).toBe(true);
+    expect(
+      chunks.every(
+        (chunk) => Buffer.byteLength(chunk, "utf-8") <= 16_000,
+      ),
+    ).toBe(true);
     expect(chunks.join("")).toBe(prompt);
     expect(chunks.join("")).toContain("\n\n");
   });
