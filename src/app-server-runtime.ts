@@ -183,6 +183,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         this.withSurfaceWrite(surface, () =>
           this.client.closeSurface(surface, closeOpts),
         ),
+      notify: (notifyOpts) => this.client.notify(notifyOpts),
       notifyLifecycleEvent: async () => {},
     }, {
       launchCommandSender: async ({ surface, workspace, command }) => {
