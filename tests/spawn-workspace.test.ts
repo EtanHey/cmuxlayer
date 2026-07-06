@@ -208,6 +208,45 @@ describe("workspace spawn tools", () => {
     ).toEqual(["workspace:grid", "workspace:grid"]);
   });
 
+  it("spawn_in_workspace surfaces the stale-build warning at the aggregate level", async () => {
+    // spawn_in_workspace rebuilds its response from per-agent objects (which
+    // drop result.warnings), so a stale MCP serving a multi-agent workspace
+    // spawn must still surface the warning at the top level. Inject a forced
+    // stale warner to make the check deterministic in CI.
+    const client = makeWorkspaceClient();
+    const STALE =
+      "cmuxlayer MCP is running a STALE build (running v9.9.9, installed v0.0.0) — placement/other fixes are not live; /mcp reconnect this agent to load the current build.";
+    const server = createServer({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: join(TEST_DIR, "inbox-stale"),
+      staleBuildWarner: () => STALE,
+    });
+    const tool = getTool(server, "spawn_in_workspace");
+
+    const result = await tool.handler(
+      {
+        workspace_title: "red-team",
+        agents: [
+          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+          { repo: "brainlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+        ],
+      },
+      {} as any,
+    );
+
+    const parsed = parseStructuredResult<{
+      warnings?: string[];
+      agents: Array<{ agent_id: string }>;
+    }>(result);
+    // Present once at the aggregate level (not per-agent duplication).
+    expect(parsed.warnings).toEqual([STALE]);
+    expect(parsed.agents).toHaveLength(2);
+    // Also echoed in the human-readable summary.
+    expect(result.content[0]!.text).toContain("STALE build");
+  });
+
   it("spawn_in_workspace refuses a manual-mode caller workspace before creating", async () => {
     const client = makeWorkspaceClient();
     client.listWorkspaces.mockResolvedValue({

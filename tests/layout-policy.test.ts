@@ -1580,15 +1580,31 @@ describe("worktree worker placement — always right, never left", () => {
     assertNeverLeft(placement);
   });
 
-  it("(c) nth worker while a prior worker is stuck in the LEFT column: still splits right, never docks left", () => {
+  it("(c) nth worker while a prior worker is stuck in the LEFT column: docks into the RIGHT column, never the left worker", () => {
+    // A real two-column layout: the lead AND a stray prior worker both live in
+    // the LEFT column (same x), while a genuine RIGHT worker column exists.
+    // columnCount is therefore 2 — this REACHES the rightmost-worker dock path
+    // (not the single-column early return that cases (a)/(c-old) hit). The
+    // worktree worker must dock as a tab into the RIGHT worker pane and must
+    // NEVER dock into the left-column worker.
+    const leftLead = { x: 0, y: 0, width: 500, height: 450 };
+    const leftWorker = { x: 0, y: 450, width: 500, height: 450 };
     const panes = [
-      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
-      makePane("pane:left-worker", 1, ["surface:worker-1"], leftColumn),
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftLead),
+      makePane("pane:left-worker", 1, ["surface:worker-left"], leftWorker),
+      makePane("pane:right", 2, ["surface:worker-right"], rightColumn),
     ];
     const paneSurfaces = [
       makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
-      makePaneSurfaces("pane:left-worker", ["surface:worker-1"]),
+      makePaneSurfaces("pane:left-worker", ["surface:worker-left"]),
+      makePaneSurfaces("pane:right", ["surface:worker-right"]),
     ];
+
+    // Sanity: the fixture is genuinely two-column (regression guard against the
+    // earlier bug where identical left rects collapsed to columnCount === 1 and
+    // the test never exercised the dock path).
+    const columns = deriveColumnIndex(panes);
+    expect(new Set(columns.values()).size).toBe(2);
 
     const placement = chooseAgentSpawnPlacement(
       panes,
@@ -1596,14 +1612,13 @@ describe("worktree worker placement — always right, never left", () => {
       {
         orchestrator: new Set(["surface:orchestrator"]),
         ic: new Set(),
-        worker: new Set(["surface:worker-1"]),
+        worker: new Set(["surface:worker-left", "surface:worker-right"]),
       },
       { role: "worker", worktree: true },
     );
 
-    // The only worker pane lives in the LEFT column — the worktree worker must
-    // NOT dock into it; it seeds a fresh right column instead.
-    expect(placement).toEqual({ kind: "split", direction: "right" });
+    // Docks as a tab into the RIGHT worker column — never into the left worker.
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
     expect(placement).not.toEqual({
       kind: "surface",
       pane: "pane:left-worker",

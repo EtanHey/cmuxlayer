@@ -259,14 +259,7 @@ export { sanitizeTerminalInput } from "./sanitize.js";
  * a fresh child that later goes stale via `brew upgrade` is still flagged
  * rather than silenced by a permanently-cached non-stale verdict.
  */
-const staleBuildWarning = createStaleBuildWarner();
-
-function appendStaleBuildWarning(result: { warnings?: string[] }): void {
-  const warning = staleBuildWarning();
-  if (warning) {
-    result.warnings = [...(result.warnings ?? []), warning];
-  }
-}
+const defaultStaleBuildWarner = createStaleBuildWarner();
 
 const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
@@ -1731,6 +1724,12 @@ export interface CreateServerOptions {
   worktreeHomeDir?: string;
   /** Override control health collection (primarily for tests). */
   controlHealthCollector?: () => Promise<ControlHealth>;
+  /**
+   * Override the process-wide stale-build warner (primarily for tests). Returns
+   * the loud warning string when this MCP build is stale vs the installed brew
+   * build, or null. Defaults to a real, throttled, sticky-once-stale warner.
+   */
+  staleBuildWarner?: () => string | null;
   /** Periodic control health sample interval. Defaults to env or 60000ms; 0 disables. */
   controlHealthIntervalMs?: number;
   /**
@@ -1951,6 +1950,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
   const controlHealthCollector =
     opts?.controlHealthCollector ?? context.controlHealthCollector;
+  const staleBuildWarning = opts?.staleBuildWarner ?? defaultStaleBuildWarner;
+  const appendStaleBuildWarning = (result: { warnings?: string[] }): void => {
+    const warning = staleBuildWarning();
+    if (warning) {
+      result.warnings = [...(result.warnings ?? []), warning];
+    }
+  };
   const inboxOpts = opts?.inboxBaseDir
     ? { baseDir: opts.inboxBaseDir }
     : undefined;
@@ -6959,15 +6965,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             spawnedAgents[spawnedAgents.length - 1]?.surface_id;
           await restoreFocusAfterRender(priorFocus, lastSurface, workspace);
 
+          // spawn_in_workspace builds its response from the per-agent objects,
+          // which drop each result.warnings — so surface the stale-build warning
+          // at the aggregate level (otherwise a stale MCP serving a multi-agent
+          // workspace spawn would return NO warning).
+          const staleWarning = staleBuildWarning();
+          const workspaceWarnings = staleWarning ? [staleWarning] : [];
+
           return okFormatted(
             formatOk("spawn_in_workspace", {
               workspace,
               agents: spawnedAgents.length,
+              ...(staleWarning ? { warning: staleWarning } : {}),
             }),
             {
               workspace,
               title: workspaceResult.title,
               agents: spawnedAgents,
+              ...(workspaceWarnings.length > 0
+                ? { warnings: workspaceWarnings }
+                : {}),
             },
           );
         } catch (e) {

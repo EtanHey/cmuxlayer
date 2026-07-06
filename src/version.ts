@@ -91,13 +91,19 @@ function resolveBrewPrefix(): string | null {
     const fromEnv = process.env.HOMEBREW_PREFIX;
     if (fromEnv && fromEnv.trim()) return fromEnv.trim();
     try {
+      // Bounded timeout: this runs on the first stale-check inside the MCP
+      // process, so a hung/slow `brew` must never block spawns — fall through
+      // to the standard install locations instead. execFileSync throws on
+      // timeout (ETIMEDOUT), which the catch swallows.
       const out = execFileSync("brew", ["--prefix"], {
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1000,
       }).trim();
       if (out) return out;
     } catch {
-      // brew not installed / not on PATH — fall through to standard locations.
+      // brew missing / not on PATH / slow (timed out) — fall through to the
+      // standard locations. Never throw from prefix resolution.
     }
     if (existsSync("/opt/homebrew")) return "/opt/homebrew";
     if (existsSync("/usr/local")) return "/usr/local";
