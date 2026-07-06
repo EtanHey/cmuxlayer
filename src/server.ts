@@ -2274,7 +2274,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
-    let sawClearedInput = false;
+    let sawClearedComposerEvidence = false;
+    let sawAllowedClearedComposerEvidence = false;
+    let lastHasPendingInput = false;
+    const screenIncludesSubmittedText = (screenText: string): boolean => {
+      const trimmed = opts.text.trim();
+      if (!trimmed) {
+        return false;
+      }
+      const tail = trimmed.slice(-Math.min(80, trimmed.length));
+      return normalizeTerminalText(screenText).includes(tail);
+    };
 
     while (Date.now() - startedAt < timeoutMs) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
@@ -2293,9 +2303,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
-      if (!hasPendingInput) {
-        sawClearedInput = true;
+      lastHasPendingInput = hasPendingInput;
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      const hasClearedAgentComposer =
+        composerInput !== null &&
+        composerInput.trim() === "" &&
+        !hasPendingInput &&
+        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
+      if (hasClearedAgentComposer) {
+        sawClearedComposerEvidence = true;
+        const allowClearedComposerSubmitEvidence =
+          opts.source_event !== "spawn_agent" ||
+          !screenIncludesSubmittedText(snapshot.text);
+        if (allowClearedComposerSubmitEvidence) {
+          sawAllowedClearedComposerEvidence = true;
+        }
+        if (!opts.require_working_status && allowClearedComposerSubmitEvidence) {
+          return { submit_verified: true, retry_count: retryCount };
+        }
       }
+
       if (opts.require_working_status) {
         if (!retried) {
           await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
@@ -2318,11 +2345,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         continue;
       }
 
-      // Pending input and cleared-but-idle composers are both ambiguous: the
-      // first Return may have been missed, or the CLI may have cleared input
-      // without starting the task. Retry Enter once, then keep polling for real
-      // working/thinking evidence. Cleared input alone is not submit proof.
-      if (!retried) {
+      const shouldRetryEnter =
+        hasPendingInput ||
+        (opts.source_event === "spawn_agent" &&
+          screenIncludesSubmittedText(snapshot.text));
+
+      // Pending input is ambiguous: the first Return may have been missed. A
+      // launch command echoed in shell history keeps its legacy advisory retry.
+      // A recognized cleared agent composer is handled above as submit evidence.
+      if (!retried && shouldRetryEnter) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         await sendKeyWithRetry(opts.surface, "return", opts.workspace);
         retryCount += 1;
@@ -2342,8 +2373,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
     return {
-      submit_verified:
-        sawClearedInput && !opts.require_working_status ? null : false,
+      submit_verified: opts.require_working_status
+        ? false
+        : sawClearedComposerEvidence && sawAllowedClearedComposerEvidence
+          ? true
+          : lastHasPendingInput
+            ? false
+            : null,
       retry_count: retryCount,
     };
   };

@@ -3268,7 +3268,7 @@ describe("tool handler integration", () => {
     });
   });
 
-  it("send_input background press_enter surfaces uncertain cleared submits", async () => {
+  it("send_input background press_enter verifies a cleared agent composer", async () => {
     vi.useFakeTimers();
     const stateDir = join(tmpdir(), "cmuxlayer-background-submit-verify");
     rmSync(stateDir, { recursive: true, force: true });
@@ -3349,8 +3349,8 @@ describe("tool handler integration", () => {
     expect(readAfterDeliveryParsed.delivery).toMatchObject({
       delivery_id: parsed.delivery_id,
       status: "delivered",
-      submit_verified: null,
-      retry_count: 1,
+      submit_verified: true,
+      retry_count: 0,
     });
   });
 

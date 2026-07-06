@@ -387,7 +387,7 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
-  it("keeps cleared short send_to submissions uncertain without a hard error", async () => {
+  it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.completionMode = "idle";
@@ -403,12 +403,71 @@ describe("enter reliability", () => {
     const events = readEventLog().filter((event) => event.event_type === "send_to");
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBe(true);
+    expect(events[0]?.retry_count).toBe(0);
+  });
+
+  it("reports a failed send_to submit when text remains in the composer after retry", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "still pending",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog();
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
     expect(parsed.retry_count).toBe(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
-    expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBeNull();
-    expect(events[0]?.retry_count).toBe(1);
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === "send_to" &&
+          event.submit_verified === false &&
+          event.retry_count === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("verifies a mid-session idle send_to after retry clears the full composer", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 2;
+    client.completionMode = "idle";
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "idle" });
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "mid-session prompt",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog();
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBeGreaterThanOrEqual(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+    expect(
+      events.some(
+        (event) =>
+          event.event_type === "send_to" &&
+          event.submit_verified === true &&
+          typeof event.retry_count === "number" &&
+          event.retry_count >= 1,
+      ),
+    ).toBe(true);
   });
 
   it("retries Enter for send_command on a Claude surface", async () => {

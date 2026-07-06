@@ -210,6 +210,11 @@ describe("false-green empty surface protection", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBeNull();
     expect(
+      (mockExec as any).mock.calls.filter(([, args]: [string, string[]]) =>
+        args.includes("send-key") && args.includes("return"),
+      ),
+    ).toHaveLength(1);
+    expect(
       (mockExec as any).mock.calls.some(([, args]: [string, string[]]) =>
         args.includes("read-screen"),
       ),
