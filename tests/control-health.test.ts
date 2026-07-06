@@ -8,14 +8,70 @@ import {
 } from "../src/control-health.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ControlHealth } from "../src/control-health.js";
+import { AgentEngine } from "../src/agent-engine.js";
+import { AgentRegistry } from "../src/agent-registry.js";
+import { StateManager } from "../src/state-manager.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-control-health-test");
+
+function createHealthNotificationEngine() {
+  const stateDir = join(TEST_ROOT, `engine-${Date.now()}-${Math.random()}`);
+  mkdirSync(stateDir, { recursive: true });
+  const stateMgr = new StateManager(stateDir);
+  const registry = new AgentRegistry(stateMgr, async () => []);
+  const engine = new AgentEngine(stateMgr, registry, {} as any, {
+    spawnPreflight: async () => {},
+    sessionIdentityResolver: () => null,
+  });
+  return { engine, stateDir };
+}
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("control health", () => {
+  it("only notifies on blocking health and records code severity in signatures", () => {
+    const { engine, stateDir } = createHealthNotificationEngine();
+    try {
+      const healthSignature = (engine as any).healthSignature.bind(engine);
+      const shouldNotifyHealthChange = (
+        engine as any
+      ).shouldNotifyHealthChange.bind(engine);
+      const degradedHealth = {
+        status: "degraded",
+        issue_codes: ["missing_cli_session_id"],
+        issues: ["managed long-running agent has no cli_session_id"],
+        issue_severities: { missing_cli_session_id: "degraded" },
+      };
+      const blockingHealth = {
+        status: "unhealthy",
+        issue_codes: ["agent_wedged"],
+        issues: ["agent monitor is alive but dispatches remain unacked"],
+        issue_severities: { agent_wedged: "blocking" },
+      };
+
+      expect(healthSignature(degradedHealth)).toBe(
+        "degraded(missing_cli_session_id:degraded)",
+      );
+      expect(
+        shouldNotifyHealthChange(
+          { healthSignature: "unhealthy(agent_wedged:blocking)" },
+          degradedHealth,
+        ),
+      ).toBe(false);
+      expect(
+        shouldNotifyHealthChange(
+          { healthSignature: "degraded(missing_cli_session_id:degraded)" },
+          blockingHealth,
+        ),
+      ).toBe(true);
+    } finally {
+      engine.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports prod/nightly sockets and warns on Nightly env with prod-resolving cmux", async () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home");

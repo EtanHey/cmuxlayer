@@ -40,21 +40,30 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent lifecycle health", () => {
-  it("marks a ready managed agent without a CLI session or monitor as unhealthy", () => {
+  it("degrades a working-screen agent without a CLI session or monitor without marking it unhealthy", () => {
     const health = evaluateAgentHealth(
-      makeRecord({ cli_session_id: null, cli_session_path: null }),
-      { monitor_alive: false },
+      makeRecord({
+        state: "working",
+        cli_session_id: null,
+        cli_session_path: null,
+      }),
+      { monitor_alive: false, screen_status: "working" },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toEqual([
       "missing_cli_session_id",
       "non_resumable",
       "inbox_monitor_not_alive",
     ]);
+    expect(health.issue_severities).toMatchObject({
+      missing_cli_session_id: "degraded",
+      non_resumable: "degraded",
+      inbox_monitor_not_alive: "degraded",
+    });
   });
 
-  it("marks auto-discovered agents as unhealthy even if they look ready", () => {
+  it("marks auto-discovered agents as degraded even if they look ready", () => {
     const health = evaluateAgentHealth(
       makeRecord({
         agent_id: "auto-codex-surface-306",
@@ -64,9 +73,13 @@ describe("agent lifecycle health", () => {
       { monitor_alive: false },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toContain("auto_discovered_agent");
     expect(health.issue_codes).toContain("missing_cli_session_id");
+    expect(health.issue_severities).toMatchObject({
+      auto_discovered_agent: "degraded",
+      missing_cli_session_id: "degraded",
+    });
   });
 
   it("distinguishes a deleted inbox channel dir from a never-armed monitor", () => {
@@ -95,12 +108,15 @@ describe("agent lifecycle health", () => {
       { monitor_alive: false, surface_title: "M1 LEAD VoiceLayerCodex" },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toContain("auto_discovered_agent");
     expect(health.issue_codes).toContain("missing_managed_lead_agent_id");
+    expect(health.issue_severities?.missing_managed_lead_agent_id).toBe(
+      "degraded",
+    );
   });
 
-  it("marks ambiguous auto-discovered repo labels as unhealthy", () => {
+  it("marks ambiguous auto-discovered repo labels as degraded label hygiene", () => {
     const health = evaluateAgentHealth(
       makeRecord({
         agent_id: "auto-codex-surface-999",
@@ -111,8 +127,9 @@ describe("agent lifecycle health", () => {
       { monitor_alive: false },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toContain("ambiguous_repo_cwd_label");
+    expect(health.issue_severities?.ambiguous_repo_cwd_label).toBe("info");
   });
 
   it("marks non-Claude orchestrators as role health failures", () => {
@@ -135,7 +152,7 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("topology_three_or_more_columns");
   });
 
-  it("marks registry done while the screen is working as unhealthy", () => {
+  it("treats registry done while the screen is working as a screen-liveness signal", () => {
     const health = evaluateAgentHealth(
       makeRecord({
         state: "done",
@@ -147,11 +164,13 @@ describe("agent lifecycle health", () => {
       },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
+    expect(health.reconciled_state).toBe("working");
     expect(health.issue_codes).toContain("registry_screen_disagreement");
+    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
   });
 
-  it("marks registry working while the screen parses done as unhealthy", () => {
+  it("marks registry working while the screen parses done as degraded registry lag", () => {
     const health = evaluateAgentHealth(
       makeRecord({
         state: "working",
@@ -163,8 +182,11 @@ describe("agent lifecycle health", () => {
       },
     );
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toContain("registry_screen_disagreement");
+    expect(health.issue_severities?.registry_screen_disagreement).toBe(
+      "degraded",
+    );
   });
 
   it("marks stale dispatches on a live monitor as wedged, not dead", () => {
@@ -192,14 +214,14 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).not.toContain("inbox_monitor_not_alive");
   });
 
-  it("marks an absent monitor as dead evidence, not a wedged live pane", () => {
+  it("marks an absent monitor as degraded evidence, not a wedged live pane", () => {
     const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
       monitor_alive: false,
       stale_count: 0,
       screen_status: "working",
     });
 
-    expect(health.status).toBe("unhealthy");
+    expect(health.status).toBe("degraded");
     expect(health.issue_codes).toContain("inbox_monitor_not_alive");
     expect(health.issue_codes).not.toContain("agent_wedged");
   });

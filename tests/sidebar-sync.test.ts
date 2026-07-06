@@ -187,7 +187,7 @@ describe("Sidebar Sync", () => {
     );
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "working-agent",
-      "brainlayer | role=worker | state=working | health=unhealthy(missing_cli_session_id,non_resumable) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
+      "brainlayer | role=worker | state=working | health=degraded(missing_cli_session_id:degraded,non_resumable:degraded) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
     );
   });
@@ -320,7 +320,8 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    const healthSummary = "unhealthy(registry_surface_workspace_mismatch)";
+    const healthSummary =
+      "unhealthy(registry_surface_workspace_mismatch:blocking)";
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "workspace-drift",
       `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a`,
@@ -395,7 +396,8 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthSummary =
+      "unhealthy(stale_inbox_dispatches:blocking,agent_wedged:blocking)";
     expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
       "health",
       expect.objectContaining({ agent_id: agentId }),
@@ -451,7 +453,8 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthSummary =
+      "unhealthy(stale_inbox_dispatches:blocking,agent_wedged:blocking)";
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
       `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=self:agent_wedged | last_prompt=Keep draining inbox dispatches | worktree=- | branch=- | report=n/a | pr=n/a`,
@@ -468,11 +471,7 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
-      "health",
-      expect.objectContaining({ agent_id: agentId }),
-      "healthy",
-    );
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
 
     mockClient.notifyLifecycleEvent.mockClear();
     dispatch(
@@ -540,7 +539,8 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
     await engine.runSweep();
 
-    const healthSummary = "unhealthy(stale_inbox_dispatches,agent_wedged)";
+    const healthSummary =
+      "unhealthy(stale_inbox_dispatches:blocking,agent_wedged:blocking)";
     const healthCalls = mockClient.notifyLifecycleEvent.mock.calls.filter(
       (call) => call[0] === "health",
     );
@@ -633,7 +633,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.setStatus).toHaveBeenCalledTimes(2);
     expect(mockClient.setStatus).toHaveBeenLastCalledWith(
       "a1",
-      "brainlayer | role=worker | state=working | health=unhealthy(missing_cli_session_id,non_resumable) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      "brainlayer | role=worker | state=working | health=degraded(missing_cli_session_id:degraded,non_resumable:degraded) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({
         workspace: "workspace:coach",
         surface: "surface:99",

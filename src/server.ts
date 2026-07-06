@@ -29,7 +29,11 @@ import {
   toAgentStatePayload,
   toPublicAgent,
 } from "./agent-facade.js";
-import { evaluateAgentHealth } from "./agent-health.js";
+import {
+  DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
+  evaluateAgentHealth,
+  type AgentHealthIssueCode,
+} from "./agent-health.js";
 import {
   AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
   AGENT_HEALTH_MONITOR_MAX_AGE_MS,
@@ -1392,10 +1396,8 @@ const LIVE_HEALTHY_STATE: Partial<
 
 /**
  * Reconcile a registry AgentState with the live read_screen parse for my_agents.
- * The registry can hold a STALE "error" for an agent that is actually alive (idle/working);
- * read_screen is ground truth for liveness. When the registry says "error" but the live screen
- * still parses a healthy running status, surface the live state instead. All other cases keep
- * the registry state (we never downgrade a healthy registry state on a transient screen blip).
+ * An active agent screen is ground truth for liveness, so working/thinking screens win
+ * over stale inactive registry states. A healthy idle screen only clears a stale error.
  */
 export function reconcileAgentLiveState(
   registryState: AgentState,
@@ -1404,9 +1406,10 @@ export function reconcileAgentLiveState(
   // Only a REAL agent screen can clear an error. parseScreen reports status:"idle" for a
   // plain shell prompt (agent_type:"unknown"), so a crashed agent fallen back to a shell must
   // keep its registry error instead of being masked as healthy idle.
-  if (registryState === "error" && screen && screen.agent_type !== "unknown") {
+  if (screen && screen.agent_type !== "unknown") {
     const live = LIVE_HEALTHY_STATE[screen.status];
-    if (live) return live;
+    if (live === "working") return live;
+    if (registryState === "error" && live) return live;
   }
   return registryState;
 }
@@ -3163,7 +3166,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
 
   const buildOrphanSurfaceHealth = (surface: DiscoveredAgent) => {
-    const issueCodes: string[] = [];
+    const issueCodes: AgentHealthIssueCode[] = [];
     const issues: string[] = [];
     if (isLeadLikeSurfaceTitle(surface.surface_title)) {
       issueCodes.push("missing_managed_lead_agent_id");
@@ -3187,13 +3190,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
 
+    const issueSeverities = Object.fromEntries(
+      issueCodes.map((code) => [code, DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code]]),
+    );
+    const hasBlockingIssue = issueCodes.some(
+      (code) => DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code] === "blocking",
+    );
     return {
       surface_id: surface.surface_id,
       surface_title: surface.surface_title,
       workspace_id: surface.workspace_id ?? null,
-      status: issueCodes.length > 0 ? "unhealthy" : "unknown",
+      status:
+        issueCodes.length === 0
+          ? "unknown"
+          : hasBlockingIssue
+            ? "unhealthy"
+            : "degraded",
       issue_codes: issueCodes,
       issues,
+      ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
     };
   };
 
@@ -6456,20 +6471,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         const filter = {
-          state: args.state,
           repo: args.repo,
           model: args.model,
         };
+        const requestedState = args.state;
         const buildListAgentsResponse = async (records: AgentRecord[]) => {
           const topology = await collectSurfaceTopology();
-          const agents = await Promise.all(
-            records.map(async (agent) => ({
-              ...toPublicAgent(agent),
-              health: await evaluateServerAgentHealth(agent, {
+          const enrichedAgents = await Promise.all(
+            records.map(async (agent) => {
+              const health = await evaluateServerAgentHealth(agent, {
                 ...healthTopologyOverrides(agent, topology),
-              }),
-            })),
+              });
+              return {
+                ...toPublicAgent(agent),
+                state: health.reconciled_state ?? agent.state,
+                health,
+              };
+            }),
           );
+          const agents = requestedState
+            ? enrichedAgents.filter((agent) => agent.state === requestedState)
+            : enrichedAgents;
           const data = {
             agents: agents as unknown as Record<string, unknown>[],
             count: agents.length,

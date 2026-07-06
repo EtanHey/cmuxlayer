@@ -1,8 +1,9 @@
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord, AgentState } from "./agent-types.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
 import { inferRecordRoleOrNull } from "./layout-policy.js";
 
-export type AgentHealthStatus = "healthy" | "unhealthy";
+export type AgentHealthStatus = "healthy" | "degraded" | "unhealthy";
+export type AgentHealthIssueSeverity = "blocking" | "degraded" | "info";
 
 export type AgentHealthIssueCode =
   | "auto_discovered_agent"
@@ -26,6 +27,32 @@ export type AgentHealthIssueCode =
   | "orchestrator_not_leftmost"
   | "worker_in_leftmost_column";
 
+export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
+  AgentHealthIssueCode,
+  AgentHealthIssueSeverity
+> = {
+  agent_wedged: "blocking",
+  closure_without_artifact: "blocking",
+  pr_loop_incomplete: "blocking",
+  kept_open_contract_incomplete: "blocking",
+  degraded_evidence_channel: "blocking",
+  recoverable_blocker_requires_action: "blocking",
+  registry_surface_workspace_mismatch: "blocking",
+  topology_three_or_more_columns: "blocking",
+  orchestrator_not_leftmost: "blocking",
+  worker_in_leftmost_column: "blocking",
+  non_claude_orchestrator: "blocking",
+  inbox_channel_dir_deleted: "blocking",
+  stale_inbox_dispatches: "blocking",
+  missing_managed_lead_agent_id: "degraded",
+  missing_cli_session_id: "degraded",
+  non_resumable: "degraded",
+  inbox_monitor_not_alive: "degraded",
+  auto_discovered_agent: "degraded",
+  ambiguous_repo_cwd_label: "info",
+  registry_screen_disagreement: "degraded",
+};
+
 export interface AgentTopologyHealthInput {
   column: number | null;
   column_count: number | null;
@@ -48,6 +75,10 @@ export interface AgentHealth {
   status: AgentHealthStatus;
   issue_codes: AgentHealthIssueCode[];
   issues: string[];
+  issue_severities?: Partial<
+    Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
+  >;
+  reconciled_state?: AgentState;
   recommended_actions?: string[];
 }
 
@@ -69,6 +100,39 @@ const RECOVERABLE_ACTION_RECOMMENDATIONS: Record<string, string> = {
 
 function addRecommendedAction(actions: string[], action: string): void {
   if (!actions.includes(action)) actions.push(action);
+}
+
+function issueSeverity(
+  code: AgentHealthIssueCode,
+  context: { screenActive: boolean },
+): AgentHealthIssueSeverity {
+  if (code === "registry_screen_disagreement" && context.screenActive) {
+    return "info";
+  }
+  return DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code];
+}
+
+function deriveIssueSeverities(
+  codes: AgentHealthIssueCode[],
+  context: { screenActive: boolean },
+): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
+  const severities: Partial<
+    Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
+  > = {};
+  for (const code of codes) {
+    severities[code] = issueSeverity(code, context);
+  }
+  return severities;
+}
+
+function deriveStatus(
+  codes: AgentHealthIssueCode[],
+  severities: Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>>,
+): AgentHealthStatus {
+  if (codes.length === 0) return "healthy";
+  return codes.some((code) => severities[code] === "blocking")
+    ? "unhealthy"
+    : "degraded";
 }
 
 function isLongRunning(agent: AgentRecord): boolean {
@@ -198,6 +262,7 @@ export function evaluateAgentHealth(
   const screenActive =
     input.screen_status === "working" || input.screen_status === "thinking";
   const screenDone = input.screen_status === "done";
+  let reconciledState: AgentState | undefined;
   const registryActive =
     agent.state === "creating" ||
     agent.state === "booting" ||
@@ -208,6 +273,9 @@ export function evaluateAgentHealth(
     agent.state === "done" ||
     agent.state === "error";
   if ((screenActive && registryInactive) || (screenDone && registryActive)) {
+    if (screenActive && registryInactive) {
+      reconciledState = "working";
+    }
     addIssue(
       issueCodes,
       issues,
@@ -333,10 +401,15 @@ export function evaluateAgentHealth(
     }
   }
 
+  const issueSeverities = deriveIssueSeverities(issueCodes, { screenActive });
+  const status = deriveStatus(issueCodes, issueSeverities);
+
   return {
-    status: issueCodes.length === 0 ? "healthy" : "unhealthy",
+    status,
     issue_codes: issueCodes,
     issues,
+    ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
+    ...(reconciledState ? { reconciled_state: reconciledState } : {}),
     ...(recommendedActions.length > 0
       ? { recommended_actions: recommendedActions }
       : {}),

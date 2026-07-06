@@ -416,7 +416,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
     expect(parsed.health).toMatchObject({
-      status: "unhealthy",
+      status: "degraded",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
@@ -903,7 +903,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("ic");
-    expect(parsed.health.status).toBe("unhealthy");
+    expect(parsed.health.status).toBe("degraded");
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -1974,11 +1974,48 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
     expect(parsed.agents[0].health).toMatchObject({
-      status: "unhealthy",
+      status: "degraded",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
       ]),
+    });
+  });
+
+  it("list_agents state filter uses the reconciled screen-active state", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+
+    await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "begin work",
+      },
+      {} as any,
+    );
+
+    const result = await list.handler({ state: "working" }, {} as any);
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.count).toBe(1);
+    expect(parsed.agents[0]).toMatchObject({
+      repo: "brainlayer",
+      state: "working",
+      health: {
+        status: "degraded",
+        issue_codes: expect.arrayContaining([
+          "registry_screen_disagreement",
+        ]),
+        issue_severities: {
+          registry_screen_disagreement: "info",
+        },
+        reconciled_state: "working",
+      },
     });
   });
 
@@ -2044,7 +2081,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.cli).toBe("codex");
     expect(parsed.resume_command).toBeUndefined();
     expect(parsed.health).toMatchObject({
-      status: "unhealthy",
+      status: "degraded",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
@@ -2843,7 +2880,7 @@ codex>
       pid: null,
       resumable: false,
       health: {
-        status: "unhealthy",
+        status: "degraded",
         issue_codes: expect.arrayContaining([
           "auto_discovered_agent",
           "missing_cli_session_id",

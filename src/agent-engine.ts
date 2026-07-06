@@ -80,6 +80,7 @@ import {
   type SpawnModelPolicy,
 } from "./model-policy.js";
 import {
+  DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
   type AgentHealth,
 } from "./agent-health.js";
@@ -2274,7 +2275,15 @@ export class AgentEngine {
 
   private formatHealthSummary(health: AgentHealth): string {
     if (health.issue_codes.length === 0) return health.status;
-    return `${health.status}(${health.issue_codes.join(",")})`;
+    const issueSummary = health.issue_codes
+      .map((code) => {
+        const severity =
+          health.issue_severities?.[code] ??
+          DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code];
+        return `${code}:${severity}`;
+      })
+      .join(",");
+    return `${health.status}(${issueSummary})`;
   }
 
   private formatReportSummary(harvestability: WorkerHarvestability): string {
@@ -2393,18 +2402,22 @@ export class AgentEngine {
         await this.client.notifyLifecycleEvent(event, agent, signature);
       }
       if (event === "health") {
-        const healthPrefix = `${agent.agent_id}:health:`;
-        for (const key of this.notifiedEvents) {
-          if (key.startsWith(healthPrefix)) {
-            this.notifiedEvents.delete(key);
-          }
-        }
+        this.clearHealthNotificationMemory(agent.agent_id);
       }
       this.notifiedEvents.add(eventKey);
       return true;
     } catch {
       // Ignore Claude channel push failures; logs and sidebar state remain canonical.
       return false;
+    }
+  }
+
+  private clearHealthNotificationMemory(agentId: string): void {
+    const healthPrefix = `${agentId}:health:`;
+    for (const key of this.notifiedEvents) {
+      if (key.startsWith(healthPrefix)) {
+        this.notifiedEvents.delete(key);
+      }
     }
   }
 
@@ -2419,10 +2432,7 @@ export class AgentEngine {
     if (!prev) return health.status === "unhealthy";
     const nextSignature = this.healthSignature(health);
     if (prev.healthSignature === nextSignature) return false;
-    return (
-      health.status === "unhealthy" ||
-      prev.healthSignature.startsWith("unhealthy")
-    );
+    return health.status === "unhealthy";
   }
 
   /**
@@ -2536,6 +2546,12 @@ export class AgentEngine {
           "health",
           healthSignature,
         );
+      } else if (
+        prev &&
+        prev.healthSignature !== healthSignature &&
+        health.status !== "unhealthy"
+      ) {
+        this.clearHealthNotificationMemory(agentId);
       }
 
       const archived = await this.maybeArchiveDoneAgent(agent);
