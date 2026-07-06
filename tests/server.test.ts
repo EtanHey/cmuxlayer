@@ -53,6 +53,27 @@ const REAL_CLAUDE_READY_BASELINE_SCREEN =
 const REAL_CLAUDE_DIRTY_COMPOSER_SCREEN =
   REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN.replace("\n❯ \n", "\n❯ still typing\n");
 
+function makePhantomNoBootPrompt(): string {
+  const lines = [
+    "# Worker Boot Brief",
+    "You are a Codex worker receiving a long boot prompt.",
+    "Do NOT answer with a bare no.",
+    "Do NOT submit a separate confirmation turn.",
+  ];
+
+  for (let index = 0; index < 48; index += 1) {
+    const clause =
+      index % 4 === 0
+        ? "Do NOT split this directive into a separate no turn."
+        : "Keep the entire boot brief in one composer message.";
+    const filler = `section-${String(index).padStart(2, "0")} ${clause} `;
+    lines.push(filler + "context ".repeat(14));
+  }
+
+  lines.push("Final instruction: Do NOT emit no as its own message.");
+  return `${lines.join("\n")}\n`;
+}
+
 async function advanceTimers(ms: number): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -2992,6 +3013,96 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(submittedMessages).toEqual([longText]);
+  });
+
+  it("send_input keeps multi-kb Do NOT prompts on paste path without type-mode newline submits", async () => {
+    const typedChunks: string[] = [];
+    const pastedChunks: string[] = [];
+    const mockClient = {
+      send: vi.fn().mockImplementation(
+        (_surface: string, text: string) => {
+          typedChunks.push(text);
+          return Promise.resolve();
+        },
+      ),
+      pasteText: vi.fn().mockImplementation(
+        (_surface: string, text: string) => {
+          pastedChunks.push(text);
+          return Promise.resolve();
+        },
+      ),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const prompt = makePhantomNoBootPrompt();
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: prompt,
+        chunk_size: 160,
+        press_enter: false,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const submittedTypeFragments = typedChunks
+      .map((chunk) => chunk.trim().toLowerCase())
+      .filter((chunk) => chunk === "no" || chunk === "not");
+
+    expect(parsed.ok).toBe(true);
+    expect(pastedChunks.length).toBeGreaterThan(1);
+    expect(pastedChunks.join("")).toBe(prompt);
+    expect(typedChunks).toEqual([]);
+    expect(submittedTypeFragments).toEqual([]);
+  });
+
+  it.skip("RED: chunked prompt delivery should not create multiple paste blocks", async () => {
+    // TODO(phantom-no): Current behavior performs one pasteText call per
+    // chunk. Claude can render those as separate [Pasted text #N] blocks,
+    // which matches the observed phantom-"no" failure class. Coalescing the
+    // chunks into one paste operation would change chunk retry/progress
+    // semantics, so keep this repro skipped until that delivery redesign is
+    // reviewed deliberately.
+    const pastedChunks: string[] = [];
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockImplementation(
+        (_surface: string, text: string) => {
+          pastedChunks.push(text);
+          return Promise.resolve();
+        },
+      ),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const prompt = makePhantomNoBootPrompt();
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: prompt,
+        chunk_size: 160,
+        press_enter: true,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(pastedChunks).toEqual([prompt]);
   });
 
   it("send_input fails instead of falling back to send when paste delivery is unsupported", async () => {
