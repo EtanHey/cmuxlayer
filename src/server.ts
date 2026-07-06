@@ -5267,6 +5267,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               () => client.closeSurface(surface, closeOpts),
               { toolName: "close_surface", workspace: closeOpts?.workspace },
             ),
+          notify: (notifyOpts) => client.notify(notifyOpts),
           notifyLifecycleEvent,
         },
         {

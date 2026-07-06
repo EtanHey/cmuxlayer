@@ -10,13 +10,15 @@ import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
+import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
 import type { CmuxClient } from "../src/cmux-client.js";
-import type { AgentRecord } from "../src/agent-types.js";
+import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 
 type MockClient = CmuxClient & {
+  notify: ReturnType<typeof vi.fn>;
   notifyLifecycleEvent: ReturnType<typeof vi.fn>;
 };
 
@@ -49,6 +51,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
     identify: vi.fn().mockResolvedValue({}),
     browser: vi.fn().mockResolvedValue({}),
     log: vi.fn().mockResolvedValue(undefined),
+    notify: vi.fn().mockResolvedValue(undefined),
     notifyLifecycleEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as MockClient;
@@ -116,6 +119,7 @@ describe("Sidebar Sync", () => {
 
   afterEach(() => {
     engine.dispose();
+    vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -555,6 +559,244 @@ describe("Sidebar Sync", () => {
       expect.objectContaining({ agent_id: agentId }),
       healthSummary,
     ]);
+  });
+
+  it("fires one proactive alert when a lead monitor heartbeat goes stale", async () => {
+    const inboxDir = join(TEST_DIR, "lead-stale-monitor-inbox");
+    const agentId = "cmuxlayer-lead-stale-monitor";
+    let now = 1_000_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:lead-stale",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-lead-stale",
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead-stale")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    now += 61_000;
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    await engine.runSweep();
+
+    expect(mockClient.notify).toHaveBeenCalledTimes(1);
+    expect(mockClient.notify).toHaveBeenCalledWith({
+      title: "Lead monitor/session ended",
+      subtitle: "cmuxlayer lead cmuxlayer-lead-stale-monitor",
+      body: "Lead seat cmuxlayer-lead-stale-monitor in workspace workspace:cmuxlayer is watch-blind: monitor/session ended - lead is watch-blind. Last-known state: working.",
+      workspace: "workspace:cmuxlayer",
+      surface: "surface:lead-stale",
+    });
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
+      "health",
+      expect.objectContaining({ agent_id: agentId }),
+      expect.stringContaining("inbox_monitor_not_alive"),
+    );
+  });
+
+  it("does not fire the proactive monitor-death alert for a worker", async () => {
+    const inboxDir = join(TEST_DIR, "worker-stale-monitor-inbox");
+    const agentId = "cmuxlayer-worker-stale-monitor";
+    let now = 2_000_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:worker-stale",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-worker-stale",
+        role: "worker",
+        repo: "cmuxlayer",
+        task_summary: "Worker remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:worker-stale")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    now += 61_000;
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notify).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      agentId,
+      expect.stringContaining(
+        "health=degraded(inbox_monitor_not_alive:degraded)",
+      ),
+      expect.any(Object),
+    );
+  });
+
+  it("re-arms the lead monitor-death alert after heartbeat recovery", async () => {
+    const inboxDir = join(TEST_DIR, "lead-monitor-rearm-inbox");
+    const agentId = "cmuxlayer-lead-monitor-rearm";
+    let now = 3_000_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:lead-rearm",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-lead-rearm",
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead-rearm")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    now += 61_000;
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    now += 1_000;
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await engine.runSweep();
+
+    now += 61_000;
+    await engine.runSweep();
+
+    expect(mockClient.notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("deadman timeout fires a lead monitor-death alert without a follow-up sweep", async () => {
+    vi.useFakeTimers();
+    const inboxDir = join(TEST_DIR, "lead-monitor-deadman-inbox");
+    const agentId = "cmuxlayer-lead-monitor-deadman";
+    let now = 4_000_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:lead-deadman",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-lead-deadman",
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead-deadman")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+    });
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notify).not.toHaveBeenCalled();
+
+    now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
+    const advanceTimersByTimeAsync = (
+      vi as unknown as {
+        advanceTimersByTimeAsync?: (ms: number) => Promise<void>;
+      }
+    ).advanceTimersByTimeAsync;
+    if (advanceTimersByTimeAsync) {
+      await advanceTimersByTimeAsync.call(
+        vi,
+        AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1,
+      );
+    } else {
+      vi.advanceTimersByTime(AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    expect(mockClient.notify).toHaveBeenCalledTimes(1);
+    expect(mockClient.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Lead monitor/session ended",
+        surface: "surface:lead-deadman",
+        workspace: "workspace:cmuxlayer",
+      }),
+    );
+  });
+
+  it("lead monitor-death delivery memory follows session-capture rename", async () => {
+    const inboxDir = join(TEST_DIR, "lead-monitor-rename-deadman-inbox");
+    const pendingAgentId = "claude-cmuxlayer-pending-lead";
+    const sessionId = "12345678-1234-1234-1234-123456789abc";
+    const finalAgentId = generateAgentId("claude", "cmuxlayer", sessionId);
+    let now = 5_000_000;
+    let capturedSessionId: string | null = null;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: pendingAgentId,
+        state: "working",
+        surface_id: "surface:lead-rename",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: null,
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead-rename")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+      sessionIdentityResolver: () => capturedSessionId,
+    });
+    writeHeartbeat(pendingAgentId, { baseDir: inboxDir, now: () => now });
+    now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notify).toHaveBeenCalledTimes(1);
+    expect(mockClient.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtitle: `cmuxlayer lead ${pendingAgentId}`,
+        body: expect.stringContaining(`Lead seat ${pendingAgentId}`),
+      }),
+    );
+
+    capturedSessionId = sessionId;
+    await engine.runSweep();
+
+    expect(stateMgr.readState(pendingAgentId)).toBeNull();
+    expect(stateMgr.readState(finalAgentId)).not.toBeNull();
+    expect(mockClient.notify).toHaveBeenCalledTimes(1);
   });
 
   it("does not emit done notifications until a worker has verified terminal evidence", async () => {

@@ -273,7 +273,7 @@ export function readLastHeartbeat(
   return last ? parseHeartbeatLine(last) : null;
 }
 
-function readLastAgentHeartbeat(
+export function readLastAgentHeartbeat(
   agentId: string,
   opts?: InboxOpts,
 ): MonitorHeartbeat | null {
