@@ -1067,9 +1067,7 @@ function lineIsCurrentComposerRegionAnchor(
   const trimmed = line.trim();
   switch (cli) {
     case "claude":
-      return /Claude Code|bypass permissions on|What can I help you with\?/i.test(
-        trimmed,
-      );
+      return /Claude Code|What can I help you with\?/i.test(trimmed);
     case "codex":
       return (
         /\bOpenAI\s+Codex\b/i.test(trimmed) ||
@@ -1083,9 +1081,7 @@ function lineIsCurrentComposerRegionAnchor(
       return /^Kiro\b/i.test(trimmed) || /^kiro>\s*$/i.test(trimmed);
     case null:
       return (
-        /Claude Code|bypass permissions on|What can I help you with\?/i.test(
-          trimmed,
-        ) ||
+        /Claude Code|What can I help you with\?/i.test(trimmed) ||
         /\bOpenAI\s+Codex\b/i.test(trimmed) ||
         /\bModel:\s*gpt-/i.test(trimmed) ||
         /^Cursor Agent$/i.test(trimmed) ||
@@ -1116,7 +1112,10 @@ function isComposerFooterOrChromeLine(line: string): boolean {
     return true;
   }
   return (
+    /^─{8,}$/.test(trimmed) ||
     /^(?:⎇|🤖)(?:\s|$)/.test(trimmed) ||
+    /^⏵+.*\bbypass permissions on\b/i.test(trimmed) ||
+    /^[✻✢✳✶]\s+Cogitated\s+for\s+\d+s\b/i.test(trimmed) ||
     /^CLAUDE_COUNTER:/i.test(trimmed) ||
     /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*/i.test(trimmed) ||
     /^\d+(?:\.\d+)?%\s+(?:context\s+)?left\b/i.test(trimmed) ||
@@ -1245,6 +1244,11 @@ function parseRawSubmitEvidenceMetrics(
 
   return { tokenCount, cost };
 }
+
+export const __submitEvidenceTestHooks = {
+  extractComposerInputRegion,
+  screenShowsPendingInput,
+};
 
 function hasRawSubmitEvidenceIncrease(
   current: RawSubmitEvidenceMetrics,

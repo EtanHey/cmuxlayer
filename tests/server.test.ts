@@ -3,7 +3,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "../src/server.js";
+import { createServer, __submitEvidenceTestHooks } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -35,6 +35,22 @@ const EXPECTED_TOOLS = [
 
 const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
 const BOOT_PROMPT_READY_POLL_MS_FOR_TESTS = 250;
+const REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN = [
+  "✻ Cogitated for 15s",
+  "                                                                                51784 tokens",
+  "─────────────────────────────────────────────────────────────────────────────────────────────",
+  "❯ ",
+  "─────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ⎇ main | +16,-0 | 🔧 13",
+  "  🤖 Opus 4.8 (1M context) | 💰 $0.50 | ⏱️  0m | 🧠 27.6% | 📚 89%",
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+].join("\n");
+const REAL_CLAUDE_READY_BASELINE_SCREEN =
+  REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN.replace("51784 tokens", "0 tokens")
+    .replace("$0.50", "$0.00")
+    .replace("✻ Cogitated for 15s", "Claude Code");
+const REAL_CLAUDE_DIRTY_COMPOSER_SCREEN =
+  REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN.replace("\n❯ \n", "\n❯ still typing\n");
 
 async function advanceTimers(ms: number): Promise<void> {
   await Promise.resolve();
@@ -70,6 +86,34 @@ describe("createServer", () => {
 
     expect(rawServer._capabilities.experimental).toBeUndefined();
     expect(rawServer._instructions).toBeUndefined();
+  });
+});
+
+describe("submit evidence parser", () => {
+  it("extracts an empty composer from the real Claude submit-evidence screen", () => {
+    expect(
+      __submitEvidenceTestHooks.extractComposerInputRegion(
+        REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN,
+      ),
+    ).toBe("");
+  });
+
+  it("does not report pending input for the real Claude screen with an empty composer", () => {
+    expect(
+      __submitEvidenceTestHooks.screenShowsPendingInput(
+        REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN,
+        "any submitted text",
+      ),
+    ).toBe(false);
+  });
+
+  it("reports pending input for the real Claude screen when the composer is dirty", () => {
+    expect(
+      __submitEvidenceTestHooks.screenShowsPendingInput(
+        REAL_CLAUDE_DIRTY_COMPOSER_SCREEN,
+        "still typing",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -2456,6 +2500,101 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
+  it("send_command verifies the real Claude cleared-composer screen using token evidence", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "real-claude-cleared.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot prompt", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN
+              : REAL_CLAUDE_READY_BASELINE_SCREEN,
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "boot prompt"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 700,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_submit_verified).toBe(true);
+    expect(promptSent).toBe(true);
+  }, 10_000);
+
+  it("send_command rejects the real Claude layout when the composer is still dirty", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "real-claude-dirty.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "still typing", "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? REAL_CLAUDE_DIRTY_COMPOSER_SCREEN
+              : REAL_CLAUDE_READY_BASELINE_SCREEN,
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "") === "still typing"
+      ) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerClaude -s",
+        boot_prompt_path: promptPath,
+        boot_prompt_timeout_ms: 100,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Boot prompt delivery failed");
     expect(promptSent).toBe(true);
   }, 10_000);
 
