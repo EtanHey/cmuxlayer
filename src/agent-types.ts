@@ -211,11 +211,68 @@ export interface CloseTelemetryEvent {
   refused: boolean;
 }
 
+/**
+ * Client/attach context around an app-level close, derived by correlating the
+ * cmux `surface.closed` event with nearby `window.keyed`/`window.unkeyed` events
+ * and boot_id changes. This is the rc/screen-share-reconnect signal: the
+ * operator drives this Mac over remote-control + Screens5 screen-sharing, so an
+ * attach/detach or reconnect cycles window key-focus (and can restart cmux,
+ * changing boot_id) right around the moment tabs die.
+ */
+export interface CloseForensicsClientContext {
+  /** A window.keyed/unkeyed event occurred within delta-t of the close. */
+  window_key_cycle_near_close: boolean;
+  /** The nearest window key-focus event within delta-t: "keyed"/"unkeyed"/none. */
+  last_window_key_event: "keyed" | "unkeyed" | null;
+  /** The close's boot_id differs from the previous close's boot_id (cmux restart). */
+  boot_id_changed_since_prev: boolean;
+}
+
+/**
+ * Forensics record that ATTRIBUTES a cmux app-level `surface.closed`
+ * (origin `tab_close`/`workspace_teardown`) -- events cmux emits to its OWN
+ * stream (`~/.cmuxterm/events.jsonl`) with NO actor. cmuxlayer's
+ * `CloseTelemetryEvent` only sees MCP-tool-driven closes, so app-level tab
+ * deaths were invisible/unattributed; this pairs each app-level close with the
+ * MCP close (if any) for the mapped surface within delta-t, and captures the
+ * client/attach context that reveals rc/screen-share churn as the culprit.
+ */
+export interface CloseForensicsEvent {
+  /** When forensics ingested this record (injected clock). */
+  ts: string;
+  event_type: "close_forensics";
+  /** cmux internal surface UUID from the surface.closed event. */
+  cmux_surface_id: string | null;
+  /** cmux internal pane UUID. */
+  cmux_pane_id: string | null;
+  /** cmux window id (UUID or numeric), often null for a bare tab_close. */
+  window_id: string | number | null;
+  /** cmux app boot session UUID; a change signals a cmux restart/reconnect. */
+  boot_id: string | null;
+  /** cmux workspace UUID. */
+  workspace_id: string | null;
+  /** payload.origin: "tab_close" | "workspace_teardown" | other. */
+  origin: string;
+  /** The cmux event's own occurred_at (ISO) -- when the surface actually closed. */
+  occurred_at: string;
+  /**
+   * Attribution verdict:
+   *  - `mcp:<tool> caller=<x>` when a cmuxlayer MCP close for the mapped surface
+   *    landed within delta-t of this app-level close (cmuxlayer DID tear it down).
+   *  - `app-level:no-mcp-close` when no MCP close matches -- the smoking gun that
+   *    something OUTSIDE cmuxlayer (the app, or an rc/attach cycle) killed it.
+   */
+  attribution: string;
+  /** rc/screen-share-reconnect signal (see CloseForensicsClientContext). */
+  client_context: CloseForensicsClientContext;
+}
+
 export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
   | ControlHealthTelemetryEvent
-  | CloseTelemetryEvent;
+  | CloseTelemetryEvent
+  | CloseForensicsEvent;
 
 export interface WaitResult {
   matched: boolean;

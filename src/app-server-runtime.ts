@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
+import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
   defaultMonitorRegistryPath,
@@ -198,6 +199,9 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
       monitorRegistryPath: defaultMonitorRegistryPath(),
       monitorRegistryNotify: httpNotifyMonitorDeadman,
+      closeForensicsRunner: createDefaultCloseForensicsRunner({
+        stateMgr: this.stateMgr,
+      }),
     });
   }
 
