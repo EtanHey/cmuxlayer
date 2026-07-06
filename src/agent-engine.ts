@@ -90,6 +90,11 @@ import {
   buildAgentHealthInput,
 } from "./agent-health-input.js";
 import {
+  assertSeatIdentity,
+  loadSeatRegistryFromConfig,
+  type SeatRegistry,
+} from "./seat-identity.js";
+import {
   collectSurfaceTopology,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
@@ -223,6 +228,8 @@ export interface AgentEngineOptions {
     command: string;
   }) => Promise<void>;
   inboxOpts?: InboxOpts;
+  seatRegistry?: SeatRegistry | null;
+  seatRegistryPath?: string;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -725,6 +732,7 @@ export class AgentEngine {
   private inboxOpts?: InboxOpts;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
+  private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
   private sweepTiming: SweepTimingOptions | null = null;
@@ -755,6 +763,10 @@ export class AgentEngine {
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
+    this.seatRegistry =
+      opts?.seatRegistry !== undefined
+        ? opts.seatRegistry
+        : this.loadSeatRegistry(opts?.seatRegistryPath);
     this.hasCustomSessionIdentityResolver =
       opts?.sessionIdentityResolver !== undefined;
     this.sessionIdentityResolver =
@@ -797,6 +809,14 @@ export class AgentEngine {
           };
         }
       });
+  }
+
+  private loadSeatRegistry(configPath: string | undefined): SeatRegistry | null {
+    try {
+      return loadSeatRegistryFromConfig(configPath);
+    } catch {
+      return null;
+    }
   }
 
   getRegistry(): AgentRegistry {
@@ -2360,6 +2380,8 @@ export class AgentEngine {
     return [
       agent.repo,
       `role=${role}`,
+      agent.seat_id ? `seat=${agent.seat_id}` : null,
+      agent.seat_lane ? `lane=${agent.seat_lane}` : null,
       `state=${agent.state}`,
       `health=${this.formatHealthSummary(health)}`,
       `blocked=${this.formatBlockedSummary(agent, health)}`,
@@ -2368,7 +2390,9 @@ export class AgentEngine {
       `branch=${this.compactSidebarValue(agent.worktree_branch)}`,
       `report=${this.formatReportSummary(harvestability)}`,
       `pr=${this.formatPrSummary(harvestability)}`,
-    ].join(" | ");
+    ]
+      .filter((part): part is string => Boolean(part))
+      .join(" | ");
   }
 
   private healthSignature(health: AgentHealth): string {
@@ -3088,6 +3112,12 @@ export class AgentEngine {
     this.spawnGuard.check(spawnParams.workspace);
 
     const preflight = await this.spawnPreflight(spawnParams);
+    const seatIdentity = assertSeatIdentity({
+      repo: spawnParams.repo,
+      cli: spawnParams.cli,
+      launcherName: preflight?.launcherName ?? null,
+      registry: this.seatRegistry,
+    });
 
     // 1. Create cmux surface using the deterministic worker layout policy.
     const surface = await this.createAgentSurface(spawnParams.workspace, {
@@ -3109,6 +3139,11 @@ export class AgentEngine {
       cli_session_id: null,
       cli_session_path: null,
       launcher_name: preflight?.launcherName ?? null,
+      seat_id: seatIdentity.seat_id,
+      seat_lane: seatIdentity.seat_lane,
+      seat_role: seatIdentity.seat_role,
+      seat_identity_status: seatIdentity.seat_identity_status,
+      seat_identity_error: seatIdentity.seat_identity_error,
       task_summary: spawnParams.prompt,
       pid: null,
       version: 1,
@@ -3173,6 +3208,11 @@ export class AgentEngine {
       throw error;
     }
     this.schedulePostSpawnLivenessAssertion(agentId);
+    const seatWarnings =
+      seatIdentity.seat_identity_status === "mismatch" &&
+      seatIdentity.seat_identity_error
+        ? [`Seat identity mismatch: ${seatIdentity.seat_identity_error}`]
+        : [];
 
     return {
       agent_id: agentId,
@@ -3182,7 +3222,11 @@ export class AgentEngine {
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
-      warnings: [...modelPolicy.warnings, ...(surface.warnings ?? [])],
+      warnings: [
+        ...modelPolicy.warnings,
+        ...(surface.warnings ?? []),
+        ...seatWarnings,
+      ],
       model_policy: modelPolicy,
       cwd: spawnParams.cwd,
       mcp_env: spawnParams.mcp_env,

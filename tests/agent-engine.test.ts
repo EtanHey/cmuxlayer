@@ -477,6 +477,83 @@ describe("AgentEngine", () => {
       resolvingEngine.dispose();
     });
 
+    it("records the resolved registry seat identity when repo and launcher match", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => ({ launcherName: "cmuxlayerCodex" }),
+        sessionIdentityResolver: () => null,
+        seatRegistry: {
+          cmuxlayerClaude: {
+            repo: "cmuxlayer",
+            launchers: {
+              claude: "cmuxlayerClaude",
+              codex: "cmuxlayerCodex",
+              cursor: "cmuxlayerCursor",
+              gemini: "cmuxlayerGemini",
+              kiro: "cmuxlayerKiro",
+            },
+            lane: "cmuxlayer",
+            aliases: [],
+            role: "worker",
+            orgTree: { parent: "cmuxlayerLead", directReports: [] },
+          },
+        },
+      });
+
+      const result = await engine.spawnAgent({
+        repo: "cmuxlayer",
+        cli: "codex",
+        prompt: "Fix seat identity",
+      });
+
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        seat_id: "cmuxlayerClaude",
+        seat_lane: "cmuxlayer",
+        seat_role: "worker",
+        seat_identity_status: "ok",
+        seat_identity_error: null,
+      });
+    });
+
+    it("treats orchestrator repo spawns through orc launchers as the same registry seat", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => ({ launcherName: "orcCodex" }),
+        sessionIdentityResolver: () => null,
+        seatRegistry: {
+          orcClaude: {
+            repo: "orc",
+            launchers: {
+              claude: "orcClaude",
+              codex: "orcCodex",
+              cursor: "orcCursor",
+              gemini: "orcGemini",
+              kiro: "orcKiro",
+            },
+            lane: "orc",
+            aliases: [],
+            role: "orc",
+          },
+        },
+      });
+
+      const result = await engine.spawnAgent({
+        repo: "orchestrator",
+        cli: "codex",
+        prompt: "Coordinate fleet",
+      });
+
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        seat_id: "orcClaude",
+        seat_lane: "orc",
+        seat_role: "orc",
+        seat_identity_status: "ok",
+        seat_identity_error: null,
+      });
+    });
+
     it("writes initial state file", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
