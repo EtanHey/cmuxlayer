@@ -173,6 +173,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       sendKey: (surface, key, keyOpts) =>
         this.withSurfaceWrite(surface, () => this.client.sendKey(surface, key, keyOpts)),
       setProgress: async () => {},
+      clearProgress: async () => {},
       newSplit: (direction, splitOpts) => this.client.newSplit(direction, splitOpts),
       newSurface: (surfaceOpts) => this.client.newSurface(surfaceOpts),
       selectWorkspace: (workspace) => this.client.selectWorkspace(workspace),
