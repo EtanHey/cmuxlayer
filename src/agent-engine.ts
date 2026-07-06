@@ -85,21 +85,24 @@ import {
   type AgentHealth,
   type AgentHealthInput,
 } from "./agent-health.js";
-import {
-  AGENT_HEALTH_MONITOR_MAX_AGE_MS,
-  buildAgentHealthInput,
-} from "./agent-health-input.js";
+import { buildAgentHealthInput } from "./agent-health-input.js";
 import {
   assertSeatIdentity,
   loadSeatRegistryFromConfig,
   type SeatRegistry,
 } from "./seat-identity.js";
 import {
+  latestMonitorForOwnerSeats,
+  sweepMonitorRegistry,
+  transferMonitorRegistryOwner,
+  type MonitorDeadmanNotify,
+} from "./monitor-registry.js";
+import {
   collectSurfaceTopology,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
 } from "./surface-topology.js";
-import { readLastAgentHeartbeat, type InboxOpts } from "./inbox.js";
+import type { InboxOpts } from "./inbox.js";
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
 
@@ -238,6 +241,14 @@ export interface AgentEngineOptions {
    * production entrypoints inject `() => drainOutbox()`.
    */
   outboxDrain?: () => Promise<unknown>;
+  /**
+   * Optional monitor-registry deadman sweep. Omitted by default so tests and
+   * library construction never read/write the real home-directory registry.
+   * Production entrypoints pass the canonical path and injected notify hook.
+   */
+  monitorRegistryPath?: string;
+  monitorRegistryNow?: () => number;
+  monitorRegistryNotify?: MonitorDeadmanNotify;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -282,11 +293,6 @@ interface SidebarStatusSnapshot {
   surfaceId: string | null;
   workspaceId: string | null;
   healthSignature: string;
-}
-
-interface LeadMonitorDeathTimer {
-  timer: ReturnType<typeof setTimeout>;
-  dueAtMs: number;
 }
 
 export interface SweepTimingOptions {
@@ -755,14 +761,16 @@ export class AgentEngine {
   private notifiedEvents = new Set<string>();
   /** agentId values whose current lead monitor-death alert was delivered. */
   private deliveredLeadMonitorDeathAlerts = new Set<string>();
-  /** agentId → wake-on-timeout timer for lead monitor-death detection. */
-  private leadMonitorDeathTimers = new Map<string, LeadMonitorDeathTimer>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
   private outboxDrainInFlight = false;
+  private monitorRegistryPath?: string;
+  private monitorRegistryNow?: () => number;
+  private monitorRegistryNotify: MonitorDeadmanNotify;
+  private monitorRegistrySweepInFlight = false;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -788,6 +796,9 @@ export class AgentEngine {
     // the real outbox or network. Production entrypoints inject the real
     // drainOutbox (see server.ts createServer / app-server-runtime).
     this.outboxDrain = opts?.outboxDrain ?? (async () => {});
+    this.monitorRegistryPath = opts?.monitorRegistryPath;
+    this.monitorRegistryNow = opts?.monitorRegistryNow;
+    this.monitorRegistryNotify = opts?.monitorRegistryNotify ?? (async () => {});
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -1876,7 +1887,12 @@ export class AgentEngine {
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
       this.deliveredLeadMonitorDeathAlerts.add(nextAgentId);
     }
-    this.transferLeadMonitorDeathTimer(previousAgentId, nextAgentId);
+    if (this.monitorRegistryPath) {
+      void transferMonitorRegistryOwner(previousAgentId, nextAgentId, {
+        registryPath: this.monitorRegistryPath,
+        now: this.monitorRegistryNow,
+      }).catch(() => {});
+    }
   }
 
   private finalizeCapturedSession(
@@ -2428,60 +2444,17 @@ export class AgentEngine {
       }
     }
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
-    this.clearLeadMonitorDeathTimer(agentId);
-  }
-
-  private clearLeadMonitorDeathTimer(agentId: string): void {
-    const entry = this.leadMonitorDeathTimers.get(agentId);
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    this.leadMonitorDeathTimers.delete(agentId);
-  }
-
-  private armLeadMonitorDeathTimer(
-    agentId: string,
-    delayMs: number,
-    dueAtMs: number,
-  ): void {
-    const timer = setTimeout(() => {
-      this.leadMonitorDeathTimers.delete(agentId);
-      void this.fireLeadMonitorDeathDeadman(agentId);
-    }, delayMs);
-    this.leadMonitorDeathTimers.set(agentId, { timer, dueAtMs });
-  }
-
-  private transferLeadMonitorDeathTimer(
-    previousAgentId: string,
-    nextAgentId: string,
-  ): void {
-    const entry = this.leadMonitorDeathTimers.get(previousAgentId);
-    if (!entry) return;
-
-    clearTimeout(entry.timer);
-    this.leadMonitorDeathTimers.delete(previousAgentId);
-    if (this.leadMonitorDeathTimers.has(nextAgentId)) {
-      return;
-    }
-
-    const now = (this.inboxOpts?.now ?? Date.now)();
-    this.armLeadMonitorDeathTimer(
-      nextAgentId,
-      Math.max(0, entry.dueAtMs - now),
-      entry.dueAtMs,
-    );
   }
 
   private isLeadWatchBlind(
     agent: AgentRecord,
-    healthInput: AgentHealthInput,
+    _healthInput: AgentHealthInput,
   ): boolean {
     if (inferRecordRoleOrNull(agent) !== "orchestrator") {
       return false;
     }
 
-    if (healthInput.monitor_alive === false) {
-      return readLastAgentHeartbeat(agent.agent_id, this.inboxOpts) !== null;
-    }
+    if (this.latestLeadMonitor(agent)?.state === "deadman-fired") return true;
 
     if (
       agent.pid !== null &&
@@ -2499,23 +2472,35 @@ export class AgentEngine {
     );
   }
 
+  private leadOwnerSeats(agent: AgentRecord): string[] {
+    return [agent.seat_id, agent.agent_id].filter(
+      (ownerSeat): ownerSeat is string =>
+        typeof ownerSeat === "string" && ownerSeat.trim().length > 0,
+    );
+  }
+
+  private latestLeadMonitor(agent: AgentRecord) {
+    if (!this.monitorRegistryPath) return null;
+    return latestMonitorForOwnerSeats(this.leadOwnerSeats(agent), {
+      registryPath: this.monitorRegistryPath,
+      now: this.monitorRegistryNow,
+    });
+  }
+
   private async maybeNotifyLeadMonitorDeath(
     agent: AgentRecord,
     healthInput: AgentHealthInput,
   ): Promise<void> {
     if (inferRecordRoleOrNull(agent) !== "orchestrator") {
-      this.clearLeadMonitorDeathTimer(agent.agent_id);
       this.deliveredLeadMonitorDeathAlerts.delete(agent.agent_id);
       return;
     }
 
     if (!this.isLeadWatchBlind(agent, healthInput)) {
-      this.scheduleLeadMonitorDeathDeadman(agent);
       this.deliveredLeadMonitorDeathAlerts.delete(agent.agent_id);
       return;
     }
 
-    this.clearLeadMonitorDeathTimer(agent.agent_id);
     if (this.deliveredLeadMonitorDeathAlerts.has(agent.agent_id)) {
       return;
     }
@@ -2537,36 +2522,6 @@ export class AgentEngine {
     } catch {
       // Notification delivery is best-effort; do not break sweeps. Retry next sweep.
     }
-  }
-
-  private scheduleLeadMonitorDeathDeadman(agent: AgentRecord): void {
-    this.clearLeadMonitorDeathTimer(agent.agent_id);
-
-    const heartbeat = readLastAgentHeartbeat(agent.agent_id, this.inboxOpts);
-    if (!heartbeat) {
-      return;
-    }
-
-    const now = (this.inboxOpts?.now ?? Date.now)();
-    const ageMs = Math.max(0, now - heartbeat.ts_ms);
-    const delayMs = Math.max(
-      0,
-      AGENT_HEALTH_MONITOR_MAX_AGE_MS - ageMs + 1,
-    );
-    this.armLeadMonitorDeathTimer(agent.agent_id, delayMs, now + delayMs);
-  }
-
-  private async fireLeadMonitorDeathDeadman(agentId: string): Promise<void> {
-    const agent = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
-    if (!agent) {
-      this.clearLeadMonitorDeathTimer(agentId);
-      return;
-    }
-
-    const healthInput = await buildAgentHealthInput(agent, {
-      inboxOpts: this.inboxOpts,
-    });
-    await this.maybeNotifyLeadMonitorDeath(agent, healthInput);
   }
 
   private async logLifecycleEvent(
@@ -2915,8 +2870,27 @@ export class AgentEngine {
     }
 
     await this.registry.purgeTerminal();
+    await this.sweepMonitorRegistryBestEffort();
     await this.syncSidebar();
     await this.drainOutboxBestEffort();
+  }
+
+  private async sweepMonitorRegistryBestEffort(): Promise<void> {
+    if (!this.monitorRegistryPath) return;
+    if (this.monitorRegistrySweepInFlight) return;
+    this.monitorRegistrySweepInFlight = true;
+    try {
+      await sweepMonitorRegistry({
+        registryPath: this.monitorRegistryPath,
+        now: this.monitorRegistryNow,
+        notify: this.monitorRegistryNotify,
+      });
+    } catch {
+      // The registry deadman is best-effort inside the sweep; never break
+      // lifecycle reconciliation because the shared file is temporarily busy.
+    } finally {
+      this.monitorRegistrySweepInFlight = false;
+    }
   }
 
   /**
@@ -3030,10 +3004,6 @@ export class AgentEngine {
       clearTimeout(timer);
     }
     this.postSpawnLivenessTimers.clear();
-    for (const entry of this.leadMonitorDeathTimers.values()) {
-      clearTimeout(entry.timer);
-    }
-    this.leadMonitorDeathTimers.clear();
     this.sweepTiming = null;
     this.lastSweepSignature = null;
     this.unchangedSweepCount = 0;

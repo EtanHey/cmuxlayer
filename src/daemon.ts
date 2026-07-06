@@ -19,6 +19,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
+import {
+  defaultMonitorRegistryPath,
+  httpNotifyMonitorDeadman,
+} from "./monitor-registry.js";
 import type { ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
@@ -400,6 +404,8 @@ export class CmuxLayerDaemon {
     const mcpServer = createServer({
       context,
       outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+      monitorRegistryPath: defaultMonitorRegistryPath(),
+      monitorRegistryNotify: httpNotifyMonitorDeadman,
     });
     const pendingRequestIds = new Set<RequestId>();
     this.activeTransports.add(transport);

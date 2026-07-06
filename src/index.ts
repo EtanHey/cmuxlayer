@@ -25,6 +25,10 @@ import { createCmuxClient } from "./cmux-client-factory.js";
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 import { readVersion } from "./version.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
+import {
+  defaultMonitorRegistryPath,
+  httpNotifyMonitorDeadman,
+} from "./monitor-registry.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -73,6 +77,8 @@ async function main() {
   const server = createServer({
     client,
     outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+    monitorRegistryPath: defaultMonitorRegistryPath(),
+    monitorRegistryNotify: httpNotifyMonitorDeadman,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
