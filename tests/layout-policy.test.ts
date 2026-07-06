@@ -1465,3 +1465,149 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:rightmost" });
   });
 });
+
+describe("worktree worker placement — always right, never left", () => {
+  const leftColumn = { x: 0, y: 0, width: 500, height: 900 };
+  const rightColumn = { x: 500, y: 0, width: 500, height: 900 };
+
+  function assertNeverLeft(placement: {
+    kind: string;
+    direction?: string;
+    pane?: string;
+  }): void {
+    // No left split, ever.
+    expect(placement).not.toEqual({ kind: "split", direction: "left" });
+    if (placement.kind === "split") {
+      expect(placement.direction).not.toBe("left");
+    }
+  }
+
+  it("(a) single lead column: seeds the right worker column via a right split", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    expect(placement).toEqual({ kind: "split", direction: "right" });
+    assertNeverLeft(placement);
+  });
+
+  it("(b) lead column + existing right worker pane: DOCKS as a tab, not a new pane", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:right", 1, ["surface:worker-1"], rightColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    // Docks into the existing rightmost worker pane as a tab — never a new
+    // pane and never a left placement.
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+    expect(placement).not.toEqual({ kind: "split", direction: "right" });
+    assertNeverLeft(placement);
+  });
+
+  it("(b2) picks the rightmost worker column when several worker panes exist", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:right", 1, ["surface:worker-1"], rightColumn),
+      makePane("pane:rightmost", 2, ["surface:worker-2"], {
+        x: 1000,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+      makePaneSurfaces("pane:rightmost", ["surface:worker-2"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1", "surface:worker-2"]),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:rightmost" });
+    assertNeverLeft(placement);
+  });
+
+  it("(c) nth worker while a prior worker is stuck in the LEFT column: still splits right, never docks left", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:left-worker", 1, ["surface:worker-1"], leftColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:left-worker", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      { role: "worker", worktree: true },
+    );
+
+    // The only worker pane lives in the LEFT column — the worktree worker must
+    // NOT dock into it; it seeds a fresh right column instead.
+    expect(placement).toEqual({ kind: "split", direction: "right" });
+    expect(placement).not.toEqual({
+      kind: "surface",
+      pane: "pane:left-worker",
+    });
+    assertNeverLeft(placement);
+  });
+});

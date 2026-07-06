@@ -13,7 +13,7 @@ import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
-import { readVersion } from "./version.js";
+import { detectStaleBuild, readVersion } from "./version.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -249,6 +249,32 @@ const QueryMonitorRegistryArgsSchema = {
 
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";
+
+/**
+ * Memoized stale-build warning, computed once per server process. After a brew
+ * release, an already-running per-agent MCP stdio child keeps serving spawns
+ * from its OLD dist until the agent `/mcp reconnect`s — silently mis-placing
+ * workers with pre-release logic (the #247 recurrence root cause). We surface
+ * this loudly so the operator knows the fix is not live. Cached so we never
+ * re-read the opt package.json on every spawn.
+ */
+let staleBuildWarningCache: string | null | undefined;
+function staleBuildWarning(): string | null {
+  if (staleBuildWarningCache !== undefined) return staleBuildWarningCache;
+  const stale = detectStaleBuild();
+  staleBuildWarningCache =
+    stale && stale.stale
+      ? `cmuxlayer MCP is running a STALE build (running v${stale.running}, installed v${stale.installed}) — placement/other fixes are not live; /mcp reconnect this agent to load the current build.`
+      : null;
+  return staleBuildWarningCache;
+}
+
+function appendStaleBuildWarning(result: { warnings?: string[] }): void {
+  const warning = staleBuildWarning();
+  if (warning) {
+    result.warnings = [...(result.warnings ?? []), warning];
+  }
+}
 
 const CLAUDE_CHANNEL_CAPABILITY = "claude/channel";
 const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
@@ -3984,8 +4010,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async () => {
       try {
         const health = await appendControlHealthSnapshot();
-        return okFormatted(formatControlHealth(health), {
-          health,
+        const staleWarning = staleBuildWarning();
+        const healthWithStale = staleWarning
+          ? { ...health, warnings: [...health.warnings, staleWarning] }
+          : health;
+        return okFormatted(formatControlHealth(healthWithStale), {
+          health: healthWithStale,
         });
       } catch (e) {
         return err(e);
@@ -6450,6 +6480,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
           });
+          appendStaleBuildWarning(result);
 
           let bootPromptDelivery:
             | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -6688,6 +6719,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
           });
+          appendStaleBuildWarning(result);
 
           let bootPromptDelivery:
             | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -6847,6 +6879,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: agent.role,
               auto_archive_on_done: false,
             });
+            appendStaleBuildWarning(result);
             let bootPromptDelivery:
               | Awaited<ReturnType<typeof deliverBootPrompt>>
               | undefined;
