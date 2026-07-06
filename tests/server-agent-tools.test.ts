@@ -10,6 +10,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -19,6 +20,7 @@ import {
   createServer,
   createServerContext,
   reconcileAgentLiveState,
+  SEND_INPUT_MAX_INLINE_CHARS,
   type CmuxServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
@@ -40,6 +42,7 @@ const AGENT_TOOLS = [
   "wait_for_all",
   "get_agent_state",
   "list_agents",
+  "broadcast",
   "stop_agent",
   "send_to_agent",
   "read_agent_output",
@@ -299,6 +302,173 @@ function makeServerAgentRecord(
   };
 }
 
+type BroadcastMockClient = {
+  client: Record<string, any>;
+  sendCalls: Array<{ surface: string; text: string; workspace?: string }>;
+  sendKeyCalls: Array<{ surface: string; key: string; workspace?: string }>;
+};
+
+function makeBroadcastClient(
+  records: AgentRecord[],
+  opts: {
+    failSurface?: string;
+    callerSurface?: string;
+    malformedEnumeration?: boolean;
+  } = {},
+): BroadcastMockClient {
+  const submittedSurfaces = new Set<string>();
+  const sendCalls: Array<{ surface: string; text: string; workspace?: string }> =
+    [];
+  const sendKeyCalls: Array<{
+    surface: string;
+    key: string;
+    workspace?: string;
+  }> = [];
+  const workspaces = [
+    ...new Set(records.map((record) => record.workspace_id ?? "workspace:1")),
+  ];
+  const recordsForWorkspace = (workspace?: string) =>
+    records.filter((record) => (record.workspace_id ?? "workspace:1") === workspace);
+  const screenFor = (surface: string): string => {
+    const record = records.find((candidate) => candidate.surface_id === surface);
+    if (submittedSurfaces.has(surface)) {
+      return record?.cli === "claude"
+        ? "Claude Code\nWorking\n"
+        : "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+    }
+    if (record?.cli === "claude") {
+      return "Claude Code\nWhat can I help you with?\n>";
+    }
+    if (record?.cli === "cursor") {
+      return "cursor>\n";
+    }
+    return "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\ncodex> ";
+  };
+
+  const client = {
+    listWorkspaces: vi.fn().mockImplementation(async () =>
+      opts.malformedEnumeration
+        ? { workspaces: null }
+        : {
+            workspaces: workspaces.map((ref, index) => ({
+              ref,
+              title: ref,
+              index,
+              selected: index === 0,
+              pinned: false,
+            })),
+          },
+    ),
+    listPanes: vi.fn().mockImplementation(async ({ workspace }) => {
+      const workspaceRecords = recordsForWorkspace(workspace);
+      return {
+        workspace_ref: workspace,
+        window_ref: `window:${workspace}`,
+        panes: [
+          {
+            ref: `pane:${workspace}`,
+            index: 0,
+            focused: true,
+            surface_count: workspaceRecords.length,
+            surface_refs: workspaceRecords.map((record) => record.surface_id),
+            selected_surface_ref: workspaceRecords[0]?.surface_id,
+          },
+        ],
+      };
+    }),
+    listPaneSurfaces: vi.fn().mockImplementation(async ({ workspace, pane }) => {
+      const workspaceRecords = recordsForWorkspace(workspace);
+      return {
+        workspace_ref: workspace,
+        window_ref: `window:${workspace}`,
+        pane_ref: pane ?? `pane:${workspace}`,
+        surfaces: workspaceRecords.map((record, index) => ({
+          ref: record.surface_id,
+          title: record.task_summary,
+          type: "terminal",
+          index,
+          selected: index === 0,
+          workspace_ref: workspace,
+          pane_ref: pane ?? `pane:${workspace}`,
+        })),
+      };
+    }),
+    readScreen: vi.fn().mockImplementation(async (surface) => ({
+      surface,
+      text: screenFor(surface),
+      lines: 20,
+      scrollback_used: false,
+    })),
+    send: vi.fn().mockImplementation(async (surface, text, sendOpts) => {
+      sendCalls.push({ surface, text, workspace: sendOpts?.workspace });
+      if (opts.failSurface === surface) {
+        throw new Error(`send failed for ${surface}`);
+      }
+    }),
+    sendKey: vi.fn().mockImplementation(async (surface, key, keyOpts) => {
+      sendKeyCalls.push({ surface, key, workspace: keyOpts?.workspace });
+      if (key === "return") {
+        submittedSurfaces.add(surface);
+      }
+    }),
+    log: vi.fn().mockResolvedValue(undefined),
+    setStatus: vi.fn().mockResolvedValue(undefined),
+    clearStatus: vi.fn().mockResolvedValue(undefined),
+    setProgress: vi.fn().mockResolvedValue(undefined),
+    clearProgress: vi.fn().mockResolvedValue(undefined),
+    newSplit: vi.fn(),
+    newSurface: vi.fn(),
+    selectWorkspace: vi.fn(),
+    closeSurface: vi.fn(),
+    notify: vi.fn(),
+    listStatus: vi.fn().mockResolvedValue([]),
+    identify: vi.fn().mockImplementation(async () => ({
+      caller: {
+        surface_ref: opts.callerSurface ?? process.env.CMUX_TAB_ID,
+        workspace_ref: records.find(
+          (record) =>
+            record.surface_id === (opts.callerSurface ?? process.env.CMUX_TAB_ID),
+        )?.workspace_id,
+      },
+      focused: {
+        surface_ref: opts.callerSurface ?? process.env.CMUX_TAB_ID,
+      },
+    })),
+    browser: vi.fn().mockResolvedValue({}),
+  };
+
+  return { client, sendCalls, sendKeyCalls };
+}
+
+async function createBroadcastServer(
+  records: AgentRecord[],
+  opts: {
+    failSurface?: string;
+    callerSurface?: string;
+    malformedEnumeration?: boolean;
+  } = {},
+) {
+  const { client, sendCalls, sendKeyCalls } = makeBroadcastClient(records, opts);
+  const server = createTrackedServer({
+    client: client as any,
+    stateDir: TEST_DIR,
+    disableSpawnPreflight: true,
+    sessionIdentityResolver: () => null,
+  });
+  await serverContexts[serverContexts.length - 1]?.lifecycleStartPromise;
+  const engine = testLifecycleEngine(server);
+  const registry = engine.getRegistry();
+  for (const record of records) {
+    engine.stateMgr.writeState(record);
+    registry.set(record.agent_id, record);
+  }
+  return { server, client, sendCalls, sendKeyCalls };
+}
+
+function readOutboxMtimeMs(path: string): number {
+  return statSync(path).mtimeMs;
+}
+
 type TestToolResult = {
   structuredContent?: Record<string, unknown>;
   content: Array<{ text: string }>;
@@ -352,7 +522,7 @@ function readCloseEvents(stateDir: string): Array<Record<string, unknown>> {
 }
 
 describe("agent lifecycle tool registration", () => {
-  it("registers all 14 phase-5 lifecycle tools when lifecycle is enabled", () => {
+  it("registers all 15 phase-5 lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
@@ -380,11 +550,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 41", () => {
+  it("total tool count is 42", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(41);
+    expect(Object.keys(registeredTools)).toHaveLength(42);
   });
 });
 
@@ -2067,6 +2237,415 @@ describe("agent lifecycle tool handlers", () => {
         "non_resumable",
       ]),
     });
+  });
+
+  it("broadcast defaults to leads and excludes the caller, workers, and explicit excludes", async () => {
+    const previousTabId = process.env.CMUX_TAB_ID;
+    const previousAgentId = process.env.CMUX_AGENT_ID;
+    process.env.CMUX_TAB_ID = "surface:caller";
+    delete process.env.CMUX_AGENT_ID;
+
+    try {
+      const records = [
+        makeServerAgentRecord({
+          agent_id: "orc-caller",
+          surface_id: "surface:caller",
+          state: "ready",
+          role: "orchestrator",
+          task_summary: "caller lead",
+        }),
+        makeServerAgentRecord({
+          agent_id: "ic-target",
+          surface_id: "surface:ic",
+          state: "ready",
+          role: "ic",
+          task_summary: "ic lane",
+        }),
+        makeServerAgentRecord({
+          agent_id: "orc-target",
+          surface_id: "surface:orc",
+          state: "idle",
+          role: "orchestrator",
+          task_summary: "orchestrator lane",
+        }),
+        makeServerAgentRecord({
+          agent_id: "ic-excluded",
+          surface_id: "surface:excluded",
+          state: "ready",
+          role: "ic",
+          task_summary: "excluded lane",
+        }),
+        makeServerAgentRecord({
+          agent_id: "worker-target",
+          surface_id: "surface:worker",
+          state: "ready",
+          role: "worker",
+          task_summary: "worker lane",
+        }),
+      ];
+      const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(
+        records,
+        { callerSurface: "surface:caller" },
+      );
+      const broadcast = (server as any)._registeredTools["broadcast"];
+
+      const result = await broadcast.handler(
+        {
+          text: "Read and follow /tmp/lead-update.md",
+          exclude: ["ic-excluded"],
+        },
+        {} as any,
+      );
+      const parsed = parseToolResult(result);
+      const receipts = parsed.receipts as Array<Record<string, unknown>>;
+
+      expect(result.isError).toBeFalsy();
+      expect(parsed).toMatchObject({
+        ok: true,
+        role: "leads",
+        target_count: 2,
+        delivered_count: 2,
+        failed_count: 0,
+        skipped_count: 0,
+      });
+      expect(sendCalls.map((call) => call.surface)).toEqual([
+        "surface:ic",
+        "surface:orc",
+      ]);
+      expect(sendKeyCalls.map((call) => call.surface)).toEqual([
+        "surface:ic",
+        "surface:orc",
+      ]);
+      expect(receipts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            agent_id: "ic-target",
+            seat: "ic lane",
+            delivered: true,
+            submit_verified: true,
+          }),
+          expect.objectContaining({
+            agent_id: "orc-target",
+            seat: "orchestrator lane",
+            delivered: true,
+            submit_verified: true,
+          }),
+        ]),
+      );
+      expect(receipts.map((receipt) => receipt.agent_id)).not.toContain(
+        "orc-caller",
+      );
+      expect(receipts.map((receipt) => receipt.agent_id)).not.toContain(
+        "worker-target",
+      );
+      expect(receipts.map((receipt) => receipt.agent_id)).not.toContain(
+        "ic-excluded",
+      );
+    } finally {
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+      if (previousAgentId === undefined) {
+        delete process.env.CMUX_AGENT_ID;
+      } else {
+        process.env.CMUX_AGENT_ID = previousAgentId;
+      }
+    }
+  });
+
+  it("broadcast infers unset record roles before selecting lead targets", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "implicit-orchestrator",
+        surface_id: "surface:implicit-orc",
+        state: "ready",
+        role: undefined,
+        cli: "claude",
+        repo: "orchestrator",
+        task_summary: "implicit Claude lead",
+      }),
+      makeServerAgentRecord({
+        agent_id: "implicit-worker",
+        surface_id: "surface:implicit-worker",
+        state: "ready",
+        role: undefined,
+        cli: "codex",
+        repo: "brainlayer",
+        task_summary: "implicit Codex worker",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Role inference target test", role: "leads", press_enter: false },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      role: "leads",
+      target_count: 1,
+      delivered_count: 1,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual([
+      "surface:implicit-orc",
+    ]);
+  });
+
+  it("broadcast returns per-lead receipts when one delivery fails without aborting others", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-ok-1",
+        surface_id: "surface:ok-1",
+        state: "ready",
+        role: "ic",
+        task_summary: "first ok lead",
+      }),
+      makeServerAgentRecord({
+        agent_id: "ic-fail",
+        surface_id: "surface:fail",
+        state: "ready",
+        role: "ic",
+        task_summary: "failing lead",
+      }),
+      makeServerAgentRecord({
+        agent_id: "orc-ok-2",
+        surface_id: "surface:ok-2",
+        state: "ready",
+        role: "orchestrator",
+        task_summary: "second ok lead",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records, {
+      failSurface: "surface:fail",
+    });
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Short receipt test", role: "leads" },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+    const receipts = parsed.receipts as Array<Record<string, unknown>>;
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      target_count: 3,
+      delivered_count: 2,
+      failed_count: 1,
+      skipped_count: 0,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual(
+      expect.arrayContaining(["surface:ok-1", "surface:fail", "surface:ok-2"]),
+    );
+    expect(receipts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "ic-ok-1",
+          delivered: true,
+          submit_verified: true,
+        }),
+        expect.objectContaining({
+          agent_id: "ic-fail",
+          delivered: false,
+          submit_verified: null,
+          error: expect.stringContaining("send failed for surface:fail"),
+        }),
+        expect.objectContaining({
+          agent_id: "orc-ok-2",
+          delivered: true,
+          submit_verified: true,
+        }),
+      ]),
+    );
+  });
+
+  it("broadcast refuses over-cap text with file-pointer guidance before delivery", async () => {
+    const outboxPath = join(TEST_DIR, "mock-outbox.md");
+    writeFileSync(outboxPath, "not touched by broadcast\n", "utf8");
+    const outboxMtimeBefore = readOutboxMtimeMs(outboxPath);
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-target",
+        surface_id: "surface:ic",
+        state: "ready",
+        role: "ic",
+      }),
+    ];
+    const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "x".repeat(SEND_INPUT_MAX_INLINE_CHARS + 1) },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("broadcast.text");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(parsed.error).not.toContain("allow_long_inline");
+    expect(sendCalls).toHaveLength(0);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(readOutboxMtimeMs(outboxPath)).toBe(outboxMtimeBefore);
+  });
+
+  it("broadcast fails closed when live surface enumeration is malformed", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-stale",
+        surface_id: "surface:stale",
+        state: "ready",
+        role: "ic",
+        task_summary: "possibly stale lead",
+      }),
+    ];
+    const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(
+      records,
+      { malformedEnumeration: true },
+    );
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Must not deliver on stale enumeration", role: "leads" },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Malformed cmux surface enumeration");
+    expect(sendCalls).toHaveLength(0);
+    expect(sendKeyCalls).toHaveLength(0);
+  });
+
+  it("broadcast records dead and non-interactive lead targets as skipped", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-ready",
+        surface_id: "surface:ready",
+        state: "ready",
+        role: "ic",
+      }),
+      makeServerAgentRecord({
+        agent_id: "ic-working",
+        surface_id: "surface:working",
+        state: "working",
+        role: "ic",
+      }),
+      makeServerAgentRecord({
+        agent_id: "orc-error",
+        surface_id: "surface:error",
+        state: "error",
+        role: "orchestrator",
+        error: "pane died",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Skip accounting", role: "leads", press_enter: false },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+    const receipts = parsed.receipts as Array<Record<string, unknown>>;
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      target_count: 3,
+      delivered_count: 1,
+      failed_count: 0,
+      skipped_count: 2,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual(["surface:ready"]);
+    expect(receipts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "ic-ready",
+          delivered: true,
+          submit_verified: null,
+        }),
+        expect.objectContaining({
+          agent_id: "ic-working",
+          delivered: false,
+          submit_verified: null,
+          skipped: "not_interactive:working",
+        }),
+        expect.objectContaining({
+          agent_id: "orc-error",
+          delivered: false,
+          submit_verified: null,
+          skipped: "dead:error",
+        }),
+      ]),
+    );
+  });
+
+  it("broadcast role=workers and role=all select the requested target sets", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "orc-target",
+        surface_id: "surface:orc",
+        state: "ready",
+        role: "orchestrator",
+      }),
+      makeServerAgentRecord({
+        agent_id: "ic-target",
+        surface_id: "surface:ic",
+        state: "ready",
+        role: "ic",
+      }),
+      makeServerAgentRecord({
+        agent_id: "worker-target",
+        surface_id: "surface:worker",
+        state: "ready",
+        role: "worker",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    let result = await broadcast.handler(
+      { text: "Workers only", role: "workers", press_enter: false },
+      {} as any,
+    );
+    let parsed = parseToolResult(result);
+    expect(parsed).toMatchObject({
+      ok: true,
+      role: "workers",
+      target_count: 1,
+      delivered_count: 1,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual(["surface:worker"]);
+
+    sendCalls.splice(0);
+
+    result = await broadcast.handler(
+      { text: "Everyone", role: "all", press_enter: false },
+      {} as any,
+    );
+    parsed = parseToolResult(result);
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      role: "all",
+      target_count: 3,
+      delivered_count: 3,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual([
+      "surface:orc",
+      "surface:ic",
+      "surface:worker",
+    ]);
   });
 
   it("list_agents state filter uses the reconciled screen-active state", async () => {

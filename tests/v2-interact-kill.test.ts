@@ -273,7 +273,7 @@ function finalizeAgentAlias(server: any, pendingId: string, finalId: string) {
 }
 
 describe("V2 tool registration", () => {
-  it("registers interact and kill tools", () => {
+  it("registers interact, kill, and broadcast tools", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
@@ -282,16 +282,17 @@ describe("V2 tool registration", () => {
     const tools = Object.keys((server as any)._registeredTools);
     expect(tools).toContain("interact");
     expect(tools).toContain("kill");
+    expect(tools).toContain("broadcast");
   });
 
-  it("total tool count is 41", () => {
+  it("total tool count is 42", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
     });
     const server = createV2Server(mockExec);
     const count = Object.keys((server as any)._registeredTools).length;
-    expect(count).toBe(41);
+    expect(count).toBe(42);
   });
 });
 
