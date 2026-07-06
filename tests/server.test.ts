@@ -49,6 +49,11 @@ const EXPECTED_TOOLS = [
   "browser_surface",
   "dispatch_to_agent",
   "inbox_check",
+  "register_monitor",
+  "signal_monitor",
+  "deregister_monitor",
+  "list_monitors",
+  "query_monitor_registry",
 ] as const;
 
 const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
@@ -247,7 +252,7 @@ describe("input delivery batching helpers", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 20 core tools", () => {
+  it("registers all 25 core tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
