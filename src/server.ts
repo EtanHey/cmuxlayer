@@ -13,6 +13,7 @@ import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
+import { readVersion } from "./version.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -1820,7 +1821,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const server = new McpServer(
     {
       name: "cmuxlayer",
-      version: "0.1.0",
+      version: readVersion(),
     },
     enableClaudeChannels
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }

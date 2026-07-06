@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, __submitEvidenceTestHooks } from "../src/server.js";
@@ -65,6 +66,28 @@ describe("createServer", () => {
     const server = createServer({ skipAgentLifecycle: true });
     expect(server).toBeDefined();
     expect(typeof server.connect).toBe("function");
+  });
+
+  it("reports the package version in MCP serverInfo", async () => {
+    const packageJson = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
+    ) as { version?: string };
+    const server = createServer({ skipAgentLifecycle: true });
+    const client = new Client({ name: "test-client", version: "0.1.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    expect(client.getServerVersion()).toEqual({
+      name: "cmuxlayer",
+      version: packageJson.version,
+    });
+
+    await client.close();
   });
 
   it("registers Claude channel capability when enabled", () => {
