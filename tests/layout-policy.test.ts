@@ -1465,3 +1465,164 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:rightmost" });
   });
 });
+
+describe("worktree worker placement — always right, never left", () => {
+  const leftColumn = { x: 0, y: 0, width: 500, height: 900 };
+  const rightColumn = { x: 500, y: 0, width: 500, height: 900 };
+
+  function assertNeverLeft(placement: {
+    kind: string;
+    direction?: string;
+    pane?: string;
+  }): void {
+    // No left split, ever.
+    expect(placement).not.toEqual({ kind: "split", direction: "left" });
+    if (placement.kind === "split") {
+      expect(placement.direction).not.toBe("left");
+    }
+  }
+
+  it("(a) single lead column: seeds the right worker column via a right split", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    expect(placement).toEqual({ kind: "split", direction: "right" });
+    assertNeverLeft(placement);
+  });
+
+  it("(b) lead column + existing right worker pane: DOCKS as a tab, not a new pane", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:right", 1, ["surface:worker-1"], rightColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    // Docks into the existing rightmost worker pane as a tab — never a new
+    // pane and never a left placement.
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+    expect(placement).not.toEqual({ kind: "split", direction: "right" });
+    assertNeverLeft(placement);
+  });
+
+  it("(b2) picks the rightmost worker column when several worker panes exist", () => {
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:right", 1, ["surface:worker-1"], rightColumn),
+      makePane("pane:rightmost", 2, ["surface:worker-2"], {
+        x: 1000,
+        y: 0,
+        width: 500,
+        height: 900,
+      }),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:right", ["surface:worker-1"]),
+      makePaneSurfaces("pane:rightmost", ["surface:worker-2"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1", "surface:worker-2"]),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    expect(placement).toEqual({ kind: "surface", pane: "pane:rightmost" });
+    assertNeverLeft(placement);
+  });
+
+  it("(c) nth worker while a prior worker is stuck in the LEFT column: docks into the RIGHT column, never the left worker", () => {
+    // A real two-column layout: the lead AND a stray prior worker both live in
+    // the LEFT column (same x), while a genuine RIGHT worker column exists.
+    // columnCount is therefore 2 — this REACHES the rightmost-worker dock path
+    // (not the single-column early return that cases (a)/(c-old) hit). The
+    // worktree worker must dock as a tab into the RIGHT worker pane and must
+    // NEVER dock into the left-column worker.
+    const leftLead = { x: 0, y: 0, width: 500, height: 450 };
+    const leftWorker = { x: 0, y: 450, width: 500, height: 450 };
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftLead),
+      makePane("pane:left-worker", 1, ["surface:worker-left"], leftWorker),
+      makePane("pane:right", 2, ["surface:worker-right"], rightColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:left-worker", ["surface:worker-left"]),
+      makePaneSurfaces("pane:right", ["surface:worker-right"]),
+    ];
+
+    // Sanity: the fixture is genuinely two-column (regression guard against the
+    // earlier bug where identical left rects collapsed to columnCount === 1 and
+    // the test never exercised the dock path).
+    const columns = deriveColumnIndex(panes);
+    expect(new Set(columns.values()).size).toBe(2);
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-left", "surface:worker-right"]),
+      },
+      { role: "worker", worktree: true },
+    );
+
+    // Docks as a tab into the RIGHT worker column — never into the left worker.
+    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+    expect(placement).not.toEqual({
+      kind: "surface",
+      pane: "pane:left-worker",
+    });
+    assertNeverLeft(placement);
+  });
+});
