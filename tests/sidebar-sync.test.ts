@@ -196,6 +196,45 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("surfaces a registry seat identity mismatch as blocking health", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "seat-mismatch",
+        state: "working",
+        surface_id: "surface:seat-mismatch",
+        workspace_id: "workspace:cmuxlayer",
+        repo: "cmuxlayer",
+        cli: "codex",
+        cli_session_id: "session-seat-mismatch",
+        launcher_name: "golemsCodex",
+        task_summary: "Fix seat assertion",
+        role: "worker",
+        seat_id: "golemsClaude",
+        seat_lane: "golems",
+        seat_role: "worker",
+        seat_identity_status: "mismatch",
+        seat_identity_error:
+          "launcher golemsCodex belongs to seat golemsClaude repo=golems lane=golems, not requested repo=cmuxlayer",
+      } as Partial<AgentRecord>),
+    );
+    liveSurfaces = [makeSurface("surface:seat-mismatch")];
+    writeHeartbeat("seat-mismatch", inboxOpts);
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "seat-mismatch",
+      "cmuxlayer | role=worker | seat=golemsClaude | lane=golems | state=working | health=unhealthy(seat_identity_mismatch:blocking) | blocked=- | last_prompt=Fix seat assertion | worktree=- | branch=- | report=n/a | pr=n/a",
+      expect.objectContaining({
+        icon: "bolt.fill",
+        color: "#3B82F6",
+        workspace: "workspace:cmuxlayer",
+        surface: "surface:seat-mismatch",
+      }),
+    );
+  });
+
   it("clears stale workspace-scoped sidebar rows during startup purge after restart", async () => {
     stateMgr.writeState(
       makeRecord({

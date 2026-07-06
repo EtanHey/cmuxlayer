@@ -16,6 +16,7 @@ export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 export type AgentRole = "orchestrator" | "ic" | "worker";
+export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
@@ -32,6 +33,11 @@ export interface AgentRecord {
   cli_session_id: string | null;
   cli_session_path?: string | null;
   launcher_name?: string | null;
+  seat_id?: string | null;
+  seat_lane?: string | null;
+  seat_role?: string | null;
+  seat_identity_status?: SeatIdentityStatus;
+  seat_identity_error?: string | null;
   task_summary: string;
   pid: number | null;
   version: number;

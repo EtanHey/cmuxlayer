@@ -26,6 +26,7 @@ export type AgentHealthIssueCode =
   | "recoverable_blocker_requires_action"
   | "missing_managed_lead_agent_id"
   | "ambiguous_repo_cwd_label"
+  | "seat_identity_mismatch"
   | "non_claude_orchestrator"
   | "topology_three_or_more_columns"
   | "orchestrator_not_leftmost"
@@ -42,6 +43,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   degraded_evidence_channel: "blocking",
   recoverable_blocker_requires_action: "blocking",
   registry_surface_workspace_mismatch: "blocking",
+  seat_identity_mismatch: "blocking",
   topology_three_or_more_columns: "blocking",
   orchestrator_not_leftmost: "blocking",
   worker_in_leftmost_column: "blocking",
@@ -216,6 +218,16 @@ export function evaluateAgentHealth(
   const issues: string[] = [];
   const recommendedActions: string[] = [];
   const role = inferRecordRoleOrNull(agent);
+
+  if (agent.seat_identity_status === "mismatch") {
+    addIssue(
+      issueCodes,
+      issues,
+      "seat_identity_mismatch",
+      agent.seat_identity_error ??
+        "spawned agent seat identity does not match the registry",
+    );
+  }
 
   if (isAutoDiscovered(agent)) {
     addIssue(
