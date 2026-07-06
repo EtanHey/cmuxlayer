@@ -784,8 +784,8 @@ describe("Phase 10 painpoint e2e replay", () => {
       expect(after.delivery).toMatchObject({
         delivery_id: accepted.delivery_id,
         status: "delivered",
-        submit_verified: null,
-        retry_count: 1,
+        submit_verified: true,
+        retry_count: 0,
       });
     } finally {
       await closeServer(server);
