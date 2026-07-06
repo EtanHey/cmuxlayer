@@ -45,6 +45,25 @@ function harness(root: string, overrides?: Partial<OutboxDrainerOptions>) {
   return { outboxPath, statePath, archivePath, ...overrides };
 }
 
+/**
+ * Seed a sidecar at a chosen version so a test exercises the intended path:
+ *  - version 2 (STATE_VERSION): the one-time migration gate is SKIPPED, so the
+ *    normal delivery/dedup mechanics run (what most tests below check).
+ *  - version 1 / 0: a legacy sidecar that trips the id-scheme quarantine.
+ * A missing sidecar counts as legacy (version 0) and quarantines, so delivery
+ * tests must seed a current-version sidecar first.
+ */
+function writeSidecar(
+  statePath: string,
+  version: number,
+  drained: Array<{ id: string; at: number }> = [],
+): void {
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({ version, drained }, null, 2)}\n`,
+  );
+}
+
 describe("parseOutboxEntries", () => {
   it("splits blank-line-separated blocks into indexed entries and ignores empties", () => {
     const raw = "first message\n\nsecond message\n\n\n\nthird message\n";
@@ -88,6 +107,9 @@ describe("drainOutbox", () => {
   it("FN: a written entry is delivered exactly once", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    // Current-version sidecar: exercise the delivery path, not the one-time
+    // quarantine that a missing/legacy sidecar would trigger.
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "hello operator\n");
     const rec = recorder();
 
@@ -111,6 +133,7 @@ describe("drainOutbox", () => {
   it("FP: draining twice never double-sends (same process)", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "one\n\ntwo\n");
     const rec = recorder();
 
@@ -134,6 +157,7 @@ describe("drainOutbox", () => {
   it("FP: survives restart — a fresh drainer reading persisted state re-sends nothing", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "durable\n");
 
     const first = recorder();
@@ -154,6 +178,7 @@ describe("drainOutbox", () => {
   it("delivers only newly-appended entries on a subsequent drain", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "old entry\n");
     const rec = recorder();
 
@@ -175,6 +200,7 @@ describe("drainOutbox", () => {
   it("does NOT mark an entry drained when delivery fails, and retries next time", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "flaky\n");
 
     const failing = recorder({ fail: true });
@@ -215,6 +241,7 @@ describe("drainOutbox", () => {
   it("persisted state is valid JSON recording the drained ids", async () => {
     const root = tempRoot();
     const { outboxPath, statePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "audit me\n");
     await drainOutbox({ outboxPath, statePath, deliver: recorder().deliver });
 
@@ -222,7 +249,7 @@ describe("drainOutbox", () => {
       version: number;
       drained: Array<{ id: string; at: number }>;
     };
-    expect(parsed.version).toBe(1);
+    expect(parsed.version).toBe(2);
     expect(parsed.drained).toHaveLength(1);
     expect(typeof parsed.drained[0].id).toBe("string");
   });
@@ -232,6 +259,7 @@ describe("rotation-safe dedup", () => {
   it("FN rotation-safety: archiving/truncating outbox.md then re-draining re-sends nothing", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     // A multi-entry log; the earlier entries are what a rotation trims away.
     writeFileSync(outboxPath, "alpha\n\nbeta\n\ngamma\n");
     const first = recorder();
@@ -262,6 +290,7 @@ describe("rotation-safe dedup", () => {
   it("a full truncate followed by a re-drain of old content re-sends nothing", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "one\n\ntwo\n");
     await drainOutbox({
       outboxPath,
@@ -288,6 +317,7 @@ describe("rotation-safe dedup", () => {
   it("genuine repeated identical messages each deliver once", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "ping\n\nping\n");
     const rec = recorder();
     const result = await drainOutbox({
@@ -314,6 +344,7 @@ describe("rotation-safe dedup", () => {
   it("a newly-appended identical message after a drain still delivers", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "ping\n");
     await drainOutbox({
       outboxPath,
@@ -337,10 +368,148 @@ describe("rotation-safe dedup", () => {
   });
 });
 
+describe("id-scheme migration (v1→v2 quarantine)", () => {
+  it("THE regression: a legacy sidecar quarantines the whole backlog — ZERO deliveries", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // Backlog of 3 entries under the CURRENT id scheme...
+    const raw = "backlog one\n\nbacklog two\n\nbacklog three\n";
+    writeFileSync(outboxPath, raw);
+    const expectedIds = parseOutboxEntries(raw).map((e) => e.id);
+    // ...and a LEGACY (v1) sidecar whose old-scheme ids match none of them. On
+    // the old code the backlog would read as undrained and be re-delivered (the
+    // #240 mass-respam). The migration gate must adopt-as-drained instead.
+    writeSidecar(statePath, 1, [
+      { id: "legacy-pos-0", at: 0 },
+      { id: "legacy-pos-1", at: 0 },
+    ]);
+    const rec = recorder();
+
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+
+    // ZERO deliveries — the entire backlog was quarantined, not re-sent.
+    expect(rec.calls).toHaveLength(0);
+    expect(result.deliveredCount).toBe(0);
+    expect(result.migrated).toBe(true);
+    expect(result.migratedCount).toBe(3);
+
+    // Sidecar stamped to v2 with every current entry's new-scheme id present.
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+      drained: Array<{ id: string; at: number }>;
+    };
+    expect(saved.version).toBe(2);
+    const savedIds = new Set(saved.drained.map((r) => r.id));
+    for (const id of expectedIds) expect(savedIds.has(id)).toBe(true);
+  });
+
+  it("a MISSING sidecar quarantines (kills 'deleted sidecar re-arms full re-send')", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // No sidecar on disk + a live backlog: legacy by default → quarantine.
+    writeFileSync(outboxPath, "stale one\n\nstale two\n");
+    const rec = recorder();
+
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+
+    expect(rec.calls).toHaveLength(0);
+    expect(result.deliveredCount).toBe(0);
+    expect(result.migrated).toBe(true);
+    expect(result.migratedCount).toBe(2);
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+    };
+    expect(saved.version).toBe(2);
+  });
+
+  it("a CORRUPT sidecar quarantines (treated as lost legacy, not re-sent)", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(statePath, "{ broken json");
+    writeFileSync(outboxPath, "corrupt-guard one\n\ncorrupt-guard two\n");
+    const rec = recorder();
+
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+
+    expect(rec.calls).toHaveLength(0);
+    expect(result.deliveredCount).toBe(0);
+    expect(result.migrated).toBe(true);
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+    };
+    expect(saved.version).toBe(2);
+  });
+
+  it("post-migration delivery works: a NEW entry after migration delivers exactly once", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // First drain migrates (missing sidecar → quarantine, zero deliveries).
+    writeFileSync(outboxPath, "pre-existing backlog\n");
+    const migrateRec = recorder();
+    const migrateResult = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: migrateRec.deliver,
+    });
+    expect(migrateResult.migrated).toBe(true);
+    expect(migrateRec.calls).toHaveLength(0);
+
+    // Sidecar is now v2; a genuinely new message appended afterwards delivers
+    // normally — migration is one-time, no re-quarantine.
+    writeFileSync(outboxPath, "pre-existing backlog\n\nfresh message\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    expect(result.deliveredCount).toBe(1);
+    expect(result.migrated).toBeUndefined();
+    expect(rec.calls.map((c) => c.body)).toEqual(["fresh message"]);
+  });
+
+  it("a CURRENT-version (v2) sidecar is untouched — migration does NOT fire", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
+    writeFileSync(outboxPath, "deliver me normally\n");
+    const rec = recorder();
+
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+
+    expect(result.deliveredCount).toBe(1);
+    expect(result.migrated).toBeUndefined();
+    expect(rec.calls.map((c) => c.body)).toEqual(["deliver me normally"]);
+  });
+});
+
 describe("archive", () => {
   it("appends delivered entries to the durable archive file", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "archive me\n\narchive me too\n");
     const rec = recorder();
     await drainOutbox({
@@ -359,6 +528,7 @@ describe("archive", () => {
   it("preserves operator history even after the live outbox is trimmed", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "alpha\n\nbeta\n");
     await drainOutbox({
       outboxPath,
@@ -377,6 +547,7 @@ describe("archive", () => {
   it("only archives entries that were actually delivered", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "never sent\n");
     const failing = recorder({ fail: true });
     await drainOutbox({
@@ -400,6 +571,10 @@ describe("default deliver is a no-op (incident guard)", () => {
   it("draining without injecting a transport delivers nothing and never posts", async () => {
     const root = tempRoot();
     const { outboxPath, statePath, archivePath } = harness(root);
+    // Current-version sidecar so the one-time migration gate does NOT fire —
+    // this isolates the DELIVERY path: the default no-op transport must deliver
+    // nothing and never reach the 3847 notify listener.
+    writeSidecar(statePath, 2);
     writeFileSync(outboxPath, "must never reach 127.0.0.1:3847\n");
     // No `deliver` injected: the library default MUST be a no-op so the test
     // suite (and any caller that forgets to wire a transport) never hits the
@@ -407,8 +582,12 @@ describe("default deliver is a no-op (incident guard)", () => {
     const result = await drainOutbox({ outboxPath, statePath, archivePath });
     expect(result.totalEntries).toBe(1);
     expect(result.deliveredCount).toBe(0);
-    // Nothing delivered -> no drained-state and no archive written.
-    expect(existsSync(statePath)).toBe(false);
+    expect(result.migrated).toBeUndefined();
+    // No-op delivery marks nothing drained and writes no archive.
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      drained: unknown[];
+    };
+    expect(saved.drained).toHaveLength(0);
     expect(existsSync(archivePath)).toBe(false);
   });
 });

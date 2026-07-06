@@ -101,6 +101,38 @@ Manual equivalent, if you prefer:
 The formula also carries a `head` block, so `--HEAD` installs always track
 `main` with **no** sha/tag bump — that is the on-the-go dogfood path.
 
+## Pre-deploy hygiene: archive the outbox before shipping outbox-semantics changes
+
+Any release that could change how `outbox-drainer.ts` derives dedup ids or
+gates delivery (e.g. #240's byte-position → `sha256(body)#occurrence` switch, or
+the v1→v2 quarantine that followed it) can, on the first drain after deploy,
+re-interpret the *existing* backlog in `~/.golems-zikaron/outbox.md`. The
+in-code guard for this is the **version-gated quarantine** in `drainOutbox`: on a
+`STATE_VERSION` bump it adopts the current backlog as drained *without*
+re-delivering (see `src/outbox-drainer.ts`). That guard is the real safety net —
+the drainer itself stays **non-destructive** (idempotency is the sidecar, never a
+mutation of `outbox.md`; see the L7 invariant).
+
+As belt-and-suspenders release hygiene, **before shipping a release that touches
+outbox semantics**, mechanically archive + truncate the live outbox on each
+target Mac so a fresh backlog can never be re-drained through the new code path:
+
+```bash
+# Run on EACH target Mac, per user, before the new binary goes live.
+z=~/.golems-zikaron
+if [ -s "$z/outbox.md" ]; then
+  { printf '\n<!-- archived %s (pre-deploy) -->\n' "$(date -u +%FT%TZ)"; cat "$z/outbox.md"; } >> "$z/outbox-archive.md"
+  : > "$z/outbox.md"    # truncate in place; keep the file so the drainer no-ops cleanly
+fi
+```
+
+This is a **documented manual deploy step**, not something the drainer does — the
+drainer must remain non-destructive. Do **not** wire an unguarded `rm`/truncate
+into `scripts/release.sh`; a release runs on the maintainer's machine and must not
+silently delete another operator's pending messages. If you add a hook, make it a
+**commented reminder** that prints the step for the operator to run per target
+Mac, gated behind an explicit opt-in flag.
+
 ## Behavioural invariants (what changed in v0.2.0)
 
 These are enforced in code + tests; rely on them and don't regress them.

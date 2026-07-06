@@ -65,6 +65,19 @@ export interface DrainResult {
   failedCount: number;
   /** Total entries parsed from the outbox file. */
   totalEntries: number;
+  /**
+   * True only on a one-time id-scheme/version-bump migration sweep: the legacy
+   * (or missing/corrupt) sidecar was QUARANTINED — every currently-present entry
+   * was adopted as drained WITHOUT delivering, so the whole pre-existing backlog
+   * is not re-sent under the new id scheme (the #240 mass-respam regression).
+   * Absent (undefined) on every normal drain.
+   */
+  migrated?: boolean;
+  /**
+   * Number of entries adopted-as-drained by the quarantine migration. Populated
+   * only when `migrated` is true.
+   */
+  migratedCount?: number;
 }
 
 export interface OutboxDrainerOptions {
@@ -111,7 +124,10 @@ const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const DEFAULT_TITLE = "golems outbox";
 const DEFAULT_SOURCE = "cmuxlayer-outbox";
 const DEFAULT_PRIORITY = "default";
-const STATE_VERSION = 1;
+// v1 → v2: #240 changed the dedup id from byte-position → `sha256(body)#occurrence`.
+// A version bump means prior drained-marks may not map to the current id scheme, so
+// `drainOutbox` gates on it to quarantine (not re-deliver) a legacy backlog.
+const STATE_VERSION = 2;
 
 export function defaultOutboxPath(): string {
   return join(homedir(), ".golems-zikaron", "outbox.md");
@@ -154,19 +170,26 @@ export function parseOutboxEntries(raw: string): OutboxEntry[] {
 }
 
 function loadState(statePath: string): DrainState {
+  // A MISSING sidecar is legacy, not current: default to version 0 so the
+  // migration gate quarantines any co-existing backlog instead of re-sending it
+  // ("deleted sidecar re-arms full re-send" class). Never seed with STATE_VERSION.
   if (!existsSync(statePath)) {
-    return { version: STATE_VERSION, drained: [] };
+    return { version: 0, drained: [] };
   }
   try {
     const parsed = JSON.parse(
       readFileSync(statePath, "utf8"),
     ) as Partial<DrainState>;
     const drained = Array.isArray(parsed.drained) ? parsed.drained : [];
-    return { version: STATE_VERSION, drained };
+    // Preserve the ON-DISK version so `drainOutbox` can detect an id-scheme bump.
+    // A missing/NaN version field is treated as legacy (0), NOT current.
+    const version = Number(parsed.version);
+    return { version: Number.isFinite(version) ? version : 0, drained };
   } catch {
-    // Corrupt sidecar: treat as empty rather than crash. Worst case is a re-send,
-    // which is safer than throwing and blocking all future drains.
-    return { version: STATE_VERSION, drained: [] };
+    // Corrupt sidecar: treat as a lost legacy sidecar (version 0, no drained
+    // records) so the migration gate quarantines rather than re-sends the whole
+    // backlog. Safer than throwing and blocking all future drains.
+    return { version: 0, drained: [] };
   }
 }
 
@@ -257,6 +280,36 @@ export async function drainOutbox(
 
   const state = loadState(statePath);
   const drainedIds = new Set(state.drained.map((r) => r.id));
+
+  // One-time migration on an id-scheme/version bump. A version change means
+  // prior drained-marks may not map to the current id scheme, so re-running the
+  // delivery loop against a legacy sidecar would re-deliver the whole backlog
+  // (the #240 mass-respam regression). We QUARANTINE: adopt every entry
+  // currently present as drained WITHOUT delivering, archive them as history,
+  // then stamp the sidecar to STATE_VERSION. Genuine new messages appended
+  // after migration deliver normally. Also covers a missing/corrupt sidecar
+  // (version 0) → never re-arms a full re-send.
+  if (state.version < STATE_VERSION) {
+    const at = now();
+    for (const entry of entries) {
+      if (!drainedIds.has(entry.id)) {
+        drainedIds.add(entry.id);
+        state.drained.push({ id: entry.id, at });
+        // best-effort history; must never gate exactly-once
+        try {
+          appendArchive(archivePath, entry, at);
+        } catch {
+          // Archive is durable operator history, not the dedup source of truth.
+        }
+      }
+    }
+    state.version = STATE_VERSION;
+    saveState(statePath, state);
+    result.migrated = true;
+    result.migratedCount = entries.length;
+    // fall through: the delivery loop below now skips every entry (all in
+    // drainedIds) → deliveredCount stays 0 on the migration sweep.
+  }
 
   for (const entry of entries) {
     if (drainedIds.has(entry.id)) {
