@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   createServer,
   createServerContext,
@@ -310,7 +310,11 @@ type BroadcastMockClient = {
 
 function makeBroadcastClient(
   records: AgentRecord[],
-  opts: { failSurface?: string; callerSurface?: string } = {},
+  opts: {
+    failSurface?: string;
+    callerSurface?: string;
+    malformedEnumeration?: boolean;
+  } = {},
 ): BroadcastMockClient {
   const submittedSurfaces = new Set<string>();
   const sendCalls: Array<{ surface: string; text: string; workspace?: string }> =
@@ -342,15 +346,19 @@ function makeBroadcastClient(
   };
 
   const client = {
-    listWorkspaces: vi.fn().mockResolvedValue({
-      workspaces: workspaces.map((ref, index) => ({
-        ref,
-        title: ref,
-        index,
-        selected: index === 0,
-        pinned: false,
-      })),
-    }),
+    listWorkspaces: vi.fn().mockImplementation(async () =>
+      opts.malformedEnumeration
+        ? { workspaces: null }
+        : {
+            workspaces: workspaces.map((ref, index) => ({
+              ref,
+              title: ref,
+              index,
+              selected: index === 0,
+              pinned: false,
+            })),
+          },
+    ),
     listPanes: vi.fn().mockImplementation(async ({ workspace }) => {
       const workspaceRecords = recordsForWorkspace(workspace);
       return {
@@ -434,7 +442,11 @@ function makeBroadcastClient(
 
 async function createBroadcastServer(
   records: AgentRecord[],
-  opts: { failSurface?: string; callerSurface?: string } = {},
+  opts: {
+    failSurface?: string;
+    callerSurface?: string;
+    malformedEnumeration?: boolean;
+  } = {},
 ) {
   const { client, sendCalls, sendKeyCalls } = makeBroadcastClient(records, opts);
   const server = createTrackedServer({
@@ -453,12 +465,8 @@ async function createBroadcastServer(
   return { server, client, sendCalls, sendKeyCalls };
 }
 
-function readOutboxMtimeMs(): number | null {
-  try {
-    return statSync(join(homedir(), ".golems-zikaron", "outbox.md")).mtimeMs;
-  } catch {
-    return null;
-  }
+function readOutboxMtimeMs(path: string): number {
+  return statSync(path).mtimeMs;
 }
 
 type TestToolResult = {
@@ -2347,6 +2355,48 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("broadcast infers unset record roles before selecting lead targets", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "implicit-orchestrator",
+        surface_id: "surface:implicit-orc",
+        state: "ready",
+        role: undefined,
+        cli: "claude",
+        repo: "orchestrator",
+        task_summary: "implicit Claude lead",
+      }),
+      makeServerAgentRecord({
+        agent_id: "implicit-worker",
+        surface_id: "surface:implicit-worker",
+        state: "ready",
+        role: undefined,
+        cli: "codex",
+        repo: "brainlayer",
+        task_summary: "implicit Codex worker",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Role inference target test", role: "leads", press_enter: false },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      role: "leads",
+      target_count: 1,
+      delivered_count: 1,
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual([
+      "surface:implicit-orc",
+    ]);
+  });
+
   it("broadcast returns per-lead receipts when one delivery fails without aborting others", async () => {
     const records = [
       makeServerAgentRecord({
@@ -2417,7 +2467,9 @@ describe("agent lifecycle tool handlers", () => {
   });
 
   it("broadcast refuses over-cap text with file-pointer guidance before delivery", async () => {
-    const outboxMtimeBefore = readOutboxMtimeMs();
+    const outboxPath = join(TEST_DIR, "mock-outbox.md");
+    writeFileSync(outboxPath, "not touched by broadcast\n", "utf8");
+    const outboxMtimeBefore = readOutboxMtimeMs(outboxPath);
     const records = [
       makeServerAgentRecord({
         agent_id: "ic-target",
@@ -2442,7 +2494,36 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.error).not.toContain("allow_long_inline");
     expect(sendCalls).toHaveLength(0);
     expect(sendKeyCalls).toHaveLength(0);
-    expect(readOutboxMtimeMs()).toBe(outboxMtimeBefore);
+    expect(readOutboxMtimeMs(outboxPath)).toBe(outboxMtimeBefore);
+  });
+
+  it("broadcast fails closed when live surface enumeration is malformed", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-stale",
+        surface_id: "surface:stale",
+        state: "ready",
+        role: "ic",
+        task_summary: "possibly stale lead",
+      }),
+    ];
+    const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(
+      records,
+      { malformedEnumeration: true },
+    );
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Must not deliver on stale enumeration", role: "leads" },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Malformed cmux surface enumeration");
+    expect(sendCalls).toHaveLength(0);
+    expect(sendKeyCalls).toHaveLength(0);
   });
 
   it("broadcast records dead and non-interactive lead targets as skipped", async () => {

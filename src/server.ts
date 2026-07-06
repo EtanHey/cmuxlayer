@@ -99,6 +99,8 @@ import {
   chooseSurfaceClosePolicy,
   deriveColumnIndex,
   inferAgentRole,
+  inferRecordRoleOrNull,
+  isAgentRoleInferenceError,
   launcherNameForCli,
 } from "./layout-policy.js";
 import type {
@@ -1072,11 +1074,27 @@ function assertBroadcastInlineInputAllowed(text: string): void {
 
 function broadcastRoleMatches(
   requestedRole: BroadcastRole,
-  agentRole: AgentRole | undefined,
+  agentRole: AgentRole | null,
 ): boolean {
   if (requestedRole === "all") return true;
   if (requestedRole === "workers") return agentRole === "worker";
   return agentRole === "orchestrator" || agentRole === "ic";
+}
+
+function inferBroadcastRecordRole(agent: AgentRecord): AgentRole | null {
+  try {
+    return inferAgentRole({
+      role: agent.role,
+      cli: agent.cli,
+      launcherName: agent.launcher_name ?? launcherNameForCli(agent.repo, agent.cli),
+      title: agent.task_summary,
+    });
+  } catch (error) {
+    if (isAgentRoleInferenceError(error)) {
+      return inferRecordRoleOrNull(agent);
+    }
+    throw error;
+  }
 }
 
 function assertBootPromptMode(
@@ -7285,7 +7303,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return await registry.listMerged(discovery);
             } catch (e) {
               if (isSurfaceEnumerationError(e)) {
-                return registry.list();
+                throw new Error(
+                  `Refusing broadcast because live surface enumeration failed: ${
+                    e instanceof Error ? e.message : String(e)
+                  }`,
+                );
               }
               throw e;
             }
@@ -7293,7 +7315,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const targets = (await collectTargets()).filter(
             (agent) =>
-              broadcastRoleMatches(args.role, agent.role) &&
+              broadcastRoleMatches(args.role, inferBroadcastRecordRole(agent)) &&
               workspaceMatches(agent) &&
               !excludedAgentIds.has(agent.agent_id) &&
               !isCaller(agent),
