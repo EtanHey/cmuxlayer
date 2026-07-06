@@ -53,6 +53,13 @@ describe("agent-engine sweep wires the outbox drainer", () => {
     const outboxPath = join(root, "outbox.md");
     const statePath = join(root, ".outbox-drained.json");
     writeFileSync(outboxPath, "sweep must deliver this\n");
+    // Seed a CURRENT-version (v2) sidecar so the one-time id-scheme quarantine
+    // does not fire — this test exercises the delivery + dedup wiring, not the
+    // migration path (a missing sidecar would quarantine and deliver nothing).
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ version: 2, drained: [] }, null, 2)}\n`,
+    );
 
     calls = [];
     // Inject a drain that exercises the REAL drainOutbox against a temp outbox,

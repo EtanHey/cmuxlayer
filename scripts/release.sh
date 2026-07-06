@@ -97,4 +97,11 @@ cat <<EOF
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
 Next:
   brew update && brew upgrade etanhey/layers/cmuxlayer
+
+# Outbox-semantics releases only (see docs/releases-and-brew.md "Pre-deploy hygiene"):
+#   if this release changes outbox dedup-id derivation or the delivery gate,
+#   archive+truncate ~/.golems-zikaron/outbox.md on EACH target Mac BEFORE the
+#   new binary goes live. This is a manual, per-Mac step — intentionally NOT
+#   auto-run here, since a release must never silently delete another operator's
+#   pending messages. The in-code version-gated quarantine is the real guard.
 EOF
