@@ -1134,9 +1134,8 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.length).toBeGreaterThan(0);
     expect(chunks.every((chunk) => chunk.trim().length > 0)).toBe(true);
-    expect(chunks.every((chunk) => chunk.length <= 501)).toBe(true);
     expect(chunks.join("")).toBe(prompt);
     expect(chunks.join("")).toContain("\n\n");
   });
@@ -3301,8 +3300,8 @@ codex>
 
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
-    expect(setBufferCalls).toHaveLength(2);
-    expect(pasteBufferCalls).toHaveLength(2);
+    expect(setBufferCalls).toHaveLength(1);
+    expect(pasteBufferCalls).toHaveLength(1);
     expect(sendKeyCalls).toHaveLength(1);
     expect(deliveredText).toBe(sanitizedText);
     expect(deliveredText).not.toContain("\x1b");

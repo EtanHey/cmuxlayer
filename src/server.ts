@@ -195,6 +195,7 @@ const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
 export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
+const SEND_INPUT_PASTE_BATCH_MAX_BYTES = 16_000;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
@@ -800,6 +801,103 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
   }
 
   return chunks;
+}
+
+interface InputDeliveryBatch {
+  text: string;
+  firstChunkNumber: number;
+  deliveredChunkCounts: number[];
+}
+
+function splitTextByUtf8ByteLimit(text: string, maxBytes: number): string[] {
+  if (text.length === 0) {
+    return [text];
+  }
+
+  const parts: string[] = [];
+  let current = "";
+  let currentBytes = 0;
+
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char, "utf-8");
+    if (current && currentBytes + charBytes > maxBytes) {
+      parts.push(current);
+      current = char;
+      currentBytes = charBytes;
+      continue;
+    }
+
+    current += char;
+    currentBytes += charBytes;
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+function buildInputDeliveryBatches(
+  chunks: string[],
+  maxPasteBytes = SEND_INPUT_PASTE_BATCH_MAX_BYTES,
+): InputDeliveryBatch[] {
+  const batches: InputDeliveryBatch[] = [];
+  let pendingText = "";
+  let pendingBytes = 0;
+  let pendingFirstChunkNumber = 1;
+  let pendingDeliveredChunkCounts: number[] = [];
+
+  const flushPending = () => {
+    if (pendingDeliveredChunkCounts.length === 0) {
+      return;
+    }
+
+    batches.push({
+      text: pendingText,
+      firstChunkNumber: pendingFirstChunkNumber,
+      deliveredChunkCounts: pendingDeliveredChunkCounts,
+    });
+    pendingText = "";
+    pendingBytes = 0;
+    pendingDeliveredChunkCounts = [];
+  };
+
+  for (const [index, chunk] of chunks.entries()) {
+    const chunkNumber = index + 1;
+    const chunkBytes = Buffer.byteLength(chunk, "utf-8");
+
+    if (chunkBytes > maxPasteBytes) {
+      flushPending();
+      const parts = splitTextByUtf8ByteLimit(chunk, maxPasteBytes);
+      for (const [partIndex, part] of parts.entries()) {
+        batches.push({
+          text: part,
+          firstChunkNumber: chunkNumber,
+          deliveredChunkCounts:
+            partIndex === parts.length - 1 ? [chunkNumber] : [],
+        });
+      }
+      continue;
+    }
+
+    if (
+      pendingDeliveredChunkCounts.length > 0 &&
+      pendingBytes + chunkBytes > maxPasteBytes
+    ) {
+      flushPending();
+    }
+
+    if (pendingDeliveredChunkCounts.length === 0) {
+      pendingFirstChunkNumber = chunkNumber;
+    }
+    pendingText += chunk;
+    pendingBytes += chunkBytes;
+    pendingDeliveredChunkCounts.push(chunkNumber);
+  }
+
+  flushPending();
+  return batches;
 }
 
 function shouldPasteInputChunk(text: string, totalChunks: number): boolean {
@@ -2402,18 +2500,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     retry_count: number;
     submit_verified: boolean | null;
   }> => {
-    for (const [index, chunk] of opts.chunks.entries()) {
+    const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
+    for (const [index, batch] of deliveryBatches.entries()) {
       await sendChunkWithRetry(
         opts.surface,
-        chunk,
+        batch.text,
         {
           workspace: opts.workspace,
         },
-        index + 1,
+        batch.firstChunkNumber,
         opts.chunks.length,
       );
-      opts.onChunkDelivered?.(index + 1);
-      if (index < opts.chunks.length - 1) {
+      for (const sentChunks of batch.deliveredChunkCounts) {
+        opts.onChunkDelivered?.(sentChunks);
+      }
+      if (index < deliveryBatches.length - 1) {
         await delay(opts.chunk_delay_ms);
       }
     }

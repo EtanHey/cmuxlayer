@@ -1896,7 +1896,7 @@ describe("tool handler integration", () => {
     expect(result.content[0].text).not.toContain("col ");
   });
 
-  it("send_input handler calls cmux send", async () => {
+  it("send_input handler calls cmux send for small single-chunk input", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
@@ -1912,6 +1912,9 @@ describe("tool handler integration", () => {
       "cmux",
       expect.arrayContaining(["send"]),
     );
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer")),
+    ).toHaveLength(0);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
@@ -2899,7 +2902,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("send_input chunks long text transparently before sending", async () => {
+  it("send_input coalesces long chunked text into one bounded paste operation", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
@@ -2924,25 +2927,55 @@ describe("tool handler integration", () => {
     const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
       args.includes("paste-buffer"),
     );
-    expect(setBufferCalls).toHaveLength(5);
-    expect(pasteBufferCalls).toHaveLength(5);
+    expect(setBufferCalls).toHaveLength(1);
+    expect(pasteBufferCalls).toHaveLength(1);
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),
     ).toHaveLength(0);
-    for (const [index, call] of setBufferCalls.entries()) {
-      expect(call[0]).toBe("cmux");
-      expect(call[1]).toEqual(expect.arrayContaining(["set-buffer"]));
-      const chunk = call[1][call[1].length - 1];
-      expect(typeof chunk).toBe("string");
-      expect((chunk as string).length).toBeLessThanOrEqual(121);
-      if (index < setBufferCalls.length - 1) {
-        expect((chunk as string).endsWith("\n")).toBe(true);
-      }
-    }
+    expect(setBufferCalls[0][0]).toBe("cmux");
+    expect(setBufferCalls[0][1]).toEqual(expect.arrayContaining(["set-buffer"]));
+    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
+      longText,
+    );
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+  });
+
+  it("send_input keeps coalesced paste operations under the paste batch cap", async () => {
+    mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+    const longText = ["a".repeat(15_000), "b".repeat(15_000), "c".repeat(5_000)]
+      .join("\n");
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: longText,
+        chunk_size: 500,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const pastedTexts = mockExec.mock.calls
+      .filter(([, args]) => args.includes("set-buffer"))
+      .map(([, args]) => String(args[args.length - 1]));
+
+    expect(parsed.ok).toBe(true);
+    expect(pastedTexts.length).toBeGreaterThan(1);
+    expect(pastedTexts.join("")).toBe(longText);
+    expect(
+      pastedTexts.every(
+        (text) => Buffer.byteLength(text, "utf-8") <= 16_000,
+      ),
+    ).toBe(true);
   });
 
   it("send_input submits chunked multiline text as one receiver message", async () => {
@@ -3057,19 +3090,12 @@ describe("tool handler integration", () => {
       .filter((chunk) => chunk === "no" || chunk === "not");
 
     expect(parsed.ok).toBe(true);
-    expect(pastedChunks.length).toBeGreaterThan(1);
-    expect(pastedChunks.join("")).toBe(prompt);
+    expect(pastedChunks).toEqual([prompt]);
     expect(typedChunks).toEqual([]);
     expect(submittedTypeFragments).toEqual([]);
   });
 
-  it.skip("RED: chunked prompt delivery should not create multiple paste blocks", async () => {
-    // TODO(phantom-no): Current behavior performs one pasteText call per
-    // chunk. Claude can render those as separate [Pasted text #N] blocks,
-    // which matches the observed phantom-"no" failure class. Coalescing the
-    // chunks into one paste operation would change chunk retry/progress
-    // semantics, so keep this repro skipped until that delivery redesign is
-    // reviewed deliberately.
+  it("send_input chunked prompt delivery does not create multiple paste blocks", async () => {
     const pastedChunks: string[] = [];
     const mockClient = {
       send: vi.fn().mockResolvedValue(undefined),
@@ -3351,8 +3377,8 @@ describe("tool handler integration", () => {
     for (let i = 0; i < 50; i++) {
       await advanceTimers(5);
       if (
-        mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer"))
-          .length === 5
+          mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer"))
+            .length === 1
       ) {
         break;
       }
@@ -3360,7 +3386,7 @@ describe("tool handler integration", () => {
 
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("paste-buffer")),
-    ).toHaveLength(5);
+    ).toHaveLength(1);
 
     await Promise.resolve();
 
@@ -3673,6 +3699,52 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(sendAttempts).toBe(2);
+  });
+
+  it("send_input retries a transient coalesced paste failure before succeeding", async () => {
+    let pasteAttempts = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args) => {
+      if (args.includes("paste-buffer")) {
+        pasteAttempts += 1;
+        if (pasteAttempts === 1) {
+          return Promise.reject(
+            new Error("socket closed before receiving response"),
+          );
+        }
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const registeredTools = (server as any)._registeredTools;
+    const tool = registeredTools["send_input"];
+    const longText = [
+      "abcdef".repeat(20),
+      "ghijkl".repeat(20),
+      "mnopqr".repeat(20),
+      "stuvwx".repeat(20),
+      "yz1234".repeat(20),
+    ].join("\n");
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: longText, chunk_size: 120 },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("set-buffer"),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(pasteAttempts).toBe(2);
+    expect(setBufferCalls).toHaveLength(2);
+    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
+      longText,
+    );
+    expect(setBufferCalls[1][1][setBufferCalls[1][1].length - 1]).toBe(
+      longText,
+    );
   });
 
   it("send_input reports the failed chunk when retries are exhausted", async () => {
@@ -6795,7 +6867,8 @@ describe("tool handler integration", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(sendCalls.length).toBeGreaterThan(1);
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls.join("")).toBe(prompt);
     expect(returnPresses).toBe(2);
   });
 

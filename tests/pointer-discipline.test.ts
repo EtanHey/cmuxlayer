@@ -217,7 +217,7 @@ describe("pane input pointer discipline", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("send_input allow_long_inline preserves chunked delivery", async () => {
+  it("send_input allow_long_inline uses bounded paste delivery", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
     const { createServer } = await loadServerModule();
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
@@ -239,8 +239,15 @@ describe("pane input pointer discipline", () => {
     const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
       args.includes("set-buffer"),
     );
+    const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("paste-buffer"),
+    );
     expect(parsed.ok).toBe(true);
-    expect(setBufferCalls.length).toBeGreaterThan(1);
+    expect(setBufferCalls).toHaveLength(1);
+    expect(pasteBufferCalls).toHaveLength(1);
+    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
+      "x".repeat(2_000),
+    );
   });
 
   it("CMUXLAYER_MAX_INLINE_CHARS changes the cap and invalid values fall back to the default", async () => {
@@ -630,8 +637,15 @@ describe("pane input pointer discipline", () => {
     const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
       args.includes("set-buffer"),
     );
+    const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("paste-buffer"),
+    );
     expect(parsed.ok).toBe(true);
-    expect(setBufferCalls.length).toBeGreaterThan(1);
+    expect(setBufferCalls).toHaveLength(1);
+    expect(pasteBufferCalls).toHaveLength(1);
+    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
+      "x".repeat(2_000),
+    );
     context.dispose();
   });
 
@@ -712,10 +726,17 @@ describe("pane input pointer discipline", () => {
 
     parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    expect(
-      mockExec.mock.calls.filter(([, args]) => args.includes("set-buffer"))
-        .length,
-    ).toBeGreaterThan(1);
+    const setBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("set-buffer"),
+    );
+    const pasteBufferCalls = mockExec.mock.calls.filter(([, args]) =>
+      args.includes("paste-buffer"),
+    );
+    expect(setBufferCalls).toHaveLength(1);
+    expect(pasteBufferCalls).toHaveLength(1);
+    expect(setBufferCalls[0][1][setBufferCalls[0][1].length - 1]).toBe(
+      "x".repeat(2_000),
+    );
     context.dispose();
   });
 
