@@ -177,10 +177,45 @@ export interface ControlHealthTelemetryEvent {
   snapshot: unknown;
 }
 
+/** Which close/kill path emitted the event. */
+export type CloseEventPath =
+  | "close_surface"
+  | "stop_agent"
+  | "kill"
+  | "internal";
+
+/**
+ * Durable, attributed record of a surface close or agent kill/stop. Answers
+ * "who tore this down, forcibly or not, and was the attempt refused?" from the
+ * SAME events.jsonl the other telemetry entries land in, so a pane-death
+ * investigation reads one log instead of reconstructing intent from transcripts.
+ */
+export interface CloseTelemetryEvent {
+  ts: string;
+  event_type: "close";
+  /** Which handler/teardown path initiated the close. */
+  event: CloseEventPath;
+  /** Surface ref and/or agent_id being closed/killed. */
+  target: string;
+  /**
+   * Best available identity of the caller: an env-derived id
+   * (`CMUX_TAB_ID=...`), the `mcp:<toolName>` fallback for a tool-driven call
+   * with no resolvable id, or `internal:<reason>` for a teardown path.
+   */
+  caller: string;
+  /** The force flag on the originating call (kill/stop/close force). */
+  force: boolean;
+  /** Short reason / opts summary if available. */
+  reason: string | null;
+  /** True when a protected live-agent close was refused (attempt still logged). */
+  refused: boolean;
+}
+
 export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
-  | ControlHealthTelemetryEvent;
+  | ControlHealthTelemetryEvent
+  | CloseTelemetryEvent;
 
 export interface WaitResult {
   matched: boolean;

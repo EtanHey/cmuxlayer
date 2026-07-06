@@ -3,7 +3,10 @@ import { mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventLog } from "../src/event-log.js";
-import type { StateTransition } from "../src/agent-types.js";
+import type {
+  CloseTelemetryEvent,
+  StateTransition,
+} from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-eventlog");
 
@@ -123,5 +126,40 @@ describe("EventLog", () => {
     expect(agentA).toHaveLength(2);
     expect(agentA[0].to_state).toBe("booting");
     expect(agentA[1].to_state).toBe("ready");
+  });
+
+  it("appendClose writes a fully-populated close entry to the same JSONL", () => {
+    const log = new EventLog(TEST_DIR);
+    const filePath = join(TEST_DIR, "events.jsonl");
+    const closeEvent: CloseTelemetryEvent = {
+      ts: "2026-07-06T12:00:00Z",
+      event_type: "close",
+      event: "close_surface",
+      target: "surface:worker-9 (agent codex-9)",
+      caller: "CMUX_TAB_ID=tab-42",
+      force: true,
+      reason: "refused: agent still live (working)",
+      refused: true,
+    };
+
+    log.appendClose(closeEvent);
+
+    // Forensics read ONE log: the close event lands in events.jsonl alongside
+    // every other telemetry entry, with all fields intact.
+    const lines = readFileSync(filePath, "utf-8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toEqual(closeEvent);
+
+    const entries = log.readEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      event_type: "close",
+      event: "close_surface",
+      caller: "CMUX_TAB_ID=tab-42",
+      force: true,
+      refused: true,
+    });
+    // Close entries carry no agent_id, so they are not mistaken for transitions.
+    expect(log.readAll()).toHaveLength(0);
   });
 });

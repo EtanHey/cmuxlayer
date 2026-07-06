@@ -7275,6 +7275,149 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface logs a durable close entry with caller, force, and target", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-eventlog");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    // A terminal agent backs the surface, so the close proceeds normally.
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-done",
+      surface_id: "surface:worker-done",
+      state: "done",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "shipped",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({ caller: {} }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-done", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalled();
+
+    const closeEvents = readFileSync(join(stateDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((e) => e.event_type === "close");
+    expect(closeEvents).toHaveLength(1);
+    expect(closeEvents[0]).toMatchObject({
+      event_type: "close",
+      event: "close_surface",
+      target: "surface:worker-done",
+      force: true,
+      refused: false,
+    });
+    expect(typeof closeEvents[0].caller).toBe("string");
+    expect(closeEvents[0].caller.length).toBeGreaterThan(0);
+    expect(typeof closeEvents[0].ts).toBe("string");
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface logs the attempt when a live-agent close is refused", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-refuse-eventlog");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-live",
+      surface_id: "surface:worker-live",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "mid task",
+      pid: null,
+      version: 1,
+      created_at: "2026-04-16T00:00:00Z",
+      updated_at: "2026-04-16T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockClient = {
+      readScreen: vi.fn().mockResolvedValue({
+        surface: "surface:worker-live",
+        text: "running tests... 115 passed",
+        lines: 1,
+        scrollback_used: false,
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-live" },
+      {} as any,
+    );
+
+    // The close is refused, but the ATTEMPT is still recorded so a pane-death
+    // investigation sees who tried to tear down a live agent.
+    expect(result.isError).toBe(true);
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
+
+    const closeEvents = readFileSync(join(stateDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((e) => e.event_type === "close");
+    expect(closeEvents).toHaveLength(1);
+    expect(closeEvents[0]).toMatchObject({
+      event_type: "close",
+      event: "close_surface",
+      force: false,
+      refused: true,
+    });
+    expect(closeEvents[0].target).toContain("worker-live");
+    expect(closeEvents[0].reason).toContain("refused");
+    expect(typeof closeEvents[0].caller).toBe("string");
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("close_surface consolidates stale live registry when pane shows TASK_DONE", async () => {
     const stateDir = join(tmpdir(), "cmuxlayer-close-surface-done-consolidate");
     rmSync(stateDir, { recursive: true, force: true });
