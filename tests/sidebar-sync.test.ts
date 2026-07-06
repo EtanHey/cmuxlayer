@@ -11,6 +11,13 @@ import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
+import {
+  registerMonitor,
+  signalMonitor,
+  createFileMonitorRegistryPort,
+  type MonitorRegistryPort,
+  type NotifyPayload,
+} from "../src/monitor-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -93,6 +100,46 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     max_cost_per_agent: null,
     ...overrides,
   };
+}
+
+/**
+ * Arm a lead monitor in a temp registry and return a file-backed port plus a
+ * deliver spy. The engine's injected clock (inboxOpts.now) drives the deadman,
+ * so a test advances `now` past `deadmanTimeoutS` to lapse the monitor. NO
+ * NETWORK: the wake transport is a spy, never a real POST to 3847.
+ */
+function armLeadMonitor(opts: {
+  registryPath: string;
+  ownerSeat: string;
+  now: () => number;
+  monitorId?: string;
+  deadmanTimeoutS?: number;
+}): {
+  port: MonitorRegistryPort;
+  wakes: NotifyPayload[];
+  monitorId: string;
+} {
+  const wakes: NotifyPayload[] = [];
+  const deliver = async (payload: NotifyPayload) => {
+    wakes.push(payload);
+    return true;
+  };
+  const monitorId = opts.monitorId ?? `mon-${opts.ownerSeat}`;
+  registerMonitor(
+    {
+      monitor_id: monitorId,
+      owner_seat: opts.ownerSeat,
+      watch_targets: ["collab/hub.md"],
+      mechanism: "event",
+      deadman_timeout_s: opts.deadmanTimeoutS ?? 60,
+    },
+    { registryPath: opts.registryPath, now: opts.now },
+  );
+  const port = createFileMonitorRegistryPort({
+    registryPath: opts.registryPath,
+    deliver,
+  });
+  return { port, wakes, monitorId };
 }
 
 describe("Sidebar Sync", () => {
@@ -601,8 +648,12 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
-  it("fires one proactive alert when a lead monitor heartbeat goes stale", async () => {
+  it("fires one proactive alert when a lead monitor's registry deadman fires", async () => {
+    // Migrated off inbox-heartbeat (LANE-MONITOR-REGISTRY-CORE): the lead
+    // monitor-death signal now comes from the shared registry's `deadman-fired`
+    // state, not from a stale inbox heartbeat.
     const inboxDir = join(TEST_DIR, "lead-stale-monitor-inbox");
+    const registryPath = join(TEST_DIR, "lead-stale-registry.json");
     const agentId = "cmuxlayer-lead-stale-monitor";
     let now = 1_000_000;
     stateMgr.writeState(
@@ -620,13 +671,18 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:lead-stale")];
+    const { port, wakes } = armLeadMonitor({
+      registryPath,
+      ownerSeat: agentId,
+      now: () => now,
+    });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistry: port,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
@@ -641,15 +697,13 @@ describe("Sidebar Sync", () => {
       workspace: "workspace:cmuxlayer",
       surface: "surface:lead-stale",
     });
-    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
-      "health",
-      expect.objectContaining({ agent_id: agentId }),
-      expect.stringContaining("inbox_monitor_not_alive"),
-    );
+    // One mechanism, two consumers: the registry emits its wake exactly once too.
+    expect(wakes).toHaveLength(1);
   });
 
-  it("does not alert when a lead monitor was never armed", async () => {
+  it("does not alert when a lead has no registry monitor (never armed)", async () => {
     const inboxDir = join(TEST_DIR, "lead-never-armed-monitor-inbox");
+    const registryPath = join(TEST_DIR, "lead-never-armed-registry.json");
     const agentId = "cmuxlayer-lead-never-armed-monitor";
     let now = 1_500_000;
     stateMgr.writeState(
@@ -667,11 +721,14 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:lead-never-armed")];
+    // Port over an empty registry — the lead never armed a monitor.
+    const port = createFileMonitorRegistryPort({ registryPath });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistry: port,
     });
     await engine.getRegistry().reconstitute();
 
@@ -687,8 +744,12 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("does not fire the proactive monitor-death alert for a worker", async () => {
+  it("does not fire the proactive monitor-death alert for a worker (role-gated)", async () => {
+    // The registry deadman fires for ANY resolvable-seat monitor, but the
+    // LEAD-specific proactive alert is gated to orchestrator seats only — a
+    // worker's deadman emits a registry wake but never the lead alert.
     const inboxDir = join(TEST_DIR, "worker-stale-monitor-inbox");
+    const registryPath = join(TEST_DIR, "worker-stale-registry.json");
     const agentId = "cmuxlayer-worker-stale-monitor";
     let now = 2_000_000;
     stateMgr.writeState(
@@ -704,19 +765,27 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:worker-stale")];
+    const { port, wakes } = armLeadMonitor({
+      registryPath,
+      ownerSeat: agentId,
+      now: () => now,
+    });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistry: port,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
     expect(mockClient.notify).not.toHaveBeenCalled();
+    // The registry still fired the worker's deadman (a wake was emitted); only
+    // the lead-specific proactive alert is suppressed.
+    expect(wakes).toHaveLength(1);
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       agentId,
       expect.stringContaining(
@@ -726,8 +795,9 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("re-arms the lead monitor-death alert after heartbeat recovery", async () => {
+  it("re-arms the lead monitor-death alert after registry recovery", async () => {
     const inboxDir = join(TEST_DIR, "lead-monitor-rearm-inbox");
+    const registryPath = join(TEST_DIR, "lead-rearm-registry.json");
     const agentId = "cmuxlayer-lead-monitor-rearm";
     let now = 3_000_000;
     stateMgr.writeState(
@@ -745,22 +815,29 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:lead-rearm")];
+    const { port, monitorId } = armLeadMonitor({
+      registryPath,
+      ownerSeat: agentId,
+      now: () => now,
+    });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistry: port,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
+    // Recovery: a fresh signal re-arms the monitor back to alive.
     now += 1_000;
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    signalMonitor(monitorId, { registryPath, now: () => now });
     await engine.runSweep();
 
+    // Re-death: lapse again → the alert re-fires.
     now += 61_000;
     await engine.runSweep();
 
@@ -770,6 +847,7 @@ describe("Sidebar Sync", () => {
   it("deadman timeout fires a lead monitor-death alert without a follow-up sweep", async () => {
     vi.useFakeTimers();
     const inboxDir = join(TEST_DIR, "lead-monitor-deadman-inbox");
+    const registryPath = join(TEST_DIR, "lead-deadman-registry.json");
     const agentId = "cmuxlayer-lead-monitor-deadman";
     let now = 4_000_000;
     stateMgr.writeState(
@@ -787,19 +865,29 @@ describe("Sidebar Sync", () => {
       }),
     );
     liveSurfaces = [makeSurface("surface:lead-deadman")];
+    // 60s deadman window == AGENT_HEALTH_MONITOR_MAX_AGE_MS in ms.
+    const { port } = armLeadMonitor({
+      registryPath,
+      ownerSeat: agentId,
+      now: () => now,
+      deadmanTimeoutS: 60,
+    });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistry: port,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
     await engine.getRegistry().reconstitute();
 
+    // First sweep: monitor still alive → schedules the wake-on-timeout timer.
     await engine.runSweep();
 
     expect(mockClient.notify).not.toHaveBeenCalled();
 
+    // Advance the clock past the deadman AND fire the scheduled timer — no
+    // follow-up engine sweep is needed (§6E deadman leg).
     now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
     const advanceTimersByTimeAsync = (
       vi as unknown as {
@@ -829,7 +917,13 @@ describe("Sidebar Sync", () => {
 
   it("lead monitor-death delivery memory follows session-capture rename", async () => {
     const inboxDir = join(TEST_DIR, "lead-monitor-rename-deadman-inbox");
+    const registryPath = join(TEST_DIR, "lead-rename-registry.json");
     const pendingAgentId = "claude-cmuxlayer-pending-lead";
+    // The monitor is owned by the stable SEAT, which survives the agent-id
+    // rename on session capture — so the registry still reports the lead as
+    // watch-blind after the rename, and only the transferred dedup memory
+    // prevents a second alert.
+    const leadSeat = "cmuxlayerLead";
     const sessionId = "12345678-1234-1234-1234-123456789abc";
     const finalAgentId = generateAgentId("claude", "cmuxlayer", sessionId);
     let now = 5_000_000;
@@ -845,19 +939,25 @@ describe("Sidebar Sync", () => {
         model: "claude",
         role: "orchestrator",
         repo: "cmuxlayer",
+        seat_id: leadSeat,
         task_summary: "Lead remediation lane",
       }),
     );
     liveSurfaces = [makeSurface("surface:lead-rename")];
+    const { port } = armLeadMonitor({
+      registryPath,
+      ownerSeat: leadSeat,
+      now: () => now,
+    });
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
     engine.dispose();
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
       sessionIdentityResolver: () => capturedSessionId,
+      monitorRegistry: port,
     });
-    writeHeartbeat(pendingAgentId, { baseDir: inboxDir, now: () => now });
-    now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
+    now += 61_000;
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -875,6 +975,8 @@ describe("Sidebar Sync", () => {
 
     expect(stateMgr.readState(pendingAgentId)).toBeNull();
     expect(stateMgr.readState(finalAgentId)).not.toBeNull();
+    // Still watch-blind (seat-owned monitor is deadman-fired), but the dedup
+    // memory transferred with the rename, so no second alert fires.
     expect(mockClient.notify).toHaveBeenCalledTimes(1);
   });
 
@@ -1211,8 +1313,7 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     const spawnedCalls = mockClient.log.mock.calls.filter(
-      (call) =>
-        typeof call[0] === "string" && call[0].startsWith("spawned:"),
+      (call) => typeof call[0] === "string" && call[0].startsWith("spawned:"),
     );
     expect(spawnedCalls).toHaveLength(0);
     expect(

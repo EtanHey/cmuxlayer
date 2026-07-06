@@ -24,6 +24,7 @@ import {
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
+import { type MonitorRegistryPort } from "./monitor-registry.js";
 import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
@@ -1481,6 +1482,13 @@ export interface CreateServerOptions {
    * to actually flush `~/.golems-zikaron/outbox.md` to the notify path.
    */
   outboxDrain?: () => Promise<unknown>;
+  /**
+   * Cross-agent monitor deadman registry port scanned each agent-engine sweep.
+   * Omitted by default (no-op) so tests never touch the real registry/network;
+   * the real MCP entrypoints pass
+   * `createFileMonitorRegistryPort({ deliver: httpDeliver })`.
+   */
+  monitorRegistry?: MonitorRegistryPort;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -5290,6 +5298,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await sendLauncherCommandToSurface({ surface, workspace, command });
           },
           outboxDrain: opts?.outboxDrain,
+          monitorRegistry: opts?.monitorRegistry,
         },
       );
     context.lifecycleSweepEngine = engine;

@@ -85,10 +85,7 @@ import {
   type AgentHealth,
   type AgentHealthInput,
 } from "./agent-health.js";
-import {
-  AGENT_HEALTH_MONITOR_MAX_AGE_MS,
-  buildAgentHealthInput,
-} from "./agent-health-input.js";
+import { buildAgentHealthInput } from "./agent-health-input.js";
 import {
   assertSeatIdentity,
   loadSeatRegistryFromConfig,
@@ -99,7 +96,11 @@ import {
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
 } from "./surface-topology.js";
-import { readLastAgentHeartbeat, type InboxOpts } from "./inbox.js";
+import { type InboxOpts } from "./inbox.js";
+import {
+  NOOP_MONITOR_REGISTRY_PORT,
+  type MonitorRegistryPort,
+} from "./monitor-registry.js";
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
 
@@ -238,6 +239,16 @@ export interface AgentEngineOptions {
    * production entrypoints inject `() => drainOutbox()`.
    */
   outboxDrain?: () => Promise<unknown>;
+  /**
+   * Cross-agent monitor deadman registry (LANE-MONITOR-REGISTRY-CORE). The engine
+   * sweep scans the shared registry so ANY live agent fires a lapsed monitor's
+   * deadman (surviving the owner's own death), and #237's lead monitor-death
+   * alert consumes the resulting `deadman-fired` state instead of inbox-heartbeat
+   * staleness. Defaults to a NO-OP port so bare construction (tests, libraries)
+   * never touches the real registry file or network; production entrypoints
+   * inject `createFileMonitorRegistryPort({ deliver: httpDeliver })`.
+   */
+  monitorRegistry?: MonitorRegistryPort;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -763,6 +774,10 @@ export class AgentEngine {
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
   private outboxDrainInFlight = false;
+  /** Cross-agent monitor deadman registry port (injectable; default no-op). */
+  private monitorRegistry: MonitorRegistryPort;
+  /** Guards against overlapping registry sweeps if a sweep runs long. */
+  private monitorSweepInFlight = false;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -788,6 +803,9 @@ export class AgentEngine {
     // the real outbox or network. Production entrypoints inject the real
     // drainOutbox (see server.ts createServer / app-server-runtime).
     this.outboxDrain = opts?.outboxDrain ?? (async () => {});
+    // Default no-op port: constructing an engine must never touch the real
+    // registry file or network. Production entrypoints inject a file-backed port.
+    this.monitorRegistry = opts?.monitorRegistry ?? NOOP_MONITOR_REGISTRY_PORT;
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -2471,16 +2489,31 @@ export class AgentEngine {
     );
   }
 
-  private isLeadWatchBlind(
-    agent: AgentRecord,
-    healthInput: AgentHealthInput,
-  ): boolean {
+  /**
+   * The seat that owns a lead agent's monitor, for looking it up in the shared
+   * registry. Prefer the resolved seat identity; fall back to the agent id so a
+   * lead without a resolved seat still maps to its own stable key.
+   */
+  private resolveOwnerSeat(agent: AgentRecord): string {
+    return agent.seat_id ?? agent.agent_id;
+  }
+
+  private isLeadWatchBlind(agent: AgentRecord): boolean {
     if (inferRecordRoleOrNull(agent) !== "orchestrator") {
       return false;
     }
 
-    if (healthInput.monitor_alive === false) {
-      return readLastAgentHeartbeat(agent.agent_id, this.inboxOpts) !== null;
+    // Migrated off inbox-heartbeat (LANE-MONITOR-REGISTRY-CORE): a lead is
+    // watch-blind when its monitor's deadman has fired in the shared registry —
+    // the one mechanism, detectable cross-agent even after the lead's own
+    // process dies. monitorAlive (inbox heartbeat) is no longer a LIVENESS
+    // signal; it stays only as the narrower can-receive-dispatches check.
+    const now = (this.inboxOpts?.now ?? Date.now)();
+    if (
+      this.monitorRegistry.leadStatus(this.resolveOwnerSeat(agent), now)
+        .firedNow
+    ) {
+      return true;
     }
 
     if (
@@ -2499,17 +2532,14 @@ export class AgentEngine {
     );
   }
 
-  private async maybeNotifyLeadMonitorDeath(
-    agent: AgentRecord,
-    healthInput: AgentHealthInput,
-  ): Promise<void> {
+  private async maybeNotifyLeadMonitorDeath(agent: AgentRecord): Promise<void> {
     if (inferRecordRoleOrNull(agent) !== "orchestrator") {
       this.clearLeadMonitorDeathTimer(agent.agent_id);
       this.deliveredLeadMonitorDeathAlerts.delete(agent.agent_id);
       return;
     }
 
-    if (!this.isLeadWatchBlind(agent, healthInput)) {
+    if (!this.isLeadWatchBlind(agent)) {
       this.scheduleLeadMonitorDeathDeadman(agent);
       this.deliveredLeadMonitorDeathAlerts.delete(agent.agent_id);
       return;
@@ -2542,17 +2572,20 @@ export class AgentEngine {
   private scheduleLeadMonitorDeathDeadman(agent: AgentRecord): void {
     this.clearLeadMonitorDeathTimer(agent.agent_id);
 
-    const heartbeat = readLastAgentHeartbeat(agent.agent_id, this.inboxOpts);
-    if (!heartbeat) {
+    // Wake-on-timeout (§6E deadman leg): arm a timer for when the lead's monitor
+    // would lapse in the registry, so the alert fires WITHOUT waiting for the
+    // next scheduled sweep. dueAtMs comes from the registry (last_signal_at +
+    // deadman_timeout_s), not from inbox-heartbeat age.
+    const now = (this.inboxOpts?.now ?? Date.now)();
+    const { dueAtMs } = this.monitorRegistry.leadStatus(
+      this.resolveOwnerSeat(agent),
+      now,
+    );
+    if (dueAtMs === null) {
       return;
     }
 
-    const now = (this.inboxOpts?.now ?? Date.now)();
-    const ageMs = Math.max(0, now - heartbeat.ts_ms);
-    const delayMs = Math.max(
-      0,
-      AGENT_HEALTH_MONITOR_MAX_AGE_MS - ageMs + 1,
-    );
+    const delayMs = Math.max(0, dueAtMs - now + 1);
     this.armLeadMonitorDeathTimer(agent.agent_id, delayMs, now + delayMs);
   }
 
@@ -2563,10 +2596,10 @@ export class AgentEngine {
       return;
     }
 
-    const healthInput = await buildAgentHealthInput(agent, {
-      inboxOpts: this.inboxOpts,
-    });
-    await this.maybeNotifyLeadMonitorDeath(agent, healthInput);
+    // Flip the lapsed monitor to deadman-fired (and emit the registry wake) before
+    // evaluating, so the shared state reflects the death and #237's alert fires.
+    await this.sweepMonitorRegistryBestEffort();
+    await this.maybeNotifyLeadMonitorDeath(agent);
   }
 
   private async logLifecycleEvent(
@@ -2709,7 +2742,7 @@ export class AgentEngine {
         },
       );
       const health = evaluateAgentHealth(agent, healthInput);
-      await this.maybeNotifyLeadMonitorDeath(agent, healthInput);
+      await this.maybeNotifyLeadMonitorDeath(agent);
       const healthSignature = this.healthSignature(health);
       const statusValue = this.buildSidebarStatusValue(
         agent,
@@ -2915,8 +2948,41 @@ export class AgentEngine {
     }
 
     await this.registry.purgeTerminal();
+    // Scan the shared monitor registry BEFORE syncing the sidebar so a lapsed
+    // monitor is flipped to deadman-fired (and its wake emitted) and #237's lead
+    // monitor-death alert — evaluated per-agent inside syncSidebar — sees the
+    // fresh state.
+    await this.sweepMonitorRegistryBestEffort();
     await this.syncSidebar();
     await this.drainOutboxBestEffort();
+  }
+
+  /**
+   * Cross-agent monitor deadman sweep (LANE-MONITOR-REGISTRY-CORE). ANY live
+   * agent scans the shared registry file; a monitor whose last_signal_at lapsed
+   * past its deadman_timeout_s is flipped to `deadman-fired` (first-to-fire wins,
+   * idempotent) and a wake is emitted on the notify path — surviving the owner's
+   * own process death, which is the whole point. Best-effort: any failure is
+   * swallowed so it never breaks a sweep, and an in-flight guard prevents
+   * overlapping scans. The default port is a no-op (tests/libraries touch nothing).
+   *
+   * AIDEV-NOTE: cross-process exactly-once is best-effort (a rare read-before-
+   * write race between two sweeping agents could double-emit one wake), matching
+   * the outbox drainer's stance. The launchd caffeinate guard
+   * (docs/sleep-survival.md) is the always-on backstop that keeps SOME agent
+   * sweeping across sleep; a fuller lock is out of scope for this minimal core.
+   */
+  private async sweepMonitorRegistryBestEffort(): Promise<void> {
+    if (this.monitorSweepInFlight) return;
+    this.monitorSweepInFlight = true;
+    try {
+      const now = (this.inboxOpts?.now ?? Date.now)();
+      await this.monitorRegistry.sweep(now);
+    } catch {
+      // Never break the sweep on a registry failure; it retries next sweep.
+    } finally {
+      this.monitorSweepInFlight = false;
+    }
   }
 
   /**
