@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   assertBuildVersion,
+  createStaleBuildWarner,
   detectStaleBuild,
   readVersion,
 } from "../src/version.js";
@@ -145,5 +146,100 @@ describe("detectStaleBuild", () => {
         },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("createStaleBuildWarner", () => {
+  const stale = (running: string, installed: string) => ({
+    stale: running !== installed,
+    running,
+    installed,
+  });
+
+  it("does NOT permanently cache a not-yet-stale verdict — warns once a later upgrade bumps installed", () => {
+    // This is the exact timeline this feature exists to catch: a fresh child
+    // boots non-stale, a `brew upgrade` bumps the installed build mid-lifetime,
+    // and the very next (post-throttle) spawn must surface the warning.
+    let installed = "0.3.17";
+    let t = 0;
+    const warn = createStaleBuildWarner({
+      detect: () => stale("0.3.17", installed),
+      now: () => t,
+      recheckIntervalMs: 30_000,
+    });
+
+    // Fresh process: running == installed -> no warning.
+    expect(warn()).toBeNull();
+    // Within the throttle window: still no warning, not permanently cached.
+    t = 10_000;
+    expect(warn()).toBeNull();
+
+    // brew upgrade bumps the installed build; advance past the throttle.
+    installed = "0.3.18";
+    t = 40_000;
+    const message = warn();
+    expect(message).toContain("STALE build");
+    expect(message).toContain("running v0.3.17");
+    expect(message).toContain("installed v0.3.18");
+  });
+
+  it("caches the warning FOREVER once stale (it can never un-stale)", () => {
+    let installed = "0.3.18";
+    let t = 0;
+    const warn = createStaleBuildWarner({
+      detect: () => stale("0.3.17", installed),
+      now: () => t,
+      recheckIntervalMs: 30_000,
+    });
+
+    const first = warn();
+    expect(first).toContain("STALE build");
+
+    // Even if the installed build somehow matches again, the warning sticks.
+    installed = "0.3.17";
+    t = 1_000_000;
+    expect(warn()).toBe(first);
+  });
+
+  it("throttles re-checks while not yet stale (no per-spawn fs read)", () => {
+    let calls = 0;
+    let t = 0;
+    const warn = createStaleBuildWarner({
+      detect: () => {
+        calls += 1;
+        return stale("1.0.0", "1.0.0");
+      },
+      now: () => t,
+      recheckIntervalMs: 30_000,
+    });
+
+    expect(warn()).toBeNull();
+    expect(calls).toBe(1);
+
+    // Inside the throttle window: no re-read.
+    t = 5_000;
+    expect(warn()).toBeNull();
+    expect(calls).toBe(1);
+
+    // Past the throttle window: re-checks.
+    t = 35_000;
+    expect(warn()).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  it("re-checks on every call when the running version cannot be determined (detect returns null)", () => {
+    let calls = 0;
+    const warn = createStaleBuildWarner({
+      detect: () => {
+        calls += 1;
+        return null;
+      },
+      now: () => 0,
+      recheckIntervalMs: 0,
+    });
+
+    expect(warn()).toBeNull();
+    expect(warn()).toBeNull();
+    expect(calls).toBe(2);
   });
 });

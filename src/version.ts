@@ -157,3 +157,62 @@ export function detectStaleBuild(
     return null;
   }
 }
+
+export interface StaleBuildWarnerDeps {
+  /** Override the detector (defaults to `detectStaleBuild`). */
+  detect?: (deps?: DetectStaleBuildDeps) => StaleBuildResult | null;
+  /** Injectable clock in ms (defaults to `Date.now`). */
+  now?: () => number;
+  /**
+   * Minimum ms between re-checks while NOT yet stale. Small fs read, so cheap;
+   * throttled only to avoid a per-spawn read. Defaults to 30s.
+   */
+  recheckIntervalMs?: number;
+}
+
+export const DEFAULT_STALE_RECHECK_INTERVAL_MS = 30_000;
+
+/**
+ * Build a memoized stale-build warner for a single process.
+ *
+ * A running process's OWN build never changes, but the INSTALLED build can bump
+ * mid-lifetime (a `brew upgrade` while the per-agent MCP child keeps running),
+ * so staleness only ever goes false -> true and NEVER back. Therefore:
+ *   - once stale, we cache the warning FOREVER (it cannot un-stale), and
+ *   - while NOT yet stale, we RE-CHECK on each call (throttled to
+ *     `recheckIntervalMs`) so a later upgrade is caught — we never cache a
+ *     not-yet-stale verdict permanently.
+ *
+ * Caching a not-yet-stale verdict permanently would defeat the entire feature:
+ * a child that boots fresh (non-stale) would cache `null` and stay silent
+ * through the very upgrade this warner exists to flag.
+ */
+export function createStaleBuildWarner(
+  deps: StaleBuildWarnerDeps = {},
+): () => string | null {
+  const detect = deps.detect ?? detectStaleBuild;
+  const now = deps.now ?? Date.now;
+  const recheckIntervalMs =
+    deps.recheckIntervalMs ?? DEFAULT_STALE_RECHECK_INTERVAL_MS;
+
+  let stickyWarning: string | null = null;
+  let lastCheckedAt: number | null = null;
+
+  return function staleBuildWarning(): string | null {
+    // Once stale, keep warning forever — it can never un-stale.
+    if (stickyWarning !== null) return stickyWarning;
+
+    const t = now();
+    if (lastCheckedAt !== null && t - lastCheckedAt < recheckIntervalMs) {
+      return null; // Throttled; still not-yet-stale.
+    }
+    lastCheckedAt = t;
+
+    const stale = detect();
+    if (stale && stale.stale) {
+      stickyWarning = `cmuxlayer MCP is running a STALE build (running v${stale.running}, installed v${stale.installed}) — placement/other fixes are not live; /mcp reconnect this agent to load the current build.`;
+      return stickyWarning;
+    }
+    return null;
+  };
+}

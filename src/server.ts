@@ -13,7 +13,7 @@ import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
-import { detectStaleBuild, readVersion } from "./version.js";
+import { createStaleBuildWarner, readVersion } from "./version.js";
 import { StateManager } from "./state-manager.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -251,23 +251,15 @@ const QueryMonitorRegistryArgsSchema = {
 export { sanitizeTerminalInput } from "./sanitize.js";
 
 /**
- * Memoized stale-build warning, computed once per server process. After a brew
- * release, an already-running per-agent MCP stdio child keeps serving spawns
- * from its OLD dist until the agent `/mcp reconnect`s — silently mis-placing
- * workers with pre-release logic (the #247 recurrence root cause). We surface
- * this loudly so the operator knows the fix is not live. Cached so we never
- * re-read the opt package.json on every spawn.
+ * Process-wide stale-build warner. After a brew release, an already-running
+ * per-agent MCP stdio child keeps serving spawns from its OLD dist until the
+ * agent `/mcp reconnect`s — silently mis-placing workers with pre-release logic
+ * (the #247 recurrence root cause). The warner (see version.ts) caches the
+ * warning FOREVER once stale, but RE-CHECKS (throttled) while not-yet-stale, so
+ * a fresh child that later goes stale via `brew upgrade` is still flagged
+ * rather than silenced by a permanently-cached non-stale verdict.
  */
-let staleBuildWarningCache: string | null | undefined;
-function staleBuildWarning(): string | null {
-  if (staleBuildWarningCache !== undefined) return staleBuildWarningCache;
-  const stale = detectStaleBuild();
-  staleBuildWarningCache =
-    stale && stale.stale
-      ? `cmuxlayer MCP is running a STALE build (running v${stale.running}, installed v${stale.installed}) — placement/other fixes are not live; /mcp reconnect this agent to load the current build.`
-      : null;
-  return staleBuildWarningCache;
-}
+const staleBuildWarning = createStaleBuildWarner();
 
 function appendStaleBuildWarning(result: { warnings?: string[] }): void {
   const warning = staleBuildWarning();
