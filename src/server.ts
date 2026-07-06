@@ -1477,8 +1477,8 @@ export interface CreateServerOptions {
   /**
    * Best-effort outbox drain invoked at the tail of each agent-engine sweep.
    * Omitted by default (no-op) so tests never touch the real outbox/network;
-   * the real MCP entrypoints pass `() => drainOutbox()` to actually flush
-   * `~/.golems-zikaron/outbox.md` to the notify path.
+   * the real MCP entrypoints pass `() => drainOutbox({ deliver: httpDeliver })`
+   * to actually flush `~/.golems-zikaron/outbox.md` to the notify path.
    */
   outboxDrain?: () => Promise<unknown>;
 }

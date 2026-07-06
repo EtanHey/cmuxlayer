@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  defaultArchivePath,
   defaultOutboxPath,
   defaultStatePath,
   drainOutbox,
@@ -40,7 +41,8 @@ function recorder(opts?: { fail?: boolean }) {
 function harness(root: string, overrides?: Partial<OutboxDrainerOptions>) {
   const outboxPath = join(root, "outbox.md");
   const statePath = join(root, ".outbox-drained.json");
-  return { outboxPath, statePath, ...overrides };
+  const archivePath = join(root, "outbox-archive.md");
+  return { outboxPath, statePath, archivePath, ...overrides };
 }
 
 describe("parseOutboxEntries", () => {
@@ -223,5 +225,190 @@ describe("drainOutbox", () => {
     expect(parsed.version).toBe(1);
     expect(parsed.drained).toHaveLength(1);
     expect(typeof parsed.drained[0].id).toBe("string");
+  });
+});
+
+describe("rotation-safe dedup", () => {
+  it("FN rotation-safety: archiving/truncating outbox.md then re-draining re-sends nothing", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // A multi-entry log; the earlier entries are what a rotation trims away.
+    writeFileSync(outboxPath, "alpha\n\nbeta\n\ngamma\n");
+    const first = recorder();
+    const firstResult = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: first.deliver,
+    });
+    expect(firstResult.deliveredCount).toBe(3);
+
+    // Someone rotates/trims the unbounded log: only the tail entry survives, so
+    // every surviving entry's file position shifts. A position-keyed id would
+    // change here and re-send — the ~20-Telegram-spam class. Content-keyed ids
+    // must survive the shift.
+    writeFileSync(outboxPath, "gamma\n");
+    const second = recorder();
+    const secondResult = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: second.deliver,
+    });
+    expect(secondResult.deliveredCount).toBe(0);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("a full truncate followed by a re-drain of old content re-sends nothing", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "one\n\ntwo\n");
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: recorder().deliver,
+    });
+
+    // Trim to empty, then the same content reappears verbatim (e.g. a restored
+    // backup or a log that was rewound). Delivered ids must still match.
+    writeFileSync(outboxPath, "");
+    writeFileSync(outboxPath, "one\n\ntwo\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    expect(result.deliveredCount).toBe(0);
+    expect(rec.calls).toHaveLength(0);
+  });
+
+  it("genuine repeated identical messages each deliver once", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "ping\n\nping\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    expect(result.deliveredCount).toBe(2);
+    expect(rec.calls.map((c) => c.body)).toEqual(["ping", "ping"]);
+
+    // Re-draining the unchanged file sends nothing.
+    const again = recorder();
+    const secondResult = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: again.deliver,
+    });
+    expect(secondResult.deliveredCount).toBe(0);
+    expect(again.calls).toHaveLength(0);
+  });
+
+  it("a newly-appended identical message after a drain still delivers", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "ping\n");
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: recorder().deliver,
+    });
+
+    writeFileSync(outboxPath, "ping\n\nping\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    // The first "ping" is already drained; the genuinely-new second occurrence
+    // delivers.
+    expect(result.deliveredCount).toBe(1);
+    expect(rec.calls.map((c) => c.body)).toEqual(["ping"]);
+  });
+});
+
+describe("archive", () => {
+  it("appends delivered entries to the durable archive file", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "archive me\n\narchive me too\n");
+    const rec = recorder();
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+
+    expect(existsSync(archivePath)).toBe(true);
+    const archived = readFileSync(archivePath, "utf8");
+    expect(archived).toContain("archive me");
+    expect(archived).toContain("archive me too");
+  });
+
+  it("preserves operator history even after the live outbox is trimmed", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "alpha\n\nbeta\n");
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: recorder().deliver,
+    });
+
+    // The live outbox is later trimmed to nothing; the archive still holds it.
+    writeFileSync(outboxPath, "");
+    const archived = readFileSync(archivePath, "utf8");
+    expect(archived).toContain("alpha");
+    expect(archived).toContain("beta");
+  });
+
+  it("only archives entries that were actually delivered", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "never sent\n");
+    const failing = recorder({ fail: true });
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: failing.deliver,
+    });
+    // Delivery failed -> nothing archived (no archive file, or no content).
+    if (existsSync(archivePath)) {
+      expect(readFileSync(archivePath, "utf8")).not.toContain("never sent");
+    }
+  });
+
+  it("archive sidecar sits next to the outbox by default", () => {
+    expect(defaultArchivePath("/x/y/outbox.md")).toBe("/x/y/outbox-archive.md");
+  });
+});
+
+describe("default deliver is a no-op (incident guard)", () => {
+  it("draining without injecting a transport delivers nothing and never posts", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    writeFileSync(outboxPath, "must never reach 127.0.0.1:3847\n");
+    // No `deliver` injected: the library default MUST be a no-op so the test
+    // suite (and any caller that forgets to wire a transport) never hits the
+    // notify listener. Only prod entrypoints inject the real HTTP POST.
+    const result = await drainOutbox({ outboxPath, statePath, archivePath });
+    expect(result.totalEntries).toBe(1);
+    expect(result.deliveredCount).toBe(0);
+    // Nothing delivered -> no drained-state and no archive written.
+    expect(existsSync(statePath)).toBe(false);
+    expect(existsSync(archivePath)).toBe(false);
   });
 });
