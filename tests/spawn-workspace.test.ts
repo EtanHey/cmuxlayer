@@ -112,6 +112,7 @@ function makeWorkspaceClient() {
     setStatus: vi.fn().mockResolvedValue(undefined),
     clearStatus: vi.fn().mockResolvedValue(undefined),
     setProgress: vi.fn().mockResolvedValue(undefined),
+    clearProgress: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),
     identify: vi.fn().mockResolvedValue({}),
     listStatus: vi.fn().mockResolvedValue([]),

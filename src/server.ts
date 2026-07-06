@@ -5255,6 +5255,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ),
           setProgress: (value, progressOpts) =>
             client.setProgress(value, progressOpts),
+          clearProgress: (progressOpts) => client.clearProgress(progressOpts),
           newSplit: (direction, splitOpts) =>
             client.newSplit(direction, splitOpts),
           newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),

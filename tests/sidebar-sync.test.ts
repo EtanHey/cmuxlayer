@@ -210,6 +210,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.clearStatus).toHaveBeenCalledWith("stale-done-agent", {
       workspace: "workspace:previous-session",
     });
+    expect(mockClient.clearProgress).toHaveBeenCalledWith();
     expect(mockClient.setStatus).not.toHaveBeenCalledWith(
       "stale-done-agent",
       expect.any(String),
@@ -694,21 +695,42 @@ describe("Sidebar Sync", () => {
     expect(doneCall).toBeDefined();
   });
 
-  it("calls setProgress with ratio of done to total agents", async () => {
+  it("does not emit an opaque global progress bar while preserving agent status", async () => {
     stateMgr.writeState(
-      makeRecord({ agent_id: "a1", state: "done", surface_id: "surface:1" }),
+      makeRecord({
+        agent_id: "a1",
+        state: "working",
+        surface_id: "surface:1",
+        workspace_id: "workspace:alpha",
+        cli_session_id: "session-a1",
+      }),
     );
     stateMgr.writeState(
-      makeRecord({ agent_id: "a2", state: "working", surface_id: "surface:2" }),
+      makeRecord({
+        agent_id: "a2",
+        state: "done",
+        surface_id: "surface:2",
+        workspace_id: "workspace:beta",
+        cli_session_id: "session-a2",
+      }),
     );
     liveSurfaces = [makeSurface("surface:1"), makeSurface("surface:2")];
+    writeHeartbeat("a1", inboxOpts);
+    writeHeartbeat("a2", inboxOpts);
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
-    expect(mockClient.setProgress).toHaveBeenCalledWith(
-      0.5,
-      expect.objectContaining({ label: "agents 1/2" }),
+    expect(mockClient.setProgress).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a1",
+      expect.stringContaining("state=working"),
+      expect.objectContaining({ workspace: "workspace:alpha" }),
+    );
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      "a2",
+      expect.stringContaining("state=done"),
+      expect.objectContaining({ workspace: "workspace:beta" }),
     );
   });
 

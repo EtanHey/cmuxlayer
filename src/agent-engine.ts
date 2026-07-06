@@ -413,6 +413,7 @@ interface AgentEngineClient {
     value: number,
     opts?: { label?: string; workspace?: string; surface?: string },
   ): Promise<void>;
+  clearProgress(opts?: { workspace?: string }): Promise<void>;
   newSplit(
     direction: string,
     opts?: {
@@ -716,7 +717,6 @@ export class AgentEngine {
   private currentSweepScreenSignatures = new Map<string, string>();
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
-  private progressSnapshot: string | null = null;
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
   private loggedEvents = new Set<string>();
   /** e.g. "a1:done", "a1:health:unhealthy(...)" */
@@ -2666,17 +2666,6 @@ export class AgentEngine {
         this.clearAgentLifecycleMemory(agentId);
       }
     }
-
-    // Progress bar
-    if (total > 0) {
-      const progressSnapshot = `${done}/${total}`;
-      if (this.progressSnapshot !== progressSnapshot) {
-        await this.client.setProgress(done / total, {
-          label: `agents ${done}/${total}`,
-        });
-        this.progressSnapshot = progressSnapshot;
-      }
-    }
   }
 
   /** Whether a startup purge is pending (opt-in via enableStartupPurge) */
@@ -2704,6 +2693,11 @@ export class AgentEngine {
     if (this.startupPurgePending) {
       this.startupPurgePending = false;
       const purgedIds = this.registry.purgeAllTerminal();
+      try {
+        await this.client.clearProgress();
+      } catch {
+        // Best-effort cleanup of the removed workspace-less progress row.
+      }
       // Seed sidebar snapshot so syncSidebar clears their cmux entries
       for (const purgedAgent of purgedIds) {
         this.sidebarSnapshot.set(purgedAgent.agent_id, {
