@@ -39,6 +39,7 @@ export interface AgentPlacementContext {
   parentRole?: AgentRole | null;
   parentSurfaceId?: string | null;
   childWorkerSurfaceIds?: ReadonlySet<string>;
+  worktree?: boolean;
 }
 
 function emptyRoleSurfaceIds(): RoleSurfaceIds {
@@ -461,6 +462,22 @@ export function chooseAgentSpawnPlacement(
     return orchestratorPane
       ? { kind: "surface", pane: orchestratorPane.pane.ref }
       : { kind: "split", direction: "left" };
+  }
+
+  const hasLeadColumn =
+    layouts.some(isLeadMajorityPane) ||
+    context.parentRole === "orchestrator" ||
+    context.parentRole === "ic";
+  // A worktree worker has no classified destination surface yet. If the only
+  // visible column is lead-owned, seed the right worker column without anchoring
+  // the split to a lead pane.
+  if (
+    role === "worker" &&
+    context.worktree &&
+    columnCount < 2 &&
+    hasLeadColumn
+  ) {
+    return { kind: "split", direction: "right" };
   }
 
   const workerPanes = layouts.filter(isDedicatedWorkerPane);
