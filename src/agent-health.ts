@@ -1,6 +1,10 @@
-import type { AgentRecord, AgentState } from "./agent-types.js";
+import type { AgentRecord, AgentRole, AgentState } from "./agent-types.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
-import { inferRecordRoleOrNull } from "./layout-policy.js";
+import {
+  inferAgentRole,
+  inferRecordRoleOrNull,
+  isAgentRoleInferenceError,
+} from "./layout-policy.js";
 
 export type AgentHealthStatus = "healthy" | "degraded" | "unhealthy";
 export type AgentHealthIssueSeverity = "blocking" | "degraded" | "info";
@@ -171,6 +175,36 @@ function hasAmbiguousRepoOrCwdLabel(agent: AgentRecord): boolean {
   return (
     ambiguousNames.has(repo) ||
     /\/(?:gits|repos|projects|workspaces)\/?$/.test(cwd)
+  );
+}
+
+function inferRoleOrNull(input: {
+  role?: AgentRole;
+  launcherName?: string;
+  title?: string;
+  cli?: string;
+}): AgentRole | null {
+  try {
+    return inferAgentRole(input);
+  } catch (error) {
+    if (isAgentRoleInferenceError(error)) return null;
+    throw error;
+  }
+}
+
+function inferTopologyRole(
+  agent: AgentRecord,
+  input: AgentHealthInput,
+): AgentRole | null {
+  if (agent.role) return agent.role;
+
+  return (
+    inferRoleOrNull({ title: input.surface_title ?? undefined }) ??
+    inferRoleOrNull({
+      launcherName: agent.launcher_name ?? undefined,
+      cli: agent.cli,
+    }) ??
+    inferRecordRoleOrNull(agent)
   );
 }
 
@@ -374,6 +408,7 @@ export function evaluateAgentHealth(
   }
 
   const topology = input.topology;
+  const topologyRole = inferTopologyRole(agent, input) ?? role;
   if (topology && topology.column_count !== null) {
     if (topology.column_count >= 3) {
       addIssue(
@@ -383,7 +418,11 @@ export function evaluateAgentHealth(
         `workspace has ${topology.column_count} columns; expected at most two lead/worker columns`,
       );
     }
-    if (role === "orchestrator" && topology.column !== null && topology.column > 0) {
+    if (
+      topologyRole === "orchestrator" &&
+      topology.column !== null &&
+      topology.column > 0
+    ) {
       addIssue(
         issueCodes,
         issues,
@@ -391,7 +430,11 @@ export function evaluateAgentHealth(
         `orchestrator is in column ${topology.column}; expected leftmost column 0`,
       );
     }
-    if (role === "worker" && topology.column === 0 && topology.column_count >= 2) {
+    if (
+      topologyRole === "worker" &&
+      topology.column === 0 &&
+      topology.column_count >= 2
+    ) {
       addIssue(
         issueCodes,
         issues,
