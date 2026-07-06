@@ -336,6 +336,21 @@ function parseToolResult(result: TestToolResult): Record<string, unknown> {
   );
 }
 
+/** Read the durable close/kill telemetry the handlers append to events.jsonl. */
+function readCloseEvents(stateDir: string): Array<Record<string, unknown>> {
+  const filePath = join(stateDir, "events.jsonl");
+  try {
+    return readFileSync(filePath, "utf-8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((entry) => entry.event_type === "close");
+  } catch {
+    return [];
+  }
+}
+
 describe("agent lifecycle tool registration", () => {
   it("registers all 14 phase-5 lifecycle tools when lifecycle is enabled", () => {
     const mockExec = makeLifecycleExec();
@@ -764,6 +779,74 @@ describe("agent lifecycle tool handlers", () => {
         process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
       }
     }
+  });
+
+  it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
+    const server = createLifecycleServer(mockExec);
+    const stopTool = (server as any)._registeredTools["stop_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    // Seed a terminal agent so stopAgent short-circuits (no surface teardown),
+    // isolating the handler's own close-event emission.
+    const record = makeServerAgentRecord({
+      agent_id: "codex-golems-stopme",
+      surface_id: "surface:stopme",
+      state: "done",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+
+    await stopTool.handler(
+      { agent_id: record.agent_id, force: false },
+      {} as any,
+    );
+
+    const stopEvents = readCloseEvents(TEST_DIR).filter(
+      (e) => e.event === "stop_agent",
+    );
+    expect(stopEvents).toHaveLength(1);
+    expect(stopEvents[0]).toMatchObject({
+      event_type: "close",
+      event: "stop_agent",
+      target: "codex-golems-stopme",
+      force: false,
+      refused: false,
+    });
+    expect(typeof stopEvents[0].caller).toBe("string");
+    expect((stopEvents[0].caller as string).length).toBeGreaterThan(0);
+    expect(typeof stopEvents[0].ts).toBe("string");
+  });
+
+  it("kill logs a durable close entry per killed agent with caller and force", async () => {
+    const server = createLifecycleServer(mockExec);
+    const killTool = (server as any)._registeredTools["kill"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const record = makeServerAgentRecord({
+      agent_id: "codex-golems-killme",
+      surface_id: "surface:killme",
+      state: "done",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+
+    const result = await killTool.handler(
+      { target: record.agent_id, force: true },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+    expect(parsed.killed).toContain("codex-golems-killme");
+
+    const killEvents = readCloseEvents(TEST_DIR).filter(
+      (e) => e.event === "kill",
+    );
+    expect(killEvents).toHaveLength(1);
+    expect(killEvents[0]).toMatchObject({
+      event_type: "close",
+      event: "kill",
+      target: "codex-golems-killme",
+      force: true,
+      refused: false,
+    });
+    expect(typeof killEvents[0].caller).toBe("string");
   });
 
   it("spawn_agent warns when an existing same-lane idle agent can be reused", async () => {

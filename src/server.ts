@@ -47,6 +47,7 @@ import type {
   AgentRole,
   AgentState,
   CliType,
+  CloseTelemetryEvent,
   DeliveryEventType,
   DeliveryTelemetryEvent,
 } from "./agent-types.js";
@@ -2108,6 +2109,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const appendDeliveryEvent = (event: Omit<DeliveryTelemetryEvent, "ts">) => {
     eventLog.appendDelivery({
       ts: new Date().toISOString(),
+      ...event,
+    });
+  };
+
+  // Env vars the calling agent's harness sets in this MCP child's environment.
+  // First non-empty one is the best available caller identity for a close/kill.
+  const CLOSE_CALLER_ENV_KEYS = [
+    "CMUX_TAB_ID",
+    "CMUX_WORKSPACE_ID",
+    "CMUX_SOCKET_PATH",
+  ] as const;
+
+  /**
+   * Best available identity of whoever drove a close/kill. Prefers a real
+   * env-derived id (`CMUX_TAB_ID=...`); falls back to `mcp:<toolName>` for a
+   * tool call with no resolvable id. Never fabricates an id.
+   */
+  const resolveCloseCaller = (toolName: string): string => {
+    for (const key of CLOSE_CALLER_ENV_KEYS) {
+      const value = process.env[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return `${key}=${value.trim()}`;
+      }
+    }
+    return `mcp:${toolName}`;
+  };
+
+  const appendCloseEvent = (
+    event: Omit<CloseTelemetryEvent, "ts" | "event_type">,
+  ) => {
+    eventLog.appendClose({
+      ts: new Date().toISOString(),
+      event_type: "close",
       ...event,
     });
   };
@@ -4720,6 +4754,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 };
               } catch {
                 // If consolidation fails, keep the fail-safe refusal path.
+                appendCloseEvent({
+                  event: "close_surface",
+                  target: `${args.surface} (agent ${backingAgent.agent_id})`,
+                  caller: resolveCloseCaller("close_surface"),
+                  force: args.force ?? false,
+                  reason: `refused: agent still live (${backingAgent.state}), registry consolidation failed`,
+                  refused: true,
+                });
                 return err(
                   new Error(
                     `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live) and registry consolidation failed. Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
@@ -4742,6 +4784,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     !TERMINAL_AGENT_STATES.has(record.state),
                 );
               if (remainingLiveAgent) {
+                appendCloseEvent({
+                  event: "close_surface",
+                  target: `${args.surface} (agent ${remainingLiveAgent.agent_id})`,
+                  caller: resolveCloseCaller("close_surface"),
+                  force: args.force ?? false,
+                  reason: `refused: agent still live (${remainingLiveAgent.state}) after stale registry consolidation`,
+                  refused: true,
+                });
                 return err(
                   new Error(
                     `Refused to close ${args.surface}: agent ${remainingLiveAgent.agent_id} is "${remainingLiveAgent.state}" (still live) after stale registry consolidation. Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
@@ -4759,6 +4809,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 );
               }
             } else {
+              appendCloseEvent({
+                event: "close_surface",
+                target: `${args.surface} (agent ${backingAgent.agent_id})`,
+                caller: resolveCloseCaller("close_surface"),
+                force: args.force ?? false,
+                reason: `refused: agent still live (${backingAgent.state})`,
+                refused: true,
+              });
               return err(
                 new Error(
                   `Refused to close ${args.surface}: agent ${backingAgent.agent_id} is "${backingAgent.state}" (still live). Pass force:true to close anyway. Current pane contents follow in screen/structuredContent.`,
@@ -4825,6 +4883,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
           collapsePane,
+        });
+        appendCloseEvent({
+          event: "close_surface",
+          target: args.surface,
+          caller: resolveCloseCaller("close_surface"),
+          force: args.force ?? false,
+          reason: staleRegistryDoneConsolidated
+            ? `closed after stale-registry done consolidation (agent ${staleRegistryDoneConsolidated.agent_id})`
+            : null,
+          refused: false,
         });
         const data = {
           surface: args.surface,
@@ -5281,7 +5349,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           closeSurface: (surface, closeOpts) =>
             withSurfaceWrite(
               surface,
-              () => client.closeSurface(surface, closeOpts),
+              async () => {
+                const result = await client.closeSurface(surface, closeOpts);
+                appendCloseEvent({
+                  event: "internal",
+                  target: surface,
+                  caller: "internal:agent_engine",
+                  force: false,
+                  reason: "agent_engine teardown",
+                  refused: false,
+                });
+                return result;
+              },
               { toolName: "close_surface", workspace: closeOpts?.workspace },
             ),
           notify: (notifyOpts) => client.notify(notifyOpts),
@@ -6610,6 +6689,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           await engine.stopAgent(args.agent_id, args.force);
           const state = engine.getAgentState(args.agent_id);
+          appendCloseEvent({
+            event: "stop_agent",
+            target: args.agent_id,
+            caller: resolveCloseCaller("stop_agent"),
+            force: args.force ?? false,
+            reason: `state after stop: ${state?.state ?? "done"}`,
+            refused: false,
+          });
           const data = {
             agent_id: args.agent_id,
             state: state?.state ?? "done",
@@ -7162,6 +7249,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               await engine.stopAgent(agentId, args.force);
               killed.push(agentId);
+              appendCloseEvent({
+                event: "kill",
+                target: agentId,
+                caller: resolveCloseCaller("kill"),
+                force: args.force ?? false,
+                reason: current ? `state before kill: ${current.state}` : null,
+                refused: false,
+              });
             } catch (e) {
               errors.push(
                 `${agentId}: ${e instanceof Error ? e.message : String(e)}`,

@@ -7,6 +7,7 @@
 import { appendFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  CloseTelemetryEvent,
   ControlHealthTelemetryEvent,
   DeliveryTelemetryEvent,
   EventLogEntry,
@@ -30,6 +31,14 @@ export class EventLog {
   }
 
   appendControlHealth(event: ControlHealthTelemetryEvent): void {
+    this.appendEntry(event);
+  }
+
+  /**
+   * Record a surface close / agent kill-or-stop with its caller. Lands in the
+   * same events.jsonl as every other telemetry entry so forensics read one log.
+   */
+  appendClose(event: CloseTelemetryEvent): void {
     this.appendEntry(event);
   }
 
