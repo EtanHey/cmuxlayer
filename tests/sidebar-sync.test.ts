@@ -11,6 +11,7 @@ import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
+import { readMonitorRegistry, registerMonitor } from "../src/monitor-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -69,6 +70,25 @@ function makeWorkspace(ref: string) {
     selected: false,
     pinned: false,
   };
+}
+
+async function armLeadMonitor(input: {
+  registryPath: string;
+  monitorId: string;
+  ownerSeat: string;
+  now: () => number;
+  timeoutS?: number;
+}): Promise<void> {
+  await registerMonitor(
+    {
+      monitor_id: input.monitorId,
+      owner_seat: input.ownerSeat,
+      watch_targets: ["orchestrator/collab/example.md"],
+      mechanism: "event",
+      deadman_timeout_s: input.timeoutS ?? 60,
+    },
+    { registryPath: input.registryPath, now: input.now },
+  );
 }
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
@@ -601,9 +621,10 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
-  it("fires one proactive alert when a lead monitor heartbeat goes stale", async () => {
-    const inboxDir = join(TEST_DIR, "lead-stale-monitor-inbox");
-    const agentId = "cmuxlayer-lead-stale-monitor";
+  it("fires one proactive alert when the registry deadman fires for a lead", async () => {
+    const inboxDir = join(TEST_DIR, "lead-registry-deadman-inbox");
+    const registryPath = join(TEST_DIR, "lead-deadman-registry.json");
+    const agentId = "cmuxlayer-lead-registry-deadman";
     let now = 1_000_000;
     stateMgr.writeState(
       makeRecord({
@@ -625,8 +646,15 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-deadman-1",
+      ownerSeat: agentId,
+      now: () => now,
+    });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
@@ -636,8 +664,8 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).toHaveBeenCalledTimes(1);
     expect(mockClient.notify).toHaveBeenCalledWith({
       title: "Lead monitor/session ended",
-      subtitle: "cmuxlayer lead cmuxlayer-lead-stale-monitor",
-      body: "Lead seat cmuxlayer-lead-stale-monitor in workspace workspace:cmuxlayer is watch-blind: monitor/session ended - lead is watch-blind. Last-known state: working.",
+      subtitle: "cmuxlayer lead cmuxlayer-lead-registry-deadman",
+      body: "Lead seat cmuxlayer-lead-registry-deadman in workspace workspace:cmuxlayer is watch-blind: monitor/session ended - lead is watch-blind. Last-known state: working.",
       workspace: "workspace:cmuxlayer",
       surface: "surface:lead-stale",
     });
@@ -648,9 +676,10 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("does not alert when a lead monitor was never armed", async () => {
-    const inboxDir = join(TEST_DIR, "lead-never-armed-monitor-inbox");
-    const agentId = "cmuxlayer-lead-never-armed-monitor";
+  it("does not alert from stale inbox heartbeat when no registry deadman fired", async () => {
+    const inboxDir = join(TEST_DIR, "lead-stale-inbox-only");
+    const registryPath = join(TEST_DIR, "lead-stale-inbox-only-registry.json");
+    const agentId = "cmuxlayer-lead-stale-inbox-only";
     let now = 1_500_000;
     stateMgr.writeState(
       makeRecord({
@@ -672,7 +701,11 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    now += 61_000;
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -687,9 +720,10 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("does not fire the proactive monitor-death alert for a worker", async () => {
-    const inboxDir = join(TEST_DIR, "worker-stale-monitor-inbox");
-    const agentId = "cmuxlayer-worker-stale-monitor";
+  it("does not fire the lead monitor-death alert for a worker registry deadman", async () => {
+    const inboxDir = join(TEST_DIR, "worker-registry-deadman-inbox");
+    const registryPath = join(TEST_DIR, "worker-registry-deadman.json");
+    const agentId = "cmuxlayer-worker-registry-deadman";
     let now = 2_000_000;
     stateMgr.writeState(
       makeRecord({
@@ -709,8 +743,15 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "worker-deadman-1",
+      ownerSeat: agentId,
+      now: () => now,
+    });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
@@ -726,8 +767,9 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("re-arms the lead monitor-death alert after heartbeat recovery", async () => {
+  it("re-arms the lead monitor-death alert after a newer alive registry monitor appears", async () => {
     const inboxDir = join(TEST_DIR, "lead-monitor-rearm-inbox");
+    const registryPath = join(TEST_DIR, "lead-monitor-rearm-registry.json");
     const agentId = "cmuxlayer-lead-monitor-rearm";
     let now = 3_000_000;
     stateMgr.writeState(
@@ -750,15 +792,27 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-rearm-1",
+      ownerSeat: agentId,
+      now: () => now,
+    });
     now += 61_000;
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
 
     now += 1_000;
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-rearm-2",
+      ownerSeat: agentId,
+      now: () => now,
+    });
     await engine.runSweep();
 
     now += 61_000;
@@ -767,9 +821,10 @@ describe("Sidebar Sync", () => {
     expect(mockClient.notify).toHaveBeenCalledTimes(2);
   });
 
-  it("deadman timeout fires a lead monitor-death alert without a follow-up sweep", async () => {
+  it("registry deadman timeout waits for a cross-agent sweep instead of an owner-local timer", async () => {
     vi.useFakeTimers();
-    const inboxDir = join(TEST_DIR, "lead-monitor-deadman-inbox");
+    const inboxDir = join(TEST_DIR, "lead-monitor-cross-agent-inbox");
+    const registryPath = join(TEST_DIR, "lead-monitor-cross-agent-sweep.json");
     const agentId = "cmuxlayer-lead-monitor-deadman";
     let now = 4_000_000;
     stateMgr.writeState(
@@ -792,8 +847,15 @@ describe("Sidebar Sync", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
-    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-cross-agent-1",
+      ownerSeat: agentId,
+      now: () => now,
+    });
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
@@ -817,6 +879,10 @@ describe("Sidebar Sync", () => {
       await Promise.resolve();
     }
 
+    expect(mockClient.notify).not.toHaveBeenCalled();
+
+    await engine.runSweep();
+
     expect(mockClient.notify).toHaveBeenCalledTimes(1);
     expect(mockClient.notify).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -828,7 +894,8 @@ describe("Sidebar Sync", () => {
   });
 
   it("lead monitor-death delivery memory follows session-capture rename", async () => {
-    const inboxDir = join(TEST_DIR, "lead-monitor-rename-deadman-inbox");
+    const inboxDir = join(TEST_DIR, "lead-monitor-rename-inbox");
+    const registryPath = join(TEST_DIR, "lead-monitor-rename-registry.json");
     const pendingAgentId = "claude-cmuxlayer-pending-lead";
     const sessionId = "12345678-1234-1234-1234-123456789abc";
     const finalAgentId = generateAgentId("claude", "cmuxlayer", sessionId);
@@ -855,8 +922,15 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       inboxOpts: { baseDir: inboxDir, now: () => now },
       sessionIdentityResolver: () => capturedSessionId,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
     });
-    writeHeartbeat(pendingAgentId, { baseDir: inboxDir, now: () => now });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-rename-1",
+      ownerSeat: pendingAgentId,
+      now: () => now,
+    });
     now += AGENT_HEALTH_MONITOR_MAX_AGE_MS + 1;
     await engine.getRegistry().reconstitute();
 
@@ -876,6 +950,10 @@ describe("Sidebar Sync", () => {
     expect(stateMgr.readState(pendingAgentId)).toBeNull();
     expect(stateMgr.readState(finalAgentId)).not.toBeNull();
     expect(mockClient.notify).toHaveBeenCalledTimes(1);
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "lead-rename-1",
+      owner_seat: finalAgentId,
+    });
   });
 
   it("does not emit done notifications until a worker has verified terminal evidence", async () => {

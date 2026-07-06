@@ -5,6 +5,10 @@ import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
+import {
+  defaultMonitorRegistryPath,
+  httpNotifyMonitorDeadman,
+} from "./monitor-registry.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
@@ -192,6 +196,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         await this.sendCommand(surface, command, workspace);
       },
       outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+      monitorRegistryPath: defaultMonitorRegistryPath(),
+      monitorRegistryNotify: httpNotifyMonitorDeadman,
     });
   }
 

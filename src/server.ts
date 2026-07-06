@@ -24,6 +24,7 @@ import {
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
+import type { MonitorDeadmanNotify } from "./monitor-registry.js";
 import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
@@ -1481,6 +1482,13 @@ export interface CreateServerOptions {
    * to actually flush `~/.golems-zikaron/outbox.md` to the notify path.
    */
   outboxDrain?: () => Promise<unknown>;
+  /**
+   * Canonical monitor-registry file scanned by the agent-engine deadman sweep.
+   * Omitted by default so tests do not touch ~/.golems-zikaron.
+   */
+  monitorRegistryPath?: string;
+  monitorRegistryNow?: () => number;
+  monitorRegistryNotify?: MonitorDeadmanNotify;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -5290,6 +5298,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await sendLauncherCommandToSurface({ surface, workspace, command });
           },
           outboxDrain: opts?.outboxDrain,
+          monitorRegistryPath: opts?.monitorRegistryPath,
+          monitorRegistryNow: opts?.monitorRegistryNow,
+          monitorRegistryNotify: opts?.monitorRegistryNotify,
         },
       );
     context.lifecycleSweepEngine = engine;
