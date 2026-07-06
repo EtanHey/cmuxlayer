@@ -3,7 +3,7 @@
 /**
  * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * 36 MCP tools across three categories (keep in sync with server.ts and the
+ * 41 MCP tools across four categories (keep in sync with server.ts and the
  * "total tool count" assertion in tests/server-agent-tools.test.ts):
  *   Core (18): list_surfaces, control_health, select_workspace,
  *              create_workspace, new_split, new_surface, move_surface,
@@ -11,6 +11,9 @@
  *              read_screen, rename_tab, notify, set_status, set_progress,
  *              close_surface, browser_surface
  *   Metacommlayer write channel (2): dispatch_to_agent, inbox_check
+ *   Monitor registry (5): register_monitor, signal_monitor,
+ *                         deregister_monitor, list_monitors,
+ *                         query_monitor_registry
  *   Agent lifecycle (16): spawn_agent, new_worktree_split, spawn_in_workspace,
  *                         resync_agents,
  *                         send_to (canonical), send_to_agent (deprecated alias),

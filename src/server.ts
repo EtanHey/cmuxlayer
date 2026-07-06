@@ -24,7 +24,16 @@ import {
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
-import type { MonitorDeadmanNotify } from "./monitor-registry.js";
+import {
+  deregisterMonitor,
+  queryMonitorRegistryForGates,
+  readMonitorRegistry,
+  registerMonitor,
+  signalMonitor,
+  type MonitorDeadmanNotify,
+  type MonitorRegistryOptions,
+  type RegisterMonitorInput,
+} from "./monitor-registry.js";
 import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
@@ -185,6 +194,56 @@ const ANNOTATIONS = {
     openWorldHint: false,
   } as const,
 };
+
+const MonitorMechanismSchema = z.enum(["event", "offset-poll"]);
+const MonitorDedupeSchema = z.enum(["offset", "seen-set", "header-keyed"]);
+const MonitorRegistryGateSchema = z.enum(["gate-9", "gate-10"]);
+
+const RegisterMonitorArgsSchema = {
+  monitor_id: z.string().describe("Stable unique monitor id"),
+  owner_seat: z.string().describe("Seat/agent responsible for the monitor"),
+  watch_targets: z
+    .array(z.string())
+    .min(1)
+    .describe("Files, channels, or resources this monitor watches"),
+  mechanism: MonitorMechanismSchema.describe("Monitor mechanism"),
+  watermark_key: z
+    .string()
+    .optional()
+    .describe("Required for offset-poll monitors"),
+  dedupe: MonitorDedupeSchema.optional().describe("Dedupe strategy"),
+  pattern: z.string().optional().describe("Optional delivery/watch pattern"),
+  deadman_timeout_s: z
+    .number()
+    .positive()
+    .describe("Required deadman timeout in seconds"),
+  addressee: z.string().optional().describe("Owner to notify on deadman fire"),
+} as const;
+
+const MonitorIdArgsSchema = {
+  monitor_id: z.string().describe("Monitor id"),
+} as const;
+
+const QueryMonitorRegistryArgsSchema = {
+  gate: MonitorRegistryGateSchema.optional().describe(
+    "Optional gate query mode",
+  ),
+  owner_seat: z.string().optional().describe("Filter by owner seat"),
+  monitor_id: z.string().optional().describe("Filter or claimed monitor id"),
+  monitor_ids: z
+    .array(z.string())
+    .optional()
+    .describe("Filter or claimed monitor ids"),
+  claimed_monitor_ids: z
+    .array(z.string())
+    .optional()
+    .describe("Additional monitor ids claimed by a gate caller"),
+  include_dead: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe("Include intentionally deregistered dead monitors"),
+} as const;
 
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";
@@ -1957,6 +2016,192 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const monitorRegistryOptions = (): MonitorRegistryOptions => ({
+    ...(opts?.monitorRegistryPath ? { registryPath: opts.monitorRegistryPath } : {}),
+    ...(opts?.monitorRegistryNow ? { now: opts.monitorRegistryNow } : {}),
+  });
+  const monitorRegistryError = (
+    reason: string,
+    monitorId?: string | null,
+    message = reason,
+  ): ToolReturn =>
+    err(new Error(message), {
+      reason,
+      monitor_id: monitorId ?? "<missing-monitor-id>",
+    });
+  const validateRegisterMonitorArgs = (
+    args: Record<string, unknown>,
+  ): RegisterMonitorInput | ToolReturn => {
+    const monitorId = nonEmptyString(args.monitor_id);
+    if (!monitorId) {
+      return monitorRegistryError("missing-monitor-id", null);
+    }
+    const ownerSeat = nonEmptyString(args.owner_seat);
+    if (!ownerSeat || /^(?:unknown|none|null|n\/a)$/i.test(ownerSeat)) {
+      return monitorRegistryError(
+        "missing-or-unknown-owner-seat",
+        monitorId,
+      );
+    }
+    const watchTargets = Array.isArray(args.watch_targets)
+      ? args.watch_targets.map(nonEmptyString)
+      : null;
+    if (
+      !watchTargets ||
+      watchTargets.length === 0 ||
+      watchTargets.some((target) => target === null)
+    ) {
+      return monitorRegistryError("invalid-watch-targets", monitorId);
+    }
+    if (args.mechanism !== "event" && args.mechanism !== "offset-poll") {
+      return monitorRegistryError("invalid-mechanism", monitorId);
+    }
+    const watermarkKey = nonEmptyString(args.watermark_key);
+    if (args.mechanism === "offset-poll" && !watermarkKey) {
+      return monitorRegistryError(
+        "offset-poll-missing-watermark-key",
+        monitorId,
+      );
+    }
+    const dedupe =
+      args.dedupe === "offset" ||
+      args.dedupe === "seen-set" ||
+      args.dedupe === "header-keyed"
+        ? args.dedupe
+        : undefined;
+    if (args.dedupe !== undefined && !dedupe) {
+      return monitorRegistryError("invalid-dedupe", monitorId);
+    }
+    if (
+      typeof args.deadman_timeout_s !== "number" ||
+      !Number.isFinite(args.deadman_timeout_s) ||
+      args.deadman_timeout_s <= 0
+    ) {
+      return monitorRegistryError("invalid-deadman-timeout", monitorId);
+    }
+    const addressee = nonEmptyString(args.addressee);
+    if (args.addressee !== undefined && !addressee) {
+      return monitorRegistryError("invalid-addressee", monitorId);
+    }
+
+    return {
+      monitor_id: monitorId,
+      owner_seat: ownerSeat,
+      watch_targets: watchTargets as string[],
+      mechanism: args.mechanism,
+      ...(nonEmptyString(args.pattern)
+        ? { pattern: nonEmptyString(args.pattern)! }
+        : {}),
+      ...(watermarkKey ? { watermark_key: watermarkKey } : {}),
+      ...(dedupe ? { dedupe } : {}),
+      ...(addressee ? { addressee } : {}),
+      deadman_timeout_s: args.deadman_timeout_s,
+    };
+  };
+  const isToolReturn = (
+    value: RegisterMonitorInput | ToolReturn,
+  ): value is ToolReturn => "content" in value;
+  const collectMonitorIds = (args: {
+    monitor_id?: string;
+    monitor_ids?: string[];
+    claimed_monitor_ids?: string[];
+  }): string[] => {
+    const ids = [
+      ...(nonEmptyString(args.monitor_id) ? [nonEmptyString(args.monitor_id)!] : []),
+      ...(Array.isArray(args.monitor_ids) ? args.monitor_ids : []),
+      ...(Array.isArray(args.claimed_monitor_ids)
+        ? args.claimed_monitor_ids
+        : []),
+    ]
+      .map(nonEmptyString)
+      .filter((id): id is string => id !== null);
+    return [...new Set(ids)];
+  };
+  const filterMonitorRegistryRecords = <
+    T extends { monitor_id: string; owner_seat?: string; state?: string },
+  >(
+    records: T[],
+    args: {
+      owner_seat?: string;
+      include_dead?: boolean;
+      monitor_id?: string;
+      monitor_ids?: string[];
+      claimed_monitor_ids?: string[];
+    },
+    includeDeadByDefault: boolean,
+  ): T[] => {
+    const ownerSeat = nonEmptyString(args.owner_seat);
+    const ids = collectMonitorIds(args);
+    const idSet = new Set(ids);
+    const includeDead = args.include_dead ?? includeDeadByDefault;
+    return records.filter((record) => {
+      if (!includeDead && record.state === "dead") return false;
+      if (ownerSeat && record.owner_seat !== ownerSeat) return false;
+      if (idSet.size > 0 && !idSet.has(record.monitor_id)) return false;
+      return true;
+    });
+  };
+  const queryMonitorRegistryTool = (
+    args: {
+      gate?: "gate-9" | "gate-10";
+      owner_seat?: string;
+      monitor_id?: string;
+      monitor_ids?: string[];
+      claimed_monitor_ids?: string[];
+      include_dead?: boolean;
+    },
+    toolName: "list_monitors" | "query_monitor_registry",
+  ): ToolReturn => {
+    const gate = args.gate;
+    if (!gate) {
+      const registry = readMonitorRegistry(monitorRegistryOptions());
+      const monitors = filterMonitorRegistryRecords(
+        registry.monitors,
+        args,
+        false,
+      );
+      return ok({
+        tool: toolName,
+        version: registry.version,
+        monitors,
+      });
+    }
+
+    const claimedMonitorIds = collectMonitorIds(args);
+    const query = queryMonitorRegistryForGates({
+      ...monitorRegistryOptions(),
+      ...(claimedMonitorIds.length > 0 ? { claimedMonitorIds } : {}),
+    });
+    const requestedIds = new Set(claimedMonitorIds);
+    const monitors = filterMonitorRegistryRecords(
+      query.monitors,
+      args,
+      true,
+    );
+    const monitorById = new Map(
+      query.monitors.map((monitor) => [monitor.monitor_id, monitor]),
+    );
+    const violations = query.violations.filter((violation) => {
+      if (violation.gate !== gate) return false;
+      if (requestedIds.size > 0 && !requestedIds.has(violation.monitor_id)) {
+        return false;
+      }
+      const ownerSeat = nonEmptyString(args.owner_seat);
+      if (!ownerSeat) return true;
+      const monitor = monitorById.get(violation.monitor_id);
+      return !monitor || monitor.owner_seat === ownerSeat;
+    });
+    return ok({
+      tool: toolName,
+      gate,
+      verdict: violations.length > 0 ? "fire" : "pass",
+      queried_at: query.queried_at,
+      latency_ms: query.latency_ms,
+      monitors,
+      violations,
+    });
+  };
+
   const server = new McpServer(
     {
       name: "cmuxlayer",
@@ -3685,6 +3930,129 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return okFormatted(formatControlHealth(health), {
           health,
         });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "register_monitor",
+    "Register or re-arm a shared monitor-registry deadman record. Offset-poll monitors require a watermark_key; fired monitor ids cannot be reused.",
+    RegisterMonitorArgsSchema,
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const inputOrError = validateRegisterMonitorArgs(args);
+        if (isToolReturn(inputOrError)) {
+          return inputOrError;
+        }
+        const existing = readMonitorRegistry(monitorRegistryOptions()).monitors.find(
+          (record) => record.monitor_id === inputOrError.monitor_id,
+        );
+        if (existing?.state === "deadman-fired") {
+          return monitorRegistryError(
+            "cannot-rearm-fired-monitor-id",
+            inputOrError.monitor_id,
+            "cannot re-arm a fired monitor_id; use a new id",
+          );
+        }
+        const record = await registerMonitor(
+          inputOrError,
+          monitorRegistryOptions(),
+        );
+        return ok({ record });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (/cannot re-arm a fired monitor_id/i.test(message)) {
+          return monitorRegistryError(
+            "cannot-rearm-fired-monitor-id",
+            nonEmptyString(args.monitor_id),
+            message,
+          );
+        }
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "signal_monitor",
+    "Signal a registered monitor's liveness heartbeat by updating last_signal_at.",
+    MonitorIdArgsSchema,
+    ANNOTATIONS.idempotentMutating,
+    async (args) => {
+      try {
+        const monitorId = nonEmptyString(args.monitor_id);
+        if (!monitorId) {
+          return monitorRegistryError("missing-monitor-id", null);
+        }
+        const record = await signalMonitor(monitorId, monitorRegistryOptions());
+        if (!record) {
+          return monitorRegistryError(
+            "monitor-id-absent-or-not-alive",
+            monitorId,
+            `Monitor not found or not alive: ${monitorId}`,
+          );
+        }
+        return ok({ record });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "deregister_monitor",
+    "Mark a monitor as intentionally stopped so later signals do not revive it.",
+    MonitorIdArgsSchema,
+    ANNOTATIONS.idempotentMutating,
+    async (args) => {
+      try {
+        const monitorId = nonEmptyString(args.monitor_id);
+        if (!monitorId) {
+          return monitorRegistryError("missing-monitor-id", null);
+        }
+        const record = await deregisterMonitor(
+          monitorId,
+          monitorRegistryOptions(),
+        );
+        if (!record) {
+          return monitorRegistryError(
+            "monitor-id-absent",
+            monitorId,
+            `Monitor not found: ${monitorId}`,
+          );
+        }
+        return ok({ record });
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "list_monitors",
+    "List monitor-registry records, optionally filtering by gate, owner_seat, or monitor id.",
+    QueryMonitorRegistryArgsSchema,
+    ANNOTATIONS.readOnly,
+    async (args) => {
+      try {
+        return queryMonitorRegistryTool(args, "list_monitors");
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+
+  server.tool(
+    "query_monitor_registry",
+    "Query the monitor registry for gate-9/gate-10 pass/fire verdicts and monitor metadata.",
+    QueryMonitorRegistryArgsSchema,
+    ANNOTATIONS.readOnly,
+    async (args) => {
+      try {
+        return queryMonitorRegistryTool(args, "query_monitor_registry");
       } catch (e) {
         return err(e);
       }
