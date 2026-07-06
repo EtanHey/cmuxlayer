@@ -199,6 +199,23 @@ function saveState(statePath: string, state: DrainState): void {
 }
 
 /**
+ * Stamp the sidecar to the current STATE_VERSION when the version boundary is
+ * crossed with NO backlog to quarantine (an empty or absent outbox). Without
+ * this, a fresh v2 deploy whose outbox is momentarily empty/absent would
+ * early-return before the migration block, the sidecar would never be stamped,
+ * and the gate would stay armed — so the FIRST real message to arrive later
+ * would be quarantined and dropped. Existing drained records are preserved.
+ * Returns true iff it stamped (i.e. a boundary was actually crossed).
+ */
+function stampVersionBaseline(statePath: string): boolean {
+  const state = loadState(statePath);
+  if (state.version >= STATE_VERSION) return false;
+  state.version = STATE_VERSION;
+  saveState(statePath, state);
+  return true;
+}
+
+/**
  * Append a delivered entry to the durable archive so operator history survives
  * when the live outbox.md is later trimmed/rotated. Best-effort: the caller
  * treats a throw here as non-fatal (the entry is already marked drained).
@@ -269,12 +286,25 @@ export async function drainOutbox(
   };
 
   if (!existsSync(outboxPath)) {
+    // No outbox file, but a version-boundary crossing must still stamp the v2
+    // baseline so the gate disarms — otherwise the first real message to arrive
+    // later would be quarantined. Nothing to quarantine here, just stamp.
+    if (stampVersionBaseline(statePath)) {
+      result.migrated = true;
+      result.migratedCount = 0;
+    }
     return result;
   }
 
   const entries = parseOutboxEntries(readFileSync(outboxPath, "utf8"));
   result.totalEntries = entries.length;
   if (entries.length === 0) {
+    // Empty outbox: same as above — stamp the v2 baseline so a fresh deploy
+    // does not leave the gate armed against the first genuine message.
+    if (stampVersionBaseline(statePath)) {
+      result.migrated = true;
+      result.migratedCount = 0;
+    }
     return result;
   }
 

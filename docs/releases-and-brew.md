@@ -114,24 +114,38 @@ the drainer itself stays **non-destructive** (idempotency is the sidecar, never 
 mutation of `outbox.md`; see the L7 invariant).
 
 As belt-and-suspenders release hygiene, **before shipping a release that touches
-outbox semantics**, mechanically archive + truncate the live outbox on each
-target Mac so a fresh backlog can never be re-drained through the new code path:
+outbox semantics**, archive the live outbox on each target Mac so operator
+history is preserved before the new code path runs.
+
+> ⚠️ **Never discard undelivered entries.** The drainer reads only `outbox.md`
+> and its sidecar — it does **not** read `outbox-archive.md`. So truncating
+> `outbox.md` while it still holds *undelivered* entries silently drops them
+> (they are archived-as-history but never delivered). Truncation is therefore
+> only safe **after** the outbox is confirmed fully drained. If you cannot
+> confirm that, **archive only — do not truncate.**
 
 ```bash
 # Run on EACH target Mac, per user, before the new binary goes live.
 z=~/.golems-zikaron
 if [ -s "$z/outbox.md" ]; then
+  # 1) Always safe: append a copy to the durable archive (history survives).
   { printf '\n<!-- archived %s (pre-deploy) -->\n' "$(date -u +%FT%TZ)"; cat "$z/outbox.md"; } >> "$z/outbox-archive.md"
-  : > "$z/outbox.md"    # truncate in place; keep the file so the drainer no-ops cleanly
+
+  # 2) Truncate ONLY after confirming the outbox is fully drained — i.e. every
+  #    entry has already been delivered (no pending/undelivered messages). If you
+  #    have not confirmed that, SKIP this line and leave outbox.md in place; the
+  #    version-gated quarantine already prevents a re-send, and the drainer stays
+  #    non-destructive. Truncating an undrained outbox would DROP those messages.
+  : > "$z/outbox.md"   # keep the file so the drainer no-ops cleanly
 fi
 ```
 
 This is a **documented manual deploy step**, not something the drainer does — the
 drainer must remain non-destructive. Do **not** wire an unguarded `rm`/truncate
 into `scripts/release.sh`; a release runs on the maintainer's machine and must not
-silently delete another operator's pending messages. If you add a hook, make it a
-**commented reminder** that prints the step for the operator to run per target
-Mac, gated behind an explicit opt-in flag.
+silently delete another operator's pending (undelivered) messages. If you add a
+hook, make it a **commented reminder** that prints the step for the operator to
+run per target Mac, gated behind an explicit opt-in flag.
 
 ## Behavioural invariants (what changed in v0.2.0)
 

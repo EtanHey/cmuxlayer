@@ -449,10 +449,77 @@ describe("id-scheme migration (v1→v2 quarantine)", () => {
     expect(rec.calls).toHaveLength(0);
     expect(result.deliveredCount).toBe(0);
     expect(result.migrated).toBe(true);
+    expect(result.migratedCount).toBe(2);
     const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
       version: number;
     };
     expect(saved.version).toBe(2);
+  });
+
+  it("fresh v2 deploy with an EMPTY outbox stamps the baseline so the first real message DELIVERS (not quarantined)", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // Fresh deploy: no sidecar, outbox present but empty (no backlog). The old
+    // code early-returned here BEFORE stamping v2, leaving the gate armed.
+    writeFileSync(outboxPath, "");
+    const firstDrain = recorder();
+    const empty = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: firstDrain.deliver,
+    });
+    expect(firstDrain.calls).toHaveLength(0);
+    expect(empty.deliveredCount).toBe(0);
+    // Gate must be disarmed: sidecar stamped to v2 even with nothing to quarantine.
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+    };
+    expect(saved.version).toBe(2);
+
+    // The FIRST real message arrives later — it must DELIVER, not be quarantined.
+    writeFileSync(outboxPath, "first real message\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    expect(result.deliveredCount).toBe(1);
+    expect(result.migrated).toBeUndefined();
+    expect(rec.calls.map((c) => c.body)).toEqual(["first real message"]);
+  });
+
+  it("fresh v2 deploy with an ABSENT outbox stamps the baseline so the first real message DELIVERS", async () => {
+    const root = tempRoot();
+    const { outboxPath, statePath, archivePath } = harness(root);
+    // No outbox file at all yet, no sidecar. Boundary must still be stamped.
+    const firstDrain = recorder();
+    await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: firstDrain.deliver,
+    });
+    expect(firstDrain.calls).toHaveLength(0);
+    const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+      version: number;
+    };
+    expect(saved.version).toBe(2);
+
+    // First real message → delivers, not quarantined.
+    writeFileSync(outboxPath, "first real message\n");
+    const rec = recorder();
+    const result = await drainOutbox({
+      outboxPath,
+      statePath,
+      archivePath,
+      deliver: rec.deliver,
+    });
+    expect(result.deliveredCount).toBe(1);
+    expect(result.migrated).toBeUndefined();
+    expect(rec.calls.map((c) => c.body)).toEqual(["first real message"]);
   });
 
   it("post-migration delivery works: a NEW entry after migration delivers exactly once", async () => {
