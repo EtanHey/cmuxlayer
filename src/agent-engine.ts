@@ -138,6 +138,18 @@ export interface SpawnAgentResult {
   mcp_env?: string;
 }
 
+function isWorktreeLaunch(
+  params: Pick<SpawnAgentParams, "cwd" | "worktree_branch">,
+): boolean {
+  if (params.worktree_branch) return true;
+  const cwd = params.cwd;
+  if (!cwd) return false;
+  return (
+    /(?:^|[/\\])[^/\\]+\.wt(?:[/\\]|$)/.test(cwd) ||
+    /(?:^|[/\\])\.worktrees(?:[/\\]|$)/.test(cwd)
+  );
+}
+
 export type HarvestabilityDoneSource = "transcript" | "screen" | "none";
 
 export interface HarvestabilityEvidenceChannel {
@@ -1486,6 +1498,7 @@ export class AgentEngine {
       role?: AgentRole;
       parentAgent?: AgentRecord | null;
       repo?: string;
+      worktree?: boolean;
     },
   ): Promise<CreatedAgentSurface> {
     // Pin a child worker to the parent orchestrator's ACTUAL workspace before
@@ -1584,6 +1597,7 @@ export class AgentEngine {
           parentRole,
           parentSurfaceId: parentAgent?.surface_id ?? null,
           childWorkerSurfaceIds,
+          worktree: context?.worktree,
         },
       );
       const surface =
@@ -3134,6 +3148,7 @@ export class AgentEngine {
       role,
       parentAgent,
       repo: spawnParams.repo,
+      worktree: isWorktreeLaunch(spawnParams),
     });
 
     // 2. Write initial state (creating → booting)

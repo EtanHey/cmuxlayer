@@ -834,12 +834,72 @@ describe("AgentEngine", () => {
         "workspace:parent",
       );
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
-        pane: "pane:parent",
         workspace: "workspace:parent",
         type: "terminal",
       });
       // The parent pin short-circuits repo-name resolution entirely.
       expect(mockClient.listWorkspaces).not.toHaveBeenCalled();
+    });
+
+    it("seeds a worktree worker to the right without anchoring to the left lead pane", async () => {
+      const parent = makeRecord({
+        agent_id: "parent-claude",
+        surface_id: "surface:parent",
+        workspace_id: "workspace:parent",
+        state: "ready",
+        role: "orchestrator",
+        cli: "claude",
+        repo: "brainlayer",
+        parent_agent_id: null,
+      });
+      engine.getRegistry().set(parent.agent_id, parent);
+      liveSurfaces = [makeSurface("surface:parent")];
+
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [],
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:parent",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:parent",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:parent"],
+          },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "workspace:parent",
+        window_ref: "window:1",
+        pane_ref: "pane:parent",
+        surfaces: [makeSurface("surface:parent")],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:parent",
+        surface: "surface:worker",
+        pane: "pane:worker",
+        title: "",
+        type: "terminal",
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix the watcher",
+        parent_agent_id: "parent-claude",
+        cwd: "/Users/etanheyman/Gits/brainlayer.wt/watcher-fix",
+        worktree_branch: "fix/watcher",
+      });
+
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        workspace: "workspace:parent",
+        type: "terminal",
+      });
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
 
     it("docks the first worker into the rightmost sparse non-lead pane when user panes already exist", async () => {

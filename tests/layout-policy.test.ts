@@ -1271,6 +1271,62 @@ describe("layout policy", () => {
     });
   });
 
+  it("seeds a worktree worker column without anchoring to the left lead pane", () => {
+    const panes = [makePane("pane:lead", 0, ["surface:orchestrator"])];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(),
+      },
+      {
+        role: "worker",
+        parentRole: "orchestrator",
+        parentSurfaceId: "surface:orchestrator",
+        worktree: true,
+      },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+    });
+  });
+
+  it("does not dock an nth worktree worker into a left-column worker pane", () => {
+    const leftColumn = { x: 0, y: 0, width: 500, height: 900 };
+    const panes = [
+      makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      makePane("pane:left-worker", 1, ["surface:worker-1"], leftColumn),
+    ];
+    const paneSurfaces = [
+      makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      makePaneSurfaces("pane:left-worker", ["surface:worker-1"]),
+    ];
+
+    const placement = chooseAgentSpawnPlacement(
+      panes,
+      paneSurfaces,
+      {
+        orchestrator: new Set(["surface:orchestrator"]),
+        ic: new Set(),
+        worker: new Set(["surface:worker-1"]),
+      },
+      { role: "worker", worktree: true },
+    );
+
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+    });
+  });
+
   it("does not dock a sparse parentless worker into the leftmost pane", () => {
     const panes = [makePane("pane:left", 0, ["surface:unclassified-lead"])];
     const paneSurfaces = [
