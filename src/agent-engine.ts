@@ -2440,7 +2440,7 @@ export class AgentEngine {
     }
 
     if (healthInput.monitor_alive === false) {
-      return true;
+      return readLastAgentHeartbeat(agent.agent_id, this.inboxOpts) !== null;
     }
 
     if (

@@ -608,6 +608,45 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("does not alert when a lead monitor was never armed", async () => {
+    const inboxDir = join(TEST_DIR, "lead-never-armed-monitor-inbox");
+    const agentId = "cmuxlayer-lead-never-armed-monitor";
+    let now = 1_500_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:lead-never-armed",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-lead-never-armed",
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:lead-never-armed")];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notify).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).toHaveBeenCalledWith(
+      agentId,
+      expect.stringContaining(
+        "health=degraded(inbox_monitor_not_alive:degraded)",
+      ),
+      expect.any(Object),
+    );
+  });
+
   it("does not fire the proactive monitor-death alert for a worker", async () => {
     const inboxDir = join(TEST_DIR, "worker-stale-monitor-inbox");
     const agentId = "cmuxlayer-worker-stale-monitor";
