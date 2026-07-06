@@ -195,7 +195,7 @@ const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
 export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
-const SEND_INPUT_PASTE_BATCH_MAX_BYTES = 16_000;
+export const SEND_INPUT_PASTE_BATCH_MAX_BYTES = 16_000;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
@@ -803,13 +803,27 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
   return chunks;
 }
 
-interface InputDeliveryBatch {
+function limitInputChunksByUtf8ByteSize(
+  chunks: string[],
+  maxBytes = SEND_INPUT_PASTE_BATCH_MAX_BYTES,
+): string[] {
+  return chunks.flatMap((chunk) =>
+    Buffer.byteLength(chunk, "utf-8") > maxBytes
+      ? splitTextByUtf8ByteLimit(chunk, maxBytes)
+      : [chunk],
+  );
+}
+
+export interface InputDeliveryBatch {
   text: string;
   firstChunkNumber: number;
   deliveredChunkCounts: number[];
 }
 
-function splitTextByUtf8ByteLimit(text: string, maxBytes: number): string[] {
+export function splitTextByUtf8ByteLimit(
+  text: string,
+  maxBytes: number,
+): string[] {
   if (text.length === 0) {
     return [text];
   }
@@ -838,7 +852,7 @@ function splitTextByUtf8ByteLimit(text: string, maxBytes: number): string[] {
   return parts;
 }
 
-function buildInputDeliveryBatches(
+export function buildInputDeliveryBatches(
   chunks: string[],
   maxPasteBytes = SEND_INPUT_PASTE_BATCH_MAX_BYTES,
 ): InputDeliveryBatch[] {
@@ -902,6 +916,17 @@ function buildInputDeliveryBatches(
 
 function shouldPasteInputChunk(text: string, totalChunks: number): boolean {
   return totalChunks > 1 || /[\n\r\t]|\\[nrt]/.test(text);
+}
+
+function shouldPasteInputDelivery(
+  chunks: string[],
+  deliveryBatchCount: number,
+): boolean {
+  return (
+    chunks.length > 1 ||
+    deliveryBatchCount > 1 ||
+    chunks.some((chunk) => shouldPasteInputChunk(chunk, 1))
+  );
 }
 
 function isMethodNotFoundError(error: unknown): boolean {
@@ -2129,13 +2154,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts: { workspace?: string },
     chunkNumber: number,
     totalChunks: number,
+    shouldPaste: boolean,
   ) => {
     let attempt = 0;
     let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
-        const shouldPaste = shouldPasteInputChunk(chunk, totalChunks);
         if (shouldPaste) {
           if (typeof client.pasteText !== "function") {
             throw pasteRequiredError("client does not support pasteText");
@@ -2501,6 +2526,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
   }> => {
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
+    const shouldPaste = shouldPasteInputDelivery(
+      opts.chunks,
+      deliveryBatches.length,
+    );
     for (const [index, batch] of deliveryBatches.entries()) {
       await sendChunkWithRetry(
         opts.surface,
@@ -2510,6 +2539,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
         batch.firstChunkNumber,
         opts.chunks.length,
+        shouldPaste,
       );
       for (const sentChunks of batch.deliveredChunkCounts) {
         opts.onChunkDelivered?.(sentChunks);
@@ -4229,9 +4259,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           allowLongInline: args.allow_long_inline,
         });
         const sanitizedText = sanitizeTerminalInput(args.text);
+        const effectiveChunkSize = Math.min(
+          args.chunk_size,
+          SEND_INPUT_PASTE_BATCH_MAX_BYTES,
+        );
         const chunks =
           sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
-            ? chunkTerminalInput(sanitizedText, args.chunk_size)
+            ? limitInputChunksByUtf8ByteSize(
+                chunkTerminalInput(sanitizedText, effectiveChunkSize),
+              )
             : [sanitizedText];
         const targetRecord = resolveLatestSurfaceAgentRecord(
           stateMgr,
@@ -4255,7 +4291,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             status: "delivering",
             total_chunks: chunks.length,
             sent_chunks: 0,
-            chunk_size: args.chunk_size,
+            chunk_size: effectiveChunkSize,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             chunks,
             press_enter: args.press_enter,
@@ -4292,7 +4328,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface: args.surface,
             workspace: args.workspace,
             chunks,
-            chunk_size: args.chunk_size,
+            chunk_size: effectiveChunkSize,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
             rename_to_task: args.rename_to_task,
