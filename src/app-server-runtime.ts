@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
+import { drainOutbox } from "./outbox-drainer.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
@@ -190,6 +191,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         await this.waitForShellReady(surface, workspace);
         await this.sendCommand(surface, command, workspace);
       },
+      outboxDrain: () => drainOutbox(),
     });
   }
 
