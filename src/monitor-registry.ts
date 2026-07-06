@@ -11,7 +11,16 @@ import { dirname, join } from "node:path";
 import { httpDeliver } from "./outbox-drainer.js";
 
 export type MonitorMechanism = "event" | "offset-poll";
-export type MonitorState = "alive" | "deadman-fired" | "dead";
+export type MonitorDedupe = "offset" | "seen-set" | "header-keyed";
+export type MonitorState = "alive" | "firing" | "deadman-fired" | "dead";
+export type MonitorRegistryGate = "gate-9" | "gate-10";
+export type MonitorRegistryLiveness =
+  | "alive"
+  | "lapsed"
+  | "firing"
+  | "deadman-fired"
+  | "dead"
+  | "invalid";
 
 export interface MonitorRegistryRecord {
   monitor_id: string;
@@ -19,10 +28,15 @@ export interface MonitorRegistryRecord {
   watch_targets: string[];
   mechanism: MonitorMechanism;
   pattern?: string;
+  watermark_key?: string;
+  dedupe?: MonitorDedupe;
+  addressee?: string;
   deadman_timeout_s: number;
   armed_at: string;
   last_signal_at: string;
   state: MonitorState;
+  firing_claimed_by_agent_id?: string;
+  firing_claimed_at?: string;
 }
 
 export interface MonitorRegistryFile {
@@ -36,6 +50,9 @@ export interface RegisterMonitorInput {
   watch_targets: string[];
   mechanism: MonitorMechanism;
   pattern?: string;
+  watermark_key?: string;
+  dedupe?: MonitorDedupe;
+  addressee?: string;
   deadman_timeout_s: number;
 }
 
@@ -49,6 +66,10 @@ export interface MonitorDeadmanEvent {
   owner_seat: string;
   watch_targets: string[];
   mechanism: MonitorMechanism;
+  pattern?: string;
+  watermark_key?: string;
+  dedupe?: MonitorDedupe;
+  addressee?: string;
   deadman_timeout_s: number;
   armed_at: string;
   last_signal_at: string;
@@ -75,6 +96,40 @@ export type MonitorDeadmanNotify = (
 export interface MonitorRegistrySweepOptions extends MonitorRegistryOptions {
   notify?: MonitorDeadmanNotify;
   sweeperAgentId?: string;
+}
+
+export interface MonitorRegistryGateViolation {
+  gate: MonitorRegistryGate;
+  monitor_id: string;
+  reason: string;
+}
+
+export interface MonitorRegistryGateRecord {
+  monitor_id: string;
+  owner_seat?: string;
+  watch_targets: string[];
+  mechanism?: MonitorMechanism;
+  pattern?: string;
+  watermark_key?: string;
+  dedupe?: MonitorDedupe;
+  addressee?: string;
+  deadman_timeout_s?: number;
+  armed_at?: string;
+  last_signal_at?: string;
+  state?: MonitorState;
+  liveness: MonitorRegistryLiveness;
+}
+
+export interface MonitorRegistryGateQueryOptions extends MonitorRegistryOptions {
+  claimedMonitorIds?: readonly string[];
+}
+
+export interface MonitorRegistryGateQuery {
+  version: 1;
+  queried_at: string;
+  latency_ms: number;
+  monitors: MonitorRegistryGateRecord[];
+  violations: MonitorRegistryGateViolation[];
 }
 
 type RawMonitorRecord = Record<string, unknown>;
@@ -162,8 +217,17 @@ function isMechanism(value: unknown): value is MonitorMechanism {
   return value === "event" || value === "offset-poll";
 }
 
+function isDedupe(value: unknown): value is MonitorDedupe {
+  return value === "offset" || value === "seen-set" || value === "header-keyed";
+}
+
 function isState(value: unknown): value is MonitorState {
-  return value === "alive" || value === "deadman-fired" || value === "dead";
+  return (
+    value === "alive" ||
+    value === "firing" ||
+    value === "deadman-fired" ||
+    value === "dead"
+  );
 }
 
 function parseTimeMs(value: unknown): number | null {
@@ -180,22 +244,77 @@ function validWatchTargets(value: unknown): string[] | null {
   return targets as string[];
 }
 
+function normalizeAddressee(value: unknown): string | null {
+  const text = cleanString(value);
+  if (!text) return null;
+  return text.startsWith("@") ? cleanString(text.slice(1)) : text;
+}
+
+function deriveAddressee(record: {
+  addressee?: unknown;
+  pattern?: unknown;
+  watch_targets?: unknown;
+}): string | null {
+  const explicit = normalizeAddressee(record.addressee);
+  if (explicit) return explicit;
+
+  const values: string[] = [];
+  const pattern = cleanString(record.pattern);
+  if (pattern) values.push(pattern);
+  if (Array.isArray(record.watch_targets)) {
+    for (const target of record.watch_targets) {
+      const text = cleanString(target);
+      if (text) values.push(text);
+    }
+  }
+
+  for (const value of values) {
+    const match = value.match(/@([A-Za-z0-9][A-Za-z0-9_.:-]*)/);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function hasTailFShape(record: RawMonitorRecord): boolean {
+  const values: string[] = [];
+  const pattern = cleanString(record.pattern);
+  if (pattern) values.push(pattern);
+  if (Array.isArray(record.watch_targets)) {
+    for (const target of record.watch_targets) {
+      const text = cleanString(target);
+      if (text) values.push(text);
+    }
+  }
+  return values.some((value) => /\btail\b[^\n\r]*\s-[^\s]*[fF]\b/.test(value));
+}
+
+function cleanWatermarkKey(value: unknown): string | null {
+  return cleanString(value);
+}
+
+function cleanPositiveTimeout(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return value;
+}
+
 function toValidRecord(record: RawMonitorRecord): MonitorRegistryRecord | null {
   const monitorId = cleanString(record.monitor_id);
   const ownerSeat = cleanString(record.owner_seat);
   const watchTargets = validWatchTargets(record.watch_targets);
-  const timeout = record.deadman_timeout_s;
+  const timeout = cleanPositiveTimeout(record.deadman_timeout_s);
   const armedAt = cleanString(record.armed_at);
   const lastSignalAt = cleanString(record.last_signal_at);
+  const watermarkKey = cleanWatermarkKey(record.watermark_key);
+  const addressee = deriveAddressee(record);
   if (
     !monitorId ||
     !ownerSeat ||
     isUnknownOwnerSeat(ownerSeat) ||
     !watchTargets ||
     !isMechanism(record.mechanism) ||
-    typeof timeout !== "number" ||
-    !Number.isFinite(timeout) ||
-    timeout <= 0 ||
+    timeout === null ||
     !armedAt ||
     !lastSignalAt ||
     !isState(record.state)
@@ -208,10 +327,23 @@ function toValidRecord(record: RawMonitorRecord): MonitorRegistryRecord | null {
     watch_targets: watchTargets,
     mechanism: record.mechanism,
     ...(typeof record.pattern === "string" ? { pattern: record.pattern } : {}),
+    ...(watermarkKey ? { watermark_key: watermarkKey } : {}),
+    ...(isDedupe(record.dedupe) ? { dedupe: record.dedupe } : {}),
+    ...(addressee ? { addressee } : {}),
     deadman_timeout_s: timeout,
     armed_at: armedAt,
     last_signal_at: lastSignalAt,
     state: record.state,
+    ...(cleanString(record.firing_claimed_by_agent_id)
+      ? {
+          firing_claimed_by_agent_id: cleanString(
+            record.firing_claimed_by_agent_id,
+          )!,
+        }
+      : {}),
+    ...(cleanString(record.firing_claimed_at)
+      ? { firing_claimed_at: cleanString(record.firing_claimed_at)! }
+      : {}),
   };
 }
 
@@ -222,11 +354,7 @@ function invalidReason(record: RawMonitorRecord): string | null {
   }
   if (!validWatchTargets(record.watch_targets)) return "invalid-watch-targets";
   if (!isMechanism(record.mechanism)) return "invalid-mechanism";
-  if (
-    typeof record.deadman_timeout_s !== "number" ||
-    !Number.isFinite(record.deadman_timeout_s) ||
-    record.deadman_timeout_s <= 0
-  ) {
+  if (cleanPositiveTimeout(record.deadman_timeout_s) === null) {
     return "invalid-deadman-timeout";
   }
   if (parseTimeMs(record.armed_at) === null) return "invalid-armed-at";
@@ -251,6 +379,21 @@ function assertRegisterInput(input: RegisterMonitorInput): void {
   }
   if (!isMechanism(input.mechanism)) throw new Error("mechanism is invalid");
   if (
+    input.watermark_key !== undefined &&
+    cleanWatermarkKey(input.watermark_key) === null
+  ) {
+    throw new Error("watermark_key must be a non-empty string when provided");
+  }
+  if (input.dedupe !== undefined && !isDedupe(input.dedupe)) {
+    throw new Error("dedupe is invalid");
+  }
+  if (
+    input.addressee !== undefined &&
+    normalizeAddressee(input.addressee) === null
+  ) {
+    throw new Error("addressee must be a non-empty string when provided");
+  }
+  if (
     !Number.isFinite(input.deadman_timeout_s) ||
     input.deadman_timeout_s <= 0
   ) {
@@ -267,6 +410,171 @@ export function readMonitorRegistry(
     monitors: raw.monitors
       .map(toValidRecord)
       .filter((record): record is MonitorRegistryRecord => record !== null),
+  };
+}
+
+function gateRecordLiveness(
+  record: RawMonitorRecord,
+  nowMs: number,
+): MonitorRegistryLiveness {
+  const reason = invalidReason(record);
+  if (reason !== null) return "invalid";
+  const valid = toValidRecord(record)!;
+  if (valid.state !== "alive") return valid.state;
+  const lastSignalAtMs = parseTimeMs(valid.last_signal_at)!;
+  const elapsedMs = nowMs - lastSignalAtMs;
+  return elapsedMs > valid.deadman_timeout_s * 1000 ? "lapsed" : "alive";
+}
+
+function toGateRecord(
+  record: RawMonitorRecord,
+  nowMs: number,
+): MonitorRegistryGateRecord {
+  const watchTargets = validWatchTargets(record.watch_targets) ?? [];
+  const ownerSeat = cleanString(record.owner_seat);
+  const mechanism = isMechanism(record.mechanism) ? record.mechanism : undefined;
+  const watermarkKey = cleanWatermarkKey(record.watermark_key);
+  const timeout = cleanPositiveTimeout(record.deadman_timeout_s);
+  const armedAt = cleanString(record.armed_at);
+  const lastSignalAt = cleanString(record.last_signal_at);
+  const addressee = deriveAddressee(record);
+  return {
+    monitor_id: monitorIdForInvalid(record),
+    ...(ownerSeat ? { owner_seat: ownerSeat } : {}),
+    watch_targets: watchTargets,
+    ...(mechanism ? { mechanism } : {}),
+    ...(typeof record.pattern === "string" ? { pattern: record.pattern } : {}),
+    ...(watermarkKey ? { watermark_key: watermarkKey } : {}),
+    ...(isDedupe(record.dedupe) ? { dedupe: record.dedupe } : {}),
+    ...(addressee ? { addressee } : {}),
+    ...(timeout !== null ? { deadman_timeout_s: timeout } : {}),
+    ...(armedAt ? { armed_at: armedAt } : {}),
+    ...(lastSignalAt ? { last_signal_at: lastSignalAt } : {}),
+    ...(isState(record.state) ? { state: record.state } : {}),
+    liveness: gateRecordLiveness(record, nowMs),
+  };
+}
+
+function violationKey(violation: MonitorRegistryGateViolation): string {
+  return `${violation.gate}:${violation.monitor_id}:${violation.reason}`;
+}
+
+function addViolation(
+  violations: MonitorRegistryGateViolation[],
+  seen: Set<string>,
+  violation: MonitorRegistryGateViolation,
+): void {
+  const key = violationKey(violation);
+  if (seen.has(key)) return;
+  seen.add(key);
+  violations.push(violation);
+}
+
+function addGate10Violations(
+  record: RawMonitorRecord,
+  violations: MonitorRegistryGateViolation[],
+  seen: Set<string>,
+): void {
+  const monitorId = monitorIdForInvalid(record);
+  const watermarkKey = cleanWatermarkKey(record.watermark_key);
+
+  if (record.deadman_timeout_s === undefined || record.deadman_timeout_s === null) {
+    addViolation(violations, seen, {
+      gate: "gate-10",
+      monitor_id: monitorId,
+      reason: "missing-deadman-timeout",
+    });
+  } else if (cleanPositiveTimeout(record.deadman_timeout_s) === null) {
+    addViolation(violations, seen, {
+      gate: "gate-10",
+      monitor_id: monitorId,
+      reason: "invalid-deadman-timeout",
+    });
+  }
+
+  if (record.mechanism === "offset-poll") {
+    if (!watermarkKey) {
+      addViolation(violations, seen, {
+        gate: "gate-10",
+        monitor_id: monitorId,
+        reason: "offset-poll-missing-watermark-key",
+      });
+    }
+    if (!isDedupe(record.dedupe)) {
+      addViolation(violations, seen, {
+        gate: "gate-10",
+        monitor_id: monitorId,
+        reason: "offset-poll-missing-dedupe",
+      });
+    }
+  }
+
+  if (hasTailFShape(record) && !watermarkKey) {
+    addViolation(violations, seen, {
+      gate: "gate-10",
+      monitor_id: monitorId,
+      reason: "tail-f-without-watermark",
+    });
+  }
+}
+
+export function queryMonitorRegistryForGates(
+  opts: MonitorRegistryGateQueryOptions = {},
+): MonitorRegistryGateQuery {
+  const startedAt = Date.now();
+  const nowMs = (opts.now ?? Date.now)();
+  const raw = readRawRegistry(registryPathFor(opts));
+  const monitors = raw.monitors.map((record) => toGateRecord(record, nowMs));
+  const violations: MonitorRegistryGateViolation[] = [];
+  const seenViolations = new Set<string>();
+
+  for (const record of raw.monitors) {
+    addGate10Violations(record, violations, seenViolations);
+    if (gateRecordLiveness(record, nowMs) === "lapsed") {
+      addViolation(violations, seenViolations, {
+        gate: "gate-9",
+        monitor_id: monitorIdForInvalid(record),
+        reason: "deadman-timeout-lapsed",
+      });
+    }
+  }
+
+  const byMonitorId = new Map(
+    monitors.map((monitor) => [monitor.monitor_id, monitor]),
+  );
+  for (const claimedMonitorId of opts.claimedMonitorIds ?? []) {
+    const claimed = byMonitorId.get(claimedMonitorId);
+    if (!claimed) {
+      addViolation(violations, seenViolations, {
+        gate: "gate-9",
+        monitor_id: claimedMonitorId,
+        reason: "monitor-id-absent",
+      });
+      continue;
+    }
+    if (claimed.liveness === "lapsed") {
+      addViolation(violations, seenViolations, {
+        gate: "gate-9",
+        monitor_id: claimedMonitorId,
+        reason: "deadman-timeout-lapsed",
+      });
+      continue;
+    }
+    if (claimed.state !== "alive" || claimed.liveness !== "alive") {
+      addViolation(violations, seenViolations, {
+        gate: "gate-9",
+        monitor_id: claimedMonitorId,
+        reason: "monitor-not-alive",
+      });
+    }
+  }
+
+  return {
+    version: STATE_VERSION,
+    queried_at: new Date(nowMs).toISOString(),
+    latency_ms: Date.now() - startedAt,
+    monitors,
+    violations,
   };
 }
 
@@ -293,6 +601,11 @@ export async function registerMonitor(
       watch_targets: [...input.watch_targets],
       mechanism: input.mechanism,
       ...(input.pattern ? { pattern: input.pattern } : {}),
+      ...(cleanWatermarkKey(input.watermark_key)
+        ? { watermark_key: cleanWatermarkKey(input.watermark_key)! }
+        : {}),
+      ...(input.dedupe ? { dedupe: input.dedupe } : {}),
+      ...(deriveAddressee(input) ? { addressee: deriveAddressee(input)! } : {}),
       deadman_timeout_s: input.deadman_timeout_s,
       armed_at: stamp,
       last_signal_at: stamp,
@@ -397,6 +710,7 @@ export async function sweepMonitorRegistry(
 ): Promise<MonitorRegistrySweepResult> {
   const path = registryPathFor(opts);
   const nowMs = (opts.now ?? Date.now)();
+  const sweeperAgentId = opts.sweeperAgentId ?? DEFAULT_SWEEPER_ID;
   const fired: MonitorDeadmanEvent[] = [];
   const invalid: InvalidMonitorRegistryRecord[] = [];
   const alive: string[] = [];
@@ -423,14 +737,23 @@ export async function sweepMonitorRegistry(
         owner_seat: valid.owner_seat,
         watch_targets: valid.watch_targets,
         mechanism: valid.mechanism,
+        ...(valid.pattern ? { pattern: valid.pattern } : {}),
+        ...(valid.watermark_key ? { watermark_key: valid.watermark_key } : {}),
+        ...(valid.dedupe ? { dedupe: valid.dedupe } : {}),
+        ...(valid.addressee ? { addressee: valid.addressee } : {}),
         deadman_timeout_s: valid.deadman_timeout_s,
         armed_at: valid.armed_at,
         last_signal_at: valid.last_signal_at,
         fired_at: firedAt,
-        fired_by_agent_id: opts.sweeperAgentId ?? DEFAULT_SWEEPER_ID,
+        fired_by_agent_id: sweeperAgentId,
         elapsed_s: elapsedMs / 1000,
       });
-      return { ...valid, state: "deadman-fired" };
+      return {
+        ...valid,
+        state: "firing",
+        firing_claimed_by_agent_id: sweeperAgentId,
+        firing_claimed_at: firedAt,
+      };
     });
     if (fired.length > 0) writeRawRegistry(path, monitors);
   });
@@ -442,6 +765,26 @@ export async function sweepMonitorRegistry(
     } catch {
       // State is canonical; notification delivery is best-effort and injected.
     }
+  }
+
+  if (fired.length > 0) {
+    const firedIds = new Set(fired.map((event) => event.monitor_id));
+    withRegistryWriteLock(path, () => {
+      const registry = readRawRegistry(path);
+      const monitors = registry.monitors.map((record) => {
+        const valid = toValidRecord(record);
+        if (
+          !valid ||
+          valid.state !== "firing" ||
+          valid.firing_claimed_by_agent_id !== sweeperAgentId ||
+          !firedIds.has(valid.monitor_id)
+        ) {
+          return record;
+        }
+        return { ...valid, state: "deadman-fired" };
+      });
+      writeRawRegistry(path, monitors);
+    });
   }
 
   return { fired, invalid, alive };
