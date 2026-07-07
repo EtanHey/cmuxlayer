@@ -5339,6 +5339,13 @@ To continue this session, run codex resume ${sessionId}`,
     ] as const)(
       "rejects missing %s repoGolem launchers before creating a surface",
       async (cli, suffix) => {
+        const registryPath = join(TEST_DIR, `missing-${cli}-launchers.zsh`);
+        writeFileSync(
+          registryPath,
+          'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+        );
+        vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+
         const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
         const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
         try {
@@ -5353,6 +5360,7 @@ To continue this session, run codex resume ${sessionId}`,
           expect(mockClient.newSplit).not.toHaveBeenCalled();
         } finally {
           defaultEngine.dispose();
+          vi.unstubAllEnvs();
         }
       },
     );
