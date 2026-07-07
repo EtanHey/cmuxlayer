@@ -3501,8 +3501,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  /** Caller pane workspace ref first, then focused workspace as fallback. */
-  const currentCallerWorkspace = async (): Promise<string | undefined> => {
+  const callerWorkspaceStrict = async (): Promise<string | undefined> => {
     try {
       const { workspaces } = await client.listWorkspaces();
       const envCandidates = [
@@ -3518,10 +3517,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
         if (match) return match.ref;
       }
-      return workspaces.find((w) => w.selected)?.ref;
     } catch {
       return undefined;
     }
+    return undefined;
+  };
+
+  /** Caller pane workspace ref first, then focused workspace as fallback. */
+  const currentCallerWorkspace = async (): Promise<string | undefined> => {
+    const callerWorkspace = await callerWorkspaceStrict();
+    return callerWorkspace ?? (await currentFocusedWorkspace());
   };
 
   /** Currently-focused workspace ref, or undefined if it can't be read. */
@@ -3532,6 +3537,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } catch {
       return undefined;
     }
+  };
+
+  const focusedWorkspaceFallbackWarning =
+    "No explicit workspace, caller workspace, or repo workspace could be resolved; falling back to the currently focused workspace.";
+
+  const resolvePlacementWorkspace = async (opts: {
+    explicitWorkspace?: string;
+    callerWorkspace?: string;
+    repo?: string | null;
+    allowFocusedFallback?: boolean;
+  }): Promise<{ workspace?: string; warnings: string[] }> => {
+    const explicitWorkspace = opts.explicitWorkspace
+      ? await canonicalWorkspaceRef(opts.explicitWorkspace)
+      : undefined;
+    if (explicitWorkspace) return { workspace: explicitWorkspace, warnings: [] };
+
+    const callerWorkspace = opts.callerWorkspace ?? (await callerWorkspaceStrict());
+    if (callerWorkspace) return { workspace: callerWorkspace, warnings: [] };
+
+    const repoWorkspace = await resolveWorkspaceForRepo(opts.repo);
+    if (repoWorkspace) return { workspace: repoWorkspace, warnings: [] };
+
+    if (opts.allowFocusedFallback === false) {
+      return { workspace: undefined, warnings: [] };
+    }
+
+    const focusedWorkspace = await currentFocusedWorkspace();
+    if (focusedWorkspace) {
+      return {
+        workspace: focusedWorkspace,
+        warnings: [focusedWorkspaceFallbackWarning],
+      };
+    }
+
+    return { workspace: undefined, warnings: [] };
   };
 
   /**
@@ -4256,11 +4296,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       let result: CmuxNewSplitResult | undefined;
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
-        const targetWorkspace =
-          args.workspace ??
-          (await resolveWorkspaceForRepo(
-            inferRepoFromLauncherTitle(args.title),
-          ));
         const shouldInferRole =
           Boolean(args.role) ||
           (!args.pane &&
@@ -4278,11 +4313,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "pane/surface cannot be combined with role-based new_split; omit the explicit target or omit role",
           );
         }
-        if (args.surface) {
-          await assertSurfaceMutationAllowed("new_split", args.surface);
-        } else if (targetWorkspace) {
-          await assertWorkspaceMutationAllowed("new_split", targetWorkspace);
-        }
         if (bootPromptPath) {
           if ((args.type ?? "terminal") !== "terminal") {
             throw new Error(
@@ -4290,6 +4320,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           await preflightBootPromptFile(bootPromptPath);
+        }
+        const targetResolution =
+          args.pane || args.surface
+            ? {
+                workspace: args.workspace,
+                warnings: [],
+              }
+            : await resolvePlacementWorkspace({
+                explicitWorkspace: args.workspace,
+                repo: inferRepoFromLauncherTitle(args.title),
+              });
+        const targetWorkspace = targetResolution.workspace;
+        if (args.surface) {
+          await assertSurfaceMutationAllowed("new_split", args.surface);
+        } else if (targetWorkspace) {
+          await assertWorkspaceMutationAllowed("new_split", targetWorkspace);
         }
 
         // Auto-focus only applies to workspace-targeted splits (no explicit
@@ -4419,6 +4465,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data: Record<string, unknown> = { ...result };
         data.placement = actualPlacement;
         data.direction = actualDirection;
+        if (targetResolution.warnings.length > 0) {
+          data.warnings = targetResolution.warnings;
+        }
         if (inferredRole) {
           data.role = inferredRole;
         }
@@ -6427,10 +6476,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ? (engine.getAgentState(args.parent_agent_id)?.workspace_id ??
               undefined)
             : undefined;
-          const explicitWorkspace = await canonicalWorkspaceRef(args.workspace);
-          const spawnWorkspace =
-            explicitWorkspace ??
-            (args.parent_agent_id ? undefined : await currentCallerWorkspace());
+          const targetResolution = await resolvePlacementWorkspace({
+            explicitWorkspace: args.workspace,
+            callerWorkspace: parentWorkspace,
+            repo: args.repo,
+          });
+          const spawnWorkspace = targetResolution.workspace;
           const comparisonWorkspace = spawnWorkspace ?? parentWorkspace;
           await assertWorkspaceMutationAllowed("spawn_agent", comparisonWorkspace);
           const worktree = await prepareSpawnWorktree(
@@ -6503,6 +6554,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             crash_recover: args.crash_recover,
           });
           appendStaleBuildWarning(result);
+          if (targetResolution.warnings.length > 0) {
+            result.warnings = [
+              ...(result.warnings ?? []),
+              ...targetResolution.warnings,
+            ];
+          }
 
           let bootPromptDelivery:
             | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -6711,14 +6768,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           assertBootPromptMode(args.prompt, null);
-          const explicitWorkspace = await canonicalWorkspaceRef(args.workspace);
-          const mutationWorkspace =
-            explicitWorkspace ?? (await currentCallerWorkspace());
+          await refreshManagedMetadataBestEffort(args.parent_agent_id);
+          const parentWorkspace = args.parent_agent_id
+            ? (engine.getAgentState(args.parent_agent_id)?.workspace_id ??
+              undefined)
+            : undefined;
+          const targetResolution = await resolvePlacementWorkspace({
+            explicitWorkspace: args.workspace,
+            callerWorkspace: parentWorkspace,
+            repo: args.repo,
+          });
+          const mutationWorkspace = targetResolution.workspace;
           await assertWorkspaceMutationAllowed(
             "new_worktree_split",
             mutationWorkspace,
           );
-          const priorFocus = await focusTargetBeforeSplit(args.workspace);
+          const priorFocus = await focusTargetBeforeSplit(mutationWorkspace);
           const worktree = await prepareSpawnWorktree(
             args.repo,
             args.worktree ?? true,
@@ -6731,7 +6796,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: args.cli,
             prompt: args.prompt ?? "",
             boot_prompt_pending: hasPrompt,
-            workspace: args.workspace,
+            workspace: mutationWorkspace,
             cwd: worktree.prepared?.path,
             mcp_env: worktree.mcpEnv,
             mcp_profile_label: worktree.mcpProfileLabel,
@@ -6742,6 +6807,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             crash_recover: args.crash_recover,
           });
           appendStaleBuildWarning(result);
+          if (targetResolution.warnings.length > 0) {
+            result.warnings = [
+              ...(result.warnings ?? []),
+              ...targetResolution.warnings,
+            ];
+          }
 
           let bootPromptDelivery:
             | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -6749,7 +6820,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (hasPrompt) {
             const deliveryWorkspace = spawnDeliveryWorkspace(
               result,
-              args.workspace,
+              mutationWorkspace,
             );
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
@@ -6777,7 +6848,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await restoreFocusAfterRender(
             priorFocus,
             result.surface_id,
-            spawnDeliveryWorkspace(result, args.workspace),
+            spawnDeliveryWorkspace(result, mutationWorkspace),
           );
           await refreshManagedMetadataBestEffort(result.agent_id);
           const currentAgent = engine.getAgentState(result.agent_id);

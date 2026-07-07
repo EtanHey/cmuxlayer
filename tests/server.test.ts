@@ -4116,6 +4116,314 @@ describe("tool handler integration", () => {
     expect(parsed.surface).toBe("surface:2");
   });
 
+  it("new_split defaults to the caller workspace instead of the selected workspace", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    delete process.env.CMUX_TAB_ID;
+    try {
+      const mockClient = {
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:caller",
+              title: "Caller",
+              selected: false,
+            },
+            {
+              id: "focused-workspace-uuid",
+              ref: "workspace:focused",
+              title: "Focused",
+              selected: true,
+            },
+          ],
+        }),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
+          workspace: opts.workspace,
+          surface: "surface:caller",
+          pane: "pane:caller",
+          title: "",
+          type: "terminal",
+        })),
+        renameTab: vi.fn().mockResolvedValue(undefined),
+        selectWorkspace: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:caller",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+      };
+      const server = createServer({
+        client: mockClient as any,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools["new_split"];
+
+      const result = await tool.handler({ direction: "right" }, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ workspace: "workspace:caller" }),
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ workspace: "workspace:focused" }),
+      );
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
+  it("new_split honors an explicit workspace before caller and focused workspaces", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    delete process.env.CMUX_TAB_ID;
+    try {
+      const mockClient = {
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:caller",
+              title: "Caller",
+              selected: false,
+            },
+            {
+              id: "focused-workspace-uuid",
+              ref: "workspace:focused",
+              title: "Focused",
+              selected: true,
+            },
+            {
+              id: "explicit-workspace-uuid",
+              ref: "workspace:explicit",
+              title: "Explicit",
+              selected: false,
+            },
+          ],
+        }),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
+          workspace: opts.workspace,
+          surface: "surface:explicit",
+          pane: "pane:explicit",
+          title: "",
+          type: "terminal",
+        })),
+        renameTab: vi.fn().mockResolvedValue(undefined),
+        selectWorkspace: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:explicit",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+      };
+      const server = createServer({
+        client: mockClient as any,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools["new_split"];
+
+      const result = await tool.handler(
+        { direction: "right", workspace: "workspace:explicit" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ workspace: "workspace:explicit" }),
+      );
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
+  it("new_split caller workspace wins over repo-title workspace resolution", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    delete process.env.CMUX_TAB_ID;
+    try {
+      const mockClient = {
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:caller",
+              title: "Caller",
+              selected: false,
+              current_directory: "/repo/orchestrator",
+            },
+            {
+              id: "voice-workspace-uuid",
+              ref: "workspace:voice",
+              title: "Voice",
+              selected: true,
+              current_directory: "/repo/voicelayer",
+            },
+          ],
+        }),
+        listPanes: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          panes: [],
+        })),
+        listPaneSurfaces: vi.fn().mockResolvedValue({
+          workspace_ref: "workspace:caller",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        }),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
+          workspace: opts.workspace,
+          surface: "surface:caller",
+          pane: "pane:caller",
+          title: opts.title ?? "",
+          type: "terminal",
+        })),
+        newSurface: vi.fn(),
+        renameTab: vi.fn().mockResolvedValue(undefined),
+        selectWorkspace: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:caller",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+      };
+      const server = createServer({
+        client: mockClient as any,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools["new_split"];
+
+      const result = await tool.handler(
+        { direction: "right", title: "voicelayerCodex" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(mockClient.listPanes).toHaveBeenCalledWith({
+        workspace: "workspace:caller",
+      });
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ workspace: "workspace:caller" }),
+      );
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
+  it("new_split warns when it falls back to the focused workspace", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    delete process.env.CMUX_WORKSPACE_ID;
+    delete process.env.CMUX_TAB_ID;
+    try {
+      const mockClient = {
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:caller",
+              title: "Caller",
+              selected: false,
+            },
+            {
+              id: "focused-workspace-uuid",
+              ref: "workspace:focused",
+              title: "Focused",
+              selected: true,
+            },
+          ],
+        }),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
+          workspace: opts.workspace,
+          surface: "surface:focused",
+          pane: "pane:focused",
+          title: "",
+          type: "terminal",
+        })),
+        renameTab: vi.fn().mockResolvedValue(undefined),
+        selectWorkspace: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:focused",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+      };
+      const server = createServer({
+        client: mockClient as any,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools["new_split"];
+
+      const result = await tool.handler({ direction: "right" }, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        "right",
+        expect.objectContaining({ workspace: "workspace:focused" }),
+      );
+      expect(parsed.warnings).toEqual([
+        expect.stringContaining("focused workspace"),
+      ]);
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
+  });
+
   it("new_split inherits workspace from a launcher-style title repo", async () => {
     const mockClient = {
       listWorkspaces: vi.fn().mockResolvedValue({
@@ -7186,9 +7494,17 @@ describe("tool handler integration", () => {
   });
 
   it("new_split renames the new surface when a title is provided", async () => {
-    mockExec = vi
-      .fn()
-      .mockResolvedValueOnce({
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", selected: true }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
         stdout: JSON.stringify({
           workspace: "workspace:1",
           surface: "surface:2",
@@ -7197,8 +7513,10 @@ describe("tool handler integration", () => {
           type: "terminal",
         }),
         stderr: "",
-      })
-      .mockResolvedValueOnce({ stdout: "{}", stderr: "" });
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
 
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const registeredTools = (server as any)._registeredTools;
@@ -7206,8 +7524,7 @@ describe("tool handler integration", () => {
 
     await tool.handler({ direction: "right", title: "Build Task" }, {} as any);
 
-    expect(mockExec).toHaveBeenNthCalledWith(
-      2,
+    expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
         "rename-tab",
