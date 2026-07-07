@@ -273,7 +273,7 @@ export interface AgentEngineOptions {
    * to DISABLED (`null`) so bare construction never reads the real cmux file;
    * production entrypoints inject the runner. Pass an explicit runner in tests.
    */
-  closeForensicsRunner?: (() => { emitted: number }) | null;
+  closeForensicsRunner?: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -668,7 +668,7 @@ export class AgentEngine {
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
   /** Best-effort close-forensics ingest; null when disabled. */
-  private closeForensicsRunner: (() => { emitted: number }) | null;
+  private closeForensicsRunner: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
   private closeForensicsSweepInFlight = false;
   constructor(
     stateMgr: StateManager,
@@ -2819,12 +2819,21 @@ export class AgentEngine {
     if (this.closeForensicsSweepInFlight) return;
     this.closeForensicsSweepInFlight = true;
     try {
-      this.closeForensicsRunner();
+      const result = this.closeForensicsRunner();
+      if (result && typeof (result as Promise<unknown>).then === "function") {
+        void (result as Promise<unknown>)
+          .catch(() => {
+            // Never break the sweep on a forensics failure; it retries next sweep.
+          })
+          .finally(() => {
+            this.closeForensicsSweepInFlight = false;
+          });
+        return;
+      }
     } catch {
       // Never break the sweep on a forensics failure; it retries next sweep.
-    } finally {
-      this.closeForensicsSweepInFlight = false;
     }
+    this.closeForensicsSweepInFlight = false;
   }
 
   private async sweepMonitorRegistryBestEffort(): Promise<void> {

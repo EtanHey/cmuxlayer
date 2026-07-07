@@ -16,6 +16,7 @@ import {
   readAppendedCmuxEventsText,
   runCloseForensicsSweep,
   createDefaultCloseForensicsRunner,
+  buildSurfaceRefMapFromSurfaces,
   type CmuxEvent,
   type CloseForensicsCursorStore,
 } from "../src/close-forensics.js";
@@ -339,6 +340,38 @@ describe("parseCmuxEvents / ingest — malformed & missing tolerance", () => {
   });
 });
 
+describe("buildSurfaceRefMapFromSurfaces", () => {
+  it("maps cmux internal surface UUIDs to cmuxlayer refs", () => {
+    const map = buildSurfaceRefMapFromSurfaces([
+      {
+        id: "92AF15C5-EB43-4427-9820-5CE77AFC31AB",
+        ref: "surface:42",
+      },
+      {
+        id: "9EC491F0-6A53-4552-BDA0-21F3F8CB47B2",
+        ref: "surface:43",
+      },
+    ]);
+
+    expect(map).toEqual(
+      new Map([
+        ["92AF15C5-EB43-4427-9820-5CE77AFC31AB", "surface:42"],
+        ["9EC491F0-6A53-4552-BDA0-21F3F8CB47B2", "surface:43"],
+      ]),
+    );
+  });
+
+  it("skips entries that lack either a UUID or a surface ref", () => {
+    const map = buildSurfaceRefMapFromSurfaces([
+      { id: "HAS-NO-REF" },
+      { ref: "surface:no-id" },
+      { id: "HAS-BOTH", ref: "surface:ok" },
+    ]);
+
+    expect(map).toEqual(new Map([["HAS-BOTH", "surface:ok"]]));
+  });
+});
+
 describe("runCloseForensicsSweep — persisted cursor end-to-end", () => {
   it("appends new forensics, advances the cursor, and does not double-emit on re-run", () => {
     const appended: CloseForensicsEvent[] = [];
@@ -389,7 +422,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("ingests from a real events file, writes to the event log, and persists the cursor", () => {
+  it("ingests from a real events file, writes to the event log, and persists the cursor", async () => {
     writeFileSync(
       eventsPath,
       [
@@ -405,7 +438,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       now,
     });
 
-    const first = runner();
+    const first = await runner();
     expect(first.emitted).toBe(2);
 
     const forensics = stateMgr
@@ -417,7 +450,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(forensics).toHaveLength(2);
 
     // Re-run: cursor persisted → no double emit.
-    const second = runner();
+    const second = await runner();
     expect(second.emitted).toBe(0);
     const forensicsAfter = stateMgr
       .getEventLog()
@@ -428,7 +461,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(forensicsAfter).toHaveLength(2);
   });
 
-  it("reads only bytes appended after the persisted offset and advances that offset", () => {
+  it("reads only bytes appended after the persisted offset and advances that offset", async () => {
     const oldLine = JSON.stringify(surfaceClosed({ seq: 1, surface_id: "OLD" })) + "\n";
     const oldBytes = Buffer.byteLength(oldLine);
     writeFileSync(eventsPath, oldLine, "utf-8");
@@ -458,7 +491,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       now,
     });
 
-    const result = runner();
+    const result = await runner();
     expect(result.emitted).toBe(1);
 
     const forensics = stateMgr
@@ -479,7 +512,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(cursor.last_close_boot_id).toBe("BOOT-NEW");
   });
 
-  it("persists window key lookback across offset-tail sweeps", () => {
+  it("persists window key lookback across offset-tail sweeps", async () => {
     const stateMgr = new StateManager(stateDir);
     writeFileSync(
       eventsPath,
@@ -494,7 +527,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       now,
     });
 
-    expect(runner().emitted).toBe(0);
+    expect((await runner()).emitted).toBe(0);
     appendFileSync(
       eventsPath,
       JSON.stringify(
@@ -507,7 +540,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       "utf-8",
     );
 
-    expect(runner().emitted).toBe(1);
+    expect((await runner()).emitted).toBe(1);
     const forensics = stateMgr
       .getEventLog()
       .readEntries()
@@ -538,7 +571,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(read.truncated).toBe(true);
   });
 
-  it("treats truncation as a fresh sequence stream instead of reusing the old seq cursor", () => {
+  it("treats truncation as a fresh sequence stream instead of reusing the old seq cursor", async () => {
     writeFileSync(
       eventsPath,
       JSON.stringify(surfaceClosed({ seq: 1, surface_id: "AFTER-ROTATE" })) + "\n",
@@ -557,7 +590,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       now,
     });
 
-    expect(runner().emitted).toBe(1);
+    expect((await runner()).emitted).toBe(1);
     const forensics = stateMgr
       .getEventLog()
       .readEntries()
@@ -567,7 +600,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(forensics[0].cmux_surface_id).toBe("AFTER-ROTATE");
   });
 
-  it("reads MCP closes through the bounded close-event reader, not readEntries", () => {
+  it("reads MCP closes through the bounded close-event reader, not readEntries", async () => {
     writeFileSync(
       eventsPath,
       JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
@@ -591,9 +624,10 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       stateMgr,
       eventsPath,
       now,
+      listSurfacesForRefMap: async () => [{ id: "S1", ref: "surface:42" }],
     });
 
-    expect(runner().emitted).toBe(1);
+    expect((await runner()).emitted).toBe(1);
     const forensics = readFileSync(join(stateDir, "events.jsonl"), "utf-8")
       .trim()
       .split("\n")
@@ -655,7 +689,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
 });
 
 describe("close forensics — does not disturb the operator outbox", () => {
-  it("leaves ~/.golems-zikaron/outbox.md mtime unchanged across a full run", () => {
+  it("leaves ~/.golems-zikaron/outbox.md mtime unchanged across a full run", async () => {
     // Guard: forensics must never write to the operator outbox. We assert the
     // real outbox's mtime is untouched (creating an empty temp one only if
     // absent so the assertion is meaningful without mutating real content).
@@ -689,7 +723,7 @@ describe("close forensics — does not disturb the operator outbox", () => {
         eventsPath,
         now,
       });
-      runner();
+      await runner();
 
       const after = statSync(outboxPath).mtimeMs;
       expect(after).toBe(before);

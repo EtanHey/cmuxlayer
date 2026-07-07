@@ -158,12 +158,24 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
+      const paneByRef = new Map(
+        panesByWorkspace.flatMap(({ panes }) =>
+          panes.panes.map((pane) => [pane.ref, pane] as const),
+        ),
+      );
       return surfaceGroups.flatMap((group) =>
-        group.surfaces.map((surface) => ({
-          ...surface,
-          workspace_ref: group.workspace_ref,
-          pane_ref: group.pane_ref,
-        })),
+        group.surfaces.map((surface) => {
+          const pane = paneByRef.get(group.pane_ref);
+          const surfaceIndex = pane?.surface_refs?.indexOf(surface.ref) ?? -1;
+          const inferredId =
+            surfaceIndex >= 0 ? pane?.surface_ids?.[surfaceIndex] : undefined;
+          return {
+            ...surface,
+            id: surface.id ?? inferredId,
+            workspace_ref: group.workspace_ref,
+            pane_ref: group.pane_ref,
+          };
+        }),
       );
     };
 
@@ -201,6 +213,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       monitorRegistryNotify: httpNotifyMonitorDeadman,
       closeForensicsRunner: createDefaultCloseForensicsRunner({
         stateMgr: this.stateMgr,
+        listSurfacesForRefMap: surfaceProvider,
       }),
     });
   }
