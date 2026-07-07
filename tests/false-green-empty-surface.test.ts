@@ -203,7 +203,7 @@ describe("false-green empty surface protection", () => {
       { surface: "surface:2", command: longCommand },
       {} as any,
     );
-    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(6000);
     const result = await resultPromise;
 
     const parsed = parseToolResult(result);

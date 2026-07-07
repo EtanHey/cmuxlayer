@@ -1945,7 +1945,7 @@ describe("agent lifecycle tool handlers", () => {
         "file prompt body",
       ]),
     );
-  });
+  }, 10_000);
 
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");

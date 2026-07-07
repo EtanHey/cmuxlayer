@@ -272,6 +272,71 @@ class FakeShellSurfaceClient {
   }
 }
 
+class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
+  readonly sendKeyCalls: string[] = [];
+  clearAfterReads = 22;
+  duplicateSubmits = 0;
+  private pendingText = "";
+  private submittedText: string | null = null;
+  private readsSinceSubmit = 0;
+
+  async send(surface: string, text: string) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    this.sendCalls.push(text);
+    this.pendingText += text;
+  }
+
+  async pasteText(surface: string, text: string) {
+    await this.send(surface, text);
+  }
+
+  async sendKey(surface: string, key: string) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    this.sendKeyCalls.push(key);
+    if (key !== "return" || !this.pendingText) {
+      return;
+    }
+
+    if (this.submittedText !== null) {
+      this.duplicateSubmits += 1;
+      return;
+    }
+
+    this.submittedText = this.pendingText;
+  }
+
+  async readScreen(surface: string, opts?: { lines?: number }) {
+    if (surface !== this.surface) {
+      throw new Error(`Unknown surface: ${surface}`);
+    }
+
+    if (this.submittedText !== null) {
+      this.readsSinceSubmit += 1;
+      if (this.readsSinceSubmit >= this.clearAfterReads) {
+        this.pendingText = "";
+      }
+    }
+
+    return {
+      surface,
+      text: this.renderScreen(),
+      lines: opts?.lines ?? 30,
+      scrollback_used: false,
+    };
+  }
+
+  private renderScreen(): string {
+    const tail = this.pendingText.slice(-160);
+    return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+  }
+}
+
 function createReliabilityServer(client: FakeClaudeSurfaceClient) {
   return createServer({
     client: client as any,
@@ -409,6 +474,27 @@ describe("enter reliability", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.submit_verified).toBe(true);
     expect(events[0]?.retry_count).toBe(0);
+  });
+
+  it("does not press Enter twice when a submitted agent composer clears slowly", async () => {
+    const client = new FakeSlowClearingAgentClient();
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "slow first token",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(client.duplicateSubmits).toBe(0);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
   });
 
   it("reports a failed send_to submit when text remains in the composer after retry", async () => {
@@ -584,6 +670,32 @@ describe("enter reliability", () => {
     expect(events[0]?.submit_verified).toBeNull();
   });
 
+  it("does not retry Enter for allow_busy agent sends with ambiguous pending input", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "ready" });
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "stack this while busy",
+      press_enter: true,
+      allow_busy: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter((event) => event.event_type === "send_to");
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBeNull();
+    expect(events[0]?.retry_count).toBe(0);
+  }, 10_000);
+
   it("does not verify send_input to an uncached shell from prompt clearing", async () => {
     const client = new FakeShellSurfaceClient();
     server = createReliabilityServer(client as any);
@@ -666,7 +778,7 @@ describe("enter reliability", () => {
           event.submit_verified === true && event.retry_count === 1,
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("records UTF-8 byte counts in delivery telemetry", async () => {
     const client = new FakeClaudeSurfaceClient();
