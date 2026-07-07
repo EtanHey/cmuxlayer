@@ -603,6 +603,36 @@ export async function buildSurfaceRefMap(
   }
 }
 
+const SURFACE_REF_MAP_CACHE_LIMIT = 1000;
+
+function readSurfaceRefMapCache(path: string): Map<string, string> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return new Map<string, string>();
+    }
+    const map = new Map<string, string>();
+    for (const [cmuxId, surfaceRef] of Object.entries(parsed)) {
+      if (typeof cmuxId === "string" && typeof surfaceRef === "string") {
+        map.set(cmuxId, surfaceRef);
+      }
+    }
+    return map;
+  } catch {
+    return new Map<string, string>();
+  }
+}
+
+function writeSurfaceRefMapCache(
+  path: string,
+  map: Map<string, string>,
+): void {
+  const entries = [...map.entries()].slice(-SURFACE_REF_MAP_CACHE_LIMIT);
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(Object.fromEntries(entries)), "utf-8");
+  renameSync(tmp, path);
+}
+
 /**
  * Build the default sweep-driven runner bound to real fs + a StateManager. The
  * returned function is what the engine calls each sweep; it is a thin wrapper
@@ -621,6 +651,10 @@ export function createDefaultCloseForensicsRunner(config: {
   const cursorPath = join(
     config.stateMgr.getBaseDir(),
     "close-forensics-cursor.json",
+  );
+  const surfaceRefMapCachePath = join(
+    config.stateMgr.getBaseDir(),
+    "close-forensics-surface-ref-map.json",
   );
 
   const cursor: CloseForensicsCursorStore = {
@@ -708,10 +742,23 @@ export function createDefaultCloseForensicsRunner(config: {
   };
 
   return async () => {
-    const surfaceRefByCmuxId = await buildSurfaceRefMap(
+    const cachedSurfaceRefByCmuxId = readSurfaceRefMapCache(
+      surfaceRefMapCachePath,
+    );
+    const liveSurfaceRefByCmuxId = await buildSurfaceRefMap(
       config.stateMgr,
       config.listSurfacesForRefMap,
     );
+    const surfaceRefByCmuxId = new Map([
+      ...cachedSurfaceRefByCmuxId,
+      ...liveSurfaceRefByCmuxId,
+    ]);
+    if (liveSurfaceRefByCmuxId.size > 0) {
+      safe(
+        () => writeSurfaceRefMapCache(surfaceRefMapCachePath, surfaceRefByCmuxId),
+        undefined,
+      );
+    }
     return runCloseForensicsSweep({
       readCmuxEventsText: (cursorState) =>
         existsSync(eventsPath)

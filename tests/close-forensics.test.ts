@@ -638,6 +638,45 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     expect(unboundedRead).not.toHaveBeenCalled();
   });
 
+  it("uses a cached UUID ref-map after the closed surface leaves the live listing", async () => {
+    writeFileSync(eventsPath, "", "utf-8");
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.getEventLog().appendClose(
+      mcpClose({
+        target: "surface:42",
+        caller: "mcp-test-caller",
+        ts: "2026-07-06T21:34:14.000Z",
+      }),
+    );
+    let liveSurfaces = [{ id: "S1", ref: "surface:42" }];
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+      listSurfacesForRefMap: async () => liveSurfaces,
+    });
+
+    expect((await runner()).emitted).toBe(0);
+    liveSurfaces = [];
+    appendFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
+      "utf-8",
+    );
+
+    expect((await runner()).emitted).toBe(1);
+    const forensics = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (e) => (e as { event_type?: string }).event_type === "close_forensics",
+      ) as CloseForensicsEvent[];
+    expect(forensics).toHaveLength(1);
+    expect(forensics[0].attribution).toBe(
+      "mcp:close_surface caller=mcp-test-caller",
+    );
+  });
+
   it("caps a single cmux events read window", () => {
     writeFileSync(
       eventsPath,
