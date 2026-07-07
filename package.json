@@ -1,6 +1,6 @@
 {
   "name": "cmuxlayer",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "description": "Terminal multiplexer MCP server for AI agent workspace orchestration",
   "type": "module",
   "main": "./dist/lib.js",
