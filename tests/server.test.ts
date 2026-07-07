@@ -3804,6 +3804,258 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("send_input does not retry Return for a Cursor queued composer that still shows the prompt", async () => {
+    vi.useFakeTimers();
+    const stateDir = join(tmpdir(), "cmuxlayer-cursor-queued-submit-verify");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "agent-cursor-queued-submit",
+      surface_id: "surface:cursor-queued",
+      workspace_id: null,
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "auto",
+      cli: "cursor",
+      cli_session_id: null,
+      task_summary: "cursor queued submit verification",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-07T00:00:00.000Z",
+      updated_at: "2026-07-07T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+    const text = "Read and follow docs.local/briefs/dup-cursor-retry-enter.md";
+    let textSent = false;
+    let returnPresses = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("send")) {
+        textSent = true;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:cursor-queued",
+            text:
+              textSent && returnPresses > 0
+                ? `Cursor Agent\ncursor> ${text}\nAuto\n`
+                : "Cursor Agent\ncursor> \nAuto\n",
+            lines: 4,
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const resultPromise = tool.handler(
+      {
+        surface: "surface:cursor-queued",
+        text,
+        press_enter: true,
+      },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await resultPromise;
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
+    expect(returnPresses).toBe(1);
+  }, 10_000);
+
+  it("send_input verifies a fast-cleared Codex composer without a retry", async () => {
+    vi.useFakeTimers();
+    const stateDir = join(tmpdir(), "cmuxlayer-codex-cleared-submit-verify");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "agent-codex-cleared-submit",
+      surface_id: "surface:codex-cleared",
+      workspace_id: null,
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "gpt-5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "codex cleared submit verification",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-07T00:00:00.000Z",
+      updated_at: "2026-07-07T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+    let textSent = false;
+    let returnPresses = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("send")) {
+        textSent = true;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:codex-cleared",
+            text:
+              textSent && returnPresses > 0
+                ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
+                : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+            lines: 4,
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const resultPromise = tool.handler(
+      {
+        surface: "surface:codex-cleared",
+        text: "ping codex",
+        press_enter: true,
+      },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(250);
+    const result = await resultPromise;
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
+    expect(returnPresses).toBe(1);
+  });
+
+  it("send_input does not retry Return for a non-Cursor idle composer that may have queued input", async () => {
+    vi.useFakeTimers();
+    const stateDir = join(tmpdir(), "cmuxlayer-codex-dropped-submit-retry");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "agent-codex-dropped-submit",
+      surface_id: "surface:codex-dropped",
+      workspace_id: null,
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "gpt-5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "codex dropped submit retry",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-07T00:00:00.000Z",
+      updated_at: "2026-07-07T00:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+    let textSent = false;
+    let returnPresses = 0;
+    mockExec = vi.fn().mockImplementation((_cmd, args: string[]) => {
+      if (args.includes("send-key") && args.includes("return")) {
+        returnPresses += 1;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("send")) {
+        textSent = true;
+        return Promise.resolve({ stdout: "{}", stderr: "" });
+      }
+      if (args.includes("read-screen")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            surface_ref: "surface:codex-dropped",
+            text:
+              textSent && returnPresses >= 2
+                ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
+                : "OpenAI Codex\ncodex> retry me\ngpt-5 · idle\n",
+            lines: 4,
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ stdout: "{}", stderr: "" });
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const resultPromise = tool.handler(
+      {
+        surface: "surface:codex-dropped",
+        text: "retry me",
+        press_enter: true,
+      },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = await resultPromise;
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
+    expect(returnPresses).toBe(1);
+  }, 10_000);
+
   it("send_input background mode blocks the same surface but allows other surfaces", async () => {
     vi.useFakeTimers();
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
@@ -7190,7 +7442,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:2",
             text:
-              promptSent && returnPresses >= 2
+              promptSent && returnPresses >= 1
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
                 : promptSent
                   ? `codex> ${prompt}`
@@ -7294,7 +7546,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("new_split fails loudly when a short boot prompt stays pending after submit retry", async () => {
+  it("new_split fails loudly when a short boot prompt stays pending without retrying Return", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-short-dropped-return.md");
     const prompt = "short boot prompt";
@@ -7358,7 +7610,7 @@ describe("tool handler integration", () => {
     expect(parsed.error).toContain("Boot prompt delivery failed");
     expect(parsed.error).toContain("Enter submit could not be verified");
     expect(parsed.boot_prompt_delivered).not.toBe(true);
-    expect(returnPresses).toBe(2);
+    expect(returnPresses).toBe(1);
   }, 10_000);
 
   it("new_split reports a short boot prompt delivered after submit verification succeeds", async () => {
@@ -7420,7 +7672,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("new_split keeps verifying long boot prompts and retries a missed submit", async () => {
+  it("new_split keeps verifying long boot prompts without retrying Return", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-long-retry.md");
     const prompt = "long boot prompt ".repeat(40);
@@ -7461,9 +7713,9 @@ describe("tool handler integration", () => {
             text:
               !promptSent
                 ? "codex> "
-                : returnPresses === 1
-                  ? `codex> ${typedText.slice(-100)}`
-                  : "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)",
+                : returnPresses >= 1
+                  ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+                  : `codex> ${typedText.slice(-100)}`,
             lines: 30,
             scrollback_used: false,
           }),
@@ -7490,7 +7742,7 @@ describe("tool handler integration", () => {
     expect(parsed.boot_prompt_delivered).toBe(true);
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls.join("")).toBe(prompt);
-    expect(returnPresses).toBe(2);
+    expect(returnPresses).toBe(1);
   }, 10_000);
 
   it("new_split renames the new surface when a title is provided", async () => {

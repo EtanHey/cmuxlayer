@@ -276,6 +276,7 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
   readonly sendKeyCalls: string[] = [];
   clearAfterReads = 22;
   duplicateSubmits = 0;
+  cli: "claude" | "cursor" = "claude";
   private pendingText = "";
   private submittedText: string | null = null;
   private readsSinceSubmit = 0;
@@ -333,6 +334,15 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
 
   private renderScreen(): string {
     const tail = this.pendingText.slice(-160);
+    if (this.cli === "cursor") {
+      if (!tail && this.submittedText !== null) {
+        return "Cursor Agent\nGenerating 1.2k tokens\n";
+      }
+      return `Cursor Agent\ncursor> ${tail}\nAuto\n`;
+    }
+    if (!tail && this.submittedText !== null) {
+      return "Claude Code\n✻ Working\n";
+    }
     return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
@@ -420,7 +430,7 @@ describe("enter reliability", () => {
     expect(parsed.error).toMatch(/press_enter|allow_busy|boolean/i);
   });
 
-  it("retries Enter for send_to when the first submit leaves Claude idle", async () => {
+  it("does not retry Enter for send_to when the agent composer remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
     registerAgent(server);
@@ -434,23 +444,26 @@ describe("enter reliability", () => {
     const parsed = parseResult(result);
     const events = readEventLog();
 
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
     expect(client.sendCalls.join("")).toHaveLength(2000);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
+      1,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
-          event.submit_verified === true &&
-          event.retry_count === 1,
+          event.submit_verified === false &&
+          event.retry_count === 0,
       ),
     ).toBe(true);
     expect(
       events.some((event) => event.event_type === "press_enter"),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("verifies a cleared idle composer without waiting for working status", async () => {
     const client = new FakeClaudeSurfaceClient();
@@ -476,10 +489,17 @@ describe("enter reliability", () => {
     expect(events[0]?.retry_count).toBe(0);
   });
 
-  it("does not press Enter twice when a submitted agent composer clears slowly", async () => {
+  it.each([
+    ["Cursor queued composer", "cursor"],
+    ["generic slow-clearing agent composer", "claude"],
+  ] as const)(
+    "does not press Enter twice when a submitted %s still shows accepted input",
+    async (_name, cli) => {
     const client = new FakeSlowClearingAgentClient();
+    client.cli = cli;
+    client.clearAfterReads = 35;
     server = createReliabilityServer(client);
-    registerAgent(server);
+    registerAgent(server, { cli });
 
     const result = await callTool(server, "send_to", {
       agent_id: "agent-1",
@@ -495,9 +515,10 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.retry_count).toBe(0);
-  });
+    },
+  );
 
-  it("reports a failed send_to submit when text remains in the composer after retry", async () => {
+  it("leaves send_to submit verification unknown when agent text remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -514,21 +535,21 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
-    expect(parsed.retry_count).toBe(1);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
           event.submit_verified === false &&
-          event.retry_count === 1,
+          event.retry_count === 0,
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
-  it("verifies a mid-session idle send_to after retry clears the full composer", async () => {
+  it("verifies a mid-session idle send_to when the first Return clears the full composer", async () => {
     const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 2;
+    client.requiredReturns = 1;
     client.completionMode = "idle";
     server = createReliabilityServer(client);
     registerAgent(server, { state: "idle" });
@@ -543,20 +564,19 @@ describe("enter reliability", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
-    expect(parsed.retry_count).toBeGreaterThanOrEqual(1);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
           event.submit_verified === true &&
-          typeof event.retry_count === "number" &&
-          event.retry_count >= 1,
+          event.retry_count === 0,
       ),
     ).toBe(true);
   });
 
-  it("retries Enter for send_command on a Claude surface", async () => {
+  it("does not retry Enter for send_command when the agent composer remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
     registerAgent(server);
@@ -569,21 +589,24 @@ describe("enter reliability", () => {
     const parsed = parseResult(result);
     const events = readEventLog();
 
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
+      1,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_command" &&
-          event.submit_verified === true &&
-          event.retry_count === 1,
+          event.submit_verified === false &&
+          event.retry_count === 0,
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
-  it("reports a failed short send_command submit after retry leaves Claude idle", async () => {
+  it("leaves short send_command verification unknown when agent text remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -599,21 +622,21 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
-    expect(parsed.retry_count).toBe(1);
+    expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
+      1,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_command" &&
           event.submit_verified === false &&
-          event.retry_count === 1,
+          event.retry_count === 0,
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
-  it("reports a failed short send_input submit after retry leaves Claude idle", async () => {
+  it("leaves short send_input verification unknown when agent text remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -630,19 +653,19 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
-    expect(parsed.retry_count).toBe(1);
+    expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
+      1,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_input" &&
           event.submit_verified === false &&
-          event.retry_count === 1,
+          event.retry_count === 0,
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("does not false-fail send_input to a busy cached agent surface", async () => {
     const client = new FakeClaudeSurfaceClient();
@@ -722,6 +745,7 @@ describe("enter reliability", () => {
 
   it("uses the verified send path for interact(action=send)", async () => {
     const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
     server = createReliabilityServer(client);
     registerAgent(server);
 
@@ -734,21 +758,24 @@ describe("enter reliability", () => {
     const events = readEventLog();
 
     expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      2,
+      1,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "interact" &&
           event.submit_verified === true &&
-          event.retry_count === 1,
+          event.retry_count === 0,
       ),
     ).toBe(true);
   });
 
   it("verifies each back-to-back send_to instead of assuming the previous submit pattern holds", async () => {
     const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
     server = createReliabilityServer(client);
     registerAgent(server);
 
@@ -769,13 +796,13 @@ describe("enter reliability", () => {
       (event) => event.event_type === "send_to",
     );
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      4,
+      2,
     );
     expect(events).toHaveLength(2);
     expect(
       events.every(
         (event) =>
-          event.submit_verified === true && event.retry_count === 1,
+          event.submit_verified === true && event.retry_count === 0,
       ),
     ).toBe(true);
   }, 10_000);

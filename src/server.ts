@@ -2792,10 +2792,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const retryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         shouldRetryEnter &&
-        ((screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
-          snapshot.parsed.status === "idle") ||
-          (opts.source_event === "spawn_agent" &&
-            !hasParsedAgentIdentity(snapshot.parsed)));
+        !screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
+        opts.source_event === "spawn_agent" &&
+        !hasParsedAgentIdentity(snapshot.parsed);
       lastRetryEligiblePendingInput = retryEligiblePendingInput;
       if (retryEligiblePendingInput) {
         retryEligiblePendingSince ??= Date.now();
@@ -2850,6 +2849,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         sawClearedComposerEvidence && sawAllowedClearedComposerEvidence
           ? true
           : opts.require_working_status
+            ? false
+          : lastHasPendingInput
             ? false
           : lastRetryEligiblePendingInput
             ? false
@@ -6343,11 +6344,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_agent: args.agent_id,
             // Verify every relay to an interactive agent — not just long ones.
             // A short relay (the common agent-to-agent case) to a frozen
-            // terminal must be caught, never reported as ok. allow_busy sends to
-            // a non-interactive (working) agent stay unverified to avoid
-            // false-failing a legitimate interjection.
+            // terminal must be caught, never reported as ok. allow_busy sends
+            // are deliberate queue/interjection writes and stay unverified to
+            // avoid false-failing accepted queued input.
             verify_submit:
-              args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
+              args.press_enter &&
+              !args.allow_busy &&
+              INTERACTIVE_AGENT_STATES.has(route.state),
             allow_recovery_enter_retry: !args.allow_busy,
           });
         },

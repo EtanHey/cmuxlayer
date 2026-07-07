@@ -2063,7 +2063,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(launcherReturnCount).toBeGreaterThanOrEqual(2);
+    expect(launcherReturnCount).toBe(1);
     expect(promptDelivered).toBe(true);
   });
 
