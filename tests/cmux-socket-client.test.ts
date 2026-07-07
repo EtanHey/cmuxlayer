@@ -1048,25 +1048,51 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:cli-tab");
   });
 
-  it("pasteText uses CLI fallback", async () => {
+  it("pasteText sends bracketed paste over the socket without CLI fallback", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
-      cliFallback: createMockCli(),
+      timeoutMs: 1000,
     });
 
     await client.pasteText("surface:1", "line one\nline two", {
       workspace: "workspace:1",
     });
 
-    expect(cliCalls).toHaveLength(1);
-    expect(cliCalls[0]).toEqual({
-      method: "pasteText",
-      args: [
-        "surface:1",
-        "line one\nline two",
-        { workspace: "workspace:1" },
-      ],
+    expect(lastV2Request).toEqual({
+      method: "surface.send_text",
+      params: {
+        surface_id: "surface:1",
+        text: "\x1b[200~line one\nline two\x1b[201~",
+        workspace_id: "workspace:1",
+      },
     });
+  });
+
+  it("pasteText uses CLI fallback when surface.send_text is unavailable", async () => {
+    const saved = MOCK_RESPONSES["surface.send_text"];
+    delete MOCK_RESPONSES["surface.send_text"];
+    try {
+      const client = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: createMockCli(),
+      });
+
+      await client.pasteText("surface:1", "line one\nline two", {
+        workspace: "workspace:1",
+      });
+
+      expect(cliCalls).toHaveLength(1);
+      expect(cliCalls[0]).toEqual({
+        method: "pasteText",
+        args: [
+          "surface:1",
+          "line one\nline two",
+          { workspace: "workspace:1" },
+        ],
+      });
+    } finally {
+      MOCK_RESPONSES["surface.send_text"] = saved;
+    }
   });
 
   it("moveSurface uses CLI fallback", async () => {
@@ -1155,34 +1181,33 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       return { stdout: "{}", stderr: "" };
     });
     const sharedCli = new CmuxClient({ exec });
+    const saved = MOCK_RESPONSES["surface.send_text"];
+    delete MOCK_RESPONSES["surface.send_text"];
 
-    const nightly = "/tmp/cmux-nightly.sock";
-    const prod = "/tmp/cmux-prod.sock";
+    try {
+      const firstClient = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: sharedCli,
+      });
+      const secondClient = new CmuxSocketClient({
+        socketPath: MOCK_SOCKET_PATH,
+        cliFallback: sharedCli,
+      });
+      await secondClient.pasteText("surface:p", "second text", {
+        workspace: "workspace:1",
+      });
 
-    // Nightly client constructed first (syncs fallback env -> nightly)...
-    const nightlyClient = new CmuxSocketClient({
-      socketPath: nightly,
-      cliFallback: sharedCli,
-    });
-    // ...then a prod client constructed and used, which last-synced the SHARED
-    // fallback env -> prod. Without a per-delegation re-sync, the nightly paste
-    // below would inherit prod.
-    const prodClient = new CmuxSocketClient({
-      socketPath: prod,
-      cliFallback: sharedCli,
-    });
-    await prodClient.pasteText("surface:p", "prod text", {
-      workspace: "workspace:1",
-    });
+      execEnvs.length = 0;
+      await firstClient.pasteText("surface:n", "first text", {
+        workspace: "workspace:1",
+      });
 
-    execEnvs.length = 0;
-    await nightlyClient.pasteText("surface:n", "nightly text", {
-      workspace: "workspace:1",
-    });
-
-    expect(execEnvs.length).toBeGreaterThan(0);
-    for (const env of execEnvs) {
-      expect(env?.CMUX_SOCKET_PATH).toBe(nightly);
+      expect(execEnvs.length).toBeGreaterThan(0);
+      for (const env of execEnvs) {
+        expect(env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
+      }
+    } finally {
+      MOCK_RESPONSES["surface.send_text"] = saved;
     }
   });
 });

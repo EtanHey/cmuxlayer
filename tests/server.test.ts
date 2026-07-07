@@ -2052,6 +2052,42 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("send_input pastes short multiline text and presses return once", async () => {
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+    const text = "first line\nsecond line";
+
+    const result = await tool.handler(
+      { surface: "surface:1", text, press_enter: true },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(1);
+    expect(mockClient.pasteText).toHaveBeenCalledWith(
+      "surface:1",
+      text,
+      expect.any(Object),
+    );
+    expect(mockClient.send).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
+    expect(mockClient.sendKey).toHaveBeenCalledWith(
+      "surface:1",
+      "return",
+      expect.any(Object),
+    );
+  });
+
   it("send_command sends text and return to the same surface", async () => {
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
@@ -2093,6 +2129,37 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.surface).toBe("surface:6");
+  });
+
+  it("send_command pastes short multiline commands and presses return once", async () => {
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_command"];
+    const command = "printf 'one'\nprintf 'two'";
+
+    const result = await tool.handler(
+      { surface: "surface:6", command },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(mockClient.pasteText).toHaveBeenCalledTimes(1);
+    expect(mockClient.pasteText).toHaveBeenCalledWith(
+      "surface:6",
+      command,
+      expect.any(Object),
+    );
+    expect(mockClient.send).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
   });
 
   it("send_input background reads 'delivering' (not FAILED) while in flight (F8)", async () => {
@@ -2330,7 +2397,8 @@ describe("tool handler integration", () => {
   it("send_command sends boot_prompt_path contents after launcher readiness", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
-    writeFileSync(promptPath, "boot prompt", "utf8");
+    const bootPrompt = "boot prompt line one\nboot prompt line two";
+    writeFileSync(promptPath, bootPrompt, "utf8");
     let promptSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
@@ -2346,10 +2414,7 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (
-        args.includes("send") &&
-        String(args.at(-1) ?? "") === "boot prompt"
-      ) {
+      if (args.includes("paste-buffer")) {
         promptSent = true;
       }
       return { stdout: "{}", stderr: "" };
@@ -2381,8 +2446,69 @@ describe("tool handler integration", () => {
     );
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
+      expect.arrayContaining(["set-buffer", bootPrompt]),
     );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["paste-buffer", "--surface", "surface:1"]),
+    );
+    const rawBootPromptSends = mockExec.mock.calls.filter(
+      ([, args]) =>
+        Array.isArray(args) &&
+        args.includes("send") &&
+        args.at(-1) === bootPrompt,
+    );
+    const returnPresses = mockExec.mock.calls.filter(
+      ([, args]) =>
+        Array.isArray(args) &&
+        args.includes("send-key") &&
+        args.at(-1) === "return",
+    );
+    expect(rawBootPromptSends).toHaveLength(0);
+    expect(returnPresses).toHaveLength(2);
+  });
+
+  it("send_command warns when boot_prompt_path contents exceed the pointer threshold", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "long-mandate.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, `${"long boot prompt ".repeat(40)}\n`, "utf8");
+    let promptSent = false;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:1",
+            text: promptSent
+              ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+              : "codex> ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("paste-buffer")) {
+        promptSent = true;
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        command: "brainlayerCodex -s",
+        boot_prompt_path: promptPath,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_warning).toContain("boot_prompt_path is");
+    expect(parsed.boot_prompt_warning).toContain("one-line file pointer");
   });
 
   it("send_command verifies a cleared stable Claude boot prompt without a working marker", async () => {

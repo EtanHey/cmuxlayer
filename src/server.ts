@@ -267,6 +267,7 @@ const CLAUDE_CHANNEL_NOTIFICATION = "notifications/claude/channel";
 const CLAUDE_CHANNEL_INSTRUCTIONS =
   "When loaded with Claude Code --channels, this server may emit notifications/claude/channel for cmuxlayer agent lifecycle events. These arrive as <channel> status updates and are one-way only.";
 export const SEND_INPUT_CHUNK_THRESHOLD = 500;
+const BOOT_PROMPT_PATH_WARNING_CHARS = 500;
 export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
 export const SEND_INPUT_PASTE_BATCH_MAX_BYTES = 16_000;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
@@ -3356,6 +3357,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     retry_count: number;
     submit_verified: boolean | null;
     prompt_text: string | null;
+    prompt_warning: string | null;
   }> => {
     const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
     assertBootPromptMode(opts.prompt, bootPromptPath);
@@ -3365,6 +3367,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         retry_count: 0,
         submit_verified: null,
         prompt_text: null,
+        prompt_warning: null,
       };
     }
 
@@ -3379,6 +3382,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const rawPrompt = bootPromptPath
       ? await readFile(bootPromptPath, "utf8")
       : opts.prompt!;
+    const promptWarning =
+      bootPromptPath && rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS
+        ? `boot_prompt_path is ${rawPrompt.length} characters; prefer a one-line file pointer for boot prompts over ${BOOT_PROMPT_PATH_WARNING_CHARS} characters`
+        : null;
     const sanitizedText = sanitizeTerminalInput(rawPrompt);
     const chunks =
       sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
@@ -3408,7 +3415,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }),
         { toolName: "boot_prompt", workspace: opts.workspace },
       );
-      return { ...delivery, prompt_text: rawPrompt };
+      return {
+        ...delivery,
+        prompt_text: rawPrompt,
+        prompt_warning: promptWarning,
+      };
     } catch (error) {
       if (error instanceof SurfaceGoneError) {
         throw error;
@@ -3431,6 +3442,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             retry_count: error.retry_count,
             submit_verified: true,
             prompt_text: rawPrompt,
+            prompt_warning: promptWarning,
           };
         }
       }
@@ -4949,6 +4961,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
           boot_prompt_submit_verified: bootPromptDelivery?.submit_verified ?? null,
+          boot_prompt_warning: bootPromptDelivery?.prompt_warning ?? null,
         };
         return okFormatted(
           formatDelivery("send_command", {

@@ -201,8 +201,10 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const after = sendCalls(exec);
     expect(after.length).toBeGreaterThan(before);
     const nudgeCall = after.at(-1)!;
+    const nudgeText = String(nudgeCall.at(-1) ?? "");
     expect(nudgeCall.join(" ")).toContain("surface:new");
     expect(nudgeCall.join(" ")).toContain("inbox");
+    expect(nudgeText).not.toMatch(/[\n\r]/);
     // And the message itself is durably in the inbox file.
     expect(
       readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
