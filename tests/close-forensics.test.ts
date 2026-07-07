@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
+  appendFileSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
   statSync,
@@ -11,6 +13,7 @@ import { join } from "node:path";
 import {
   ingestCloseForensics,
   parseCmuxEvents,
+  readAppendedCmuxEventsText,
   runCloseForensicsSweep,
   createDefaultCloseForensicsRunner,
   type CmuxEvent,
@@ -392,7 +395,7 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
       [
         JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })),
         JSON.stringify(surfaceClosed({ seq: 2, surface_id: "S2" })),
-      ].join("\n"),
+      ].join("\n") + "\n",
       "utf-8",
     );
     const stateMgr = new StateManager(stateDir);
@@ -423,6 +426,194 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
         (e) => (e as { event_type?: string }).event_type === "close_forensics",
       );
     expect(forensicsAfter).toHaveLength(2);
+  });
+
+  it("reads only bytes appended after the persisted offset and advances that offset", () => {
+    const oldLine = JSON.stringify(surfaceClosed({ seq: 1, surface_id: "OLD" })) + "\n";
+    const oldBytes = Buffer.byteLength(oldLine);
+    writeFileSync(eventsPath, oldLine, "utf-8");
+
+    const stateMgr = new StateManager(stateDir);
+    writeFileSync(
+      join(stateDir, "close-forensics-cursor.json"),
+      JSON.stringify({ last_seq: 1, last_offset: oldBytes, last_close_boot_id: "BOOT-OLD" }),
+      "utf-8",
+    );
+
+    appendFileSync(
+      eventsPath,
+      JSON.stringify(
+        surfaceClosed({
+          seq: 2,
+          surface_id: "NEW",
+          boot_id: "BOOT-NEW",
+        }),
+      ) + "\n",
+      "utf-8",
+    );
+
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+    });
+
+    const result = runner();
+    expect(result.emitted).toBe(1);
+
+    const forensics = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (e) => (e as { event_type?: string }).event_type === "close_forensics",
+      ) as CloseForensicsEvent[];
+    expect(forensics).toHaveLength(1);
+    expect(forensics[0].cmux_surface_id).toBe("NEW");
+    expect(forensics[0].client_context.boot_id_changed_since_prev).toBe(true);
+
+    const cursor = JSON.parse(
+      readFileSync(join(stateDir, "close-forensics-cursor.json"), "utf-8"),
+    ) as { last_seq: number; last_offset: number; last_close_boot_id: string };
+    expect(cursor.last_seq).toBe(2);
+    expect(cursor.last_offset).toBe(statSync(eventsPath).size);
+    expect(cursor.last_close_boot_id).toBe("BOOT-NEW");
+  });
+
+  it("persists window key lookback across offset-tail sweeps", () => {
+    const stateMgr = new StateManager(stateDir);
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(
+        windowKey("window.keyed", "2026-07-06T21:34:01.256Z", 1),
+      ) + "\n",
+      "utf-8",
+    );
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+    });
+
+    expect(runner().emitted).toBe(0);
+    appendFileSync(
+      eventsPath,
+      JSON.stringify(
+        surfaceClosed({
+          seq: 2,
+          occurred_at: "2026-07-06T21:34:13.820Z",
+          surface_id: "AFTER-KEY",
+        }),
+      ) + "\n",
+      "utf-8",
+    );
+
+    expect(runner().emitted).toBe(1);
+    const forensics = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (e) => (e as { event_type?: string }).event_type === "close_forensics",
+      ) as CloseForensicsEvent[];
+    expect(forensics).toHaveLength(1);
+    expect(forensics[0].cmux_surface_id).toBe("AFTER-KEY");
+    expect(forensics[0].client_context.window_key_cycle_near_close).toBe(true);
+    expect(forensics[0].client_context.last_window_key_event).toBe("keyed");
+  });
+
+  it("resets the byte offset when the cmux events file is truncated or rotated", () => {
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 7, surface_id: "ROTATED" })) + "\n",
+      "utf-8",
+    );
+
+    const read = readAppendedCmuxEventsText({
+      path: eventsPath,
+      offset: 9_999,
+      maxBytes: 4096,
+    });
+
+    expect(read.text).toContain("ROTATED");
+    expect(read.nextOffset).toBe(statSync(eventsPath).size);
+    expect(read.truncated).toBe(true);
+  });
+
+  it("treats truncation as a fresh sequence stream instead of reusing the old seq cursor", () => {
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "AFTER-ROTATE" })) + "\n",
+      "utf-8",
+    );
+    const stateMgr = new StateManager(stateDir);
+    writeFileSync(
+      join(stateDir, "close-forensics-cursor.json"),
+      JSON.stringify({ last_seq: 99, last_offset: 9_999, last_close_boot_id: "OLD" }),
+      "utf-8",
+    );
+
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+    });
+
+    expect(runner().emitted).toBe(1);
+    const forensics = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (e) => (e as { event_type?: string }).event_type === "close_forensics",
+      ) as CloseForensicsEvent[];
+    expect(forensics[0].cmux_surface_id).toBe("AFTER-ROTATE");
+  });
+
+  it("caps a single cmux events read window", () => {
+    writeFileSync(
+      eventsPath,
+      [
+        JSON.stringify(surfaceClosed({ seq: 1, surface_id: "A" })),
+        JSON.stringify(surfaceClosed({ seq: 2, surface_id: "B" })),
+        JSON.stringify(surfaceClosed({ seq: 3, surface_id: "C" })),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const read = readAppendedCmuxEventsText({
+      path: eventsPath,
+      offset: 0,
+      maxBytes: 80,
+    });
+
+    expect(Buffer.byteLength(read.text)).toBeLessThanOrEqual(80);
+    expect(read.nextOffset).toBeLessThan(statSync(eventsPath).size);
+  });
+
+  it("does not advance past an over-cap chunk with no complete JSONL line", () => {
+    writeFileSync(eventsPath, "x".repeat(200), "utf-8");
+
+    const read = readAppendedCmuxEventsText({
+      path: eventsPath,
+      offset: 0,
+      maxBytes: 80,
+    });
+
+    expect(read.text).toBe("");
+    expect(read.nextOffset).toBe(0);
+  });
+
+  it("does not advance past an unterminated EOF JSONL record", () => {
+    const complete = JSON.stringify(surfaceClosed({ seq: 1, surface_id: "DONE" })) + "\n";
+    const partial = JSON.stringify(surfaceClosed({ seq: 2, surface_id: "PARTIAL" }));
+    writeFileSync(eventsPath, complete + partial, "utf-8");
+
+    const read = readAppendedCmuxEventsText({
+      path: eventsPath,
+      offset: 0,
+      maxBytes: 4096,
+    });
+
+    expect(read.text).toBe(complete);
+    expect(read.nextOffset).toBe(Buffer.byteLength(complete));
   });
 });
 

@@ -5,7 +5,14 @@
 // the SAME map — keep both in lockstep. Terminal scraping survives ONLY for live-TUI
 // liveness (wedge/menu/permission/idle) the JSONL can't show, and for Cursor context%
 // (its JSONL carries neither tokens nor window).
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -401,13 +408,44 @@ export function readHarnessSessionFromFile(
   harness: Harness,
   path: string,
 ): HarnessSessionState | null {
-  let content: string;
+  const content = readHarnessSessionTextWindow(path);
+  if (content === null) return null;
+  return parseHarnessSession(harness, content);
+}
+
+const DEFAULT_HARNESS_SESSION_TAIL_BYTES = 512 * 1024;
+const DEFAULT_HARNESS_SESSION_IDENTITY_BYTES = 256 * 1024;
+
+export function readHarnessSessionTextWindow(
+  path: string,
+  opts: { maxBytes?: number } = {},
+): string | null {
   try {
-    content = readFileSync(path, "utf8");
+    const maxBytes = Math.max(
+      1,
+      opts.maxBytes ?? DEFAULT_HARNESS_SESSION_TAIL_BYTES,
+    );
+    const size = statSync(path).size;
+    if (size <= maxBytes) return readFileSync(path, "utf8");
+
+    const start = size - maxBytes;
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const fd = openSync(path, "r");
+    let bytesRead = 0;
+    try {
+      bytesRead = readSync(fd, buffer, 0, maxBytes, start);
+    } finally {
+      closeSync(fd);
+    }
+    if (bytesRead <= 0) return "";
+
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
+    const firstNewline = text.indexOf("\n");
+    if (firstNewline >= 0) text = text.slice(firstNewline + 1);
+    return text;
   } catch {
     return null;
   }
-  return parseHarnessSession(harness, content);
 }
 
 export interface HarnessSessionWithMeta {
@@ -458,8 +496,31 @@ function sessionIdFromJsonlName(path: string): string | null {
 }
 
 function readTextFile(path: string): string | null {
+  return readHarnessSessionIdentityWindow(path);
+}
+
+function readHarnessSessionIdentityWindow(path: string): string | null {
   try {
-    return readFileSync(path, "utf8");
+    const size = statSync(path).size;
+    const maxBytes = DEFAULT_HARNESS_SESSION_IDENTITY_BYTES;
+    if (size <= maxBytes * 2) return readFileSync(path, "utf8");
+
+    const headBuffer = Buffer.allocUnsafe(maxBytes);
+    const tailBuffer = Buffer.allocUnsafe(maxBytes);
+    const fd = openSync(path, "r");
+    let headBytes = 0;
+    let tailBytes = 0;
+    try {
+      headBytes = readSync(fd, headBuffer, 0, maxBytes, 0);
+      tailBytes = readSync(fd, tailBuffer, 0, maxBytes, size - maxBytes);
+    } finally {
+      closeSync(fd);
+    }
+
+    let tail = tailBuffer.subarray(0, tailBytes).toString("utf8");
+    const firstTailNewline = tail.indexOf("\n");
+    if (firstTailNewline >= 0) tail = tail.slice(firstTailNewline + 1);
+    return `${headBuffer.subarray(0, headBytes).toString("utf8")}\n${tail}`;
   } catch {
     return null;
   }

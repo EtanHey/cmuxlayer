@@ -21,6 +21,7 @@ import {
   loadHarnessSessionWithMeta,
   applyHarnessState,
   harnessJsonlEnabled,
+  readHarnessSessionTextWindow,
 } from "../src/harness-session.js";
 
 const FIX = join(__dirname, "fixtures", "harness");
@@ -265,6 +266,37 @@ describe("resolveSessionPath (cwd + sessionId → JSONL path)", () => {
   });
 });
 
+describe("readHarnessSessionTextWindow", () => {
+  it("reads only the tail window of a large harness transcript", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-window-"));
+    const path = join(dir, "session.jsonl");
+    try {
+      const oldLine = JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-4-8", usage: { input_tokens: 1 } },
+      });
+      const latestLine = JSON.stringify({
+        type: "assistant",
+        message: {
+          model: "claude-opus-4-8",
+          usage: { input_tokens: 123, output_tokens: 4 },
+          content: [{ type: "text", text: "latest tail text" }],
+        },
+      });
+      writeFileSync(path, `${oldLine}\n`.repeat(2000) + `${latestLine}\n`, "utf8");
+
+      const text = readHarnessSessionTextWindow(path, { maxBytes: 2048 });
+
+      expect(text).not.toBeNull();
+      expect(Buffer.byteLength(text ?? "")).toBeLessThanOrEqual(2048);
+      expect(text).toContain("latest tail text");
+      expect(text).not.toBe(readFileSync(path, "utf8"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("readHarnessSessionFromFile", () => {
   it("reads + parses a Codex fixture file end to end", () => {
     const s = readHarnessSessionFromFile("codex", join(FIX, "codex.jsonl"));
@@ -440,6 +472,38 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
       session_id: "019e942c-0dda-76f2-bbca-0ef6e484d1c9",
     });
     expect(identity?.path).toContain("not-the-real-id.jsonl");
+  });
+
+  it("Codex: finds session_meta near the head of a large transcript", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-large-head-"));
+    const cwd = "/Users/e/Gits/cmuxlayer";
+    const root = join(localHome, ".codex", "sessions", "2026", "07", "07");
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "rollout-2026-07-07T00-00-00-large-head.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "large-head", cwd },
+        }),
+        `${JSON.stringify({ type: "assistant", message: "noise" })}\n`.repeat(
+          9000,
+        ),
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      const identity = findLatestHarnessSessionIdentity("codex", cwd, {
+        home: localHome,
+      });
+
+      expect(identity?.session_id).toBe("large-head");
+      expect(identity?.path).toBe(file);
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
   });
 
   it("Codex: skips malformed lines and session_meta entries missing ids", () => {

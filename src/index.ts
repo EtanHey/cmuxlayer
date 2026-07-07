@@ -32,6 +32,7 @@ import {
   defaultMonitorRegistryPath,
   httpNotifyMonitorDeadman,
 } from "./monitor-registry.js";
+import { bindStdioLifecycle } from "./stdio-lifecycle.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -85,6 +86,29 @@ async function main() {
     enableCloseForensics: true,
   });
   const transport = new StdioServerTransport();
+  let shutdownStarted = false;
+  bindStdioLifecycle({
+    stdin: process.stdin,
+    transport: transport as any,
+    shutdown: (reason) => {
+      if (shutdownStarted) return;
+      shutdownStarted = true;
+      const forceExit = setTimeout(() => {
+        console.error(`[cmuxlayer] forced stdio shutdown after ${reason}`);
+        process.exit(0);
+      }, 1_000);
+      forceExit.unref();
+      void server
+        .close()
+        .catch((error) => {
+          console.error("[cmuxlayer] stdio shutdown failed", error);
+        })
+        .finally(() => {
+          clearTimeout(forceExit);
+          process.exit(0);
+        });
+    },
+  });
   await server.connect(transport);
 }
 
