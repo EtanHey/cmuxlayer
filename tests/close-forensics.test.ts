@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   appendFileSync,
   mkdtempSync,
@@ -565,6 +565,43 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
         (e) => (e as { event_type?: string }).event_type === "close_forensics",
       ) as CloseForensicsEvent[];
     expect(forensics[0].cmux_surface_id).toBe("AFTER-ROTATE");
+  });
+
+  it("reads MCP closes through the bounded close-event reader, not readEntries", () => {
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
+      "utf-8",
+    );
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.getEventLog().appendClose(
+      mcpClose({
+        target: "S1",
+        caller: "mcp-test-caller",
+        ts: "2026-07-06T21:34:14.000Z",
+      }),
+    );
+    const unboundedRead = vi
+      .spyOn(stateMgr.getEventLog(), "readEntries")
+      .mockImplementation(() => {
+        throw new Error("readEntries is the unbounded path");
+      });
+
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+    });
+
+    expect(runner().emitted).toBe(1);
+    const forensics = readFileSync(join(stateDir, "events.jsonl"), "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event_type?: string })
+      .filter((e) => e.event_type === "close_forensics") as CloseForensicsEvent[];
+    expect(forensics).toHaveLength(1);
+    expect(forensics[0].attribution).toBe("mcp:close_surface caller=mcp-test-caller");
+    expect(unboundedRead).not.toHaveBeenCalled();
   });
 
   it("caps a single cmux events read window", () => {

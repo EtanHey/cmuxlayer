@@ -33,6 +33,10 @@ import {
   httpNotifyMonitorDeadman,
 } from "./monitor-registry.js";
 import { bindStdioLifecycle } from "./stdio-lifecycle.js";
+import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
+
+ensureNodeMaxOldSpaceEnv();
+installHeapGuard();
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
