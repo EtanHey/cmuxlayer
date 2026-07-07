@@ -1048,51 +1048,68 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(result.surface).toBe("surface:cli-tab");
   });
 
-  it("pasteText sends bracketed paste over the socket without CLI fallback", async () => {
+  it("pasteText fails loudly without a CLI fallback instead of sending raw markers", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
       timeoutMs: 1000,
+    });
+
+    await expect(
+      client.pasteText("surface:1", "line one\nline two", {
+        workspace: "workspace:1",
+      }),
+    ).rejects.toMatchObject({
+      name: "CmuxSocketError",
+      code: "method_not_found",
+      message: expect.stringContaining("requires the cmux CLI"),
+    });
+
+    expect(lastV2Request).toBeNull();
+  });
+
+  it("pasteText uses CLI paste-buffer fallback without sending bracketed markers over the socket", async () => {
+    const execCalls: Array<{
+      cmd: string;
+      args: string[];
+      env?: NodeJS.ProcessEnv;
+    }> = [];
+    const cliFallback = new CmuxClient({
+      exec: async (cmd, args, env) => {
+        execCalls.push({ cmd, args, env });
+        return { stdout: "{}", stderr: "" };
+      },
+    });
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback,
     });
 
     await client.pasteText("surface:1", "line one\nline two", {
       workspace: "workspace:1",
     });
 
-    expect(lastV2Request).toEqual({
-      method: "surface.send_text",
-      params: {
-        surface_id: "surface:1",
-        text: "\x1b[200~line one\nline two\x1b[201~",
-        workspace_id: "workspace:1",
-      },
-    });
-  });
-
-  it("pasteText uses CLI fallback when surface.send_text is unavailable", async () => {
-    const saved = MOCK_RESPONSES["surface.send_text"];
-    delete MOCK_RESPONSES["surface.send_text"];
-    try {
-      const client = new CmuxSocketClient({
-        socketPath: MOCK_SOCKET_PATH,
-        cliFallback: createMockCli(),
-      });
-
-      await client.pasteText("surface:1", "line one\nline two", {
-        workspace: "workspace:1",
-      });
-
-      expect(cliCalls).toHaveLength(1);
-      expect(cliCalls[0]).toEqual({
-        method: "pasteText",
-        args: [
-          "surface:1",
-          "line one\nline two",
-          { workspace: "workspace:1" },
-        ],
-      });
-    } finally {
-      MOCK_RESPONSES["surface.send_text"] = saved;
-    }
+    expect(lastV2Request).toBeNull();
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[0].args).toEqual([
+      "--json",
+      "set-buffer",
+      "--name",
+      expect.stringMatching(/^cmuxlayer-workspace-1-surface-1-/),
+      "--",
+      "line one\nline two",
+    ]);
+    expect(execCalls[1].args).toEqual([
+      "--json",
+      "paste-buffer",
+      "--name",
+      execCalls[0].args[3],
+      "--surface",
+      "surface:1",
+      "--workspace",
+      "workspace:1",
+    ]);
+    expect(execCalls[0].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
+    expect(execCalls[1].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
   });
 
   it("moveSurface uses CLI fallback", async () => {
