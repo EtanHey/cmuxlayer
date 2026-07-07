@@ -520,6 +520,8 @@ export function defaultCmuxEventsPath(): string {
 
 const DEFAULT_DELTA_MS = 30_000;
 const DEFAULT_MAX_CMUX_EVENTS_READ_BYTES = 256 * 1024;
+const DEFAULT_SURFACE_REF_MAP_TTL_MS = 30_000;
+const DEFAULT_SURFACE_REF_MAP_TIMEOUT_MS = 1_000;
 
 export function readAppendedCmuxEventsText(args: {
   path: string;
@@ -633,6 +635,38 @@ function writeSurfaceRefMapCache(
   renameSync(tmp, path);
 }
 
+function mergeSurfaceRefMaps(
+  cached: Map<string, string>,
+  live: Map<string, string>,
+): Map<string, string> {
+  const merged = new Map(cached);
+  for (const cmuxId of live.keys()) {
+    merged.delete(cmuxId);
+  }
+  for (const entry of live.entries()) {
+    merged.set(...entry);
+  }
+  return merged;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 /**
  * Build the default sweep-driven runner bound to real fs + a StateManager. The
  * returned function is what the engine calls each sweep; it is a thin wrapper
@@ -644,10 +678,16 @@ export function createDefaultCloseForensicsRunner(config: {
   deltaMs?: number;
   now?: () => string;
   listSurfacesForRefMap?: SurfaceRefMapLister;
+  surfaceRefMapTtlMs?: number;
+  surfaceRefMapTimeoutMs?: number;
 }): () => Promise<{ emitted: number }> {
   const eventsPath = config.eventsPath ?? defaultCmuxEventsPath();
   const deltaMs = config.deltaMs ?? DEFAULT_DELTA_MS;
   const now = config.now ?? (() => new Date().toISOString());
+  const surfaceRefMapTtlMs =
+    config.surfaceRefMapTtlMs ?? DEFAULT_SURFACE_REF_MAP_TTL_MS;
+  const surfaceRefMapTimeoutMs =
+    config.surfaceRefMapTimeoutMs ?? DEFAULT_SURFACE_REF_MAP_TIMEOUT_MS;
   const cursorPath = join(
     config.stateMgr.getBaseDir(),
     "close-forensics-cursor.json",
@@ -741,18 +781,28 @@ export function createDefaultCloseForensicsRunner(config: {
     },
   };
 
+  let lastSurfaceRefMapRefreshMs = 0;
+  let liveSurfaceRefByCmuxId = new Map<string, string>();
+
   return async () => {
     const cachedSurfaceRefByCmuxId = readSurfaceRefMapCache(
       surfaceRefMapCachePath,
     );
-    const liveSurfaceRefByCmuxId = await buildSurfaceRefMap(
-      config.stateMgr,
-      config.listSurfacesForRefMap,
+    const refreshDue =
+      config.listSurfacesForRefMap &&
+      Date.now() - lastSurfaceRefMapRefreshMs >= surfaceRefMapTtlMs;
+    if (refreshDue) {
+      liveSurfaceRefByCmuxId = await withTimeout(
+        buildSurfaceRefMap(config.stateMgr, config.listSurfacesForRefMap),
+        surfaceRefMapTimeoutMs,
+        new Map<string, string>(),
+      );
+      lastSurfaceRefMapRefreshMs = Date.now();
+    }
+    const surfaceRefByCmuxId = mergeSurfaceRefMaps(
+      cachedSurfaceRefByCmuxId,
+      liveSurfaceRefByCmuxId,
     );
-    const surfaceRefByCmuxId = new Map([
-      ...cachedSurfaceRefByCmuxId,
-      ...liveSurfaceRefByCmuxId,
-    ]);
     if (liveSurfaceRefByCmuxId.size > 0) {
       safe(
         () => writeSurfaceRefMapCache(surfaceRefMapCachePath, surfaceRefByCmuxId),

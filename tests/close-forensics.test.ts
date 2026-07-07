@@ -677,6 +677,58 @@ describe("createDefaultCloseForensicsRunner — real fs wiring (temp dirs)", () 
     );
   });
 
+  it("falls back to app-level attribution when the surface ref-map lister rejects", async () => {
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
+      "utf-8",
+    );
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.getEventLog().appendClose(
+      mcpClose({
+        target: "surface:42",
+        caller: "mcp-test-caller",
+        ts: "2026-07-06T21:34:14.000Z",
+      }),
+    );
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+      listSurfacesForRefMap: async () => {
+        throw new Error("surface listing failed");
+      },
+    });
+
+    expect((await runner()).emitted).toBe(1);
+    const forensics = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (e) => (e as { event_type?: string }).event_type === "close_forensics",
+      ) as CloseForensicsEvent[];
+    expect(forensics).toHaveLength(1);
+    expect(forensics[0].attribution).toBe("app-level:no-mcp-close");
+  });
+
+  it("times out a hung surface ref-map lister and still runs the sweep", async () => {
+    writeFileSync(
+      eventsPath,
+      JSON.stringify(surfaceClosed({ seq: 1, surface_id: "S1" })) + "\n",
+      "utf-8",
+    );
+    const stateMgr = new StateManager(stateDir);
+    const runner = createDefaultCloseForensicsRunner({
+      stateMgr,
+      eventsPath,
+      now,
+      surfaceRefMapTimeoutMs: 1,
+      listSurfacesForRefMap: async () => new Promise(() => {}),
+    });
+
+    expect((await runner()).emitted).toBe(1);
+  });
+
   it("caps a single cmux events read window", () => {
     writeFileSync(
       eventsPath,

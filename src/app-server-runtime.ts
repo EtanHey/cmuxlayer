@@ -16,6 +16,7 @@ import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
+import { enrichSurfaceIdsFromPanes } from "./surface-topology.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -158,25 +159,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
-      const paneByRef = new Map(
-        panesByWorkspace.flatMap(({ ref, panes }) =>
-          panes.panes.map((pane) => [`${ref}:${pane.ref}`, pane] as const),
-        ),
-      );
-      return surfaceGroups.flatMap((group) =>
-        group.surfaces.map((surface) => {
-          const pane = paneByRef.get(`${group.workspace_ref}:${group.pane_ref}`);
-          const surfaceIndex = pane?.surface_refs?.indexOf(surface.ref) ?? -1;
-          const inferredId =
-            surfaceIndex >= 0 ? pane?.surface_ids?.[surfaceIndex] : undefined;
-          return {
-            ...surface,
-            id: surface.id ?? inferredId,
-            workspace_ref: group.workspace_ref,
-            pane_ref: group.pane_ref,
-          };
-        }),
-      );
+      return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
     };
 
     this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
