@@ -111,7 +111,7 @@ describe("worktree helpers", () => {
       "worktree",
       "add",
       "-b",
-      `cmuxlayer/${nextName}`,
+      `wt/${nextName}`,
       nextPath,
       "HEAD",
     ]);
@@ -123,7 +123,7 @@ describe("worktree helpers", () => {
     const secondId = (0.25).toString(36).slice(2, 8).padEnd(6, "0");
     const collidingName = `cmuxlayer-worker-${firstId}`;
     const nextName = `cmuxlayer-worker-${secondId}`;
-    const collidingBranch = `cmuxlayer/${collidingName}`;
+    const collidingBranch = `wt/${collidingName}`;
     const nextPath = join(TEST_ROOT, "cmuxlayer.wt", nextName);
     mkdirSync(repoRoot, { recursive: true });
     vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
@@ -156,7 +156,7 @@ describe("worktree helpers", () => {
     expect(result).toMatchObject({
       path: nextPath,
       name: nextName,
-      branch: `cmuxlayer/${nextName}`,
+      branch: `wt/${nextName}`,
       created: true,
       reused: false,
     });
