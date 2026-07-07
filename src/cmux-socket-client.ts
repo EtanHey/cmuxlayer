@@ -31,8 +31,6 @@ export { CmuxSocketError } from "./cmux-socket-error.js";
 // ── Configuration ──────────────────────────────────────────────────────
 
 const REQUEST_TIMEOUT_MS = 10_000;
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
 const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 const RETRY_SAFE_V2_METHODS = new Set([
   "system.ping",
@@ -496,22 +494,15 @@ export class CmuxSocketClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
-    const workspace = await this.resolveWorkspace(surface, opts?.workspace);
-    const params: Record<string, unknown> = {
-      surface_id: surface,
-      text: `${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`,
-      workspace_id: workspace,
-    };
-
-    try {
-      await this.call("surface.send_text", params);
-      return;
-    } catch (error) {
-      if (!this.isMethodNotFound(error) || !this.cliFallback) {
-        throw error;
-      }
+    const cliFallback = this.cliFallbackPinned();
+    if (cliFallback) {
+      return cliFallback.pasteText(surface, text, opts);
     }
-    await this.cliFallbackPinned()!.pasteText(surface, text, opts);
+
+    throw new CmuxSocketError(
+      "Atomic multiline paste requires the cmux CLI paste-buffer path; the socket protocol has no paste RPC, so pasteText is unavailable on a socket-only transport.",
+      "method_not_found",
+    );
   }
 
   async sendKey(
