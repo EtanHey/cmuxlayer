@@ -155,7 +155,7 @@ async function runSubmitFailureWithEnv(value: string): Promise<any> {
     { surface: client.surface, command: "ping" },
     {} as any,
   );
-  await vi.advanceTimersByTimeAsync(2500);
+  await vi.advanceTimersByTimeAsync(6000);
   const result = await resultPromise;
   disposeServer(server);
 
@@ -185,13 +185,13 @@ describe("submit verification timeout env", () => {
     expect(parsed.error).toContain("within 25ms");
   });
 
-  it("falls back to 2000ms for an invalid CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", async () => {
+  it("falls back to 5000ms for an invalid CMUXLAYER_SUBMIT_VERIFY_TIMEOUT_MS", async () => {
     vi.useFakeTimers();
     mkdirSync(TEST_DIR, { recursive: true });
 
     const parsed = await runSubmitFailureWithEnv("not-a-number");
 
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("within 2000ms");
-  });
+    expect(parsed.error).toContain("within 5000ms");
+  }, 10_000);
 });

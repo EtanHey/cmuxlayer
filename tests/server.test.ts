@@ -7011,7 +7011,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBeGreaterThanOrEqual(2);
   }, 10_000);
 
-  it("new_split retries Return when the boot prompt clears but the agent does not start working", async () => {
+  it("new_split verifies a cleared boot prompt without pressing Return again", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-idle-clear-retry.md");
     const prompt = "short boot prompt";
@@ -7074,7 +7074,7 @@ describe("tool handler integration", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
-    expect(returnPresses).toBe(2);
+    expect(returnPresses).toBe(1);
   }, 10_000);
 
   it("new_split reports pane_died when the new surface disappears during boot prompt submit verification", async () => {
@@ -7224,7 +7224,7 @@ describe("tool handler integration", () => {
     expect(transientFailureThrown).toBe(true);
   }, 10_000);
 
-  it("new_split fails when the boot prompt clears after retry without agent identity", async () => {
+  it("new_split fails when the boot prompt clears without agent identity", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-idle-after-clear.md");
     const prompt = "short boot prompt";
@@ -7291,7 +7291,7 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Timed out");
     expect(parsed.boot_prompt_delivered).not.toBe(true);
-    expect(returnPresses).toBe(2);
+    expect(returnPresses).toBe(1);
   }, 10_000);
 
   it("new_split fails loudly when a short boot prompt stays pending after submit retry", async () => {
@@ -7418,7 +7418,7 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
     expect(returnPresses).toBe(1);
-  });
+  }, 10_000);
 
   it("new_split keeps verifying long boot prompts and retries a missed submit", async () => {
     vi.useRealTimers();
@@ -7491,7 +7491,7 @@ describe("tool handler integration", () => {
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls.join("")).toBe(prompt);
     expect(returnPresses).toBe(2);
-  });
+  }, 10_000);
 
   it("new_split renames the new surface when a title is provided", async () => {
     mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {

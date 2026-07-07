@@ -275,7 +275,7 @@ const SEND_INPUT_RETRY_ATTEMPTS = 3;
 const SEND_INPUT_RETRY_DELAY_MS = 25;
 const SEND_INPUT_ENTER_DELAY_MS = 50;
 const SEND_INPUT_RECOVERY_ENTER_DELAY_MS = 150;
-const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 2000;
+const DEFAULT_SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS = 5000;
 function parsePositiveIntegerMs(
   value: string | undefined,
   fallback: number,
@@ -301,6 +301,8 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
+const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
@@ -1247,7 +1249,7 @@ function screenHasAnyAgentIdentity(
 ): boolean {
   return (
     hasParsedAgentIdentity(parsed) ||
-    /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?|(?:^|\n)\s*(?:codex>|cursor>|kiro>)\s*$/im.test(
+    /Claude Code|CLAUDE_COUNTER|bypass permissions on|What can I help you with\?|(?:^|\n)\s*(?:codex>|cursor>|kiro>)(?:\s|$)/im.test(
       screenText,
     )
   );
@@ -2720,6 +2722,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_agent?: string | null;
     verify_submit: boolean;
     require_working_status?: boolean;
+    allow_recovery_enter_retry?: boolean;
     timeout_ms?: number;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
@@ -2735,6 +2738,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let sawClearedComposerEvidence = false;
     let sawAllowedClearedComposerEvidence = false;
     let lastHasPendingInput = false;
+    let lastRetryEligiblePendingInput = false;
+    let retryEligiblePendingSince: number | null = null;
+    let retriedAt: number | null = null;
     const screenIncludesSubmittedText = (screenText: string): boolean => {
       const trimmed = opts.text.trim();
       if (!trimmed) {
@@ -2775,43 +2781,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !screenIncludesSubmittedText(snapshot.text);
         if (allowClearedComposerSubmitEvidence) {
           sawAllowedClearedComposerEvidence = true;
-        }
-        if (!opts.require_working_status && allowClearedComposerSubmitEvidence) {
           return { submit_verified: true, retry_count: retryCount };
         }
-      }
-
-      if (opts.require_working_status) {
-        if (!retried) {
-          await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
-          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
-          retryCount += 1;
-          appendDeliveryEvent({
-            event_type: "press_enter",
-            source_agent: opts.source_agent ?? null,
-            target_surface: opts.surface,
-            bytes: opts.bytes,
-            press_enter: true,
-            submit_verified: null,
-            retry_count: retryCount,
-          });
-          retried = true;
-          continue;
-        }
-
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
-        continue;
       }
 
       const shouldRetryEnter =
         hasPendingInput ||
         (opts.source_event === "spawn_agent" &&
           screenIncludesSubmittedText(snapshot.text));
+      const retryEligiblePendingInput =
+        opts.allow_recovery_enter_retry !== false &&
+        shouldRetryEnter &&
+        ((screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
+          snapshot.parsed.status === "idle") ||
+          (opts.source_event === "spawn_agent" &&
+            !hasParsedAgentIdentity(snapshot.parsed)));
+      lastRetryEligiblePendingInput = retryEligiblePendingInput;
+      if (retryEligiblePendingInput) {
+        retryEligiblePendingSince ??= Date.now();
+      } else {
+        retryEligiblePendingSince = null;
+      }
+      const retryObserveMs =
+        opts.source_event === "spawn_agent" &&
+        !hasParsedAgentIdentity(snapshot.parsed)
+          ? 0
+          : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
-      // Pending input is ambiguous: the first Return may have been missed. A
-      // launch command echoed in shell history keeps its legacy advisory retry.
-      // A recognized cleared agent composer is handled above as submit evidence.
-      if (!retried && shouldRetryEnter) {
+      // Pending input is ambiguous: the first Return may have been missed, or
+      // it may have landed while a slow agent has not repainted the composer
+      // yet. Observe before retrying, and only retry an idle agent composer that
+      // still definitively holds the original text.
+      if (
+        !retried &&
+        retryEligiblePendingInput &&
+        retryEligiblePendingSince !== null &&
+        Date.now() - retryEligiblePendingSince >= retryObserveMs
+      ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         await sendKeyWithRetry(opts.surface, "return", opts.workspace);
         retryCount += 1;
@@ -2825,17 +2831,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           retry_count: retryCount,
         });
         retried = true;
+        retriedAt = Date.now();
         continue;
+      }
+
+      if (
+        retriedAt !== null &&
+        retryEligiblePendingInput &&
+        Date.now() - retriedAt >= SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS
+      ) {
+        return { submit_verified: false, retry_count: retryCount };
       }
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
     return {
-      submit_verified: opts.require_working_status
-        ? false
-        : sawClearedComposerEvidence && sawAllowedClearedComposerEvidence
+      submit_verified:
+        sawClearedComposerEvidence && sawAllowedClearedComposerEvidence
           ? true
-          : lastHasPendingInput
+          : opts.require_working_status
+            ? false
+          : lastRetryEligiblePendingInput
             ? false
             : null,
       retry_count: retryCount,
@@ -2854,6 +2870,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     source_event?: DeliveryEventType;
     source_agent?: string | null;
     verify_submit?: boolean;
+    allow_recovery_enter_retry?: boolean;
     submit_verify_timeout_ms?: number;
   }): Promise<{
     bytes: number;
@@ -2912,6 +2929,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         source_event: opts.source_event ?? "send_command",
         source_agent: opts.source_agent,
         verify_submit: opts.verify_submit ?? false,
+        allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
         timeout_ms: opts.submit_verify_timeout_ms,
         require_working_status: opts.source_event === "boot_prompt",
       });
@@ -6330,6 +6348,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // false-failing a legitimate interjection.
             verify_submit:
               args.press_enter && INTERACTIVE_AGENT_STATES.has(route.state),
+            allow_recovery_enter_retry: !args.allow_busy,
           });
         },
         {
