@@ -211,7 +211,7 @@ describe("Sidebar Sync", () => {
     );
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "working-agent",
-      "brainlayer | role=worker | state=working | health=degraded(missing_cli_session_id:degraded,non_resumable:degraded) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
+      "brainlayer | role=worker | state=working | health=healthy(missing_cli_session_id:info,non_resumable:info) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
     );
   });
@@ -676,6 +676,75 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("suppresses watch-blind alerts and sidebar status when the lead pane is already closed", async () => {
+    const inboxDir = join(TEST_DIR, "lead-closed-pane-inbox");
+    const registryPath = join(TEST_DIR, "lead-closed-pane-registry.json");
+    const agentId = "cmuxlayer-lead-closed-pane";
+    let now = 1_250_000;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "working",
+        surface_id: "surface:lead-closed",
+        workspace_id: "workspace:cmuxlayer",
+        cli_session_id: "session-lead-closed",
+        cli: "claude",
+        model: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        task_summary: "Lead remediation lane",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:other-live")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:cmuxlayer")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      panes: [
+        {
+          ref: "pane:other-live",
+          index: 0,
+          focused: false,
+          surface_count: 1,
+          surface_refs: ["surface:other-live"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      window_ref: "window:1",
+      pane_ref: "pane:other-live",
+      surfaces: [makeSurface("surface:other-live")],
+    });
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine.dispose();
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      inboxOpts: { baseDir: inboxDir, now: () => now },
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
+    });
+    await armLeadMonitor({
+      registryPath,
+      monitorId: "lead-closed-pane-1",
+      ownerSeat: agentId,
+      now: () => now,
+    });
+    now += 61_000;
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(mockClient.notify).not.toHaveBeenCalled();
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalledWith(
+      agentId,
+      expect.any(String),
+      expect.any(Object),
+    );
+  });
+
   it("does not alert from stale inbox heartbeat when no registry deadman fired", async () => {
     const inboxDir = join(TEST_DIR, "lead-stale-inbox-only");
     const registryPath = join(TEST_DIR, "lead-stale-inbox-only-registry.json");
@@ -1032,7 +1101,7 @@ describe("Sidebar Sync", () => {
     expect(mockClient.setStatus).toHaveBeenCalledTimes(2);
     expect(mockClient.setStatus).toHaveBeenLastCalledWith(
       "a1",
-      "brainlayer | role=worker | state=working | health=degraded(missing_cli_session_id:degraded,non_resumable:degraded) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
+      "brainlayer | role=worker | state=working | health=healthy(missing_cli_session_id:info,non_resumable:info) | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({
         workspace: "workspace:coach",
         surface: "surface:99",

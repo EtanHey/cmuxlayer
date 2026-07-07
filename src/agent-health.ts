@@ -32,6 +32,8 @@ export type AgentHealthIssueCode =
   | "orchestrator_not_leftmost"
   | "worker_in_leftmost_column";
 
+export const AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS = 30_000;
+
 export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   AgentHealthIssueCode,
   AgentHealthIssueSeverity
@@ -51,10 +53,10 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   inbox_channel_dir_deleted: "blocking",
   stale_inbox_dispatches: "blocking",
   missing_managed_lead_agent_id: "degraded",
-  missing_cli_session_id: "degraded",
-  non_resumable: "degraded",
-  inbox_monitor_not_alive: "degraded",
-  auto_discovered_agent: "degraded",
+  missing_cli_session_id: "info",
+  non_resumable: "info",
+  inbox_monitor_not_alive: "info",
+  auto_discovered_agent: "info",
   ambiguous_repo_cwd_label: "info",
   registry_screen_disagreement: "degraded",
 };
@@ -88,6 +90,10 @@ export interface AgentHealth {
   recommended_actions?: string[];
 }
 
+export interface AgentHealthDeps {
+  now?: () => number;
+}
+
 function addIssue(
   codes: AgentHealthIssueCode[],
   issues: string[],
@@ -110,17 +116,23 @@ function addRecommendedAction(actions: string[], action: string): void {
 
 function issueSeverity(
   code: AgentHealthIssueCode,
-  context: { screenActive: boolean },
+  context: { screenActive: boolean; inboxMonitorWithinBootGrace: boolean },
 ): AgentHealthIssueSeverity {
   if (code === "registry_screen_disagreement" && context.screenActive) {
     return "info";
+  }
+  if (
+    code === "inbox_monitor_not_alive" &&
+    !context.inboxMonitorWithinBootGrace
+  ) {
+    return "degraded";
   }
   return DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code];
 }
 
 function deriveIssueSeverities(
   codes: AgentHealthIssueCode[],
-  context: { screenActive: boolean },
+  context: { screenActive: boolean; inboxMonitorWithinBootGrace: boolean },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
     Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
@@ -135,10 +147,13 @@ function deriveStatus(
   codes: AgentHealthIssueCode[],
   severities: Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>>,
 ): AgentHealthStatus {
-  if (codes.length === 0) return "healthy";
-  return codes.some((code) => severities[code] === "blocking")
-    ? "unhealthy"
-    : "degraded";
+  if (codes.some((code) => severities[code] === "blocking")) {
+    return "unhealthy";
+  }
+  if (codes.some((code) => severities[code] === "degraded")) {
+    return "degraded";
+  }
+  return "healthy";
 }
 
 function isLongRunning(agent: AgentRecord): boolean {
@@ -210,9 +225,27 @@ function inferTopologyRole(
   );
 }
 
+function parseAgentTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isWithinInboxMonitorBootGrace(
+  agent: AgentRecord,
+  now: number,
+): boolean {
+  const firstSeenAt =
+    parseAgentTimestamp(agent.created_at) ??
+    parseAgentTimestamp(agent.updated_at);
+  if (firstSeenAt === null) return false;
+  return now - firstSeenAt <= AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS;
+}
+
 export function evaluateAgentHealth(
   agent: AgentRecord,
   input: AgentHealthInput = {},
+  deps: AgentHealthDeps = {},
 ): AgentHealth {
   const issueCodes: AgentHealthIssueCode[] = [];
   const issues: string[] = [];
@@ -456,7 +489,13 @@ export function evaluateAgentHealth(
     }
   }
 
-  const issueSeverities = deriveIssueSeverities(issueCodes, { screenActive });
+  const issueSeverities = deriveIssueSeverities(issueCodes, {
+    screenActive,
+    inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
+      agent,
+      deps.now?.() ?? Date.now(),
+    ),
+  });
   const status = deriveStatus(issueCodes, issueSeverities);
 
   return {

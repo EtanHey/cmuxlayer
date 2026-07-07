@@ -601,7 +601,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
     expect(parsed.health).toMatchObject({
-      status: "degraded",
+      status: "healthy",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
@@ -1156,7 +1156,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("ic");
-    expect(parsed.health.status).toBe("degraded");
+    expect(parsed.health.status).toBe("healthy");
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -2357,7 +2357,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
     expect(parsed.agents[0].health).toMatchObject({
-      status: "degraded",
+      status: "healthy",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
@@ -2799,7 +2799,7 @@ describe("agent lifecycle tool handlers", () => {
       repo: "brainlayer",
       state: "working",
       health: {
-        status: "degraded",
+        status: "healthy",
         issue_codes: expect.arrayContaining([
           "registry_screen_disagreement",
         ]),
@@ -2873,7 +2873,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.cli).toBe("codex");
     expect(parsed.resume_command).toBeUndefined();
     expect(parsed.health).toMatchObject({
-      status: "degraded",
+      status: "healthy",
       issue_codes: expect.arrayContaining([
         "missing_cli_session_id",
         "non_resumable",
@@ -3672,7 +3672,7 @@ codex>
       pid: null,
       resumable: false,
       health: {
-        status: "degraded",
+        status: "healthy",
         issue_codes: expect.arrayContaining([
           "auto_discovered_agent",
           "missing_cli_session_id",
