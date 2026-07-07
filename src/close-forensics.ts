@@ -21,7 +21,16 @@
  * the sweep wiring stays a thin, best-effort adapter.
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -59,6 +68,10 @@ export interface CloseForensicsInput {
   deltaMs: number;
   /** Cursor: only emit forensics for events with seq strictly greater than this. */
   lastSeq: number;
+  /** Last close boot_id from a prior offset-tail sweep, for continuity. */
+  previousCloseBootId?: string | null;
+  /** Last window key/unkey event from a prior offset-tail sweep. */
+  previousWindowKeyEvent?: CloseForensicsWindowKeyCursor | null;
   /** Injected clock producing the forensics record's `ts`. */
   now: () => string;
 }
@@ -67,6 +80,22 @@ export interface CloseForensicsResult {
   events: CloseForensicsEvent[];
   /** Advanced cursor = max seq observed across ALL input events (>= lastSeq). */
   nextSeq: number;
+  /** Last close boot_id observed across this input batch and prior cursor state. */
+  lastCloseBootId: string | null;
+  /** Last window key/unkey event observed across this batch and prior cursor. */
+  lastWindowKeyEvent: CloseForensicsWindowKeyCursor | null;
+}
+
+export interface CloseForensicsWindowKeyCursor {
+  name: "window.keyed" | "window.unkeyed";
+  occurredAt: string;
+}
+
+export interface CloseForensicsCursorState {
+  lastSeq: number;
+  lastOffset: number;
+  lastCloseBootId: string | null;
+  lastWindowKeyEvent: CloseForensicsWindowKeyCursor | null;
 }
 
 const SURFACE_CLOSED = "surface.closed";
@@ -87,8 +116,16 @@ function toMillis(iso: string): number {
 export function ingestCloseForensics(
   input: CloseForensicsInput,
 ): CloseForensicsResult {
-  const { cmuxEvents, mcpCloses, surfaceRefByCmuxId, deltaMs, lastSeq, now } =
-    input;
+  const {
+    cmuxEvents,
+    mcpCloses,
+    surfaceRefByCmuxId,
+    deltaMs,
+    lastSeq,
+    previousCloseBootId,
+    previousWindowKeyEvent,
+    now,
+  } = input;
 
   let nextSeq = lastSeq;
   for (const ev of cmuxEvents) {
@@ -96,8 +133,23 @@ export function ingestCloseForensics(
   }
 
   // Window key-focus events power the rc/screen-share attach/detach signal.
-  const windowKeyEvents = cmuxEvents.filter(
+  const currentWindowKeyEvents = cmuxEvents.filter(
     (ev) => ev?.name === WINDOW_KEYED || ev?.name === WINDOW_UNKEYED,
+  );
+  const windowKeyEvents: Array<Pick<CmuxEvent, "name" | "occurred_at">> = [
+    ...(previousWindowKeyEvent
+      ? [
+          {
+            name: previousWindowKeyEvent.name,
+            occurred_at: previousWindowKeyEvent.occurredAt,
+          },
+        ]
+      : []),
+    ...currentWindowKeyEvents,
+  ];
+  const lastWindowKeyEvent = latestWindowKeyCursor(
+    currentWindowKeyEvents,
+    previousWindowKeyEvent ?? null,
   );
 
   // Closes sorted by seq give a stable "previous close" for boot_id continuity.
@@ -107,8 +159,8 @@ export function ingestCloseForensics(
     .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 
   const results: CloseForensicsEvent[] = [];
-  let prevBootId: string | null = null;
-  let sawPrevClose = false;
+  let prevBootId: string | null = previousCloseBootId ?? null;
+  let sawPrevClose = prevBootId !== null;
 
   for (const close of closes) {
     const bootIdChanged =
@@ -160,7 +212,27 @@ export function ingestCloseForensics(
     });
   }
 
-  return { events: results, nextSeq };
+  return {
+    events: results,
+    nextSeq,
+    lastCloseBootId: prevBootId,
+    lastWindowKeyEvent,
+  };
+}
+
+function latestWindowKeyCursor(
+  currentWindowKeyEvents: CmuxEvent[],
+  previousWindowKeyEvent: CloseForensicsWindowKeyCursor | null,
+): CloseForensicsWindowKeyCursor | null {
+  let latest: CmuxEvent | null = null;
+  for (const ev of currentWindowKeyEvents) {
+    if (!latest || (ev.seq ?? 0) > (latest.seq ?? 0)) latest = ev;
+  }
+  if (!latest) return previousWindowKeyEvent;
+  return {
+    name: latest.name === WINDOW_KEYED ? WINDOW_KEYED : WINDOW_UNKEYED,
+    occurredAt: latest.occurred_at,
+  };
 }
 
 function attributeClose(args: {
@@ -198,7 +270,7 @@ function attributeClose(args: {
 }
 
 function deriveWindowKeyContext(
-  windowKeyEvents: CmuxEvent[],
+  windowKeyEvents: Array<Pick<CmuxEvent, "name" | "occurred_at">>,
   closeMs: number,
   deltaMs: number,
 ): {
@@ -212,8 +284,12 @@ function deriveWindowKeyContext(
   // Candidates within Δt of the close. Prefer the most recent one AT OR BEFORE
   // the close (the focus state the window was in when it died); otherwise the
   // nearest one after.
-  let beforeBest: { ev: CmuxEvent; t: number } | null = null;
-  let afterBest: { ev: CmuxEvent; dist: number } | null = null;
+  let beforeBest: { ev: Pick<CmuxEvent, "name" | "occurred_at">; t: number } | null =
+    null;
+  let afterBest: {
+    ev: Pick<CmuxEvent, "name" | "occurred_at">;
+    dist: number;
+  } | null = null;
   for (const ev of windowKeyEvents) {
     const t = toMillis(ev.occurred_at);
     if (Number.isNaN(t)) continue;
@@ -286,11 +362,21 @@ export interface CloseForensicsCursorStore {
   /** Last ingested cmux seq (0 when none / unreadable). */
   read(): number;
   write(seq: number): void;
+  readState?(): CloseForensicsCursorState;
+  writeState?(state: CloseForensicsCursorState): void;
+}
+
+export interface CmuxEventsTextRead {
+  text: string;
+  nextOffset: number;
+  truncated: boolean;
 }
 
 export interface CloseForensicsDeps {
   /** Reads the raw cmux events file; returns null when absent/unreadable. */
-  readCmuxEventsText: () => string | null;
+  readCmuxEventsText: (
+    cursor?: CloseForensicsCursorState,
+  ) => string | CmuxEventsTextRead | null;
   /** cmuxlayer's own MCP close-log records. */
   readMcpCloses: () => CloseTelemetryEvent[];
   /** cmux-UUID → surface-ref map (may be empty). */
@@ -312,23 +398,66 @@ export function runCloseForensicsSweep(deps: CloseForensicsDeps): {
   emitted: number;
 } {
   try {
-    const text = safe(() => deps.readCmuxEventsText(), null);
-    if (!text) return { emitted: 0 };
+    const cursorState =
+      safe(() => deps.cursor.readState?.(), undefined) ?? undefined;
+    const lastSeq =
+      cursorState?.lastSeq ?? (safe(() => deps.cursor.read(), 0) ?? 0);
+    const readResult = safe(() => deps.readCmuxEventsText(cursorState), null);
+    const resetForTruncation =
+      typeof readResult === "object" && readResult !== null
+        ? readResult.truncated
+        : false;
+    const effectiveCursorState: CloseForensicsCursorState | undefined =
+      resetForTruncation
+        ? {
+            lastSeq: 0,
+            lastOffset: 0,
+            lastCloseBootId: null,
+            lastWindowKeyEvent: null,
+          }
+        : cursorState;
+    const effectiveLastSeq = resetForTruncation ? 0 : lastSeq;
+    const text =
+      typeof readResult === "string" || readResult === null
+        ? readResult
+        : readResult.text;
+    if (!text) {
+      if (typeof readResult === "object" && readResult !== null) {
+        const nextOffset = readResult.nextOffset;
+        if (nextOffset !== (cursorState?.lastOffset ?? nextOffset)) {
+          try {
+            deps.cursor.writeState?.({
+              lastSeq: effectiveLastSeq,
+              lastOffset: nextOffset,
+              lastCloseBootId: effectiveCursorState?.lastCloseBootId ?? null,
+              lastWindowKeyEvent:
+                effectiveCursorState?.lastWindowKeyEvent ?? null,
+            });
+          } catch {
+            // Best-effort: an offset write failure only retries the same chunk.
+          }
+        }
+      }
+      return { emitted: 0 };
+    }
     const cmuxEvents =
       safe(() => parseCmuxEvents(text), [] as CmuxEvent[]) ?? [];
-    const lastSeq = safe(() => deps.cursor.read(), 0) ?? 0;
     const mcpCloses =
       safe(() => deps.readMcpCloses(), [] as CloseTelemetryEvent[]) ?? [];
     const surfaceRefByCmuxId =
       safe(() => deps.surfaceRefByCmuxId(), new Map<string, string>()) ??
       new Map<string, string>();
 
-    const { events, nextSeq } = ingestCloseForensics({
+    const { events, nextSeq, lastCloseBootId, lastWindowKeyEvent } =
+      ingestCloseForensics({
       cmuxEvents,
       mcpCloses,
       surfaceRefByCmuxId,
       deltaMs: deps.deltaMs,
-      lastSeq,
+      lastSeq: effectiveLastSeq,
+      previousCloseBootId: effectiveCursorState?.lastCloseBootId ?? null,
+      previousWindowKeyEvent:
+        effectiveCursorState?.lastWindowKeyEvent ?? null,
       now: deps.now,
     });
 
@@ -339,9 +468,29 @@ export function runCloseForensicsSweep(deps: CloseForensicsDeps): {
         // Best-effort: one bad append must not lose the rest of the batch.
       }
     }
-    if (nextSeq > lastSeq) {
+    const nextOffset =
+      typeof readResult === "object" && readResult !== null
+        ? readResult.nextOffset
+        : (cursorState?.lastOffset ?? 0);
+    const nextState: CloseForensicsCursorState = {
+      lastSeq: nextSeq,
+      lastOffset: nextOffset,
+      lastCloseBootId,
+      lastWindowKeyEvent,
+    };
+    const stateChanged =
+      resetForTruncation ||
+      nextSeq > effectiveLastSeq ||
+      nextOffset !== (cursorState?.lastOffset ?? nextOffset) ||
+      lastCloseBootId !== (effectiveCursorState?.lastCloseBootId ?? null) ||
+      lastWindowKeyEvent?.name !==
+        effectiveCursorState?.lastWindowKeyEvent?.name ||
+      lastWindowKeyEvent?.occurredAt !==
+        effectiveCursorState?.lastWindowKeyEvent?.occurredAt;
+    if (stateChanged) {
       try {
-        deps.cursor.write(nextSeq);
+        if (deps.cursor.writeState) deps.cursor.writeState(nextState);
+        else deps.cursor.write(nextSeq);
       } catch {
         // A cursor-write failure re-processes next sweep; append de-dup is owned
         // by cursor advances, so we log at-most-once per successful advance.
@@ -369,6 +518,55 @@ export function defaultCmuxEventsPath(): string {
 }
 
 const DEFAULT_DELTA_MS = 30_000;
+const DEFAULT_MAX_CMUX_EVENTS_READ_BYTES = 256 * 1024;
+
+export function readAppendedCmuxEventsText(args: {
+  path: string;
+  offset: number;
+  maxBytes?: number;
+}): CmuxEventsTextRead {
+  const maxBytes = Math.max(
+    1,
+    args.maxBytes ?? DEFAULT_MAX_CMUX_EVENTS_READ_BYTES,
+  );
+  const size = statSync(args.path).size;
+  const start = args.offset > size ? 0 : Math.max(0, args.offset);
+  const truncated = args.offset > size;
+  if (start >= size) {
+    return { text: "", nextOffset: start, truncated };
+  }
+
+  const bytesToRead = Math.min(maxBytes, size - start);
+  const buffer = Buffer.allocUnsafe(bytesToRead);
+  const fd = openSync(args.path, "r");
+  let bytesRead = 0;
+  try {
+    bytesRead = readSync(fd, buffer, 0, bytesToRead, start);
+  } finally {
+    closeSync(fd);
+  }
+
+  if (bytesRead <= 0) {
+    return { text: "", nextOffset: start, truncated };
+  }
+
+  const reachedEof = start + bytesRead >= size;
+  const chunk = buffer.subarray(0, bytesRead).toString("utf8");
+  const lastNewline = chunk.lastIndexOf("\n");
+  if (lastNewline < 0) {
+    return { text: "", nextOffset: start, truncated };
+  }
+  if (reachedEof && lastNewline === chunk.length - 1) {
+    return { text: chunk, nextOffset: start + bytesRead, truncated };
+  }
+
+  const text = chunk.slice(0, lastNewline + 1);
+  return {
+    text,
+    nextOffset: start + Buffer.byteLength(text),
+    truncated,
+  };
+}
 
 /**
  * cmux's surface-session-index keys by cmuxlayer ref ("surface:N"), not by cmux
@@ -405,28 +603,98 @@ export function createDefaultCloseForensicsRunner(config: {
   );
 
   const cursor: CloseForensicsCursorStore = {
-    read: () => {
-      if (!existsSync(cursorPath)) return 0;
+    readState: () => {
+      if (!existsSync(cursorPath)) {
+        return {
+          lastSeq: 0,
+          lastOffset: 0,
+          lastCloseBootId: null,
+          lastWindowKeyEvent: null,
+        };
+      }
       try {
         const parsed = JSON.parse(readFileSync(cursorPath, "utf-8")) as {
           last_seq?: number;
+          last_offset?: number;
+          last_close_boot_id?: string | null;
+          last_window_key_event?: {
+            name?: string;
+            occurred_at?: string;
+          } | null;
         };
-        return typeof parsed.last_seq === "number" ? parsed.last_seq : 0;
+        const parsedWindowKeyName = parsed.last_window_key_event?.name;
+        const lastWindowKeyEvent: CloseForensicsWindowKeyCursor | null =
+          (parsedWindowKeyName === WINDOW_KEYED ||
+            parsedWindowKeyName === WINDOW_UNKEYED) &&
+          typeof parsed.last_window_key_event?.occurred_at === "string"
+            ? {
+                name: parsedWindowKeyName,
+                occurredAt: parsed.last_window_key_event.occurred_at,
+              }
+            : null;
+        return {
+          lastSeq: typeof parsed.last_seq === "number" ? parsed.last_seq : 0,
+          lastOffset:
+            typeof parsed.last_offset === "number" ? parsed.last_offset : 0,
+          lastCloseBootId:
+            typeof parsed.last_close_boot_id === "string"
+              ? parsed.last_close_boot_id
+              : null,
+          lastWindowKeyEvent,
+        };
       } catch {
-        return 0;
+        return {
+          lastSeq: 0,
+          lastOffset: 0,
+          lastCloseBootId: null,
+          lastWindowKeyEvent: null,
+        };
       }
+    },
+    read: () => cursor.readState?.().lastSeq ?? 0,
+    writeState: (state: CloseForensicsCursorState) => {
+      const tmp = `${cursorPath}.tmp`;
+      writeFileSync(
+        tmp,
+        JSON.stringify({
+          last_seq: state.lastSeq,
+          last_offset: state.lastOffset,
+          last_close_boot_id: state.lastCloseBootId,
+          last_window_key_event: state.lastWindowKeyEvent
+            ? {
+                name: state.lastWindowKeyEvent.name,
+                occurred_at: state.lastWindowKeyEvent.occurredAt,
+              }
+            : null,
+        }),
+        "utf-8",
+      );
+      renameSync(tmp, cursorPath);
     },
     write: (seq: number) => {
       const tmp = `${cursorPath}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ last_seq: seq }), "utf-8");
+      writeFileSync(
+        tmp,
+        JSON.stringify({
+          last_seq: seq,
+          last_offset: 0,
+          last_window_key_event: null,
+        }),
+        "utf-8",
+      );
       renameSync(tmp, cursorPath);
     },
   };
 
   return () =>
     runCloseForensicsSweep({
-      readCmuxEventsText: () =>
-        existsSync(eventsPath) ? readFileSync(eventsPath, "utf-8") : null,
+      readCmuxEventsText: (cursorState) =>
+        existsSync(eventsPath)
+          ? readAppendedCmuxEventsText({
+              path: eventsPath,
+              offset: cursorState?.lastOffset ?? 0,
+            })
+          : null,
       readMcpCloses: () =>
         config.stateMgr
           .getEventLog()
