@@ -3,7 +3,6 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -85,6 +84,11 @@ import {
   type AgentHealth,
   type AgentHealthInput,
 } from "./agent-health.js";
+import {
+  launcherNameCandidates,
+  resolveLauncherNameFromRegistry,
+  type LauncherSuffix,
+} from "./launcher-registry.js";
 import { buildAgentHealthInput } from "./agent-health-input.js";
 import {
   assertSeatIdentity,
@@ -218,8 +222,8 @@ function sessionCollisionSuffix(sessionId: string): string {
 
 /**
  * Result of the spawn preflight. `launcherName` carries the launcher function
- * name resolved by the candidate probe (see resolveLauncherName) so spawnAgent
- * launches the form that actually registered, even when hyphens were stripped.
+ * name resolved from the launcher registry so spawnAgent launches the form
+ * that actually registered, even when the prefix differs from the repo name.
  */
 export interface SpawnPreflightResult {
   launcherName?: string;
@@ -549,9 +553,9 @@ export function buildLaunchCommand(
   cli: CliType,
   repo: string,
   model?: string,
-  // Resolved launcher function name (from resolveLauncherName). When provided
+  // Resolved launcher function name from launchers.zsh. When provided
   // for a launcher CLI it overrides the naive `${repo}${Suffix}` guess so
-  // hyphen-stripped registrations launch correctly. Honored for the launcher
+  // registry-prefix registrations launch correctly. Honored for the launcher
   // CLIs (claude/codex/cursor/gemini); ignored for kiro (raw cd+exec).
   launcherName?: string,
   opts?: { cwd?: string; envPrefix?: string; allowModelOverride?: boolean },
@@ -600,152 +604,23 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
-export type LauncherSuffix = "Claude" | "Codex" | "Cursor" | "Gemini";
-
-const REPO_LAUNCHER_ALIASES: Record<string, string[]> = {
-  // The orchestrator checkout lives at ~/Gits/orchestrator, but the
-  // repoGolem registry key is `orc`, so the launchers are orcClaude/Codex/Cursor.
-  orchestrator: ["orc"],
-};
-
-/**
- * Ordered, de-duplicated launcher-name candidates for a repo + suffix.
- *
- * The repoGolem registry emits launcher function names INCONSISTENTLY per repo
- * (see ~/.config/ralphtools/golem-dispatch.zsh `_golem_register_wrappers`):
- *   - the primary wrapper uses the lowercased, hyphen-stripped registry key
- *     (`${(L)name}` -> `agenthtmlhostCursor`), and
- *   - the P10 "hyphen-aware verbatim alias" is emitted ONLY for some repos
- *     (`agent-html-hostCursor` exists for `maakaf-home`/`skill-creator` but
- *     NOT for `agent-html-host`).
- *
- * AIDEV-NOTE: R-039(cmuxlayer-code: launcher-name resolution) is distinct from weave-registry R-038 (wait_for(done) transcript ground-truth) and weave-registry R-039 (delta-wave coverage).
- *
- * cmuxlayer cannot know which form a given repo registered, so we generate
- * both and probe in order. Candidate #1 preserves today's behavior (verbatim
- * dir name); candidate #2 matches the registry's primary wrapper.
- */
-export function launcherNameCandidates(
-  repo: string,
-  suffix: LauncherSuffix,
-): string[] {
-  const safeRepo = sanitizeRepoName(repo);
-  const prefixes = [
-    safeRepo,
-    safeRepo.replace(/-/g, "").toLowerCase(),
-    ...(REPO_LAUNCHER_ALIASES[safeRepo] ?? []),
-  ];
-  return [...new Set(prefixes)].map((prefix) => `${prefix}${suffix}`);
-}
-
-/** Returns true when a launcher function/command resolves in the login shell. */
-export type LauncherProbe = (launcher: string) => Promise<boolean>;
-
-const shellLauncherProbe: LauncherProbe = async (launcher) => {
-  const shell = process.env.SHELL || "/bin/zsh";
-  const probe = `type ${launcher} >/dev/null 2>&1 || command -v ${launcher} >/dev/null 2>&1`;
-  try {
-    await runDetachedShellProbe(shell, probe);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-function runDetachedShellProbe(shell: string, probe: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(shell, ["-ilc", probe], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    let timedOut = false;
-    let settled = false;
-    let postTermTimer: ReturnType<typeof setTimeout> | null = null;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      postTermTimer = setTimeout(() => {
-        child.kill("SIGKILL");
-        finishReject(
-          new Error("launcher probe failed to terminate after SIGTERM"),
-        );
-      }, 1_000);
-    }, 5_000);
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      if (postTermTimer) clearTimeout(postTermTimer);
-    };
-    const finishResolve = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve();
-    };
-    const finishReject = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-
-    child.once("error", (error) => {
-      finishReject(error);
-    });
-    child.once("exit", (code, signal) => {
-      if (timedOut) {
-        finishReject(new Error("launcher probe timed out"));
-        return;
-      }
-      if (code === 0) {
-        finishResolve();
-        return;
-      }
-      finishReject(
-        new Error(
-          `launcher probe exited with ${code ?? `signal ${signal ?? "unknown"}`}`,
-        ),
-      );
-    });
-  });
-}
-
-/**
- * Resolve the actual launcher function name by probing candidate forms in
- * order. Returns the first candidate that resolves in the login shell; throws a
- * clear registration error (listing every form tried) when none resolve. The
- * probe is injectable for deterministic tests.
- */
-export async function resolveLauncherName(
-  repo: string,
-  suffix: LauncherSuffix,
-  probe: LauncherProbe = shellLauncherProbe,
-): Promise<string> {
-  const candidates = launcherNameCandidates(repo, suffix);
-  for (const candidate of candidates) {
-    if (await probe(candidate)) {
-      return candidate;
-    }
-  }
-  throw new Error(
-    `Launcher not found for repo "${repo}". Tried: ${candidates.join(", ")}. ` +
-      `The repoGolem registry may strip hyphens (e.g. "agent-html-host" -> ` +
-      `"agenthtmlhostCursor"). Register the launcher in golem-powers or use ` +
-      `cli="kiro" which uses a direct cd+exec path.`,
-  );
-}
-
 /**
  * Validate that a launcher is registered and return its resolved name. Probes
- * candidate forms so multi-hyphen repos that registered a stripped name resolve
- * instead of failing on the naive verbatim guess.
+ * the launcher registry instead of executing shell profile code.
  */
 export async function assertLauncherAvailable(
   repo: string,
   suffix: LauncherSuffix,
 ): Promise<string> {
-  return resolveLauncherName(repo, suffix);
+  const cli =
+    suffix === "Claude"
+      ? "claude"
+      : suffix === "Codex"
+        ? "codex"
+        : suffix === "Cursor"
+          ? "cursor"
+          : "gemini";
+  return resolveLauncherNameFromRegistry(repo, cli);
 }
 
 export class AgentEngine {
