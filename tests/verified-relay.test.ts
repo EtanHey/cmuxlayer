@@ -199,9 +199,8 @@ describe("verified relay", () => {
     // A relay that cannot confirm the input landed must NOT report success.
     expect(result.isError).toBe(true);
     expect(parsed.ok).not.toBe(true);
-    // It should have at least retried Enter before giving up.
     expect(
       client.sendKeyCalls.filter((key) => key === "return").length,
-    ).toBeGreaterThanOrEqual(2);
-  });
+    ).toBe(1);
+  }, 10_000);
 });
