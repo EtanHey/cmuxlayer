@@ -59,14 +59,16 @@ export class CmuxClient {
     this.env = env;
   }
 
-  private async run(args: string[]): Promise<string> {
+  private async runWithEnv(
+    args: string[],
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<string> {
     try {
       // Pin every CLI-fallback exec to the instance env (CMUX_SOCKET_PATH) so
       // the `cmux` subprocess cannot inherit an ambient socket path pointing at
       // a DIFFERENT instance (e.g. prod) and silently target the wrong one.
       // The env is forwarded on BOTH the injected-exec path and the real
       // execFile path; dropping it on either is collab O2 #8.
-      const env = this.env;
       const { stdout } = this.exec
         ? await this.exec(
             this.bin,
@@ -80,6 +82,10 @@ export class CmuxClient {
     } catch (error) {
       throw this.normalizeCliError(args, error);
     }
+  }
+
+  private async run(args: string[]): Promise<string> {
+    return this.runWithEnv(args, this.env);
   }
 
   private parse<T>(raw: string, command: string): T {
@@ -424,12 +430,16 @@ export class CmuxClient {
     text: string,
     opts?: { workspace?: string },
   ): Promise<void> {
+    const env = this.env;
     const bufferName = this.pasteBufferName(surface, opts?.workspace);
-    await this.run(["set-buffer", "--name", bufferName, "--", text]);
+    await this.runWithEnv(
+      ["set-buffer", "--name", bufferName, "--", text],
+      env,
+    );
 
     const args = ["paste-buffer", "--name", bufferName, "--surface", surface];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
-    await this.run(args);
+    await this.runWithEnv(args, env);
   }
 
   async sendKey(

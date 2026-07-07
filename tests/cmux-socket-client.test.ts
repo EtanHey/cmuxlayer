@@ -1112,6 +1112,35 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(execCalls[1].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
   });
 
+  it("pasteText forwards socket password to the CLI fallback env", async () => {
+    const execCalls: Array<{
+      cmd: string;
+      args: string[];
+      env?: NodeJS.ProcessEnv;
+    }> = [];
+    const cliFallback = new CmuxClient({
+      exec: async (cmd, args, env) => {
+        execCalls.push({ cmd, args, env });
+        return { stdout: "{}", stderr: "" };
+      },
+    });
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      password: "secret",
+      cliFallback,
+    });
+
+    await client.pasteText("surface:1", "line one\nline two", {
+      workspace: "workspace:1",
+    });
+
+    expect(execCalls).toHaveLength(2);
+    expect(execCalls[0].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
+    expect(execCalls[1].env?.CMUX_SOCKET_PATH).toBe(MOCK_SOCKET_PATH);
+    expect(execCalls[0].env?.CMUX_SOCKET_PASSWORD).toBe("secret");
+    expect(execCalls[1].env?.CMUX_SOCKET_PASSWORD).toBe("secret");
+  });
+
   it("moveSurface uses CLI fallback", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,

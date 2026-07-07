@@ -204,6 +204,9 @@ export class CmuxSocketClient {
       this.cliFallback.setEnv({
         ...process.env,
         CMUX_SOCKET_PATH: this.socketPath,
+        ...(this.authPassword
+          ? { CMUX_SOCKET_PASSWORD: this.authPassword }
+          : {}),
       });
     }
   }

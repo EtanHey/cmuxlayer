@@ -504,6 +504,44 @@ describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
     }
   });
 
+  it("keeps one immutable env snapshot across both paste-buffer commands", async () => {
+    const exec = vi
+      .fn()
+      .mockImplementation(async (_cmd: string, args: string[]) => {
+        if (args.includes("set-buffer")) {
+          client.setEnv({ ...process.env, CMUX_SOCKET_PATH: "/tmp/other.sock" });
+        }
+        return { stdout: "{}", stderr: "" };
+      });
+    const client = new CmuxClient({ exec });
+    client.setEnv({ ...process.env, CMUX_SOCKET_PATH: "/tmp/nightly.sock" });
+
+    await client.pasteText("surface:1", "hello", { workspace: "workspace:1" });
+
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec.mock.calls[0][2]?.CMUX_SOCKET_PATH).toBe("/tmp/nightly.sock");
+    expect(exec.mock.calls[1][2]?.CMUX_SOCKET_PATH).toBe("/tmp/nightly.sock");
+  });
+
+  it("forwards CMUX_SOCKET_PASSWORD with the pinned CLI fallback env", async () => {
+    const exec = mockExec({});
+    const client = new CmuxClient({ exec });
+    client.setEnv({
+      ...process.env,
+      CMUX_SOCKET_PATH: "/tmp/nightly.sock",
+      CMUX_SOCKET_PASSWORD: "secret",
+    });
+
+    await client.pasteText("surface:1", "hello", { workspace: "workspace:1" });
+
+    expect(exec).toHaveBeenCalledTimes(2);
+    for (const call of (exec as ReturnType<typeof vi.fn>).mock.calls) {
+      const env = call[2] as NodeJS.ProcessEnv | undefined;
+      expect(env?.CMUX_SOCKET_PATH).toBe("/tmp/nightly.sock");
+      expect(env?.CMUX_SOCKET_PASSWORD).toBe("secret");
+    }
+  });
+
   it("does not pass an env argument to an injected exec when env is unset", async () => {
     const exec = mockExec({});
     const client = new CmuxClient({ exec });
