@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateAgentHealth } from "../src/agent-health.js";
+import {
+  AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS,
+  evaluateAgentHealth,
+} from "../src/agent-health.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
@@ -40,45 +43,90 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent lifecycle health", () => {
-  it("degrades a working-screen agent without a CLI session or monitor without marking it unhealthy", () => {
+  it("keeps a fresh agent healthy when it only has info-tier launch-time issues", () => {
+    const createdAt = "2026-06-26T20:00:00.000Z";
     const health = evaluateAgentHealth(
       makeRecord({
+        agent_id: "auto-cmuxlayerCodex-pending-1-abcd",
         state: "working",
         cli_session_id: null,
         cli_session_path: null,
+        task_summary: "(auto-discovered)",
+        created_at: createdAt,
       }),
       { monitor_alive: false, screen_status: "working" },
+      { now: () => Date.parse(createdAt) + 1_000 },
     );
 
-    expect(health.status).toBe("degraded");
+    expect(health.status).toBe("healthy");
     expect(health.issue_codes).toEqual([
+      "auto_discovered_agent",
       "missing_cli_session_id",
       "non_resumable",
       "inbox_monitor_not_alive",
     ]);
     expect(health.issue_severities).toMatchObject({
-      missing_cli_session_id: "degraded",
-      non_resumable: "degraded",
-      inbox_monitor_not_alive: "degraded",
+      auto_discovered_agent: "info",
+      missing_cli_session_id: "info",
+      non_resumable: "info",
+      inbox_monitor_not_alive: "info",
     });
   });
 
-  it("marks auto-discovered agents as degraded even if they look ready", () => {
+  it("escalates an absent inbox monitor after the boot grace window", () => {
+    const createdAt = "2026-06-26T20:00:00.000Z";
+    const withinGrace = evaluateAgentHealth(
+      makeRecord({
+        state: "working",
+        cli_session_id: null,
+        created_at: createdAt,
+      }),
+      { monitor_alive: false, screen_status: "working" },
+      {
+        now: () =>
+          Date.parse(createdAt) + AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS - 1,
+      },
+    );
+    const pastGrace = evaluateAgentHealth(
+      makeRecord({
+        state: "working",
+        cli_session_id: null,
+        created_at: createdAt,
+      }),
+      { monitor_alive: false, screen_status: "working" },
+      {
+        now: () =>
+          Date.parse(createdAt) + AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS + 1,
+      },
+    );
+
+    expect(withinGrace.issue_severities?.inbox_monitor_not_alive).toBe("info");
+    expect(withinGrace.status).toBe("healthy");
+    expect(pastGrace.issue_severities?.inbox_monitor_not_alive).toBe(
+      "degraded",
+    );
+    expect(pastGrace.status).toBe("degraded");
+  });
+
+  it("marks auto-discovered agents as info if they look ready", () => {
+    const createdAt = "2026-06-26T20:00:00.000Z";
     const health = evaluateAgentHealth(
       makeRecord({
         agent_id: "auto-codex-surface-306",
         task_summary: "(auto-discovered)",
         cli_session_id: null,
+        created_at: createdAt,
       }),
       { monitor_alive: false },
+      { now: () => Date.parse(createdAt) + 1_000 },
     );
 
-    expect(health.status).toBe("degraded");
+    expect(health.status).toBe("healthy");
     expect(health.issue_codes).toContain("auto_discovered_agent");
     expect(health.issue_codes).toContain("missing_cli_session_id");
     expect(health.issue_severities).toMatchObject({
-      auto_discovered_agent: "degraded",
-      missing_cli_session_id: "degraded",
+      auto_discovered_agent: "info",
+      missing_cli_session_id: "info",
     });
   });
 
@@ -164,7 +212,7 @@ describe("agent lifecycle health", () => {
       },
     );
 
-    expect(health.status).toBe("degraded");
+    expect(health.status).toBe("healthy");
     expect(health.reconciled_state).toBe("working");
     expect(health.issue_codes).toContain("registry_screen_disagreement");
     expect(health.issue_severities?.registry_screen_disagreement).toBe("info");

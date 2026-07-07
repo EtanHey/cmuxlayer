@@ -105,6 +105,7 @@ import {
   collectSurfaceTopology,
   EMPTY_SURFACE_TOPOLOGY,
   healthTopologyOverrides,
+  type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
 import type { InboxOpts } from "./inbox.js";
 
@@ -2500,6 +2501,16 @@ export class AgentEngine {
     return health.status === "unhealthy";
   }
 
+  private isKnownClosedSurface(
+    agent: AgentRecord,
+    surfaceTopology: SurfaceTopologySnapshot | null,
+  ): boolean {
+    if (!surfaceTopology || surfaceTopology.workspaceBySurface.size === 0) {
+      return false;
+    }
+    return !surfaceTopology.workspaceBySurface.has(agent.surface_id);
+  }
+
   /**
    * Sync sidebar: diff agents against snapshot, push only changes.
    * Logs lifecycle events (spawned, done, error) once each.
@@ -2520,6 +2531,21 @@ export class AgentEngine {
       const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
       const agent = taskDoneResult.agent;
       const { agent_id: agentId, state, surface_id } = agent;
+      if (this.isKnownClosedSurface(agent, surfaceTopology)) {
+        const prev = this.sidebarSnapshot.get(agentId);
+        if (prev) {
+          try {
+            await this.client.clearStatus(agentId, {
+              workspace: prev.workspaceId ?? undefined,
+            });
+          } catch {
+            // Best-effort cleanup; closed panes must not emit fresh health signals.
+          }
+        }
+        this.sidebarSnapshot.delete(agentId);
+        this.clearAgentLifecycleMemory(agentId);
+        continue;
+      }
       const harvestability = this.assessHarvestability(agent);
       const healthScreenContexts = new Map<string, SweepAgentContext>();
       const healthScreenContextFor = (
