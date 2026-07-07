@@ -1510,6 +1510,40 @@ describe("worktree worker placement — always right, never left", () => {
     assertNeverLeft(placement);
   });
 
+  it.each([
+    { worktree: true, label: "worktree" },
+    { worktree: false, label: "non-worktree" },
+  ])(
+    "col-0 lead caller seeds a right worker column for a $label worker without anchoring to the lead pane",
+    ({ worktree }) => {
+      const panes = [
+        makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
+      ];
+      const paneSurfaces = [
+        makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
+      ];
+
+      const placement = chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        {
+          orchestrator: new Set(["surface:orchestrator"]),
+          ic: new Set(),
+          worker: new Set(),
+        },
+        {
+          role: "worker",
+          parentRole: "orchestrator",
+          parentSurfaceId: "surface:orchestrator",
+          worktree,
+        },
+      );
+
+      expect(placement).toEqual({ kind: "split", direction: "right" });
+      assertNeverLeft(placement);
+    },
+  );
+
   it("(b) lead column + existing right worker pane: DOCKS as a tab, not a new pane", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
