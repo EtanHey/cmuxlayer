@@ -664,7 +664,7 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(false);
   });
 
-  it("spawn_agent inherits the selected workspace when workspace is omitted", async () => {
+  it("spawn_agent uses the repo workspace before the selected workspace when caller env is absent", async () => {
     const calls: string[] = [];
     const mockClient = {
       createWorkspace: vi.fn(),
@@ -677,23 +677,23 @@ describe("agent lifecycle tool handlers", () => {
             ref: "workspace:1",
             title: "Collab",
             selected: true,
-            current_directory: "/Users/etanheyman/Gits/orchestrator",
+            current_directory: "/repo/orchestrator",
           },
           {
             ref: "workspace:5",
             title: "SkillCreator",
             selected: false,
-            current_directory: "/Users/etanheyman/Gits/skillcreator",
+            current_directory: "/repo/skillcreator",
           },
         ],
       }),
       listPanes: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:1",
+        workspace_ref: "workspace:5",
         window_ref: "window:1",
         panes: [],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
-        workspace_ref: "workspace:1",
+        workspace_ref: "workspace:5",
         window_ref: "window:1",
         pane_ref: "pane:1",
         surfaces: [],
@@ -729,7 +729,7 @@ describe("agent lifecycle tool handlers", () => {
           type: "terminal",
           index: 0,
           selected: true,
-          workspace_ref: "workspace:1",
+          workspace_ref: "workspace:5",
         },
       ]),
       identify: vi.fn().mockResolvedValue({}),
@@ -755,9 +755,9 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.workspace_id).toBe("workspace:1");
-    expect(calls).toContain("spawn:workspace:1");
-    expect(calls).not.toContain("spawn:workspace:5");
+    expect(parsed.workspace_id).toBe("workspace:5");
+    expect(calls).toContain("spawn:workspace:5");
+    expect(calls).not.toContain("spawn:workspace:1");
   });
 
   it("spawn_agent prefers the caller pane workspace over the selected workspace when workspace is omitted", async () => {
@@ -780,14 +780,14 @@ describe("agent lifecycle tool handlers", () => {
               ref: "workspace:1",
               title: "Voice Remediation",
               selected: false,
-              current_directory: "/Users/etanheyman/Gits/orchestrator",
+              current_directory: "/repo/orchestrator",
             },
             {
               id: "selected-workspace-uuid",
               ref: "workspace:5",
               title: "Other Active Workspace",
               selected: true,
-              current_directory: "/Users/etanheyman/Gits/voicelayer",
+              current_directory: "/repo/voicelayer",
             },
           ],
         }),
@@ -1476,6 +1476,132 @@ describe("agent lifecycle tool handlers", () => {
         `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
+  });
+
+  it("new_worktree_split defaults to the caller workspace instead of the selected workspace", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    delete process.env.CMUX_TAB_ID;
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(gitsDir, "cmuxlayer");
+      mkdirSync(repoRoot, { recursive: true });
+      const worktreeExec = vi.fn().mockImplementation(async () => {
+        mkdirSync(join(gitsDir, "cmuxlayer.wt", "caller-worker"), {
+          recursive: true,
+        });
+        return { stdout: "", stderr: "" };
+      });
+      const calls: string[] = [];
+      const mockClient = {
+        createWorkspace: vi.fn(),
+        selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+          calls.push(`select:${workspace}`);
+        }),
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              id: "caller-workspace-uuid",
+              ref: "workspace:caller",
+              title: "Caller",
+              selected: false,
+              current_directory: "/repo/orchestrator",
+            },
+            {
+              id: "selected-workspace-uuid",
+              ref: "workspace:selected",
+              title: "Selected",
+              selected: true,
+              current_directory: "/repo/voicelayer",
+            },
+          ],
+        }),
+        listPanes: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          panes: [],
+        })),
+        listPaneSurfaces: vi.fn().mockImplementation(async ({ workspace }) => ({
+          workspace_ref: workspace,
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        })),
+        newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
+          calls.push(`spawn:${opts.workspace}`);
+          return {
+            workspace: opts.workspace,
+            surface: "surface:caller-worktree",
+            pane: "pane:caller-worktree",
+            title: "",
+            type: "terminal",
+          };
+        }),
+        newSurface: vi.fn(),
+        send: vi.fn().mockResolvedValue(undefined),
+        sendKey: vi.fn().mockResolvedValue(undefined),
+        readScreen: vi.fn().mockResolvedValue({
+          surface: "surface:caller-worktree",
+          text: "Codex\n>",
+          lines: 1,
+          scrollback_used: false,
+        }),
+        log: vi.fn().mockResolvedValue(undefined),
+        setStatus: vi.fn().mockResolvedValue(undefined),
+        clearStatus: vi.fn().mockResolvedValue(undefined),
+        setProgress: vi.fn().mockResolvedValue(undefined),
+        closeSurface: vi.fn().mockResolvedValue(undefined),
+        listSurfaces: vi.fn().mockResolvedValue([
+          {
+            ref: "surface:caller-worktree",
+            title: "cmuxlayerCodex",
+            type: "terminal",
+            index: 0,
+            selected: true,
+            workspace_ref: "workspace:caller",
+          },
+        ]),
+        identify: vi.fn().mockResolvedValue({}),
+        browser: vi.fn().mockResolvedValue({}),
+      };
+      const server = createTrackedServer({
+        client: mockClient as any,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const tool = (server as any)._registeredTools["new_worktree_split"];
+
+      const result = await tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "codex",
+          cli: "codex",
+          worktree: { name: "caller worker" },
+        },
+        {} as any,
+      );
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.workspace_id).toBe("workspace:caller");
+      expect(calls).toContain("spawn:workspace:caller");
+      expect(calls).not.toContain("spawn:workspace:selected");
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+    }
   });
 
   it("new_worktree_split refuses a manual-mode caller workspace before worktree setup", async () => {
