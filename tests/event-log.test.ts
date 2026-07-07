@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventLog } from "../src/event-log.js";
@@ -161,5 +168,78 @@ describe("EventLog", () => {
     });
     // Close entries carry no agent_id, so they are not mistaken for transitions.
     expect(log.readAll()).toHaveLength(0);
+  });
+
+  it("reads only a bounded tail window while preserving recent entries", () => {
+    const log = new EventLog(TEST_DIR, { maxReadBytes: 512 });
+    const filePath = join(TEST_DIR, "events.jsonl");
+    const oldClose: CloseTelemetryEvent = {
+      ts: "2026-07-06T12:00:00Z",
+      event_type: "close",
+      event: "close_surface",
+      target: "surface:old",
+      caller: "old-caller",
+      force: false,
+      reason: null,
+      refused: false,
+    };
+    const recentClose: CloseTelemetryEvent = {
+      ...oldClose,
+      ts: "2026-07-06T12:05:00Z",
+      target: "surface:recent",
+      caller: "recent-caller",
+    };
+
+    writeFileSync(
+      filePath,
+      [
+        JSON.stringify(oldClose),
+        ...Array.from({ length: 40 }, (_, index) =>
+          JSON.stringify(
+            makeTransition({
+              agent_id: `agent-filler-${index}`,
+              surface_id: `surface:${index}`,
+            }),
+          ),
+        ),
+        JSON.stringify(recentClose),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    expect(statSync(filePath).size).toBeGreaterThan(512);
+
+    const read = log.readCloseEvents();
+    expect(read.map((entry) => entry.target)).toEqual(["surface:recent"]);
+    expect(
+      log.readAll().some((entry) => entry.agent_id === "agent-filler-0"),
+    ).toBe(false);
+  });
+
+  it("rotates before the active event log can grow beyond its cap", () => {
+    const log = new EventLog(TEST_DIR, {
+      maxFileBytes: 900,
+      maxReadBytes: 2048,
+    });
+    const filePath = join(TEST_DIR, "events.jsonl");
+    const rotatedPath = join(TEST_DIR, "events.jsonl.1");
+
+    for (let i = 0; i < 30; i++) {
+      log.append(
+        makeTransition({
+          agent_id: `agent-${i}`,
+          surface_id: `surface:${i}`,
+        }),
+      );
+    }
+    log.append(
+      makeTransition({
+        agent_id: "agent-recent",
+        surface_id: "surface:recent",
+      }),
+    );
+
+    expect(existsSync(rotatedPath)).toBe(true);
+    expect(statSync(filePath).size).toBeLessThanOrEqual(900);
+    expect(log.readForAgent("agent-recent")).toHaveLength(1);
   });
 });

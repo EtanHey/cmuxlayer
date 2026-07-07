@@ -698,11 +698,7 @@ export function createDefaultCloseForensicsRunner(config: {
       readMcpCloses: () =>
         config.stateMgr
           .getEventLog()
-          .readEntries()
-          .filter(
-            (entry): entry is CloseTelemetryEvent =>
-              (entry as { event_type?: string }).event_type === "close",
-          ),
+          .readCloseEvents(),
       surfaceRefByCmuxId: () => buildSurfaceRefMap(config.stateMgr),
       appendForensics: (event) =>
         config.stateMgr.getEventLog().appendCloseForensics(event),
