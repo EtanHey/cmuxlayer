@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { sanitizeRepoName, shellQuote } from "./agent-command.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_WORKTREE_BRANCH_PREFIX = "wt";
 
 export type WorktreeExec = (
   cmd: string,
@@ -76,6 +77,10 @@ function safeName(input: string): string {
 function defaultWorkerName(repo: string): string {
   const shortId = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
   return safeName(`${repo}-worker-${shortId}`);
+}
+
+function defaultWorktreeBranch(name: string): string {
+  return `${DEFAULT_WORKTREE_BRANCH_PREFIX}/${name}`;
 }
 
 function canonicalPath(path: string): string {
@@ -235,7 +240,7 @@ export async function prepareWorktree(
     : join(homeGitsDir, `${repo}.wt`, spec.name);
   if (spec.generatedName && !spec.path) {
     for (let attempts = 0; attempts < 10; attempts++) {
-      const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+      const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
       const pathExists = existsSync(worktreePath);
       const branchTaken = pathExists
         ? false
@@ -246,7 +251,7 @@ export async function prepareWorktree(
       spec.name = defaultWorkerName(repo);
       worktreePath = join(homeGitsDir, `${repo}.wt`, spec.name);
     }
-    const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+    const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
     if (
       existsSync(worktreePath) ||
       (await branchExists(repoRoot, branch, exec))
@@ -268,7 +273,7 @@ export async function prepareWorktree(
     return {
       path: worktreePath,
       name: basename(worktreePath),
-      branch: spec.branch ?? `cmuxlayer/${spec.name}`,
+      branch: spec.branch ?? defaultWorktreeBranch(spec.name),
       base: spec.base,
       created: false,
       reused: true,
@@ -282,7 +287,7 @@ export async function prepareWorktree(
   }
 
   mkdirSync(dirname(worktreePath), { recursive: true });
-  const branch = spec.branch ?? `cmuxlayer/${spec.name}`;
+  const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
   await exec("git", [
     "-C",
     repoRoot,
