@@ -16,6 +16,7 @@ import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
+import { enrichSurfaceIdsFromPanes } from "./surface-topology.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -158,13 +159,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
-      return surfaceGroups.flatMap((group) =>
-        group.surfaces.map((surface) => ({
-          ...surface,
-          workspace_ref: group.workspace_ref,
-          pane_ref: group.pane_ref,
-        })),
-      );
+      return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
     };
 
     this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
@@ -201,6 +196,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       monitorRegistryNotify: httpNotifyMonitorDeadman,
       closeForensicsRunner: createDefaultCloseForensicsRunner({
         stateMgr: this.stateMgr,
+        listSurfacesForRefMap: surfaceProvider,
       }),
     });
   }

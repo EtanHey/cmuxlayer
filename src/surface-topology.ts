@@ -3,7 +3,12 @@ import type { AgentTopologyHealthInput } from "./agent-health.js";
 import type { AgentHealthInputOverrides } from "./agent-health-input.js";
 import { deriveColumnIndex } from "./layout-policy.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
-import type { CmuxPane, CmuxPaneSurfaces, CmuxWorkspace } from "./types.js";
+import type {
+  CmuxPane,
+  CmuxPaneSurfaces,
+  CmuxSurface,
+  CmuxWorkspace,
+} from "./types.js";
 
 export type SurfaceTopology = AgentTopologyHealthInput;
 
@@ -30,6 +35,34 @@ export const EMPTY_SURFACE_TOPOLOGY: SurfaceTopology = {
   column: null,
   column_count: null,
 };
+
+export function enrichSurfaceIdsFromPanes(
+  panesByWorkspace: Array<{
+    ref: string;
+    panes: { panes: CmuxPane[] };
+  }>,
+  surfaceGroups: CmuxPaneSurfaces[],
+): CmuxSurface[] {
+  const paneByRef = new Map(
+    panesByWorkspace.flatMap(({ ref, panes }) =>
+      panes.panes.map((pane) => [`${ref}:${pane.ref}`, pane] as const),
+    ),
+  );
+  return surfaceGroups.flatMap((group) =>
+    group.surfaces.map((surface) => {
+      const pane = paneByRef.get(`${group.workspace_ref}:${group.pane_ref}`);
+      const surfaceIndex = pane?.surface_refs?.indexOf(surface.ref) ?? -1;
+      const inferredId =
+        surfaceIndex >= 0 ? pane?.surface_ids?.[surfaceIndex] : undefined;
+      return {
+        ...surface,
+        id: surface.id ?? inferredId,
+        workspace_ref: group.workspace_ref,
+        pane_ref: group.pane_ref,
+      };
+    }),
+  );
+}
 
 export async function collectSurfaceTopology(
   client: SurfaceTopologyClient,

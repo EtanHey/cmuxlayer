@@ -132,6 +132,7 @@ import {
 import {
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   EMPTY_SURFACE_TOPOLOGY,
+  enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
   type SurfaceTopology,
 } from "./surface-topology.js";
@@ -5966,13 +5967,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
-      return surfaceGroups.flatMap((group) =>
-        group.surfaces.map((surface) => ({
-          ...surface,
-          workspace_ref: group.workspace_ref,
-          pane_ref: group.pane_ref,
-        })),
-      );
+      return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
     };
     const surfaceProvider = async () => {
       try {
@@ -6096,7 +6091,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
           closeForensicsRunner: opts?.enableCloseForensics
-            ? createDefaultCloseForensicsRunner({ stateMgr })
+            ? createDefaultCloseForensicsRunner({
+                stateMgr,
+                listSurfacesForRefMap: surfaceProvider,
+              })
             : null,
         },
       );

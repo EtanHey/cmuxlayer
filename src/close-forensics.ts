@@ -38,6 +38,7 @@ import type {
   CloseTelemetryEvent,
 } from "./agent-types.js";
 import type { StateManager } from "./state-manager.js";
+import type { CmuxSurface } from "./types.js";
 
 /** Minimal shape of a parsed line from `~/.cmuxterm/events.jsonl`. */
 export interface CmuxEvent {
@@ -519,6 +520,8 @@ export function defaultCmuxEventsPath(): string {
 
 const DEFAULT_DELTA_MS = 30_000;
 const DEFAULT_MAX_CMUX_EVENTS_READ_BYTES = 256 * 1024;
+const DEFAULT_SURFACE_REF_MAP_TTL_MS = 30_000;
+const DEFAULT_SURFACE_REF_MAP_TIMEOUT_MS = 1_000;
 
 export function readAppendedCmuxEventsText(args: {
   path: string;
@@ -569,18 +572,99 @@ export function readAppendedCmuxEventsText(args: {
 }
 
 /**
- * cmux's surface-session-index keys by cmuxlayer ref ("surface:N"), not by cmux
- * internal surface UUID, so there is no UUID↔ref link to harvest yet. An empty
- * map keeps attribution honest (`app-level:no-mcp-close`) until such a bridge
- * exists — which for the current mystery is the CORRECT finding (these tab
- * deaths do NOT go through cmuxlayer). The ingest is map-driven, so the day cmux
- * exposes a UUID↔ref bridge, attribution lights up with no ingest change. Kept
- * as a named seam so that wiring point is obvious.
+ * Build the cmux-internal UUID → cmuxlayer ref bridge from a bounded live
+ * surface listing. `surface.list` may expose `surface.id`; callers can also
+ * enrich from `pane.list`'s parallel `surface_ids`/`surface_refs` arrays before
+ * passing surfaces here. Missing IDs are skipped so attribution degrades
+ * honestly to `app-level:no-mcp-close`.
  */
-export function buildSurfaceRefMap(
-  _stateMgr: StateManager,
+export type SurfaceRefMapSurface = Pick<CmuxSurface, "id" | "ref">;
+
+export type SurfaceRefMapLister = () => Promise<SurfaceRefMapSurface[]>;
+
+export function buildSurfaceRefMapFromSurfaces(
+  surfaces: SurfaceRefMapSurface[],
 ): Map<string, string> {
-  return new Map<string, string>();
+  const map = new Map<string, string>();
+  for (const surface of surfaces) {
+    if (!surface.id || !surface.ref) continue;
+    map.set(surface.id, surface.ref);
+  }
+  return map;
+}
+
+export async function buildSurfaceRefMap(
+  _stateMgr: StateManager,
+  listSurfaces?: SurfaceRefMapLister,
+): Promise<Map<string, string>> {
+  if (!listSurfaces) return new Map<string, string>();
+  try {
+    return buildSurfaceRefMapFromSurfaces(await listSurfaces());
+  } catch {
+    return new Map<string, string>();
+  }
+}
+
+const SURFACE_REF_MAP_CACHE_LIMIT = 1000;
+
+function readSurfaceRefMapCache(path: string): Map<string, string> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return new Map<string, string>();
+    }
+    const map = new Map<string, string>();
+    for (const [cmuxId, surfaceRef] of Object.entries(parsed)) {
+      if (typeof cmuxId === "string" && typeof surfaceRef === "string") {
+        map.set(cmuxId, surfaceRef);
+      }
+    }
+    return map;
+  } catch {
+    return new Map<string, string>();
+  }
+}
+
+function writeSurfaceRefMapCache(
+  path: string,
+  map: Map<string, string>,
+): void {
+  const entries = [...map.entries()].slice(-SURFACE_REF_MAP_CACHE_LIMIT);
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(Object.fromEntries(entries)), "utf-8");
+  renameSync(tmp, path);
+}
+
+function mergeSurfaceRefMaps(
+  cached: Map<string, string>,
+  live: Map<string, string>,
+): Map<string, string> {
+  const merged = new Map(cached);
+  for (const cmuxId of live.keys()) {
+    merged.delete(cmuxId);
+  }
+  for (const entry of live.entries()) {
+    merged.set(...entry);
+  }
+  return merged;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  fallback: T,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 /**
@@ -593,13 +677,24 @@ export function createDefaultCloseForensicsRunner(config: {
   eventsPath?: string;
   deltaMs?: number;
   now?: () => string;
-}): () => { emitted: number } {
+  listSurfacesForRefMap?: SurfaceRefMapLister;
+  surfaceRefMapTtlMs?: number;
+  surfaceRefMapTimeoutMs?: number;
+}): () => Promise<{ emitted: number }> {
   const eventsPath = config.eventsPath ?? defaultCmuxEventsPath();
   const deltaMs = config.deltaMs ?? DEFAULT_DELTA_MS;
   const now = config.now ?? (() => new Date().toISOString());
+  const surfaceRefMapTtlMs =
+    config.surfaceRefMapTtlMs ?? DEFAULT_SURFACE_REF_MAP_TTL_MS;
+  const surfaceRefMapTimeoutMs =
+    config.surfaceRefMapTimeoutMs ?? DEFAULT_SURFACE_REF_MAP_TIMEOUT_MS;
   const cursorPath = join(
     config.stateMgr.getBaseDir(),
     "close-forensics-cursor.json",
+  );
+  const surfaceRefMapCachePath = join(
+    config.stateMgr.getBaseDir(),
+    "close-forensics-surface-ref-map.json",
   );
 
   const cursor: CloseForensicsCursorStore = {
@@ -686,8 +781,35 @@ export function createDefaultCloseForensicsRunner(config: {
     },
   };
 
-  return () =>
-    runCloseForensicsSweep({
+  let lastSurfaceRefMapRefreshMs = 0;
+  let liveSurfaceRefByCmuxId = new Map<string, string>();
+
+  return async () => {
+    const cachedSurfaceRefByCmuxId = readSurfaceRefMapCache(
+      surfaceRefMapCachePath,
+    );
+    const refreshDue =
+      config.listSurfacesForRefMap &&
+      Date.now() - lastSurfaceRefMapRefreshMs >= surfaceRefMapTtlMs;
+    if (refreshDue) {
+      liveSurfaceRefByCmuxId = await withTimeout(
+        buildSurfaceRefMap(config.stateMgr, config.listSurfacesForRefMap),
+        surfaceRefMapTimeoutMs,
+        new Map<string, string>(),
+      );
+      lastSurfaceRefMapRefreshMs = Date.now();
+    }
+    const surfaceRefByCmuxId = mergeSurfaceRefMaps(
+      cachedSurfaceRefByCmuxId,
+      liveSurfaceRefByCmuxId,
+    );
+    if (liveSurfaceRefByCmuxId.size > 0) {
+      safe(
+        () => writeSurfaceRefMapCache(surfaceRefMapCachePath, surfaceRefByCmuxId),
+        undefined,
+      );
+    }
+    return runCloseForensicsSweep({
       readCmuxEventsText: (cursorState) =>
         existsSync(eventsPath)
           ? readAppendedCmuxEventsText({
@@ -699,11 +821,12 @@ export function createDefaultCloseForensicsRunner(config: {
         config.stateMgr
           .getEventLog()
           .readCloseEvents(),
-      surfaceRefByCmuxId: () => buildSurfaceRefMap(config.stateMgr),
+      surfaceRefByCmuxId: () => surfaceRefByCmuxId,
       appendForensics: (event) =>
         config.stateMgr.getEventLog().appendCloseForensics(event),
       cursor,
       now,
       deltaMs,
     });
+  };
 }
