@@ -22,10 +22,9 @@ import {
   buildLaunchCommand,
   buildResumeCommand,
   extractSessionId,
-  launcherNameCandidates,
-  resolveLauncherName,
   resolveSweepTiming,
 } from "../src/agent-engine.js";
+import { launcherNameCandidates } from "../src/launcher-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
@@ -5357,6 +5356,37 @@ To continue this session, run codex resume ${sessionId}`,
         }
       },
     );
+
+    it("uses the launcher registry and fails loudly before any bare split fallback", async () => {
+      const registryPath = join(TEST_DIR, "launchers.zsh");
+      writeFileSync(
+        registryPath,
+        'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+      );
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
+      try {
+        await expect(
+          defaultEngine.spawnAgent({
+            repo: "missinglauncher",
+            model: "test",
+            cli: "claude",
+            prompt: "",
+            cwd: "/tmp/cmux-worktree",
+          }),
+        ).rejects.toThrow(
+          /Launcher registry miss.*missinglauncherClaude.*launchers\.zsh.*\/Users\/etanheyman\/Gits\/matchmat.*mmClaude/s,
+        );
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+        expect(stateMgr.listStates()).toHaveLength(0);
+      } finally {
+        defaultEngine.dispose();
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   describe("waitForAll", () => {
@@ -6308,97 +6338,46 @@ describe("buildLaunchCommand", () => {
 });
 
 describe("assertLauncherAvailable", () => {
+  const registryPath = join(TEST_DIR, "assert-launchers.zsh");
+
   beforeEach(() => {
-    spawnMock.mockReset();
-    vi.stubEnv("SHELL", "/bin/zsh");
+    mkdirSync(TEST_DIR, { recursive: true });
+    writeFileSync(
+      registryPath,
+      [
+        'repoGolem brainlayer "/Users/etanheyman/Gits/brainlayer"',
+        'repoGolem agenthtmlhost "/Users/etanheyman/Gits/agent-html-host"',
+        'repoGolem orc "/Users/etanheyman/Gits/orchestrator"',
+      ].join("\n"),
+    );
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it("resolves to the verbatim launcher name when the probe returns 0", async () => {
-    spawnMock.mockImplementation(() => mockSpawnExit(0));
-
+  it("resolves to the registered launcher name from launchers.zsh", async () => {
     await expect(assertLauncherAvailable("brainlayer", "Cursor")).resolves.toBe(
       "brainlayerCursor",
     );
-
-    expect(spawnMock).toHaveBeenCalledWith(
-      "/bin/zsh",
-      [
-        "-ilc",
-        "type brainlayerCursor >/dev/null 2>&1 || command -v brainlayerCursor >/dev/null 2>&1",
-      ],
-      {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      },
-    );
   });
 
-  it("falls back to the hyphen-stripped launcher when verbatim is unregistered", async () => {
-    // agent-html-host registered only as agenthtmlhostCursor (hyphens stripped).
-    spawnMock.mockImplementation((_cmd, args) => {
-      const probe = String(args?.[1] ?? "");
-      if (probe.includes("agenthtmlhostCursor")) {
-        return mockSpawnExit(0);
-      }
-      return mockSpawnExit(1);
-    });
-
+  it("resolves the registry prefix when it differs from the repo basename", async () => {
     await expect(
       assertLauncherAvailable("agent-html-host", "Cursor"),
     ).resolves.toBe("agenthtmlhostCursor");
+    await expect(
+      assertLauncherAvailable("orchestrator", "Cursor"),
+    ).resolves.toBe("orcCursor");
   });
 
-  it("throws listing every candidate when none resolve", async () => {
-    spawnMock.mockImplementation(() => mockSpawnExit(1));
-
+  it("throws with candidates, source, and registered launchers when missing", async () => {
     await expect(
       assertLauncherAvailable("skill-creator", "Cursor"),
-    ).rejects.toThrow(/skill-creatorCursor.*skillcreatorCursor.*cli="kiro"/s);
-  });
-
-  it("waits for the launcher probe process to exit after SIGTERM timeout", async () => {
-    vi.useFakeTimers();
-    let exitCallback: ((code: number | null, signal: NodeJS.Signals | null) => void)
-      | null = null;
-    const child = {
-      kill: vi.fn(),
-      once: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
-        if (event === "exit") {
-          exitCallback = callback as typeof exitCallback;
-        }
-        return child;
-      }),
-    };
-    spawnMock.mockImplementation(() => child);
-
-    try {
-      const probe = assertLauncherAvailable("brainlayer", "Cursor");
-      let settled = false;
-      probe.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
-
-      await vi.advanceTimersByTimeAsync(5_000);
-      await Promise.resolve();
-
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      expect(settled).toBe(false);
-
-      exitCallback?.(null, "SIGTERM");
-      await expect(probe).rejects.toThrow(/Launcher not found/);
-    } finally {
-      vi.useRealTimers();
-    }
+    ).rejects.toThrow(
+      /Launcher registry miss.*skill-creatorCursor.*skillcreatorCursor.*assert-launchers\.zsh.*brainlayerCursor/s,
+    );
   });
 });
 
@@ -6410,7 +6389,15 @@ describe("launcherNameCandidates", () => {
   });
 
   it("includes the repoGolem orc alias for orchestrator", () => {
-    expect(launcherNameCandidates("orchestrator", "Cursor")).toEqual([
+    expect(
+      launcherNameCandidates("orchestrator", "Cursor", [
+        {
+          prefix: "orc",
+          path: "/Users/etanheyman/Gits/orchestrator",
+          repoBasename: "orchestrator",
+        },
+      ]),
+    ).toEqual([
       "orchestratorCursor",
       "orcCursor",
     ]);
@@ -6428,41 +6415,6 @@ describe("launcherNameCandidates", () => {
       "maakaf-homeClaude",
       "maakafhomeClaude",
     ]);
-  });
-});
-
-describe("resolveLauncherName", () => {
-  it("returns the verbatim launcher when it resolves first", async () => {
-    const probe = vi.fn(async (name: string) => name === "maakaf-homeCursor");
-    await expect(
-      resolveLauncherName("maakaf-home", "Cursor", probe),
-    ).resolves.toBe("maakaf-homeCursor");
-    expect(probe).toHaveBeenCalledWith("maakaf-homeCursor");
-  });
-
-  it("probes the stripped form only after the verbatim form misses", async () => {
-    const probe = vi.fn(async (name: string) => name === "agenthtmlhostCursor");
-    await expect(
-      resolveLauncherName("agent-html-host", "Cursor", probe),
-    ).resolves.toBe("agenthtmlhostCursor");
-    expect(probe).toHaveBeenNthCalledWith(1, "agent-html-hostCursor");
-    expect(probe).toHaveBeenNthCalledWith(2, "agenthtmlhostCursor");
-  });
-
-  it("falls back to the orc launcher alias for the orchestrator repo", async () => {
-    const probe = vi.fn(async (name: string) => name === "orcCursor");
-    await expect(
-      resolveLauncherName("orchestrator", "Cursor", probe),
-    ).resolves.toBe("orcCursor");
-    expect(probe).toHaveBeenNthCalledWith(1, "orchestratorCursor");
-    expect(probe).toHaveBeenNthCalledWith(2, "orcCursor");
-  });
-
-  it("throws when no candidate resolves", async () => {
-    const probe = vi.fn(async () => false);
-    await expect(
-      resolveLauncherName("agent-html-host", "Cursor", probe),
-    ).rejects.toThrow(/agent-html-hostCursor.*agenthtmlhostCursor/s);
   });
 });
 
