@@ -30,6 +30,8 @@ export interface StartInProcessOptions {
   fallbackWarnings?: string[];
 }
 
+export type ExitFn = (code: number) => void;
+
 export type EntryRuntime =
   | { mode: "daemon-proxy"; proxy: CmuxLayerProxy }
   | { mode: "in-process"; server: McpServer; fallbackWarnings: string[] };
@@ -47,6 +49,7 @@ export interface DaemonFirstEntryOptions {
   daemonScriptPath?: string;
   autostartTimeoutMs?: number;
   autostartPollMs?: number;
+  exit?: ExitFn;
 }
 
 function isEnabled(value: string | undefined): boolean {
@@ -55,6 +58,30 @@ function isEnabled(value: string | undefined): boolean {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function terminateSpawnedDaemon(
+  spawnedDaemon: unknown,
+  logger: Pick<Console, "error">,
+): void {
+  const kill =
+    spawnedDaemon &&
+    typeof spawnedDaemon === "object" &&
+    "kill" in spawnedDaemon &&
+    typeof spawnedDaemon.kill === "function"
+      ? spawnedDaemon.kill
+      : null;
+  if (!kill) {
+    return;
+  }
+  try {
+    kill.call(spawnedDaemon, "SIGTERM");
+  } catch (error) {
+    logger.error(
+      "[cmuxlayer] failed to terminate timed-out daemon autostart",
+      error,
+    );
+  }
 }
 
 function defaultDaemonScriptPath(): string {
@@ -196,6 +223,42 @@ export async function startInProcessRuntime(
   return server;
 }
 
+export function bindProxyStdioLifecycle(opts: {
+  input: Readable;
+  proxy: Pick<CmuxLayerProxy, "stop">;
+  logger: Pick<Console, "error">;
+  exit: ExitFn;
+}): void {
+  let shutdownStarted = false;
+  const shutdown = (reason: string) => {
+    if (shutdownStarted) {
+      return;
+    }
+    shutdownStarted = true;
+    const forceExit = setTimeout(() => {
+      opts.logger.error(
+        `[cmuxlayer-proxy] forced stdio shutdown after ${reason}`,
+      );
+      opts.exit(0);
+    }, 1_000);
+    forceExit.unref?.();
+    void opts.proxy.stop().then(
+      () => {
+        clearTimeout(forceExit);
+        opts.exit(0);
+      },
+      (error) => {
+        clearTimeout(forceExit);
+        opts.logger.error("[cmuxlayer-proxy] stdio shutdown failed", error);
+        opts.exit(1);
+      },
+    );
+  };
+
+  opts.input.once("end", () => shutdown("stdin end"));
+  opts.input.once("close", () => shutdown("stdin close"));
+}
+
 export async function runDaemonFirstEntry(
   opts: DaemonFirstEntryOptions = {},
 ): Promise<EntryRuntime> {
@@ -207,19 +270,25 @@ export async function runDaemonFirstEntry(
   const spawnDaemon = opts.spawnDaemon ?? spawnDaemonProcess;
   const startInProcess = opts.startInProcess ?? startInProcessRuntime;
   const sleep = opts.sleep ?? defaultSleep;
+  const exit = opts.exit ?? ((code) => process.exit(code));
   const autostartTimeoutMs =
     opts.autostartTimeoutMs ?? DEFAULT_AUTOSTART_TIMEOUT_MS;
   const autostartPollMs = opts.autostartPollMs ?? DEFAULT_AUTOSTART_POLL_MS;
 
-  const startProxy = async (): Promise<EntryRuntime> => ({
-    mode: "daemon-proxy",
-    proxy: await runProxy({
+  const startProxy = async (): Promise<EntryRuntime> => {
+    const input = opts.input ?? process.stdin;
+    const proxy = await runProxy({
       socketPath,
-      input: opts.input,
+      input,
       output: opts.output,
       logger,
-    }),
-  });
+    });
+    bindProxyStdioLifecycle({ input, proxy, logger, exit });
+    return {
+      mode: "daemon-proxy",
+      proxy,
+    };
+  };
 
   const fallback = async (warning: string): Promise<EntryRuntime> => {
     logger.error(`[cmuxlayer] WARNING: ${warning}`);
@@ -240,8 +309,9 @@ export async function runDaemonFirstEntry(
     return startProxy();
   }
 
+  let spawnedDaemon: unknown;
   try {
-    await spawnDaemon({
+    spawnedDaemon = await spawnDaemon({
       socketPath,
       env,
       daemonScriptPath: opts.daemonScriptPath,
@@ -265,6 +335,11 @@ export async function runDaemonFirstEntry(
     return startProxy();
   }
 
+  if (await probeDaemon(socketPath)) {
+    return startProxy();
+  }
+
+  terminateSpawnedDaemon(spawnedDaemon, logger);
   return fallback(
     `daemon unavailable; using heavy in-process runtime after daemon autostart timeout at ${socketPath}`,
   );

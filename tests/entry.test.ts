@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Writable } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import {
   defaultDaemonSocketPath,
   runDaemonFirstEntry,
@@ -108,6 +108,65 @@ describe("daemon-first MCP entry", () => {
       }),
     );
     expect(opts.runProxy).not.toHaveBeenCalled();
+  });
+
+  it("terminates an autostarted daemon before fallback when readiness times out", async () => {
+    const spawned = { kill: vi.fn() };
+    const opts = createEntryOptions({
+      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/slow.sock" },
+      probeDaemon: vi.fn().mockResolvedValue(false),
+      spawnDaemon: vi.fn().mockResolvedValue(spawned),
+      autostartTimeoutMs: 0,
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("in-process");
+    expect(spawned.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(opts.startInProcess).toHaveBeenCalled();
+  });
+
+  it("uses the proxy instead of killing the autostarted daemon if the final timeout re-probe succeeds", async () => {
+    const spawned = { kill: vi.fn() };
+    const probeDaemon = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const opts = createEntryOptions({
+      env: { CMUXLAYER_DAEMON_SOCKET: "/tmp/raced-online.sock" },
+      probeDaemon,
+      spawnDaemon: vi.fn().mockResolvedValue(spawned),
+      autostartTimeoutMs: 0,
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("daemon-proxy");
+    expect(spawned.kill).not.toHaveBeenCalled();
+    expect(opts.runProxy).toHaveBeenCalledWith(
+      expect.objectContaining({ socketPath: "/tmp/raced-online.sock" }),
+    );
+    expect(opts.startInProcess).not.toHaveBeenCalled();
+  });
+
+  it("stops the proxy and exits when daemon-proxy stdin ends", async () => {
+    const input = new PassThrough();
+    const proxy = { stop: vi.fn().mockResolvedValue(undefined) };
+    const exit = vi.fn();
+    const opts = createEntryOptions({
+      input,
+      runProxy: vi.fn().mockResolvedValue(proxy),
+      exit,
+    });
+
+    await runDaemonFirstEntry(opts);
+    input.emit("end");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(proxy.stop).toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(0);
   });
 
   it("honors CMUXLAYER_FORCE_INPROCESS as a loud escape hatch", async () => {
