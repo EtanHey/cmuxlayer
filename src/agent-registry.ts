@@ -86,6 +86,11 @@ function isPendingAgentId(agentId: string): boolean {
   return PENDING_AGENT_ID_RE.test(agentId);
 }
 
+function pendingBaseAgentId(agentId: string): string | null {
+  if (!isPendingAgentId(agentId)) return null;
+  return agentId.replace(PENDING_AGENT_ID_RE, "");
+}
+
 function isAutoAgentId(agentId: string): boolean {
   return agentId.startsWith("auto-");
 }
@@ -254,11 +259,24 @@ function repairCandidateForSurface(
   };
 }
 
-function surfaceScopedAgentId(baseAgentId: string, surfaceId: string): string {
-  const surfaceToken = surfaceId
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  return `${baseAgentId}-${surfaceToken || "surface"}`;
+function recordIdentityKeys(record: AgentRecord): string[] {
+  return [
+    record.seat_id ? `seat:${record.seat_id}` : null,
+    record.launcher_name ? `launcher:${record.launcher_name}` : null,
+    pendingBaseAgentId(record.agent_id)
+      ? `launcher:${pendingBaseAgentId(record.agent_id)}`
+      : null,
+  ].filter((key): key is string => Boolean(key));
+}
+
+function primaryRecordIdentityKey(record: AgentRecord): string | null {
+  if (record.seat_id) return `seat:${record.seat_id}`;
+  if (record.launcher_name) return `launcher:${record.launcher_name}`;
+  return null;
+}
+
+function canonicalIdentityName(record: AgentRecord): string | null {
+  return record.seat_id ?? record.launcher_name ?? null;
 }
 
 function patchForRepairCandidate(
@@ -309,6 +327,7 @@ class AgentNotFoundError extends Error {
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
   private aliases = new Map<string, string>();
+  private repairSuppressedSurfaceRefs = new Set<string>();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
 
@@ -549,6 +568,9 @@ export class AgentRegistry {
         discoveredEntry.cli === "unknown" ||
         discoveredEntry.read_error
       ) {
+        continue;
+      }
+      if (this.repairSuppressedSurfaceRefs.has(discoveredEntry.surface_id)) {
         continue;
       }
       if (seenSurfaces.has(discoveredEntry.surface_id)) {
@@ -809,6 +831,7 @@ export class AgentRegistry {
   ): RegistryRepairSummary {
     const repaired: RegistryRepairEntry[] = [];
     const evicted = new Set<string>();
+    this.repairSuppressedSurfaceRefs = new Set();
     const liveSurfaceRefs = new Set(
       discovered
         .filter((entry) => !entry.read_error)
@@ -835,6 +858,10 @@ export class AgentRegistry {
       }
     }
 
+    for (const removed of this.evictDuplicateManagedRegistrations(liveSurfaceRefs)) {
+      evicted.add(removed);
+    }
+
     for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
       evicted.add(removed);
     }
@@ -849,6 +876,15 @@ export class AgentRegistry {
       return [];
     }
 
+    const managedIdentityKeys = new Set(
+      [...this.agents.values()]
+        .filter(
+          (candidate) =>
+            !isPendingAgentId(candidate.agent_id) &&
+            !isAutoAgentId(candidate.agent_id),
+        )
+        .flatMap((candidate) => recordIdentityKeys(candidate)),
+    );
     const evicted: string[] = [];
     for (const [id, agent] of [...this.agents.entries()]) {
       if (!isPendingAgentId(id)) {
@@ -856,6 +892,9 @@ export class AgentRegistry {
       }
 
       const liveBackingSurface = liveSurfaceRefs.has(agent.surface_id);
+      const supersededByManagedSeat = recordIdentityKeys(agent).some((key) =>
+        managedIdentityKeys.has(key),
+      );
       const supersededByRealRecord = [...this.agents.values()].some(
         (candidate) =>
           candidate.agent_id !== id &&
@@ -864,8 +903,54 @@ export class AgentRegistry {
           !isAutoAgentId(candidate.agent_id),
       );
 
-      if (!liveBackingSurface || supersededByRealRecord) {
+      if (!liveBackingSurface || supersededByRealRecord || supersededByManagedSeat) {
         const removedAgentId = this.evict(id);
+        if (removedAgentId) {
+          evicted.push(removedAgentId);
+        }
+      }
+    }
+
+    return evicted;
+  }
+
+  private evictDuplicateManagedRegistrations(
+    liveSurfaceRefs: ReadonlySet<string>,
+  ): string[] {
+    const byIdentity = new Map<string, AgentRecord[]>();
+    for (const record of this.agents.values()) {
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
+        continue;
+      }
+      const key = primaryRecordIdentityKey(record);
+      if (!key) continue;
+      byIdentity.set(key, [...(byIdentity.get(key) ?? []), record]);
+    }
+
+    const evicted: string[] = [];
+    for (const records of byIdentity.values()) {
+      if (records.length <= 1) continue;
+      const sorted = [...records].sort((left, right) => {
+        const leftCanonical =
+          left.agent_id === canonicalIdentityName(left) ? 0 : 1;
+        const rightCanonical =
+          right.agent_id === canonicalIdentityName(right) ? 0 : 1;
+        if (leftCanonical !== rightCanonical) {
+          return leftCanonical - rightCanonical;
+        }
+        const leftLive = liveSurfaceRefs.has(left.surface_id) ? 0 : 1;
+        const rightLive = liveSurfaceRefs.has(right.surface_id) ? 0 : 1;
+        if (leftLive !== rightLive) {
+          return leftLive - rightLive;
+        }
+        return left.agent_id.localeCompare(right.agent_id);
+      });
+      const keep = sorted[0];
+      for (const duplicate of sorted.slice(1)) {
+        if (duplicate.surface_id !== keep.surface_id) {
+          this.repairSuppressedSurfaceRefs.add(duplicate.surface_id);
+        }
+        const removedAgentId = this.evict(duplicate.agent_id);
         if (removedAgentId) {
           evicted.push(removedAgentId);
         }
@@ -915,36 +1000,8 @@ export class AgentRegistry {
         existingSeatRecord.surface_id !== discovered.surface_id &&
         liveSurfaceRefs.has(existingSeatRecord.surface_id)
       ) {
-        const scopedCandidate = {
-          ...candidate,
-          agentId: surfaceScopedAgentId(
-            candidate.agentId,
-            discovered.surface_id,
-          ),
-        };
-        const existingScopedRecord = this.stateMgr.readState(
-          scopedCandidate.agentId,
-        );
-        if (existingScopedRecord) {
-          const updated = this.updateManagedSurfaceRegistration(
-            existingScopedRecord,
-            discovered,
-            scopedCandidate,
-          );
-          return updated
-            ? this.repairEntry(updated, discovered, scopedCandidate, "updated")
-            : this.repairEntry(
-                existingScopedRecord,
-                discovered,
-                scopedCandidate,
-                "updated",
-              );
-        }
-
-        const created = this.createRepairedRecord(discovered, scopedCandidate);
-        this.stateMgr.writeState(created);
-        this.agents.set(created.agent_id, created);
-        return this.repairEntry(created, discovered, scopedCandidate, "created");
+        this.repairSuppressedSurfaceRefs.add(discovered.surface_id);
+        return null;
       }
 
       const updated = this.updateManagedSurfaceRegistration(
