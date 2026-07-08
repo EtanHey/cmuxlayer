@@ -1,4 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -172,6 +173,19 @@ async function connectClient(path: string): Promise<Client> {
   const transport = new SocketJsonRpcTransport(socket);
   const client = new Client({ name: "daemon-test", version: "0.1.0" });
   await client.connect(transport);
+  return client;
+}
+
+async function connectInMemoryServer(
+  server: ReturnType<typeof createServer>,
+): Promise<Client> {
+  const client = new Client({ name: "direct-test", version: "0.1.0" });
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  await Promise.all([
+    server.connect(serverTransport),
+    client.connect(clientTransport),
+  ]);
   return client;
 }
 
@@ -496,6 +510,74 @@ describe("CmuxLayerDaemon", () => {
     await clientA.close();
     await clientB.close();
     await daemon.shutdown();
+  });
+
+  it("serves the same list_agents and read_screen state as a direct in-process server", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("truthful-state");
+    const dir = stateDir("truthful-state");
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: dir,
+      disableSpawnPreflight: true,
+    });
+    const directServer = createServer({ context });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      context,
+      disableSpawnPreflight: true,
+    });
+
+    await daemon.start();
+    const directClient = await connectInMemoryServer(directServer);
+    const daemonClient = await connectClient(path);
+
+    try {
+      const spawned = await directClient.callTool({
+        name: "spawn_agent",
+        arguments: {
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+        },
+      });
+      const agentId = String(spawned.structuredContent?.agent_id);
+      const [directAgents, daemonAgents, directScreen, daemonScreen] =
+        await Promise.all([
+          directClient.callTool({
+            name: "list_agents",
+            arguments: { include_completed: true },
+          }),
+          daemonClient.callTool({
+            name: "list_agents",
+            arguments: { include_completed: true },
+          }),
+          directClient.callTool({
+            name: "read_screen",
+            arguments: { surface: "surface:new", lines: 5 },
+          }),
+          daemonClient.callTool({
+            name: "read_screen",
+            arguments: { surface: "surface:new", lines: 5 },
+          }),
+        ]);
+
+      expect(daemonAgents.structuredContent).toEqual(
+        directAgents.structuredContent,
+      );
+      expect(daemonScreen.structuredContent).toEqual(
+        directScreen.structuredContent,
+      );
+      expect(daemonAgents.structuredContent).toMatchObject({
+        agents: [expect.objectContaining({ agent_id: agentId })],
+      });
+    } finally {
+      await directClient.close();
+      await daemonClient.close();
+      await daemon.shutdown();
+      await directServer.close();
+      context.dispose();
+    }
   });
 
   it("drains an in-flight request before shutdown completes", async () => {

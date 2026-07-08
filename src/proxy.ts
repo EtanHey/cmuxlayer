@@ -11,8 +11,8 @@ import type {
   JSONRPCMessage,
   RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
+import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 
-const DEFAULT_SOCKET_PATH = "/tmp/cmuxlayer.sock";
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
 const DEFAULT_RECONNECT_JITTER_RATIO = 0.3;
@@ -208,9 +208,7 @@ export class CmuxLayerProxy {
 
   constructor(opts: CmuxLayerProxyOptions = {}) {
     this.socketPath =
-      opts.socketPath ??
-      process.env.CMUXLAYER_DAEMON_SOCKET ??
-      DEFAULT_SOCKET_PATH;
+      opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import net from "node:net";
-import { unlink } from "node:fs/promises";
+import { mkdir, unlink } from "node:fs/promises";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   ReadBuffer,
@@ -30,8 +31,9 @@ import type {
   CmuxServerContext,
   CreateServerOptions,
 } from "./server.js";
+import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
 
-const DEFAULT_SOCKET_PATH = "/tmp/cmuxlayer.sock";
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const LISTEN_FD_START = 3;
 
@@ -302,9 +304,7 @@ export class CmuxLayerDaemon {
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
     this.socketPath =
-      opts.socketPath ??
-      process.env.CMUXLAYER_DAEMON_SOCKET ??
-      DEFAULT_SOCKET_PATH;
+      opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.listenFd = opts.listenFd ?? parseListenFd(process.env);
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   }
@@ -315,6 +315,7 @@ export class CmuxLayerDaemon {
     }
 
     if (this.listenFd === undefined) {
+      await mkdir(dirname(this.socketPath), { recursive: true });
       await unlinkStaleSocket(this.socketPath);
     }
 
@@ -555,6 +556,8 @@ export class CmuxLayerDaemon {
 export async function runDaemon(
   opts: CmuxLayerDaemonOptions = {},
 ): Promise<CmuxLayerDaemon> {
+  ensureNodeMaxOldSpaceEnv();
+  installHeapGuard();
   const daemon = new CmuxLayerDaemon(opts);
   const shutdown = (signal: NodeJS.Signals) => {
     daemon

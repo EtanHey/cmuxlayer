@@ -1729,6 +1729,8 @@ export interface CreateServerOptions {
   worktreeHomeDir?: string;
   /** Override control health collection (primarily for tests). */
   controlHealthCollector?: () => Promise<ControlHealth>;
+  /** Extra warnings surfaced by control_health, e.g. daemon fallback mode. */
+  controlHealthWarnings?: string[];
   /**
    * Override the process-wide stale-build warner (primarily for tests). Returns
    * the loud warning string when this MCP build is stale vs the installed brew
@@ -1785,6 +1787,7 @@ export interface CmuxServerContext {
   lifecycleStartPromise: Promise<void> | null;
   lifecycleSweepEngine: AgentEngine | null;
   controlHealthCollector?: () => Promise<ControlHealth>;
+  controlHealthWarnings: string[];
   controlHealthIntervalMs: number;
   controlHealthTimer: ReturnType<typeof setInterval> | null;
   dispose(): void;
@@ -1868,6 +1871,7 @@ export function createServerContext(
     lifecycleStartPromise: null,
     lifecycleSweepEngine: null,
     controlHealthCollector: opts?.controlHealthCollector,
+    controlHealthWarnings: opts?.controlHealthWarnings ?? [],
     controlHealthIntervalMs: resolveControlHealthIntervalMs(
       opts?.controlHealthIntervalMs,
     ),
@@ -1962,6 +1966,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
   const controlHealthCollector =
     opts?.controlHealthCollector ?? context.controlHealthCollector;
+  const controlHealthWarnings =
+    opts?.controlHealthWarnings ?? context.controlHealthWarnings;
   const staleBuildWarning = opts?.staleBuildWarner ?? defaultStaleBuildWarner;
   const appendStaleBuildWarning = (result: { warnings?: string[] }): void => {
     const warning = staleBuildWarning();
@@ -2608,9 +2614,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const appendControlHealthSnapshot = async (): Promise<ControlHealth> => {
-    const health = controlHealthCollector
+    const rawHealth = controlHealthCollector
       ? await controlHealthCollector()
       : await collectControlHealth({ client });
+    const health =
+      controlHealthWarnings.length > 0
+        ? {
+            ...rawHealth,
+            warnings: [...rawHealth.warnings, ...controlHealthWarnings],
+          }
+        : rawHealth;
     eventLog.appendControlHealth({
       ts: health.generated_at,
       event_type: "control_health",
