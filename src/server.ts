@@ -3868,6 +3868,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const buildOrphanSurfaceHealth = (surface: DiscoveredAgent) => {
     const issueCodes: AgentHealthIssueCode[] = [];
     const issues: string[] = [];
+    if (surface.has_agent) {
+      issueCodes.push("auto_discovered_agent");
+      issues.push(
+        "live agent surface has no managed registry seat; repair/register the seat or leave it visible as an unresolved orphan",
+      );
+    }
     if (isLeadLikeSurfaceTitle(surface.surface_title)) {
       issueCodes.push("missing_managed_lead_agent_id");
       issues.push(
@@ -7650,14 +7656,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const after = await registry.listMerged(discovery, { force: true });
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
-          const registeredSurfaceIds = new Set(
-            registry.list().map((agent) => agent.surface_id),
+          const managedSurfaceIds = new Set(
+            registry
+              .list()
+              .filter((agent) => !agent.agent_id.startsWith("auto-"))
+              .map((agent) => agent.surface_id),
           );
           const orphanedSurfaces = discovered.filter(
             (surface) =>
               !surface.read_error &&
-              !registeredSurfaceIds.has(surface.surface_id) &&
-              !surface.has_agent,
+              !managedSurfaceIds.has(surface.surface_id),
           );
           const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
           const evicted = [

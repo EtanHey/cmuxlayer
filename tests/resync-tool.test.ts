@@ -360,6 +360,84 @@ function makeShellPromptExec(): ExecFn {
   });
 }
 
+function makeAmbiguousLiveAgentExec(): ExecFn {
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Main",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:1",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:777"],
+              selected_surface_ref: "surface:777",
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [
+            {
+              ref: "surface:777",
+              title: "review lane",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      return {
+        stdout: JSON.stringify({
+          surface: "surface:777",
+          text: "gpt-5.5 · 82% left · ~/Gits/unknown\nWorking (1m 03s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({}),
+      stderr: "",
+    };
+  });
+}
+
 function makeOrphanLeadExec(): ExecFn {
   const base = makeShellPromptExec();
   return vi.fn().mockImplementation(async (cmd, args) => {
@@ -1393,6 +1471,37 @@ describe("resync_agents tool", () => {
     expect(parsed.diff.mismatches).toEqual([]);
     expect(parsed.diff.orphaned).toEqual(["surface:999"]);
     expect(parsed.count).toBe(0);
+  });
+
+  it("resync_agents reports unresolved live-agent surfaces whose title cannot map to a seat", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const server = createServer({
+      exec: makeAmbiguousLiveAgentExec(),
+      stateDir: TEST_DIR,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.repaired).toEqual([]);
+    expect(parsed.diff.orphaned).toEqual(["surface:777"]);
+    expect(parsed.diff.orphaned_health).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:777",
+        surface_title: "review lane",
+        status: "degraded",
+        issue_codes: ["auto_discovered_agent"],
+        issue_severities: { auto_discovered_agent: "info" },
+      }),
+    ]);
+    expect(
+      stateMgr.listStates().some((record) => record.agent_id === "review lane"),
+    ).toBe(false);
   });
 
   it("resync_agents reports orphan lead surfaces as health failures", async () => {
