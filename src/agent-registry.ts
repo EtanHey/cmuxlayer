@@ -17,9 +17,21 @@ import {
   isCrashRecoveryEligible,
   shouldRetainCrashRecoveryError,
   type AgentRecord,
+  type AgentRole,
   type AgentState,
+  type CliType,
 } from "./agent-types.js";
 import type { CmuxSurface } from "./types.js";
+import { extractPrefix } from "./naming.js";
+import {
+  inferAgentRole,
+  isAgentRoleInferenceError,
+} from "./layout-policy.js";
+import {
+  assertSeatIdentity,
+  type SeatIdentityAssertion,
+  type SeatRegistry,
+} from "./seat-identity.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -31,6 +43,222 @@ export interface AgentFilter {
 
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const BOOTING_GHOST_TIMEOUT_MS = 30_000;
+const PENDING_AGENT_ID_RE = /-pending-\d+-[a-z0-9]+$/i;
+const CLI_SUFFIXES: Array<{ suffix: string; cli: CliType }> = [
+  { suffix: "Claude", cli: "claude" },
+  { suffix: "Codex", cli: "codex" },
+  { suffix: "Cursor", cli: "cursor" },
+  { suffix: "Gemini", cli: "gemini" },
+  { suffix: "Kiro", cli: "kiro" },
+];
+
+export interface RegistryRepairEntry {
+  surface_id: string;
+  surface_title: string;
+  agent_id: string;
+  repo: string;
+  cli: CliType;
+  role: AgentRole;
+  launcher_name: string;
+  seat_id: string | null;
+  action: "created" | "updated";
+}
+
+export interface RegistryRepairSummary {
+  repaired: RegistryRepairEntry[];
+  evicted: string[];
+}
+
+interface RegistryRepairCandidate {
+  repo: string;
+  cli: CliType;
+  launcherName: string;
+  seat: SeatIdentityAssertion;
+  role: AgentRole;
+  agentId: string;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isPendingAgentId(agentId: string): boolean {
+  return PENDING_AGENT_ID_RE.test(agentId);
+}
+
+function isAutoAgentId(agentId: string): boolean {
+  return agentId.startsWith("auto-");
+}
+
+function hasLauncherToken(title: string, launcherName: string): boolean {
+  return new RegExp(
+    `(^|[^a-z0-9])${escapeRegExp(launcherName)}($|[^a-z0-9])`,
+    "i",
+  ).test(title);
+}
+
+function inferLauncherFromSeatRegistry(
+  title: string,
+  registry?: SeatRegistry | null,
+): { repo: string; cli: CliType; launcherName: string } | null {
+  for (const [, entry] of Object.entries(registry ?? {})) {
+    for (const cli of ["claude", "codex", "cursor", "gemini", "kiro"] as const) {
+      const launcherName = entry.launchers[cli];
+      if (launcherName && hasLauncherToken(title, launcherName)) {
+        return { repo: entry.repo, cli, launcherName };
+      }
+    }
+  }
+  return null;
+}
+
+function inferOrcDriverLauncher(
+  title: string,
+  registry?: SeatRegistry | null,
+): { repo: string; cli: CliType; launcherName: string } | null {
+  if (!/\borc(?:[-_\s]?driver)?\b/i.test(title)) {
+    return null;
+  }
+
+  const entry =
+    (registry?.orcClaude ?? null) ||
+    Object.values(registry ?? {}).find(
+      (candidate) =>
+        candidate.repo.toLowerCase() === "orc" ||
+        candidate.role?.toLowerCase() === "orc",
+    );
+  return {
+    repo: entry?.repo ?? "orc",
+    cli: "claude",
+    launcherName: entry?.launchers.claude ?? "orcClaude",
+  };
+}
+
+function inferLauncherFromSurfaceTitle(
+  title: string,
+  registry?: SeatRegistry | null,
+): { repo: string; cli: CliType; launcherName: string } | null {
+  const prefix = extractPrefix(title).trim();
+  const registryMatch = inferLauncherFromSeatRegistry(prefix, registry);
+  if (registryMatch) return registryMatch;
+
+  const orcDriver = inferOrcDriverLauncher(prefix, registry);
+  if (orcDriver) return orcDriver;
+
+  const launcherTokens = [...prefix.matchAll(/[A-Za-z][A-Za-z0-9_.-]*/g)]
+    .map((match) => match[0])
+    .reverse();
+  for (const token of launcherTokens) {
+    for (const { suffix, cli } of CLI_SUFFIXES) {
+      if (!new RegExp(`${suffix}$`, "i").test(token)) continue;
+      const repoPart = token.slice(0, -suffix.length).trim();
+      if (!repoPart || repoPart === "." || repoPart === "..") continue;
+      const repo = repoPart.replace(/^[A-Z]/, (match) => match.toLowerCase());
+      return {
+        repo,
+        cli,
+        launcherName: `${repo}${suffix}`,
+      };
+    }
+  }
+
+  return null;
+}
+
+function roleFromSeatOrLauncher(input: {
+  seat: SeatIdentityAssertion;
+  launcherName: string;
+  surfaceTitle: string;
+  cli: CliType;
+}): AgentRole {
+  const seatRole = input.seat.seat_role?.trim().toLowerCase();
+  if (seatRole === "lead" || seatRole === "orc" || seatRole === "orchestrator") {
+    return "orchestrator";
+  }
+  if (seatRole === "ic") {
+    return "ic";
+  }
+  if (seatRole === "worker") {
+    return "worker";
+  }
+
+  try {
+    return inferAgentRole({
+      launcherName: input.launcherName,
+      title: input.surfaceTitle,
+      cli: input.cli,
+    });
+  } catch (error) {
+    if (isAgentRoleInferenceError(error)) {
+      return inferAgentRole({ cli: input.cli });
+    }
+    throw error;
+  }
+}
+
+function repairCandidateForSurface(
+  discovered: DiscoveredAgent,
+  registry?: SeatRegistry | null,
+): RegistryRepairCandidate | null {
+  const launcher = inferLauncherFromSurfaceTitle(
+    discovered.surface_title,
+    registry,
+  );
+  if (!launcher) return null;
+
+  const seat = assertSeatIdentity({
+    repo: launcher.repo,
+    cli: launcher.cli,
+    launcherName: launcher.launcherName,
+    registry,
+  });
+  const role = roleFromSeatOrLauncher({
+    seat,
+    launcherName: launcher.launcherName,
+    surfaceTitle: discovered.surface_title,
+    cli: launcher.cli,
+  });
+  return {
+    ...launcher,
+    seat,
+    role,
+    agentId: seat.seat_id ?? launcher.launcherName,
+  };
+}
+
+function patchForRepairCandidate(
+  record: AgentRecord,
+  discovered: DiscoveredAgent,
+  candidate: RegistryRepairCandidate,
+): Partial<AgentRecord> {
+  const patch: Partial<AgentRecord> = {};
+  const workspaceId = discovered.workspace_id ?? null;
+  const model = discovered.model ?? record.model;
+  const fields: Partial<AgentRecord> = {
+    surface_id: discovered.surface_id,
+    workspace_id: workspaceId,
+    repo: candidate.repo,
+    model,
+    cli: candidate.cli,
+    launcher_name: candidate.launcherName,
+    seat_id: candidate.seat.seat_id,
+    seat_lane: candidate.seat.seat_lane,
+    seat_role: candidate.seat.seat_role,
+    seat_identity_status: candidate.seat.seat_identity_status,
+    seat_identity_error: candidate.seat.seat_identity_error,
+    role: candidate.role,
+  };
+
+  for (const [key, value] of Object.entries(fields) as Array<
+    [keyof AgentRecord, AgentRecord[keyof AgentRecord]]
+  >) {
+    if ((record[key] ?? null) !== (value ?? null)) {
+      (patch as Record<string, unknown>)[key] = value;
+    }
+  }
+
+  return patch;
+}
 
 class AgentNotFoundError extends Error {
   readonly code = "AGENT_NOT_FOUND";
@@ -538,6 +766,203 @@ export class AgentRegistry {
     }
 
     return evicted;
+  }
+
+  repairFromDiscovery(
+    discovered: DiscoveredAgent[],
+    opts?: { seatRegistry?: SeatRegistry | null },
+  ): RegistryRepairSummary {
+    const repaired: RegistryRepairEntry[] = [];
+    const evicted = new Set<string>();
+    const liveSurfaceRefs = new Set(
+      discovered
+        .filter((entry) => !entry.read_error)
+        .map((entry) => entry.surface_id),
+    );
+
+    for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
+      evicted.add(removed);
+    }
+
+    for (const entry of discovered) {
+      if (entry.read_error) continue;
+      const candidate = repairCandidateForSurface(entry, opts?.seatRegistry);
+      if (!candidate) continue;
+
+      const repair = this.repairDiscoveredSurface(entry, candidate, evicted);
+      if (repair) {
+        repaired.push(repair);
+      }
+    }
+
+    for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
+      evicted.add(removed);
+    }
+
+    return { repaired, evicted: [...evicted] };
+  }
+
+  private evictPendingGhostRegistrations(
+    liveSurfaceRefs: ReadonlySet<string>,
+  ): string[] {
+    if (liveSurfaceRefs.size === 0) {
+      return [];
+    }
+
+    const evicted: string[] = [];
+    for (const [id, agent] of [...this.agents.entries()]) {
+      if (!isPendingAgentId(id)) {
+        continue;
+      }
+
+      const liveBackingSurface = liveSurfaceRefs.has(agent.surface_id);
+      const supersededByRealRecord = [...this.agents.values()].some(
+        (candidate) =>
+          candidate.agent_id !== id &&
+          candidate.surface_id === agent.surface_id &&
+          !isPendingAgentId(candidate.agent_id) &&
+          !isAutoAgentId(candidate.agent_id),
+      );
+
+      if (!liveBackingSurface || supersededByRealRecord) {
+        const removedAgentId = this.evict(id);
+        if (removedAgentId) {
+          evicted.push(removedAgentId);
+        }
+      }
+    }
+
+    return evicted;
+  }
+
+  private repairDiscoveredSurface(
+    discovered: DiscoveredAgent,
+    candidate: RegistryRepairCandidate,
+    evicted: Set<string>,
+  ): RegistryRepairEntry | null {
+    const recordsForSurface = [...this.agents.values()].filter(
+      (agent) => agent.surface_id === discovered.surface_id,
+    );
+    const managedRecord = recordsForSurface.find(
+      (agent) =>
+        !isAutoAgentId(agent.agent_id) && !isPendingAgentId(agent.agent_id),
+    );
+
+    if (managedRecord) {
+      const updated = this.updateManagedSurfaceRegistration(
+        managedRecord,
+        discovered,
+        candidate,
+      );
+      return updated
+        ? this.repairEntry(updated, discovered, candidate, "updated")
+        : null;
+    }
+
+    for (const record of recordsForSurface) {
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
+        const removedAgentId = this.evict(record.agent_id);
+        if (removedAgentId) {
+          evicted.add(removedAgentId);
+        }
+      }
+    }
+
+    const existingSeatRecord = this.stateMgr.readState(candidate.agentId);
+    if (existingSeatRecord) {
+      const updated = this.updateManagedSurfaceRegistration(
+        existingSeatRecord,
+        discovered,
+        candidate,
+      );
+      return updated
+        ? this.repairEntry(updated, discovered, candidate, "updated")
+        : this.repairEntry(existingSeatRecord, discovered, candidate, "updated");
+    }
+
+    const created = this.createRepairedRecord(discovered, candidate);
+    this.stateMgr.writeState(created);
+    this.agents.set(created.agent_id, created);
+    return this.repairEntry(created, discovered, candidate, "created");
+  }
+
+  private updateManagedSurfaceRegistration(
+    record: AgentRecord,
+    discovered: DiscoveredAgent,
+    candidate: RegistryRepairCandidate,
+  ): AgentRecord | null {
+    const patch = patchForRepairCandidate(record, discovered, candidate);
+    if (Object.keys(patch).length === 0) {
+      return null;
+    }
+
+    const updated = this.stateMgr.updateRecord(record.agent_id, patch);
+    this.agents.delete(record.agent_id);
+    this.agents.set(updated.agent_id, updated);
+    return updated;
+  }
+
+  private createRepairedRecord(
+    discovered: DiscoveredAgent,
+    candidate: RegistryRepairCandidate,
+  ): AgentRecord {
+    const now = new Date().toISOString();
+    const state = discoveredStatusToAgentState(discovered.parsed_status);
+    return {
+      agent_id: candidate.agentId,
+      surface_id: discovered.surface_id,
+      workspace_id: discovered.workspace_id ?? null,
+      state,
+      repo: candidate.repo,
+      model: discovered.model ?? "unknown",
+      cli: candidate.cli,
+      cli_session_id: null,
+      cli_session_path: null,
+      launcher_name: candidate.launcherName,
+      seat_id: candidate.seat.seat_id,
+      seat_lane: candidate.seat.seat_lane,
+      seat_role: candidate.seat.seat_role,
+      seat_identity_status: candidate.seat.seat_identity_status,
+      seat_identity_error: candidate.seat.seat_identity_error,
+      task_summary: "(resync-repaired)",
+      pid: null,
+      version: 1,
+      created_at: now,
+      updated_at: now,
+      error:
+        state === "error"
+          ? "Repaired agent surface reported a frozen state"
+          : null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: candidate.role,
+      auto_archive_on_done: false,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: candidate.role === "orchestrator",
+      respawn_attempts: 0,
+      user_killed: false,
+    };
+  }
+
+  private repairEntry(
+    record: AgentRecord,
+    discovered: DiscoveredAgent,
+    candidate: RegistryRepairCandidate,
+    action: "created" | "updated",
+  ): RegistryRepairEntry {
+    return {
+      surface_id: discovered.surface_id,
+      surface_title: discovered.surface_title,
+      agent_id: record.agent_id,
+      repo: candidate.repo,
+      cli: candidate.cli,
+      role: candidate.role,
+      launcher_name: candidate.launcherName,
+      seat_id: candidate.seat.seat_id,
+      action,
+    };
   }
 
   private evictMissingStateAgent(agentId: string): boolean {
