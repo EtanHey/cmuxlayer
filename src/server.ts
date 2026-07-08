@@ -108,6 +108,7 @@ import type {
   CmuxNewSplitResult,
   CmuxNewSurfaceResult,
   CmuxPane,
+  CmuxReadScreenResult,
   CmuxSurface,
   CmuxStatusEntry,
   CmuxTerminalMetadata,
@@ -134,6 +135,7 @@ import {
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
+  type SurfaceTopologySnapshot,
   type SurfaceTopology,
 } from "./surface-topology.js";
 import {
@@ -1729,6 +1731,8 @@ export interface CreateServerOptions {
   worktreeHomeDir?: string;
   /** Override control health collection (primarily for tests). */
   controlHealthCollector?: () => Promise<ControlHealth>;
+  /** Extra warnings surfaced by control_health, e.g. daemon fallback mode. */
+  controlHealthWarnings?: string[];
   /**
    * Override the process-wide stale-build warner (primarily for tests). Returns
    * the loud warning string when this MCP build is stale vs the installed brew
@@ -1762,6 +1766,11 @@ export interface CreateServerOptions {
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
 
+interface ReadScreenSnapshot {
+  result: CmuxReadScreenResult;
+  topology: SurfaceTopologySnapshot | null;
+}
+
 export interface CmuxServerContext {
   client: CmuxLayerClient;
   stateDir: string;
@@ -1775,6 +1784,7 @@ export interface CmuxServerContext {
   latestDeliveryBySurface: Map<string, string>;
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
+  readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
   enableClaudeChannels: boolean;
   skipAgentLifecycle: boolean;
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
@@ -1785,6 +1795,7 @@ export interface CmuxServerContext {
   lifecycleStartPromise: Promise<void> | null;
   lifecycleSweepEngine: AgentEngine | null;
   controlHealthCollector?: () => Promise<ControlHealth>;
+  controlHealthWarnings: string[];
   controlHealthIntervalMs: number;
   controlHealthTimer: ReturnType<typeof setInterval> | null;
   dispose(): void;
@@ -1856,6 +1867,7 @@ export function createServerContext(
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
+    readScreenInflight: new Map(),
     enableClaudeChannels:
       opts?.enableClaudeChannels ??
       process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1",
@@ -1868,6 +1880,7 @@ export function createServerContext(
     lifecycleStartPromise: null,
     lifecycleSweepEngine: null,
     controlHealthCollector: opts?.controlHealthCollector,
+    controlHealthWarnings: opts?.controlHealthWarnings ?? [],
     controlHealthIntervalMs: resolveControlHealthIntervalMs(
       opts?.controlHealthIntervalMs,
     ),
@@ -1962,6 +1975,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
   const controlHealthCollector =
     opts?.controlHealthCollector ?? context.controlHealthCollector;
+  const controlHealthWarnings =
+    opts?.controlHealthWarnings ?? context.controlHealthWarnings;
   const staleBuildWarning = opts?.staleBuildWarner ?? defaultStaleBuildWarner;
   const appendStaleBuildWarning = (result: { warnings?: string[] }): void => {
     const warning = staleBuildWarning();
@@ -2608,9 +2623,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const appendControlHealthSnapshot = async (): Promise<ControlHealth> => {
-    const health = controlHealthCollector
+    const rawHealth = controlHealthCollector
       ? await controlHealthCollector()
       : await collectControlHealth({ client });
+    const health =
+      controlHealthWarnings.length > 0
+        ? {
+            ...rawHealth,
+            warnings: [...rawHealth.warnings, ...controlHealthWarnings],
+          }
+        : rawHealth;
     eventLog.appendControlHealth({
       ts: health.generated_at,
       event_type: "control_health",
@@ -3711,6 +3733,50 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const collectSurfaceTopology = async (
     workspace?: string,
   ) => collectCmuxSurfaceTopology(client, workspace);
+
+  const readScreenSnapshotKey = (opts: {
+    surface: string;
+    workspace?: string;
+    lines?: number;
+    scrollback?: boolean;
+  }): string =>
+    JSON.stringify([
+      opts.surface,
+      opts.workspace ?? null,
+      opts.lines ?? null,
+      opts.scrollback === true,
+    ]);
+
+  const readScreenSnapshot = async (opts: {
+    surface: string;
+    workspace?: string;
+    lines?: number;
+    scrollback?: boolean;
+  }): Promise<ReadScreenSnapshot> => {
+    const key = readScreenSnapshotKey(opts);
+    const existing = context.readScreenInflight.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const snapshot = (async () => {
+      const result = await client.readScreen(opts.surface, {
+        workspace: opts.workspace,
+        lines: opts.lines,
+        scrollback: opts.scrollback,
+      });
+      const topology = await collectSurfaceTopology(opts.workspace);
+      return { result, topology };
+    })();
+    context.readScreenInflight.set(key, snapshot);
+    try {
+      return await snapshot;
+    } finally {
+      if (context.readScreenInflight.get(key) === snapshot) {
+        context.readScreenInflight.delete(key);
+      }
+    }
+  };
 
   // Resolve a surface's 0-based column + the workspace column_count using the
   // SAME reliable post-F5 logic as list_surfaces: derive columns from pane
@@ -5142,12 +5208,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.readOnly,
     async (args) => {
       try {
-        const result = await client.readScreen(args.surface, {
+        const { result, topology } = await readScreenSnapshot({
+          surface: args.surface,
           workspace: args.workspace,
           lines: args.lines,
           scrollback: args.scrollback,
         });
-        const surface = await findSurfaceByRef(result.surface, args.workspace);
+        const title = topology?.titleBySurface.get(result.surface) ?? null;
+        const { column, column_count } =
+          topology?.topologyBySurface.get(result.surface) ??
+          EMPTY_SURFACE_TOPOLOGY;
         const parsed = applyHarnessState(
           enrichParsedScreen(
             parseScreen(result.text),
@@ -5156,17 +5226,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ),
           resolveHarnessStateForSurface(stateMgr, result.surface),
         );
-        // F7: surface column + workspace column_count so sprawl is visible on
-        // every read. Best-effort — omitted (null) if geometry is unavailable.
-        const { column, column_count } = await resolveSurfaceColumn(
-          result.surface,
-          args.workspace,
-        );
 
         if (args.parsed_only) {
           const data = {
             surface: result.surface,
-            title: surface?.title ?? null,
+            title,
             column,
             column_count,
             parsed,
@@ -5174,7 +5238,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           const formatted = formatReadScreen(
             result.surface,
-            surface?.title ?? null,
+            title,
             null,
             parsed,
             false,
@@ -5189,7 +5253,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Full untrimmed terminal content on explicit request.
           const data = {
             surface: result.surface,
-            title: surface?.title ?? null,
+            title,
             column,
             column_count,
             lines: result.lines,
@@ -5200,7 +5264,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           const formatted = formatReadScreen(
             result.surface,
-            surface?.title ?? null,
+            title,
             result.text,
             parsed,
             result.scrollback_used,
@@ -5219,7 +5283,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : cleanScreenText(result.text, 12) || null;
         const data = {
           surface: result.surface,
-          title: surface?.title ?? null,
+          title,
           column,
           column_count,
           parsed,
@@ -5228,7 +5292,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
         const formatted = formatReadScreen(
           result.surface,
-          surface?.title ?? null,
+          title,
           screenPreview,
           parsed,
           false,

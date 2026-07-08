@@ -22,21 +22,9 @@
  *                         wait_for_all, stop_agent, kill, interact
  */
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createServer } from "./server.js";
-import { createCmuxClient } from "./cmux-client-factory.js";
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 import { readVersion } from "./version.js";
-import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
-import {
-  defaultMonitorRegistryPath,
-  httpNotifyMonitorDeadman,
-} from "./monitor-registry.js";
-import { bindStdioLifecycle } from "./stdio-lifecycle.js";
-import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
-
-ensureNodeMaxOldSpaceEnv();
-installHeapGuard();
+import { runDaemonFirstEntry } from "./entry.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -54,6 +42,12 @@ Usage:
 Environment:
   CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
                        (authoritative — never falls through to another instance).
+  CMUXLAYER_DAEMON_SOCKET
+                       Override the cmuxlayer daemon Unix socket. Defaults to
+                       ~/.local/state/cmux/cmuxlayer-stated.sock.
+  CMUXLAYER_FORCE_INPROCESS=1
+                       Escape hatch: run the legacy in-process MCP runtime and
+                       log/surface a warning in control_health.
 `;
 
 async function main() {
@@ -79,41 +73,7 @@ async function main() {
     return;
   }
 
-  const client = await createCmuxClient();
-  // Wire the real outbox drainer into the live MCP server so this agent's
-  // periodic sweep flushes ~/.golems-zikaron/outbox.md to the notify path.
-  const server = createServer({
-    client,
-    outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
-    monitorRegistryPath: defaultMonitorRegistryPath(),
-    monitorRegistryNotify: httpNotifyMonitorDeadman,
-    enableCloseForensics: true,
-  });
-  const transport = new StdioServerTransport();
-  let shutdownStarted = false;
-  bindStdioLifecycle({
-    stdin: process.stdin,
-    transport: transport as any,
-    shutdown: (reason) => {
-      if (shutdownStarted) return;
-      shutdownStarted = true;
-      const forceExit = setTimeout(() => {
-        console.error(`[cmuxlayer] forced stdio shutdown after ${reason}`);
-        process.exit(0);
-      }, 1_000);
-      forceExit.unref();
-      void server
-        .close()
-        .catch((error) => {
-          console.error("[cmuxlayer] stdio shutdown failed", error);
-        })
-        .finally(() => {
-          clearTimeout(forceExit);
-          process.exit(0);
-        });
-    },
-  });
-  await server.connect(transport);
+  await runDaemonFirstEntry();
 }
 
 main().catch((error) => {

@@ -3,16 +3,17 @@
 import net from "node:net";
 import { pathToFileURL } from "node:url";
 import type { Readable, Writable } from "node:stream";
-import {
-  ReadBuffer,
-  serializeMessage,
-} from "@modelcontextprotocol/sdk/shared/stdio.js";
+import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   JSONRPCMessage,
   RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
+import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import {
+  extractJsonRpcFrameMetadata,
+  JsonRpcLineBuffer,
+} from "./json-rpc-line-buffer.js";
 
-const DEFAULT_SOCKET_PATH = "/tmp/cmuxlayer.sock";
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
 const DEFAULT_RECONNECT_JITTER_RATIO = 0.3;
@@ -49,10 +50,6 @@ type JsonRpcRequest = JSONRPCMessage & {
 
 type JsonRpcNotification = JSONRPCMessage & {
   method: string;
-};
-
-type JsonRpcResponse = JSONRPCMessage & {
-  id: RequestId;
 };
 
 interface QueuedMessage {
@@ -101,17 +98,6 @@ function isJsonRpcNotification(
   );
 }
 
-function isJsonRpcResponse(
-  message: JSONRPCMessage,
-): message is JsonRpcResponse {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    "id" in message &&
-    ("result" in message || "error" in message)
-  );
-}
-
 function requestKey(id: RequestId): string {
   return `${typeof id}:${String(id)}`;
 }
@@ -125,10 +111,17 @@ function writeMessage(
     Partial<Pick<Writable, "destroyed" | "writableEnded">>,
   message: JSONRPCMessage,
 ): Promise<void> {
+  return writeFrame(stream, Buffer.from(serializeMessage(message)));
+}
+
+function writeFrame(
+  stream: Pick<Writable, "write" | "once" | "off"> &
+    Partial<Pick<Writable, "destroyed" | "writableEnded">>,
+  frame: Buffer,
+): Promise<void> {
   if (stream.destroyed || stream.writableEnded) {
     return Promise.reject(new Error("stream is closed"));
   }
-  const payload = serializeMessage(message);
   return new Promise((resolve, reject) => {
     let settled = false;
     const onError = (error: Error) => settle(error);
@@ -154,7 +147,7 @@ function writeMessage(
     stream.once("error", onError);
     stream.once("close", onClose);
     try {
-      stream.write(payload, settle);
+      stream.write(frame, settle);
     } catch (error) {
       settle(error instanceof Error ? error : new Error(String(error)));
     }
@@ -178,8 +171,8 @@ export class CmuxLayerProxy {
   ) => void;
   private readonly logger: Pick<Console, "error">;
 
-  private readonly agentReadBuffer = new ReadBuffer();
-  private daemonReadBuffer: ReadBuffer | null = null;
+  private readonly agentReadBuffer = new JsonRpcLineBuffer();
+  private daemonReadBuffer: JsonRpcLineBuffer | null = null;
   private daemonSocket: net.Socket | null = null;
   private running = false;
   private connecting = false;
@@ -208,9 +201,7 @@ export class CmuxLayerProxy {
 
   constructor(opts: CmuxLayerProxyOptions = {}) {
     this.socketPath =
-      opts.socketPath ??
-      process.env.CMUXLAYER_DAEMON_SOCKET ??
-      DEFAULT_SOCKET_PATH;
+      opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));
@@ -423,7 +414,7 @@ export class CmuxLayerProxy {
       return;
     }
     this.daemonSocket = socket;
-    this.daemonReadBuffer = new ReadBuffer();
+    this.daemonReadBuffer = new JsonRpcLineBuffer();
     socket.on("data", this.onDaemonData);
     socket.on("error", this.onDaemonError);
     socket.on("close", this.onDaemonClose);
@@ -447,17 +438,17 @@ export class CmuxLayerProxy {
       return;
     }
     this.daemonReadBuffer.append(chunk);
-    // handleDaemonMessage may disconnect the daemon mid-loop (e.g. on a rejected
+    // handleDaemonFrame may disconnect the daemon mid-loop (e.g. on a rejected
     // initialize replay), which nulls daemonReadBuffer — re-check it each pass so
     // we don't dereference null and spin forever logging TypeErrors.
     while (this.running && this.daemonReadBuffer) {
       const buffer = this.daemonReadBuffer;
       try {
-        const message = buffer.readMessage();
-        if (message === null) {
+        const frame = buffer.readFrame();
+        if (frame === null) {
           break;
         }
-        this.handleDaemonMessage(message);
+        this.handleDaemonFrame(frame);
       } catch (error) {
         this.logger.error(
           "[cmuxlayer-proxy] failed to parse daemon frame",
@@ -477,10 +468,19 @@ export class CmuxLayerProxy {
     this.handleDaemonDrop();
   };
 
-  private handleDaemonMessage(message: JSONRPCMessage): void {
-    if (this.replayingInitialize && this.isInitializeResponse(message)) {
+  private handleDaemonFrame(frame: Buffer): void {
+    const metadata = extractJsonRpcFrameMetadata(frame);
+    if (!metadata) {
+      this.logger.error("[cmuxlayer-proxy] failed to parse daemon frame");
+      return;
+    }
+
+    if (
+      this.replayingInitialize &&
+      this.isInitializeResponseMetadata(metadata)
+    ) {
       this.replayingInitialize = false;
-      if ("error" in message) {
+      if (metadata.hasError) {
         this.failAllPendingRequests(
           "cmuxlayer daemon initialize replay failed while reconnecting",
         );
@@ -496,18 +496,18 @@ export class CmuxLayerProxy {
       return;
     }
 
-    if (isJsonRpcResponse(message)) {
-      const key = requestKey(message.id);
+    if (metadata.isResponse && metadata.hasId && metadata.id !== undefined) {
+      const key = requestKey(metadata.id);
       const pending = this.pendingRequests.get(key);
       if (!pending) {
         if (this.expiredRequestKeys.has(key)) {
           this.logger.error(
             "[cmuxlayer-proxy] late daemon response for expired request id dropped",
-            { id: message.id },
+            { id: metadata.id },
           );
           return;
         }
-        void this.writeAgent(message);
+        void this.writeAgentFrame(frame);
         return;
       }
       clearTimeout(pending.timeout);
@@ -519,18 +519,22 @@ export class CmuxLayerProxy {
       ) {
         this.initializeResultDelivered = true;
       }
-      void this.writeAgent(message);
+      void this.writeAgentFrame(frame);
       return;
     }
 
-    void this.writeAgent(message);
+    void this.writeAgentFrame(frame);
   }
 
-  private isInitializeResponse(message: JSONRPCMessage): boolean {
+  private isInitializeResponseMetadata(
+    metadata: ReturnType<typeof extractJsonRpcFrameMetadata>,
+  ): boolean {
     return (
-      isJsonRpcResponse(message) &&
+      metadata !== null &&
+      metadata.isResponse &&
+      metadata.id !== undefined &&
       this.initializeRequest !== null &&
-      requestKey(message.id) === requestKey(this.initializeRequest.id)
+      requestKey(metadata.id) === requestKey(this.initializeRequest.id)
     );
   }
 
@@ -734,6 +738,14 @@ export class CmuxLayerProxy {
   private async writeAgent(message: JSONRPCMessage): Promise<void> {
     try {
       await writeMessage(this.output, message);
+    } catch (error) {
+      this.logger.error("[cmuxlayer-proxy] failed to write agent frame", error);
+    }
+  }
+
+  private async writeAgentFrame(frame: Buffer): Promise<void> {
+    try {
+      await writeFrame(this.output, frame);
     } catch (error) {
       this.logger.error("[cmuxlayer-proxy] failed to write agent frame", error);
     }

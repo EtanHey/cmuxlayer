@@ -247,6 +247,70 @@ describe("control health", () => {
     );
   });
 
+  it("control_health surfaces daemon fallback warnings", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const health = {
+      generated_at: "2026-07-08T10:00:00.000Z",
+      current_process: {
+        pid: 123,
+        ppid: 1,
+        cwd: TEST_ROOT,
+        stdin_is_tty: false,
+        env: { PATH: "/bin" },
+        path_entries: ["/bin"],
+        cmux_resolution: [],
+      },
+      selected_transport: {
+        client_class: "CmuxClient",
+      },
+      cmux_instances: {
+        production: {
+          axis: "production",
+          app_bundle_path: "/Applications/cmux.app",
+          app_binary_path: "/Applications/cmux.app/Contents/MacOS/cmux",
+          marker_files: [],
+          socket_path: "/tmp/prod.sock",
+          socket_status: null,
+          processes: [],
+        },
+        nightly: {
+          axis: "nightly",
+          app_bundle_path: "/Applications/cmux NIGHTLY.app",
+          app_binary_path: "/Applications/cmux NIGHTLY.app/Contents/MacOS/cmux",
+          marker_files: [],
+          socket_path: "/tmp/nightly.sock",
+          socket_status: null,
+          processes: [],
+        },
+      },
+      warnings: [],
+    } satisfies ControlHealth;
+    const server = createServer({
+      stateDir: TEST_ROOT,
+      skipAgentLifecycle: true,
+      controlHealthCollector: async () => health,
+      controlHealthWarnings: [
+        "cmuxlayer daemon unavailable; using heavy in-process runtime",
+      ],
+    });
+    const tool = (server as any)._registeredTools["control_health"];
+
+    try {
+      const result = await tool.handler({}, {} as any);
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.health.warnings).toContain(
+        "cmuxlayer daemon unavailable; using heavy in-process runtime",
+      );
+      expect(result.content[0].text).toContain("daemon unavailable");
+    } finally {
+      await server.close();
+      rmSync(TEST_ROOT, { recursive: true, force: true });
+    }
+  });
+
   it("periodically appends control health snapshots without tool invocation", async () => {
     vi.useFakeTimers();
     rmSync(TEST_ROOT, { recursive: true, force: true });
