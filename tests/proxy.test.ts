@@ -86,6 +86,49 @@ function createCollector(stream: NodeJS.ReadableStream) {
   return { messages, waitForMessage };
 }
 
+function createRawLineCollector(stream: NodeJS.ReadableStream) {
+  const lines: string[] = [];
+  const events = new EventEmitter();
+  let buffer = "";
+  stream.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineIndex + 1);
+      buffer = buffer.slice(newlineIndex + 1);
+      lines.push(line);
+      events.emit("line", line);
+    }
+  });
+
+  const waitForLine = (
+    predicate: (line: string) => boolean,
+    timeoutMs = 1_000,
+  ): Promise<string> => {
+    const existing = lines.find(predicate);
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        events.off("line", onLine);
+        reject(new Error("timed out waiting for raw line"));
+      }, timeoutMs);
+      const onLine = (line: string) => {
+        if (!predicate(line)) {
+          return;
+        }
+        clearTimeout(timeout);
+        events.off("line", onLine);
+        resolve(line);
+      };
+      events.on("line", onLine);
+    });
+  };
+
+  return { lines, waitForLine };
+}
+
 function request(
   id: number,
   method: string,
@@ -349,6 +392,81 @@ describe("CmuxLayerProxy", () => {
       0,
       (message) => "method" in message && message.method === "tools/list",
     );
+  });
+
+  it("relays large daemon responses without parsing and reserializing the frame", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("large-raw-relay");
+    const largeText = "read-screen-payload-".repeat(16_384);
+    const rawReadScreenResponse = ` { "result" : { "content" : [ { "type" : "text" , "text" : ${JSON.stringify(
+      largeText,
+    )} } ] , "structuredContent" : { "ok" : true , "text" : ${JSON.stringify(
+      largeText,
+    )} } } , "id" : 2 , "jsonrpc" : "2.0" }\n`;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      const readBuffer = new ReadBuffer();
+      socket.on("data", (chunk) => {
+        readBuffer.append(chunk);
+        while (true) {
+          const message = readBuffer.readMessage();
+          if (message === null) {
+            break;
+          }
+          if (
+            typeof message === "object" &&
+            message !== null &&
+            "id" in message &&
+            "method" in message &&
+            message.method === "initialize"
+          ) {
+            writeFrame(socket, {
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                protocolVersion: "2025-03-26",
+                capabilities: {},
+                serverInfo: { name: "fake-daemon", version: "0.1.0" },
+              },
+            });
+          } else if (
+            typeof message === "object" &&
+            message !== null &&
+            "id" in message
+          ) {
+            socket.write(rawReadScreenResponse);
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(path, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const { input, output, collector } = createProxy(path);
+    const rawOutput = createRawLineCollector(output);
+
+    try {
+      writeFrame(input, request(1, "initialize", { capabilities: {} }));
+      await collector.waitForMessage(isResponseFor(1));
+      writeFrame(input, notification("notifications/initialized"));
+      writeFrame(input, request(2, "tools/call", { name: "read_screen" }));
+
+      await expect(
+        rawOutput.waitForLine((line) => line.includes('"id" : 2')),
+      ).resolves.toBe(rawReadScreenResponse);
+    } finally {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(path, { force: true });
+    }
   });
 
   it("replays initialize on daemon restart and completes buffered in-flight requests", async () => {

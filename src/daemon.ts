@@ -4,10 +4,7 @@ import net from "node:net";
 import { mkdir, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-  ReadBuffer,
-  serializeMessage,
-} from "@modelcontextprotocol/sdk/shared/stdio.js";
+import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
   TransportSendOptions,
@@ -33,6 +30,7 @@ import type {
 } from "./server.js";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
+import { JsonRpcLineBuffer } from "./json-rpc-line-buffer.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const LISTEN_FD_START = 3;
@@ -46,7 +44,7 @@ export class SocketJsonRpcTransport implements Transport {
   onRequestObserved?: (message: JSONRPCMessage) => void;
   onSend?: (message: JSONRPCMessage) => void;
 
-  private readBuffer = new ReadBuffer();
+  private readBuffer = new JsonRpcLineBuffer();
   private started = false;
   private closed = false;
 

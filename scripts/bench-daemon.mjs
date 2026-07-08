@@ -7,10 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
-import {
-  ReadBuffer,
-  serializeMessage,
-} from "@modelcontextprotocol/sdk/shared/stdio.js";
+import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distIndex = join(repoRoot, "dist", "index.js");
@@ -19,6 +16,7 @@ const DEFAULT_CLIENTS = 8;
 const DEFAULT_ROUNDS = 12;
 const LATENCY_REGRESSION_RATIO = 1.25;
 const LATENCY_REGRESSION_SLACK_MS = 5;
+let JsonRpcLineBuffer;
 
 function parsePositiveInt(raw, fallback) {
   const value = Number(raw);
@@ -139,7 +137,7 @@ class McpProcess {
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
-    this.readBuffer = new ReadBuffer();
+    this.readBuffer = new JsonRpcLineBuffer();
     this.child = spawn(command, args, {
       cwd: repoRoot,
       env,
@@ -354,6 +352,7 @@ async function main() {
   if (!existsSync(distIndex) || !existsSync(distDaemon)) {
     throw new Error("dist/index.js and dist/daemon.js are required; run bun run build first");
   }
+  ({ JsonRpcLineBuffer } = await import("../dist/json-rpc-line-buffer.js"));
 
   const tempRoot = await mkdtemp(join(tmpdir(), "cmuxlayer-daemon-bench-"));
   const binDir = join(tempRoot, "bin");

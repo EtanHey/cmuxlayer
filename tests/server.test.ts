@@ -1950,6 +1950,91 @@ describe("tool handler integration", () => {
     expect(data.column).toBe(1);
     expect(data.column_count).toBe(2);
     expect(result.content[0].text).toContain("col 2/2");
+    expect(mockClient.listPanes).toHaveBeenCalledTimes(1);
+    expect(mockClient.listPaneSurfaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("read_screen coalesces identical in-flight snapshots in one server context", async () => {
+    let resolveRead!: (value: {
+      surface: string;
+      text: string;
+      lines: number;
+      scrollback_used: boolean;
+    }) => void;
+    const readPromise = new Promise<{
+      surface: string;
+      text: string;
+      lines: number;
+      scrollback_used: boolean;
+    }>((resolve) => {
+      resolveRead = resolve;
+    });
+    const mockClient = {
+      readScreen: vi.fn().mockReturnValue(readPromise),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:1",
+            id: "pane-id",
+            surface_refs: ["surface:1"],
+            surface_ids: ["surface-id"],
+            pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            id: "surface-id",
+            pane_id: "pane-id",
+            ref: "surface:1",
+            title: "sharedAgent",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+    } as any;
+    const server = createServer({
+      client: mockClient,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["read_screen"];
+
+    const first = tool.handler(
+      { surface: "surface:1", workspace: "workspace:1", lines: 5 },
+      {} as any,
+    );
+    const second = tool.handler(
+      { surface: "surface:1", workspace: "workspace:1", lines: 5 },
+      {} as any,
+    );
+    await Promise.resolve();
+
+    expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
+
+    resolveRead({
+      surface: "surface:1",
+      text: "shared screen\nTASK_DONE",
+      lines: 5,
+      scrollback_used: false,
+    });
+    const results = await Promise.all([first, second]);
+    for (const result of results) {
+      const data =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(data.title).toBe("sharedAgent");
+      expect(data.column).toBe(0);
+      expect(data.column_count).toBe(1);
+    }
+    expect(mockClient.listPanes).toHaveBeenCalledTimes(1);
+    expect(mockClient.listPaneSurfaces).toHaveBeenCalledTimes(1);
   });
 
   it("read_screen omits column when pane geometry is unavailable but still returns the screen (F7)", async () => {
