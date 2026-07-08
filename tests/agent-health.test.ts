@@ -352,4 +352,46 @@ describe("agent lifecycle health", () => {
       issues: [],
     });
   });
+
+  it("downgrades auto-discovered column placement flags to info", () => {
+    const autoLead = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "auto-claude-surface-32",
+        cli: "claude",
+        role: "orchestrator",
+        repo: "driverBuddy",
+        task_summary: "(auto-discovered)",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "driverBuddy",
+        topology: { column: 1, column_count: 2 },
+      },
+    );
+    const autoWorker = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "auto-codex-surface-112",
+        role: "worker",
+        task_summary: "(auto-discovered)",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "pr3-quadratic-fix",
+        topology: { column: 0, column_count: 2 },
+      },
+    );
+
+    expect(autoLead.status).toBe("healthy");
+    expect(autoLead.issue_codes).toContain("orchestrator_not_leftmost");
+    expect(autoLead.issue_severities).toMatchObject({
+      auto_discovered_agent: "info",
+      orchestrator_not_leftmost: "info",
+    });
+    expect(autoWorker.status).toBe("healthy");
+    expect(autoWorker.issue_codes).toContain("worker_in_leftmost_column");
+    expect(autoWorker.issue_severities).toMatchObject({
+      auto_discovered_agent: "info",
+      worker_in_leftmost_column: "info",
+    });
+  });
 });

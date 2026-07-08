@@ -165,6 +165,37 @@ function inferLauncherFromSurfaceTitle(
   return null;
 }
 
+function suffixForCli(cli: CliType): string {
+  return CLI_SUFFIXES.find((entry) => entry.cli === cli)?.suffix ?? "";
+}
+
+function repairRepoFromTitle(title: string): string {
+  const inferred = inferRepoFromTitle(title);
+  const token = inferred.match(/[A-Za-z0-9][A-Za-z0-9_.-]*/)?.[0] ?? "";
+  return token.replace(/^[A-Z]/, (match) => match.toLowerCase());
+}
+
+function inferRepairLauncher(
+  discovered: DiscoveredAgent,
+  registry?: SeatRegistry | null,
+): { repo: string; cli: CliType; launcherName: string } | null {
+  const titleLauncher = inferLauncherFromSurfaceTitle(
+    discovered.surface_title,
+    registry,
+  );
+  if (titleLauncher) return titleLauncher;
+
+  if (discovered.cli === "unknown") return null;
+  const repo = repairRepoFromTitle(discovered.surface_title);
+  const suffix = suffixForCli(discovered.cli);
+  if (!repo || !suffix) return null;
+  return {
+    repo,
+    cli: discovered.cli,
+    launcherName: `${repo}${suffix}`,
+  };
+}
+
 function roleFromSeatOrLauncher(input: {
   seat: SeatIdentityAssertion;
   launcherName: string;
@@ -200,10 +231,7 @@ function repairCandidateForSurface(
   discovered: DiscoveredAgent,
   registry?: SeatRegistry | null,
 ): RegistryRepairCandidate | null {
-  const launcher = inferLauncherFromSurfaceTitle(
-    discovered.surface_title,
-    registry,
-  );
+  const launcher = inferRepairLauncher(discovered, registry);
   if (!launcher) return null;
 
   const seat = assertSeatIdentity({
@@ -224,6 +252,13 @@ function repairCandidateForSurface(
     role,
     agentId: seat.seat_id ?? launcher.launcherName,
   };
+}
+
+function surfaceScopedAgentId(baseAgentId: string, surfaceId: string): string {
+  const surfaceToken = surfaceId
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${baseAgentId}-${surfaceToken || "surface"}`;
 }
 
 function patchForRepairCandidate(
@@ -789,7 +824,12 @@ export class AgentRegistry {
       const candidate = repairCandidateForSurface(entry, opts?.seatRegistry);
       if (!candidate) continue;
 
-      const repair = this.repairDiscoveredSurface(entry, candidate, evicted);
+      const repair = this.repairDiscoveredSurface(
+        entry,
+        candidate,
+        evicted,
+        liveSurfaceRefs,
+      );
       if (repair) {
         repaired.push(repair);
       }
@@ -839,6 +879,7 @@ export class AgentRegistry {
     discovered: DiscoveredAgent,
     candidate: RegistryRepairCandidate,
     evicted: Set<string>,
+    liveSurfaceRefs: ReadonlySet<string>,
   ): RegistryRepairEntry | null {
     const recordsForSurface = [...this.agents.values()].filter(
       (agent) => agent.surface_id === discovered.surface_id,
@@ -870,6 +911,42 @@ export class AgentRegistry {
 
     const existingSeatRecord = this.stateMgr.readState(candidate.agentId);
     if (existingSeatRecord) {
+      if (
+        existingSeatRecord.surface_id !== discovered.surface_id &&
+        liveSurfaceRefs.has(existingSeatRecord.surface_id)
+      ) {
+        const scopedCandidate = {
+          ...candidate,
+          agentId: surfaceScopedAgentId(
+            candidate.agentId,
+            discovered.surface_id,
+          ),
+        };
+        const existingScopedRecord = this.stateMgr.readState(
+          scopedCandidate.agentId,
+        );
+        if (existingScopedRecord) {
+          const updated = this.updateManagedSurfaceRegistration(
+            existingScopedRecord,
+            discovered,
+            scopedCandidate,
+          );
+          return updated
+            ? this.repairEntry(updated, discovered, scopedCandidate, "updated")
+            : this.repairEntry(
+                existingScopedRecord,
+                discovered,
+                scopedCandidate,
+                "updated",
+              );
+        }
+
+        const created = this.createRepairedRecord(discovered, scopedCandidate);
+        this.stateMgr.writeState(created);
+        this.agents.set(created.agent_id, created);
+        return this.repairEntry(created, discovered, scopedCandidate, "created");
+      }
+
       const updated = this.updateManagedSurfaceRegistration(
         existingSeatRecord,
         discovered,

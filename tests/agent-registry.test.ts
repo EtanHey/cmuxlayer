@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState } from "../src/agent-types.js";
+import type { DiscoveredAgent } from "../src/agent-discovery.js";
+import type { SeatRegistry } from "../src/seat-identity.js";
 import type { CmuxSurface } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-registry");
@@ -42,6 +44,43 @@ function makeSurface(ref: string): CmuxSurface {
     selected: false,
   };
 }
+
+function makeDiscovered(
+  overrides: Partial<DiscoveredAgent>,
+): DiscoveredAgent {
+  return {
+    surface_id: "surface:live",
+    surface_title: "cmuxlayerClaude",
+    workspace_id: "workspace:1",
+    cli: "claude",
+    parsed_status: "working",
+    model: "Sonnet 4.6",
+    token_count: null,
+    context_pct: null,
+    has_agent: true,
+    read_error: false,
+    ...overrides,
+  };
+}
+
+const REPAIR_SEATS: SeatRegistry = {
+  driverBuddy: {
+    repo: "driverBuddy",
+    launchers: {
+      claude: "driverBuddyClaude",
+    },
+    lane: "driverBuddy",
+    role: "lead",
+  },
+  cmuxlayerLead: {
+    repo: "cmuxlayer",
+    launchers: {
+      claude: "cmuxlayerClaude",
+    },
+    lane: "cmuxlayer",
+    role: "lead",
+  },
+};
 
 describe("AgentRegistry", () => {
   let stateMgr: StateManager;
@@ -412,6 +451,129 @@ describe("AgentRegistry", () => {
       expect(registry.get("managed-codex-null")?.workspace_id).toBe(
         "workspace:known",
       );
+    });
+  });
+
+  describe("repairFromDiscovery", () => {
+    it("repairs no-suffix auto-discovered panes from parsed cli and title repo evidence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-32",
+          surface_id: "surface:32",
+          workspace_id: "workspace:1",
+          repo: "driverBuddy",
+          cli: "claude",
+          role: "orchestrator",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:32"),
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:32",
+            surface_title: "🤝 driverBuddy",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          surface_id: "surface:32",
+          agent_id: "driverBuddy",
+          repo: "driverBuddy",
+          cli: "claude",
+          launcher_name: "driverBuddyClaude",
+          seat_id: "driverBuddy",
+          action: "created",
+        }),
+      ]);
+      expect(result.evicted).toEqual(["auto-claude-surface-32"]);
+      expect(stateMgr.readState("auto-claude-surface-32")).toBeNull();
+      expect(stateMgr.readState("driverBuddy")).toMatchObject({
+        agent_id: "driverBuddy",
+        surface_id: "surface:32",
+        repo: "driverBuddy",
+        cli: "claude",
+        launcher_name: "driverBuddyClaude",
+        seat_id: "driverBuddy",
+        seat_lane: "driverBuddy",
+        seat_role: "lead",
+        role: "orchestrator",
+      });
+    });
+
+    it("keeps duplicate launcher-title surfaces as distinct repaired registrations", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-35",
+          surface_id: "surface:35",
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-121",
+          surface_id: "surface:121",
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:35"),
+        makeSurface("surface:121"),
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:35",
+            surface_title: "cmuxlayerClaude",
+          }),
+          makeDiscovered({
+            surface_id: "surface:121",
+            surface_title: "cmuxlayerClaude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          surface_id: "surface:35",
+          agent_id: "cmuxlayerLead",
+          action: "created",
+        }),
+        expect.objectContaining({
+          surface_id: "surface:121",
+          agent_id: "cmuxlayerLead-surface-121",
+          action: "created",
+        }),
+      ]);
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: "surface:35",
+        seat_id: "cmuxlayerLead",
+      });
+      expect(stateMgr.readState("cmuxlayerLead-surface-121")).toMatchObject({
+        agent_id: "cmuxlayerLead-surface-121",
+        surface_id: "surface:121",
+        seat_id: "cmuxlayerLead",
+      });
     });
   });
 
