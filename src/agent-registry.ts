@@ -78,6 +78,12 @@ interface RegistryRepairCandidate {
   agentId: string;
 }
 
+interface LiveRepairCandidate {
+  discovered: DiscoveredAgent;
+  candidate: RegistryRepairCandidate;
+  identityKeys: string[];
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -279,6 +285,26 @@ function canonicalIdentityName(record: AgentRecord): string | null {
   return record.seat_id ?? record.launcher_name ?? null;
 }
 
+function repairCandidateIdentityKeys(
+  candidate: RegistryRepairCandidate,
+): string[] {
+  return [
+    candidate.seat.seat_id ? `seat:${candidate.seat.seat_id}` : null,
+    `launcher:${candidate.launcherName}`,
+  ].filter((key): key is string => Boolean(key));
+}
+
+function identityKeysOverlap(left: readonly string[], right: readonly string[]) {
+  return left.some((key) => right.includes(key));
+}
+
+function isSelfHealEligibleManagedRecord(record: AgentRecord): boolean {
+  if (record.state !== "error") {
+    return record.state !== "done";
+  }
+  return record.error?.startsWith("Surface ") ?? false;
+}
+
 function patchForRepairCandidate(
   record: AgentRecord,
   discovered: DiscoveredAgent,
@@ -327,7 +353,6 @@ class AgentNotFoundError extends Error {
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
   private aliases = new Map<string, string>();
-  private repairSuppressedSurfaceRefs = new Set<string>();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
 
@@ -510,6 +535,10 @@ export class AgentRegistry {
     await this.evictBootingGhosts(discovered);
 
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
+    const repairCandidates = this.liveRepairCandidatesForDiscovery(discovered);
+    this.selfHealManagedRegistrationsFromDiscovery(repairCandidates, bySurface);
+    const suppressedDuplicateSurfaceRefs =
+      this.duplicateDiscoverySurfaceRefs(repairCandidates);
     const merged: MergedAgent[] = [];
     const seenSurfaces = new Set<string>();
 
@@ -570,7 +599,7 @@ export class AgentRegistry {
       ) {
         continue;
       }
-      if (this.repairSuppressedSurfaceRefs.has(discoveredEntry.surface_id)) {
+      if (suppressedDuplicateSurfaceRefs.has(discoveredEntry.surface_id)) {
         continue;
       }
       if (seenSurfaces.has(discoveredEntry.surface_id)) {
@@ -655,6 +684,124 @@ export class AgentRegistry {
     }
 
     return opts?.agentId ? requested ?? this.get(opts.agentId) : null;
+  }
+
+  private liveRepairCandidatesForDiscovery(
+    discovered: DiscoveredAgent[],
+  ): LiveRepairCandidate[] {
+    return discovered.flatMap((entry) => {
+      if (
+        !entry.has_agent ||
+        entry.cli === "unknown" ||
+        entry.read_error
+      ) {
+        return [];
+      }
+      const candidate = repairCandidateForSurface(entry);
+      if (!candidate) return [];
+      return [
+        {
+          discovered: entry,
+          candidate,
+          identityKeys: repairCandidateIdentityKeys(candidate),
+        },
+      ];
+    });
+  }
+
+  private selfHealManagedRegistrationsFromDiscovery(
+    candidates: LiveRepairCandidate[],
+    bySurface: ReadonlyMap<string, DiscoveredAgent>,
+  ): void {
+    if (candidates.length === 0) return;
+
+    const claimedSurfaceRefs = new Set<string>();
+    for (const record of [...this.agents.values()]) {
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
+        continue;
+      }
+      if (!isSelfHealEligibleManagedRecord(record)) {
+        continue;
+      }
+
+      const recordKeys = recordIdentityKeys(record);
+      if (recordKeys.length === 0) continue;
+
+      const currentLiveCandidate = candidates.find(
+        (entry) =>
+          entry.discovered.surface_id === record.surface_id &&
+          identityKeysOverlap(recordKeys, entry.identityKeys),
+      );
+      if (currentLiveCandidate) {
+        claimedSurfaceRefs.add(currentLiveCandidate.discovered.surface_id);
+        continue;
+      }
+
+      const currentSurface = bySurface.get(record.surface_id);
+      if (
+        currentSurface &&
+        (currentSurface.read_error || currentSurface.has_agent)
+      ) {
+        continue;
+      }
+
+      const replacement = candidates.find(
+        (entry) =>
+          !claimedSurfaceRefs.has(entry.discovered.surface_id) &&
+          identityKeysOverlap(recordKeys, entry.identityKeys),
+      );
+      if (!replacement) continue;
+
+      const moved =
+        this.updateManagedSurfaceRegistration(
+          record,
+          replacement.discovered,
+          replacement.candidate,
+        ) ?? record;
+      const synced = this.syncManagedRecordLifecycleFromDiscovery(
+        moved,
+        replacement.discovered,
+      );
+      claimedSurfaceRefs.add(synced.surface_id);
+    }
+  }
+
+  private duplicateDiscoverySurfaceRefs(
+    candidates: LiveRepairCandidate[],
+  ): Set<string> {
+    const liveManagedIdentityKeys = new Set<string>();
+    const liveManagedSurfaceRefs = new Set<string>();
+
+    for (const record of this.agents.values()) {
+      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
+        continue;
+      }
+      const recordKeys = recordIdentityKeys(record);
+      const matchingLiveCandidate = candidates.find(
+        (entry) =>
+          entry.discovered.surface_id === record.surface_id &&
+          identityKeysOverlap(recordKeys, entry.identityKeys),
+      );
+      if (!matchingLiveCandidate) continue;
+
+      liveManagedSurfaceRefs.add(record.surface_id);
+      for (const key of recordKeys) {
+        liveManagedIdentityKeys.add(key);
+      }
+    }
+
+    const suppressed = new Set<string>();
+    for (const entry of candidates) {
+      if (liveManagedSurfaceRefs.has(entry.discovered.surface_id)) {
+        continue;
+      }
+      if (
+        entry.identityKeys.some((key) => liveManagedIdentityKeys.has(key))
+      ) {
+        suppressed.add(entry.discovered.surface_id);
+      }
+    }
+    return suppressed;
   }
 
   /**
@@ -747,6 +894,31 @@ export class AgentRegistry {
     }
   }
 
+  private syncManagedRecordLifecycleFromDiscovery(
+    record: AgentRecord,
+    discoveredEntry: DiscoveredAgent,
+  ): AgentRecord {
+    const desiredState = discoveredStatusToAgentState(
+      discoveredEntry.parsed_status,
+    );
+    const desiredError =
+      desiredState === "error"
+        ? "Repaired agent surface reported a frozen state"
+        : null;
+    if (record.state === desiredState && record.error === desiredError) {
+      return record;
+    }
+
+    const updated = this.stateMgr.resetState(
+      record.agent_id,
+      desiredState,
+      { error: desiredError },
+      "listMergedSelfHeal",
+    );
+    this.agents.set(record.agent_id, updated);
+    return updated;
+  }
+
   /**
    * Update an agent in the in-memory map. Used by tools that
    * write state through the StateManager and need to sync the registry.
@@ -831,7 +1003,6 @@ export class AgentRegistry {
   ): RegistryRepairSummary {
     const repaired: RegistryRepairEntry[] = [];
     const evicted = new Set<string>();
-    this.repairSuppressedSurfaceRefs = new Set();
     const liveSurfaceRefs = new Set(
       discovered
         .filter((entry) => !entry.read_error)
@@ -947,9 +1118,6 @@ export class AgentRegistry {
       });
       const keep = sorted[0];
       for (const duplicate of sorted.slice(1)) {
-        if (duplicate.surface_id !== keep.surface_id) {
-          this.repairSuppressedSurfaceRefs.add(duplicate.surface_id);
-        }
         const removedAgentId = this.evict(duplicate.agent_id);
         if (removedAgentId) {
           evicted.push(removedAgentId);
@@ -1000,7 +1168,6 @@ export class AgentRegistry {
         existingSeatRecord.surface_id !== discovered.surface_id &&
         liveSurfaceRefs.has(existingSeatRecord.surface_id)
       ) {
-        this.repairSuppressedSurfaceRefs.add(discovered.surface_id);
         return null;
       }
 

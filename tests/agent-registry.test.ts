@@ -573,6 +573,76 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("cmuxlayerLead-surface-121")).toBeNull();
     });
 
+    it("self-heals a suppressed duplicate surface when the canonical surface closes", async () => {
+      const surfaceA = "surface:35";
+      const surfaceB = "surface:121";
+      const duplicateDiscoveries = [
+        makeDiscovered({
+          surface_id: surfaceA,
+          surface_title: "cmuxlayerClaude",
+        }),
+        makeDiscovered({
+          surface_id: surfaceB,
+          surface_title: "cmuxlayerClaude",
+        }),
+      ];
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-35",
+          surface_id: surfaceA,
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-121",
+          surface_id: surfaceB,
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      let surfaces = [makeSurface(surfaceA), makeSurface(surfaceB)];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await registry.reconstitute();
+      registry.repairFromDiscovery(duplicateDiscoveries, {
+        seatRegistry: REPAIR_SEATS,
+      });
+
+      surfaces = [makeSurface(surfaceB)];
+      const merged = await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: surfaceB,
+            surface_title: "cmuxlayerClaude",
+          }),
+        ]),
+      } as any);
+
+      expect(merged.map((record) => record.agent_id)).toEqual([
+        "cmuxlayerLead",
+      ]);
+      expect(merged[0]).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: surfaceB,
+        state: "working",
+        error: null,
+        launcher_name: "cmuxlayerClaude",
+      });
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: surfaceB,
+        state: "working",
+        error: null,
+      });
+      expect(stateMgr.readState("auto-claude-surface-121")).toBeNull();
+    });
+
     it("deduplicates M1 mimir pending ghosts to one row per launcher seat", async () => {
       const discovered = [
         makeDiscovered({
