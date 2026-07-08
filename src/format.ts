@@ -281,12 +281,14 @@ export function formatDelivery(
 export function formatResync(diff: {
   added: string[];
   evicted: string[];
+  repaired?: unknown[];
   mismatches: string[];
   orphaned?: string[];
 }): string {
   const added = diff.added.length;
   const evicted = diff.evicted.length;
+  const repaired = diff.repaired?.length ?? 0;
   const mismatches = diff.mismatches.length;
   const orphaned = diff.orphaned?.length ?? 0;
-  return `✔ resync_agents — added: ${added}  evicted: ${evicted}  mismatches: ${mismatches}  orphaned: ${orphaned}`;
+  return `✔ resync_agents — added: ${added}  repaired: ${repaired}  evicted: ${evicted}  mismatches: ${mismatches}  orphaned: ${orphaned}`;
 }

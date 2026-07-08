@@ -144,6 +144,10 @@ import {
   type McpProfile,
   type WorktreeExec,
 } from "./worktree.js";
+import {
+  loadSeatRegistryFromConfig,
+  type SeatRegistry,
+} from "./seat-identity.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -1733,6 +1737,9 @@ export interface CreateServerOptions {
   controlHealthCollector?: () => Promise<ControlHealth>;
   /** Extra warnings surfaced by control_health, e.g. daemon fallback mode. */
   controlHealthWarnings?: string[];
+  /** Override seat registry repair/identity lookup (primarily for tests). */
+  seatRegistry?: SeatRegistry | null;
+  seatRegistryPath?: string;
   /**
    * Override the process-wide stale-build warner (primarily for tests). Returns
    * the loud warning string when this MCP build is stale vs the installed brew
@@ -1977,6 +1984,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?.controlHealthCollector ?? context.controlHealthCollector;
   const controlHealthWarnings =
     opts?.controlHealthWarnings ?? context.controlHealthWarnings;
+  const seatRegistry =
+    opts?.seatRegistry !== undefined
+      ? opts.seatRegistry
+      : loadSeatRegistryFromConfig(opts?.seatRegistryPath);
   const staleBuildWarning = opts?.staleBuildWarner ?? defaultStaleBuildWarner;
   const appendStaleBuildWarning = (result: { warnings?: string[] }): void => {
     const warning = staleBuildWarning();
@@ -6160,6 +6171,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 listSurfacesForRefMap: surfaceProvider,
               })
             : null,
+          seatRegistry,
+          seatRegistryPath: opts?.seatRegistryPath,
         },
       );
     context.lifecycleSweepEngine = engine;
@@ -7620,21 +7633,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const beforeIds = new Set(
             registry.list().map((agent) => agent.agent_id),
           );
+          await registry.reconcile();
+          for (const agent of registry.list()) {
+            beforeIds.add(agent.agent_id);
+          }
+          discovery.invalidate();
+          const discoveredBeforeRepair = await discovery.scan(true);
+          const repair = registry.repairFromDiscovery(discoveredBeforeRepair, {
+            seatRegistry,
+          });
           discovery.invalidate();
           await registry.listMerged(discovery, { force: true });
-          await registry.evictSurfaceless();
+          const surfacelessEvicted = await registry.evictSurfaceless();
           engine.evictDeadProcessAgents();
           discovery.invalidate();
           const after = await registry.listMerged(discovery, { force: true });
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
+          const registeredSurfaceIds = new Set(
+            registry.list().map((agent) => agent.surface_id),
+          );
           const orphanedSurfaces = discovered.filter(
-            (surface) => !surface.has_agent && !surface.read_error,
+            (surface) =>
+              !surface.read_error &&
+              !registeredSurfaceIds.has(surface.surface_id) &&
+              !surface.has_agent,
           );
           const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
+          const evicted = [
+            ...new Set([
+              ...repair.evicted,
+              ...surfacelessEvicted,
+              ...[...beforeIds].filter((id) => !afterIds.has(id)),
+            ]),
+          ];
           const diff = {
             added: [...afterIds].filter((id) => !beforeIds.has(id)),
-            evicted: [...beforeIds].filter((id) => !afterIds.has(id)),
+            evicted,
+            repaired: repair.repaired,
             mismatches: after
               .filter((agent) => agent.parsed_cli_mismatch)
               .map((agent) => agent.agent_id),
