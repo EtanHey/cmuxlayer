@@ -275,10 +275,13 @@ describe("agent lifecycle health", () => {
   });
 
   it("marks registry workspace mismatch against the live surface as unhealthy", () => {
-    const health = evaluateAgentHealth(makeRecord({ workspace_id: "workspace:5" }), {
-      monitor_alive: true,
-      surface_workspace_id: "workspace:1",
-    });
+    const health = evaluateAgentHealth(
+      makeRecord({ workspace_id: "workspace:5" }),
+      {
+        monitor_alive: true,
+        surface_workspace_id: "workspace:1",
+      },
+    );
 
     expect(health.status).toBe("unhealthy");
     expect(health.issue_codes).toContain("registry_surface_workspace_mismatch");
@@ -351,6 +354,92 @@ describe("agent lifecycle health", () => {
       issue_codes: [],
       issues: [],
     });
+  });
+
+  it("downgrades resync-repaired column placement flags to info", () => {
+    const repairedLead = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "driverBuddy",
+        cli: "claude",
+        role: "orchestrator",
+        repo: "driverBuddy",
+        launcher_name: "driverBuddyClaude",
+        seat_id: "driverBuddy",
+        task_summary: "(resync-repaired)",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "driverBuddy",
+        topology: { column: 1, column_count: 2 },
+      },
+    );
+    const repairedWorker = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "pr3-quadratic-fix",
+        role: "worker",
+        launcher_name: "cmuxlayerCodex",
+        task_summary: "(resync-repaired)",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "pr3-quadratic-fix",
+        topology: { column: 0, column_count: 2 },
+      },
+    );
+
+    expect(repairedLead.status).toBe("healthy");
+    expect(repairedLead.issue_codes).toContain("orchestrator_not_leftmost");
+    expect(repairedLead.issue_severities).toMatchObject({
+      orchestrator_not_leftmost: "info",
+    });
+    expect(repairedLead.issue_codes).not.toContain("auto_discovered_agent");
+
+    expect(repairedWorker.status).toBe("healthy");
+    expect(repairedWorker.issue_codes).toContain("worker_in_leftmost_column");
+    expect(repairedWorker.issue_severities).toMatchObject({
+      worker_in_leftmost_column: "info",
+    });
+    expect(repairedWorker.issue_codes).not.toContain("auto_discovered_agent");
+  });
+
+  it("keeps managed spawn_agent column placement flags blocking", () => {
+    const managedLead = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "cmuxlayerLead",
+        cli: "claude",
+        role: "orchestrator",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerClaude",
+        seat_id: "cmuxlayerLead",
+        task_summary: "Coordinate the column-flag follow-up",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "cmuxlayerClaude",
+        topology: { column: 1, column_count: 2 },
+      },
+    );
+    const managedWorker = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "cmuxlayerCodex-pending-1-abcd",
+        role: "worker",
+        task_summary: "Implement the column-flag fix",
+      }),
+      {
+        monitor_alive: true,
+        surface_title: "cmuxlayerCodex",
+        topology: { column: 0, column_count: 2 },
+      },
+    );
+
+    expect(managedLead.status).toBe("unhealthy");
+    expect(managedLead.issue_severities?.orchestrator_not_leftmost).toBe(
+      "blocking",
+    );
+    expect(managedWorker.status).toBe("unhealthy");
+    expect(managedWorker.issue_severities?.worker_in_leftmost_column).toBe(
+      "blocking",
+    );
   });
 
   it("downgrades auto-discovered column placement flags to info", () => {
