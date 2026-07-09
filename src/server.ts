@@ -117,6 +117,7 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
+import { currentCallerContext } from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   matchReadyPattern,
@@ -3557,14 +3558,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const callerWorkspaceStrict = async (): Promise<string | undefined> => {
     try {
       const { workspaces } = await client.listWorkspaces();
-      const envCandidates = [
-        process.env.CMUX_WORKSPACE_ID,
-        process.env.CMUX_TAB_ID,
+      const callerContext = currentCallerContext();
+      const requestCandidates = [
+        callerContext?.workspaceId,
+        callerContext?.tabId,
       ].filter(
         (value): value is string =>
           typeof value === "string" && value.trim().length > 0,
       );
-      for (const candidate of envCandidates) {
+      const envCandidates =
+        requestCandidates.length > 0
+          ? []
+          : [process.env.CMUX_WORKSPACE_ID, process.env.CMUX_TAB_ID].filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim().length > 0,
+            );
+      const candidates = [...requestCandidates, ...envCandidates];
+      for (const candidate of candidates) {
         const match = workspaces.find((workspace) =>
           envWorkspaceMatches(workspace, candidate),
         );

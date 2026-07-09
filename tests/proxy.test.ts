@@ -150,6 +150,20 @@ function isResponseFor(id: number) {
     ("result" in message || "error" in message);
 }
 
+function callerContextMeta(message: JSONRPCMessage): unknown {
+  if (
+    typeof message !== "object" ||
+    message === null ||
+    !("params" in message) ||
+    typeof message.params !== "object" ||
+    message.params === null
+  ) {
+    return undefined;
+  }
+  const params = message.params as { _meta?: Record<string, unknown> };
+  return params._meta?.["cmuxlayer/callerContext"];
+}
+
 class FakeDaemon {
   readonly connections: Array<{
     socket: net.Socket;
@@ -392,6 +406,62 @@ describe("CmuxLayerProxy", () => {
       0,
       (message) => "method" in message && message.method === "tools/list",
     );
+  });
+
+  it("attaches caller cmux env to each forwarded tool call", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    const previousSurfaceId = process.env.CMUX_SURFACE_ID;
+    process.env.CMUX_WORKSPACE_ID = "workspace-x-uuid";
+    process.env.CMUX_TAB_ID = "tab-x";
+    process.env.CMUX_SURFACE_ID = "surface-x";
+
+    try {
+      const path = socketPath("caller-context");
+      const daemon = new FakeDaemon(path);
+      daemons.push(daemon);
+      await daemon.start();
+      const { input, collector } = createProxy(path);
+
+      writeFrame(input, request(1, "initialize", { capabilities: {} }));
+      await collector.waitForMessage(isResponseFor(1));
+      writeFrame(input, notification("notifications/initialized"));
+      writeFrame(
+        input,
+        request(2, "tools/call", {
+          name: "spawn_agent",
+          arguments: { repo: "brainlayer", cli: "codex" },
+        }),
+      );
+
+      await collector.waitForMessage(isResponseFor(2));
+      const forwarded = await daemon.waitForMessage(
+        0,
+        (message) => "method" in message && message.method === "tools/call",
+      );
+      expect(callerContextMeta(forwarded)).toEqual({
+        workspaceId: "workspace-x-uuid",
+        tabId: "tab-x",
+        surfaceId: "surface-x",
+      });
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+      if (previousSurfaceId === undefined) {
+        delete process.env.CMUX_SURFACE_ID;
+      } else {
+        process.env.CMUX_SURFACE_ID = previousSurfaceId;
+      }
+    }
   });
 
   it("relays large daemon responses without parsing and reserializing the frame", async () => {
