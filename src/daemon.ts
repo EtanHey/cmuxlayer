@@ -31,6 +31,10 @@ import type {
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
 import { JsonRpcLineBuffer } from "./json-rpc-line-buffer.js";
+import {
+  callerContextFromMessage,
+  runWithCallerContext,
+} from "./caller-context.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const LISTEN_FD_START = 3;
@@ -155,7 +159,9 @@ export class SocketJsonRpcTransport implements Transport {
         if (isJsonRpcRequest(message)) {
           this.onRequestObserved?.(message);
         }
-        this.onmessage?.(message);
+        runWithCallerContext(callerContextFromMessage(message), () => {
+          this.onmessage?.(message);
+        });
       } catch (error) {
         this.onerror?.(
           error instanceof Error ? error : new Error(String(error)),

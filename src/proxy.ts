@@ -13,6 +13,10 @@ import {
   extractJsonRpcFrameMetadata,
   JsonRpcLineBuffer,
 } from "./json-rpc-line-buffer.js";
+import {
+  attachCallerContextToMessage,
+  callerContextFromEnv,
+} from "./caller-context.js";
 
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
@@ -311,9 +315,13 @@ export class CmuxLayerProxy {
     }
 
     this.expiredRequestKeys.delete(key);
+    const messageForDaemon = attachCallerContextToMessage(
+      cloneMessage(message),
+      callerContextFromEnv(),
+    );
     const pending: PendingRequest = {
       id: message.id,
-      message: cloneMessage(message),
+      message: messageForDaemon,
       sequence: this.nextSequence++,
       requestKey: key,
       sent: false,

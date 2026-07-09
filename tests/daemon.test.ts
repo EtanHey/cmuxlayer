@@ -168,6 +168,67 @@ function createLifecycleExec(): ExecFn {
   });
 }
 
+function createPlacementClient(
+  workspaces: Array<Record<string, unknown>>,
+  calls: string[] = [],
+) {
+  let surfaceIndex = 0;
+  return {
+    createWorkspace: vi.fn(),
+    selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
+      calls.push(`select:${workspace}`);
+    }),
+    listWorkspaces: vi.fn().mockResolvedValue({ workspaces }),
+    listPanes: vi
+      .fn()
+      .mockImplementation(async ({ workspace }: { workspace?: string } = {}) => ({
+        workspace_ref: workspace ?? "workspace:focused",
+        window_ref: "window:1",
+        panes: [],
+      })),
+    listPaneSurfaces: vi
+      .fn()
+      .mockImplementation(async ({ workspace }: { workspace?: string } = {}) => ({
+        workspace_ref: workspace ?? "workspace:focused",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [],
+      })),
+    newSplit: vi
+      .fn()
+      .mockImplementation(
+        async (_direction: string, opts: { workspace?: string }) => {
+          surfaceIndex += 1;
+          calls.push(`spawn:${opts.workspace}`);
+          return {
+            workspace: opts.workspace,
+            surface: `surface:caller-${surfaceIndex}`,
+            pane: `pane:caller-${surfaceIndex}`,
+            title: "",
+            type: "terminal",
+          };
+        },
+      ),
+    newSurface: vi.fn(),
+    send: vi.fn().mockResolvedValue(undefined),
+    sendKey: vi.fn().mockResolvedValue(undefined),
+    readScreen: vi.fn().mockResolvedValue({
+      surface: "surface:caller",
+      text: "codex> ",
+      lines: 20,
+      scrollback_used: false,
+    }),
+    log: vi.fn().mockResolvedValue(undefined),
+    setStatus: vi.fn().mockResolvedValue(undefined),
+    clearStatus: vi.fn().mockResolvedValue(undefined),
+    setProgress: vi.fn().mockResolvedValue(undefined),
+    closeSurface: vi.fn().mockResolvedValue(undefined),
+    listSurfaces: vi.fn().mockResolvedValue([]),
+    identify: vi.fn().mockResolvedValue({}),
+    browser: vi.fn().mockResolvedValue({}),
+  };
+}
+
 async function connectClient(path: string): Promise<Client> {
   const socket = net.createConnection(path);
   const transport = new SocketJsonRpcTransport(socket);
@@ -201,6 +262,71 @@ function deferred<T>() {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function rawToolCall(
+  path: string,
+  params: Record<string, unknown>,
+  timeoutMs = 1_000,
+): Promise<Record<string, any>> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(path);
+    let buffer = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settle(new Error("timed out waiting for raw tools/call response"));
+    }, timeoutMs);
+    const send = (message: Record<string, unknown>) => {
+      socket.write(`${JSON.stringify(message)}\n`);
+    };
+    const settle = (error?: Error, response?: Record<string, any>) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(response ?? {});
+    };
+
+    socket.on("connect", () => {
+      send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "raw-spawn-test", version: "0.1.0" },
+        },
+      });
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line.trim()) {
+          continue;
+        }
+        const message = JSON.parse(line);
+        if (message.id === 1) {
+          send({ jsonrpc: "2.0", method: "notifications/initialized" });
+          send({ jsonrpc: "2.0", id: 2, method: "tools/call", params });
+          continue;
+        }
+        if (message.id === 2) {
+          settle(undefined, message);
+        }
+      }
+    });
+    socket.on("error", (error) => settle(error));
+  });
 }
 
 async function listen(server: net.Server, path: string): Promise<void> {
@@ -510,6 +636,185 @@ describe("CmuxLayerDaemon", () => {
     await clientA.close();
     await clientB.close();
     await daemon.shutdown();
+  });
+
+  it("uses per-request caller workspace metadata when daemon env has no workspace", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    delete process.env.CMUX_WORKSPACE_ID;
+    delete process.env.CMUX_TAB_ID;
+    const path = socketPath("caller-workspace");
+    const calls: string[] = [];
+    const context = createServerContext({
+      client: createPlacementClient(
+        [
+          {
+            id: "caller-workspace-uuid",
+            ref: "workspace:1",
+            title: "Caller Workspace",
+            selected: false,
+          },
+          {
+            id: "selected-workspace-uuid",
+            ref: "workspace:5",
+            title: "Focused Workspace",
+            selected: true,
+          },
+        ],
+        calls,
+      ) as any,
+      stateDir: stateDir("caller-workspace-state"),
+      disableSpawnPreflight: true,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      context,
+      disableSpawnPreflight: true,
+    });
+
+    try {
+      await daemon.start();
+
+      const response = await rawToolCall(path, {
+        name: "spawn_agent",
+        arguments: {
+          repo: "brainlayer",
+          model: "gpt-5.5",
+          cli: "codex",
+          force_new: true,
+        },
+        _meta: {
+          "cmuxlayer/callerContext": {
+            workspaceId: "caller-workspace-uuid",
+            tabId: "caller-tab-id",
+            surfaceId: "surface:caller",
+          },
+        },
+      });
+
+      expect(response.result?.structuredContent).toMatchObject({
+        ok: true,
+        workspace_id: "workspace:1",
+      });
+      expect(calls).toContain("spawn:workspace:1");
+      expect(calls).not.toContain("spawn:workspace:5");
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+      await daemon.shutdown().catch(() => {});
+    }
+  });
+
+  it("keeps concurrent caller workspace metadata isolated per request", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    const previousTabId = process.env.CMUX_TAB_ID;
+    delete process.env.CMUX_WORKSPACE_ID;
+    delete process.env.CMUX_TAB_ID;
+    const path = socketPath("caller-workspace-concurrent");
+    const calls: string[] = [];
+    const context = createServerContext({
+      client: createPlacementClient(
+        [
+          {
+            id: "workspace-x-uuid",
+            ref: "workspace:10",
+            title: "Caller X",
+            selected: false,
+          },
+          {
+            id: "workspace-y-uuid",
+            ref: "workspace:11",
+            title: "Caller Y",
+            selected: false,
+          },
+          {
+            id: "focused-workspace-uuid",
+            ref: "workspace:5",
+            title: "Focused Workspace",
+            selected: true,
+          },
+        ],
+        calls,
+      ) as any,
+      stateDir: stateDir("caller-workspace-concurrent-state"),
+      disableSpawnPreflight: true,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      context,
+      disableSpawnPreflight: true,
+    });
+
+    try {
+      await daemon.start();
+
+      const [xResponse, yResponse] = await Promise.all([
+        rawToolCall(path, {
+          name: "spawn_agent",
+          arguments: {
+            repo: "brainlayer",
+            model: "gpt-5.5",
+            cli: "codex",
+            force_new: true,
+          },
+          _meta: {
+            "cmuxlayer/callerContext": {
+              workspaceId: "workspace-x-uuid",
+              surfaceId: "surface:x",
+            },
+          },
+        }),
+        rawToolCall(path, {
+          name: "spawn_agent",
+          arguments: {
+            repo: "voicelayer",
+            model: "gpt-5.5",
+            cli: "codex",
+            force_new: true,
+          },
+          _meta: {
+            "cmuxlayer/callerContext": {
+              workspaceId: "workspace-y-uuid",
+              surfaceId: "surface:y",
+            },
+          },
+        }),
+      ]);
+
+      expect(xResponse.result?.structuredContent).toMatchObject({
+        ok: true,
+        workspace_id: "workspace:10",
+      });
+      expect(yResponse.result?.structuredContent).toMatchObject({
+        ok: true,
+        workspace_id: "workspace:11",
+      });
+      expect(calls).toContain("spawn:workspace:10");
+      expect(calls).toContain("spawn:workspace:11");
+      expect(calls).not.toContain("spawn:workspace:5");
+    } finally {
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+      if (previousTabId === undefined) {
+        delete process.env.CMUX_TAB_ID;
+      } else {
+        process.env.CMUX_TAB_ID = previousTabId;
+      }
+      await daemon.shutdown().catch(() => {});
+    }
   });
 
   it("serves the same list_agents and read_screen state as a direct in-process server", async () => {
