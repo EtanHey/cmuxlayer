@@ -24,10 +24,7 @@ import {
 import type { ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
-import type {
-  CmuxServerContext,
-  CreateServerOptions,
-} from "./server.js";
+import type { CmuxServerContext, CreateServerOptions } from "./server.js";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
 import { ensureNodeMaxOldSpaceEnv, installHeapGuard } from "./heap-guard.js";
 import { JsonRpcLineBuffer } from "./json-rpc-line-buffer.js";
@@ -38,6 +35,21 @@ import {
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const LISTEN_FD_START = 3;
+
+/**
+ * TODO(phase3-hot-reload): After Gemini research, implement drain→swap→resume on
+ * daemon version bump: pause accepts, drain in-flight MCP requests, hand off the
+ * listen socket to a successor process (launchd activation prior art), and
+ * resume proxy children without losing registry state.
+ */
+export interface DaemonHotReloadPlan {
+  readonly kind: "drain-swap-resume";
+  targetVersion: string;
+}
+
+export type DaemonHotReloadHandler = (
+  plan: DaemonHotReloadPlan,
+) => Promise<"not_implemented">;
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
 
@@ -95,7 +107,9 @@ export class SocketJsonRpcTransport implements Transport {
         settle(error);
       };
       const onClose = () => {
-        settle(new Error("SocketJsonRpcTransport closed before write completed"));
+        settle(
+          new Error("SocketJsonRpcTransport closed before write completed"),
+        );
       };
       const cleanup = () => {
         this.socket.off("error", onError);
@@ -183,8 +197,10 @@ export class SocketJsonRpcTransport implements Transport {
   }
 }
 
-export interface CmuxLayerDaemonOptions
-  extends Omit<CreateServerOptions, "context" | "client"> {
+export interface CmuxLayerDaemonOptions extends Omit<
+  CreateServerOptions,
+  "context" | "client"
+> {
   socketPath?: string;
   listenFd?: number;
   drainTimeoutMs?: number;
@@ -307,8 +323,7 @@ export class CmuxLayerDaemon {
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
-    this.socketPath =
-      opts.socketPath ?? defaultDaemonSocketPath(process.env);
+    this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.listenFd = opts.listenFd ?? parseListenFd(process.env);
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   }
@@ -582,8 +597,7 @@ export async function runDaemon(
 }
 
 const isMain =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
   runDaemon().catch((error) => {

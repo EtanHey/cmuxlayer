@@ -17,12 +17,22 @@ import {
   attachCallerContextToMessage,
   callerContextFromEnv,
 } from "./caller-context.js";
+import type { SpawnDaemonOptions } from "./entry.js";
+import {
+  detectStaleBuild,
+  type DetectStaleBuildDeps,
+  type StaleBuildResult,
+  resolveInstalledDaemonScript,
+} from "./version.js";
 
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
 const DEFAULT_RECONNECT_JITTER_RATIO = 0.3;
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_BUFFERED_REQUESTS = 100;
+const DEFAULT_STALE_RECHECK_INTERVAL_MS = 30_000;
+const DEFAULT_VERSION_BUMP_MAX_ATTEMPTS = 5;
+const DEFAULT_VERSION_BUMP_WINDOW_MS = 60_000;
 const PROXY_ERROR_CODE = -32001;
 
 export interface ReconnectDelayOptions {
@@ -30,6 +40,37 @@ export interface ReconnectDelayOptions {
   maxBackoffMs: number;
   jitterRatio: number;
   random: () => number;
+}
+
+export interface VersionBumpReconnectGuardOptions {
+  maxAttempts?: number;
+  windowMs?: number;
+  now?: () => number;
+}
+
+export class VersionBumpReconnectGuard {
+  private readonly maxAttempts: number;
+  private readonly windowMs: number;
+  private readonly now: () => number;
+  private readonly attempts: number[] = [];
+
+  constructor(opts: VersionBumpReconnectGuardOptions = {}) {
+    this.maxAttempts = opts.maxAttempts ?? DEFAULT_VERSION_BUMP_MAX_ATTEMPTS;
+    this.windowMs = opts.windowMs ?? DEFAULT_VERSION_BUMP_WINDOW_MS;
+    this.now = opts.now ?? Date.now;
+  }
+
+  allow(): boolean {
+    const cutoff = this.now() - this.windowMs;
+    while (this.attempts.length > 0 && this.attempts[0] < cutoff) {
+      this.attempts.shift();
+    }
+    if (this.attempts.length >= this.maxAttempts) {
+      return false;
+    }
+    this.attempts.push(this.now());
+    return true;
+  }
 }
 
 export interface CmuxLayerProxyOptions {
@@ -45,6 +86,13 @@ export interface CmuxLayerProxyOptions {
   maxBufferedRequests?: number;
   onReconnectDelay?: (delayMs: number, attempt: number) => void;
   logger?: Pick<Console, "error">;
+  staleRecheckIntervalMs?: number;
+  detectStaleBuild?: (deps?: DetectStaleBuildDeps) => StaleBuildResult | null;
+  installedDaemonScriptPath?: () => string | null;
+  spawnDaemonForVersionBump?: (
+    opts: SpawnDaemonOptions,
+  ) => Promise<unknown> | unknown;
+  versionBumpReconnectGuard?: VersionBumpReconnectGuard;
 }
 
 type JsonRpcRequest = JSONRPCMessage & {
@@ -174,6 +222,15 @@ export class CmuxLayerProxy {
     attempt: number,
   ) => void;
   private readonly logger: Pick<Console, "error">;
+  private readonly staleRecheckIntervalMs: number;
+  private readonly detectStaleBuildFn: (
+    deps?: DetectStaleBuildDeps,
+  ) => StaleBuildResult | null;
+  private readonly installedDaemonScriptPath: () => string | null;
+  private readonly spawnDaemonForVersionBump?: (
+    opts: SpawnDaemonOptions,
+  ) => Promise<unknown> | unknown;
+  private readonly versionBumpReconnectGuard: VersionBumpReconnectGuard;
 
   private readonly agentReadBuffer = new JsonRpcLineBuffer();
   private daemonReadBuffer: JsonRpcLineBuffer | null = null;
@@ -190,6 +247,8 @@ export class CmuxLayerProxy {
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectTimerResolve: (() => void) | null = null;
+  private versionBumpTimer: NodeJS.Timeout | null = null;
+  private versionBumpReconnecting = false;
   private readonly queue: QueuedMessage[] = [];
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly expiredRequestKeys = new Set<string>();
@@ -204,8 +263,7 @@ export class CmuxLayerProxy {
   };
 
   constructor(opts: CmuxLayerProxyOptions = {}) {
-    this.socketPath =
-      opts.socketPath ?? defaultDaemonSocketPath(process.env);
+    this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));
@@ -219,6 +277,14 @@ export class CmuxLayerProxy {
       opts.maxBufferedRequests ?? DEFAULT_MAX_BUFFERED_REQUESTS;
     this.onReconnectDelay = opts.onReconnectDelay;
     this.logger = opts.logger ?? console;
+    this.staleRecheckIntervalMs =
+      opts.staleRecheckIntervalMs ?? DEFAULT_STALE_RECHECK_INTERVAL_MS;
+    this.detectStaleBuildFn = opts.detectStaleBuild ?? detectStaleBuild;
+    this.installedDaemonScriptPath =
+      opts.installedDaemonScriptPath ?? resolveInstalledDaemonScript;
+    this.spawnDaemonForVersionBump = opts.spawnDaemonForVersionBump;
+    this.versionBumpReconnectGuard =
+      opts.versionBumpReconnectGuard ?? new VersionBumpReconnectGuard();
   }
 
   start(): void {
@@ -229,6 +295,7 @@ export class CmuxLayerProxy {
     this.input.on("data", this.onAgentData);
     this.input.on("error", this.onAgentError);
     this.ensureConnecting();
+    this.startVersionBumpWatcher();
   }
 
   async stop(): Promise<void> {
@@ -240,6 +307,7 @@ export class CmuxLayerProxy {
     this.input.off("error", this.onAgentError);
     this.agentReadBuffer.clear();
     this.clearReconnectTimer();
+    this.clearVersionBumpTimer();
     this.disconnectDaemon();
     for (const pending of this.pendingRequests.values()) {
       clearTimeout(pending.timeout);
@@ -777,6 +845,66 @@ export class CmuxLayerProxy {
     }
     this.reconnectTimerResolve?.();
     this.reconnectTimerResolve = null;
+  }
+
+  private startVersionBumpWatcher(): void {
+    this.versionBumpTimer = setInterval(() => {
+      void this.checkVersionBumpReconnect();
+    }, this.staleRecheckIntervalMs);
+    this.versionBumpTimer.unref?.();
+  }
+
+  private clearVersionBumpTimer(): void {
+    if (this.versionBumpTimer) {
+      clearInterval(this.versionBumpTimer);
+      this.versionBumpTimer = null;
+    }
+  }
+
+  private async checkVersionBumpReconnect(): Promise<void> {
+    if (!this.running || this.versionBumpReconnecting) {
+      return;
+    }
+    const stale = this.detectStaleBuildFn();
+    if (!stale?.stale) {
+      return;
+    }
+    if (!this.versionBumpReconnectGuard.allow()) {
+      this.logger.error(
+        "[cmuxlayer-proxy] version-bump reconnect storm guard tripped; backing off",
+      );
+      return;
+    }
+
+    this.versionBumpReconnecting = true;
+    try {
+      this.logger.error(
+        `[cmuxlayer-proxy] installed version bump detected (running v${stale.running}, installed v${stale.installed}); reconnecting to daemon`,
+      );
+      const daemonScriptPath = this.installedDaemonScriptPath();
+      if (daemonScriptPath && this.spawnDaemonForVersionBump) {
+        try {
+          await this.spawnDaemonForVersionBump({
+            socketPath: this.socketPath,
+            env: process.env,
+            logger: this.logger,
+            daemonScriptPath,
+          });
+        } catch (error) {
+          this.logger.error(
+            "[cmuxlayer-proxy] failed to spawn installed daemon for version bump",
+            error,
+          );
+        }
+      }
+      this.clearReconnectTimer();
+      this.disconnectDaemon();
+      this.daemonReady = false;
+      this.reconnectAttempt = 0;
+      this.ensureConnecting();
+    } finally {
+      this.versionBumpReconnecting = false;
+    }
   }
 }
 
