@@ -116,8 +116,19 @@ function addRecommendedAction(actions: string[], action: string): void {
 
 function issueSeverity(
   code: AgentHealthIssueCode,
-  context: { screenActive: boolean; inboxMonitorWithinBootGrace: boolean },
+  context: {
+    screenActive: boolean;
+    inboxMonitorWithinBootGrace: boolean;
+    autoDiscovered: boolean;
+  },
 ): AgentHealthIssueSeverity {
+  if (
+    context.autoDiscovered &&
+    (code === "orchestrator_not_leftmost" ||
+      code === "worker_in_leftmost_column")
+  ) {
+    return "info";
+  }
   if (code === "registry_screen_disagreement" && context.screenActive) {
     return "info";
   }
@@ -132,7 +143,11 @@ function issueSeverity(
 
 function deriveIssueSeverities(
   codes: AgentHealthIssueCode[],
-  context: { screenActive: boolean; inboxMonitorWithinBootGrace: boolean },
+  context: {
+    screenActive: boolean;
+    inboxMonitorWithinBootGrace: boolean;
+    autoDiscovered: boolean;
+  },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
     Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
@@ -251,6 +266,7 @@ export function evaluateAgentHealth(
   const issues: string[] = [];
   const recommendedActions: string[] = [];
   const role = inferRecordRoleOrNull(agent);
+  const autoDiscovered = isAutoDiscovered(agent);
 
   if (agent.seat_identity_status === "mismatch") {
     addIssue(
@@ -262,7 +278,7 @@ export function evaluateAgentHealth(
     );
   }
 
-  if (isAutoDiscovered(agent)) {
+  if (autoDiscovered) {
     addIssue(
       issueCodes,
       issues,
@@ -491,6 +507,7 @@ export function evaluateAgentHealth(
 
   const issueSeverities = deriveIssueSeverities(issueCodes, {
     screenActive,
+    autoDiscovered,
     inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
       agent,
       deps.now?.() ?? Date.now(),

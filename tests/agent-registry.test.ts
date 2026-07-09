@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState } from "../src/agent-types.js";
+import type { DiscoveredAgent } from "../src/agent-discovery.js";
+import type { SeatRegistry } from "../src/seat-identity.js";
 import type { CmuxSurface } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-registry");
@@ -42,6 +44,43 @@ function makeSurface(ref: string): CmuxSurface {
     selected: false,
   };
 }
+
+function makeDiscovered(
+  overrides: Partial<DiscoveredAgent>,
+): DiscoveredAgent {
+  return {
+    surface_id: "surface:live",
+    surface_title: "cmuxlayerClaude",
+    workspace_id: "workspace:1",
+    cli: "claude",
+    parsed_status: "working",
+    model: "Sonnet 4.6",
+    token_count: null,
+    context_pct: null,
+    has_agent: true,
+    read_error: false,
+    ...overrides,
+  };
+}
+
+const REPAIR_SEATS: SeatRegistry = {
+  driverBuddy: {
+    repo: "driverBuddy",
+    launchers: {
+      claude: "driverBuddyClaude",
+    },
+    lane: "driverBuddy",
+    role: "lead",
+  },
+  cmuxlayerLead: {
+    repo: "cmuxlayer",
+    launchers: {
+      claude: "cmuxlayerClaude",
+    },
+    lane: "cmuxlayer",
+    role: "lead",
+  },
+};
 
 describe("AgentRegistry", () => {
   let stateMgr: StateManager;
@@ -412,6 +451,342 @@ describe("AgentRegistry", () => {
       expect(registry.get("managed-codex-null")?.workspace_id).toBe(
         "workspace:known",
       );
+    });
+  });
+
+  describe("repairFromDiscovery", () => {
+    it("repairs no-suffix auto-discovered panes from parsed cli and title repo evidence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-32",
+          surface_id: "surface:32",
+          workspace_id: "workspace:1",
+          repo: "driverBuddy",
+          cli: "claude",
+          role: "orchestrator",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:32"),
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:32",
+            surface_title: "🤝 driverBuddy",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          surface_id: "surface:32",
+          agent_id: "driverBuddy",
+          repo: "driverBuddy",
+          cli: "claude",
+          launcher_name: "driverBuddyClaude",
+          seat_id: "driverBuddy",
+          action: "created",
+        }),
+      ]);
+      expect(result.evicted).toEqual(["auto-claude-surface-32"]);
+      expect(stateMgr.readState("auto-claude-surface-32")).toBeNull();
+      expect(stateMgr.readState("driverBuddy")).toMatchObject({
+        agent_id: "driverBuddy",
+        surface_id: "surface:32",
+        repo: "driverBuddy",
+        cli: "claude",
+        launcher_name: "driverBuddyClaude",
+        seat_id: "driverBuddy",
+        seat_lane: "driverBuddy",
+        seat_role: "lead",
+        role: "orchestrator",
+      });
+    });
+
+    it("keeps duplicate launcher-title surfaces on one canonical repaired registration", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-35",
+          surface_id: "surface:35",
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-121",
+          surface_id: "surface:121",
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:35"),
+        makeSurface("surface:121"),
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:35",
+            surface_title: "cmuxlayerClaude",
+          }),
+          makeDiscovered({
+            surface_id: "surface:121",
+            surface_title: "cmuxlayerClaude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          surface_id: "surface:35",
+          agent_id: "cmuxlayerLead",
+          action: "created",
+        }),
+      ]);
+      expect(result.evicted).toEqual(
+        expect.arrayContaining([
+          "auto-claude-surface-35",
+          "auto-claude-surface-121",
+        ]),
+      );
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: "surface:35",
+        seat_id: "cmuxlayerLead",
+      });
+      expect(stateMgr.readState("cmuxlayerLead-surface-121")).toBeNull();
+    });
+
+    it("self-heals a suppressed duplicate surface when the canonical surface closes", async () => {
+      const surfaceA = "surface:35";
+      const surfaceB = "surface:121";
+      const duplicateDiscoveries = [
+        makeDiscovered({
+          surface_id: surfaceA,
+          surface_title: "cmuxlayerClaude",
+        }),
+        makeDiscovered({
+          surface_id: surfaceB,
+          surface_title: "cmuxlayerClaude",
+        }),
+      ];
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-35",
+          surface_id: surfaceA,
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-121",
+          surface_id: surfaceB,
+          workspace_id: "workspace:1",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+
+      let surfaces = [makeSurface(surfaceA), makeSurface(surfaceB)];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await registry.reconstitute();
+      registry.repairFromDiscovery(duplicateDiscoveries, {
+        seatRegistry: REPAIR_SEATS,
+      });
+
+      surfaces = [makeSurface(surfaceB)];
+      const merged = await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: surfaceB,
+            surface_title: "cmuxlayerClaude",
+          }),
+        ]),
+      } as any);
+
+      expect(merged.map((record) => record.agent_id)).toEqual([
+        "cmuxlayerLead",
+      ]);
+      expect(merged[0]).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: surfaceB,
+        state: "working",
+        error: null,
+        launcher_name: "cmuxlayerClaude",
+      });
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        surface_id: surfaceB,
+        state: "working",
+        error: null,
+      });
+      expect(stateMgr.readState("auto-claude-surface-121")).toBeNull();
+    });
+
+    it("deduplicates M1 mimir pending ghosts to one row per launcher seat", async () => {
+      const discovered = [
+        makeDiscovered({
+          surface_id: "surface:101",
+          surface_title: "mimir",
+          cli: "claude",
+        }),
+        makeDiscovered({
+          surface_id: "surface:102",
+          surface_title: "mimir",
+          cli: "claude",
+        }),
+        makeDiscovered({
+          surface_id: "surface:103",
+          surface_title: "mimir",
+          cli: "claude",
+        }),
+        makeDiscovered({
+          surface_id: "surface:201",
+          surface_title: "mimir",
+          cli: "codex",
+          model: "gpt-5.5",
+        }),
+        makeDiscovered({
+          surface_id: "surface:202",
+          surface_title: "mimir",
+          cli: "codex",
+          model: "gpt-5.5",
+        }),
+      ];
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-101",
+          surface_id: "surface:101",
+          repo: "mimir",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-claude-surface-102",
+          surface_id: "surface:102",
+          repo: "mimir",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "mimirClaude-pending-1710000000-abcd",
+          surface_id: "surface:103",
+          repo: "mimir",
+          cli: "claude",
+          launcher_name: "mimirClaude",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "mimirCodex-pending-1710000000-cafe",
+          surface_id: "surface:201",
+          repo: "mimir",
+          cli: "codex",
+          launcher_name: "mimirCodex",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "mimirCodex-pending-1710000000-dead",
+          surface_id: "surface:202",
+          repo: "mimir",
+          cli: "codex",
+          launcher_name: "mimirCodex",
+        }),
+      );
+
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => discovered.map((entry) => makeSurface(entry.surface_id)),
+      );
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(discovered);
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          surface_id: "surface:101",
+          agent_id: "mimirClaude",
+          launcher_name: "mimirClaude",
+          action: "created",
+        }),
+        expect.objectContaining({
+          surface_id: "surface:201",
+          agent_id: "mimirCodex",
+          launcher_name: "mimirCodex",
+          action: "created",
+        }),
+      ]);
+      expect(result.evicted).toEqual(
+        expect.arrayContaining([
+          "auto-claude-surface-101",
+          "auto-claude-surface-102",
+          "mimirClaude-pending-1710000000-abcd",
+          "mimirCodex-pending-1710000000-cafe",
+          "mimirCodex-pending-1710000000-dead",
+        ]),
+      );
+
+      const liveRows = registry
+        .list()
+        .map((record) => record.agent_id)
+        .sort();
+      expect(liveRows).toEqual(["mimirClaude", "mimirCodex"]);
+      expect(stateMgr.readState("mimirClaude")).toMatchObject({
+        agent_id: "mimirClaude",
+        surface_id: "surface:101",
+        repo: "mimir",
+        cli: "claude",
+        role: "orchestrator",
+      });
+      expect(stateMgr.readState("mimirCodex")).toMatchObject({
+        agent_id: "mimirCodex",
+        surface_id: "surface:201",
+        repo: "mimir",
+        cli: "codex",
+        role: "worker",
+      });
+      expect(
+        stateMgr
+          .listStates()
+          .filter(
+            (record) =>
+              record.agent_id.startsWith("auto-") ||
+              record.agent_id.includes("-pending-"),
+          ),
+      ).toEqual([]);
+
+      const merged = await registry.listMerged({
+        scan: vi.fn().mockResolvedValue(discovered),
+      } as any);
+      expect(merged.map((record) => record.agent_id).sort()).toEqual([
+        "mimirClaude",
+        "mimirCodex",
+      ]);
     });
   });
 

@@ -408,7 +408,7 @@ function makeAmbiguousLiveAgentExec(): ExecFn {
           surfaces: [
             {
               ref: "surface:777",
-              title: "review lane",
+              title: "Codex",
               type: "terminal",
               index: 0,
               selected: true,
@@ -1473,7 +1473,7 @@ describe("resync_agents tool", () => {
     expect(parsed.count).toBe(0);
   });
 
-  it("resync_agents reports unresolved live-agent surfaces whose title cannot map to a seat", async () => {
+  it("resync_agents reports unresolved live-agent surfaces whose title has no repo label", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     const server = createServer({
       exec: makeAmbiguousLiveAgentExec(),
@@ -1493,14 +1493,14 @@ describe("resync_agents tool", () => {
     expect(parsed.diff.orphaned_health).toEqual([
       expect.objectContaining({
         surface_id: "surface:777",
-        surface_title: "review lane",
+        surface_title: "Codex",
         status: "degraded",
         issue_codes: ["auto_discovered_agent"],
         issue_severities: { auto_discovered_agent: "info" },
       }),
     ]);
     expect(
-      stateMgr.listStates().some((record) => record.agent_id === "review lane"),
+      stateMgr.listStates().some((record) => record.agent_id === "Codex"),
     ).toBe(false);
   });
 
