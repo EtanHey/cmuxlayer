@@ -113,10 +113,20 @@ function resolveBrewPrefix(): string | null {
 }
 
 /** Default installed-package.json path under the brew opt tree. */
-function defaultOptPackageJsonPath(): string | null {
+export function defaultOptPackageJsonPath(): string | null {
   const prefix = resolveBrewPrefix();
   if (!prefix) return null;
   return join(prefix, "opt", "cmuxlayer", "package.json");
+}
+
+/**
+ * Resolve the brew-installed daemon entrypoint for version-bump reconnect.
+ * Returns null when the opt tree cannot be resolved.
+ */
+export function resolveInstalledDaemonScript(): string | null {
+  const optPackageJson = defaultOptPackageJsonPath();
+  if (!optPackageJson) return null;
+  return join(dirname(optPackageJson), "dist", "daemon.js");
 }
 
 /**

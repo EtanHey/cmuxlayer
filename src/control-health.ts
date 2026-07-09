@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import { constants as fsConstants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -77,6 +78,8 @@ export interface ControlHealth {
   selected_transport: {
     client_class: string | null;
     current_socket_path?: string;
+    transport_mode?: "socket" | "cli";
+    transport_degraded?: boolean;
   };
   cmux_instances: {
     production: CmuxInstanceHealth;
@@ -198,10 +201,7 @@ function splitPathEntries(pathValue: string | undefined): string[] {
 
 async function inspectExecutable(
   path: string,
-  deps: Pick<
-    Required<ControlHealthOptions>,
-    "readFile" | "stat" | "access"
-  >,
+  deps: Pick<Required<ControlHealthOptions>, "readFile" | "stat" | "access">,
 ): Promise<ExecutableStatus | null> {
   try {
     await deps.access(path, fsConstants.X_OK);
@@ -234,10 +234,7 @@ async function inspectExecutable(
 async function resolveExecutables(
   command: string,
   pathEntries: string[],
-  deps: Pick<
-    Required<ControlHealthOptions>,
-    "readFile" | "stat" | "access"
-  >,
+  deps: Pick<Required<ControlHealthOptions>, "readFile" | "stat" | "access">,
 ): Promise<ExecutableStatus[]> {
   const seen = new Set<string>();
   const found: ExecutableStatus[] = [];
@@ -300,15 +297,24 @@ function describeClient(client: unknown): ControlHealth["selected_transport"] {
     record && typeof record.currentSocketPath === "function"
       ? (record.currentSocketPath as () => unknown).call(client)
       : undefined;
+  const transportHealth = getTransportHealth(client);
 
   return {
     client_class:
       client && typeof client === "object"
-        ? (client as { constructor?: { name?: string } }).constructor?.name ??
-          null
+        ? ((client as { constructor?: { name?: string } }).constructor?.name ??
+          null)
         : null,
     ...(typeof currentSocketPath === "string"
       ? { current_socket_path: currentSocketPath }
+      : transportHealth?.current_socket_path
+        ? { current_socket_path: transportHealth.current_socket_path }
+        : {}),
+    ...(transportHealth
+      ? {
+          transport_mode: transportHealth.mode,
+          transport_degraded: transportHealth.degraded,
+        }
       : {}),
   };
 }
@@ -366,6 +372,15 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
     );
   }
 
+  if (
+    health.selected_transport.transport_degraded === true &&
+    !warnings.some((warning) => warning.includes("transport degraded"))
+  ) {
+    warnings.push(
+      "cmuxlayer control transport is degraded on CLI fallback; socket re-probe is active.",
+    );
+  }
+
   return warnings;
 }
 
@@ -394,7 +409,11 @@ export async function collectControlHealth(
   const [prodMarkers, nightlyMarkers, cmuxResolution, processList, ps] =
     await Promise.all([
       Promise.all([
-        readMarker("state_last_socket", join(stateDir, "last-socket-path"), deps),
+        readMarker(
+          "state_last_socket",
+          join(stateDir, "last-socket-path"),
+          deps,
+        ),
         readMarker(
           "tmp_last_socket",
           join(tmpDir, "cmux-last-socket-path"),
@@ -414,13 +433,7 @@ export async function collectControlHealth(
         ),
       ]),
       resolveExecutables("cmux", pathEntries, deps),
-      runOptional(deps.execFile, "ps", [
-        "ax",
-        "-o",
-        "pid=",
-        "-o",
-        "command=",
-      ]),
+      runOptional(deps.execFile, "ps", ["ax", "-o", "pid=", "-o", "command="]),
       runOptional(deps.execFile, "ps", [
         "-o",
         "pid=",

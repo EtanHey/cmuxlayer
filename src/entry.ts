@@ -282,6 +282,7 @@ export async function runDaemonFirstEntry(
       input,
       output: opts.output,
       logger,
+      spawnDaemonForVersionBump: spawnDaemon,
     });
     bindProxyStdioLifecycle({ input, proxy, logger, exit });
     return {
