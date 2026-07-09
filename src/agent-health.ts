@@ -120,10 +120,11 @@ function issueSeverity(
     screenActive: boolean;
     inboxMonitorWithinBootGrace: boolean;
     autoDiscovered: boolean;
+    lacksManagedPlacement: boolean;
   },
 ): AgentHealthIssueSeverity {
   if (
-    context.autoDiscovered &&
+    context.lacksManagedPlacement &&
     (code === "orchestrator_not_leftmost" ||
       code === "worker_in_leftmost_column")
   ) {
@@ -147,6 +148,7 @@ function deriveIssueSeverities(
     screenActive: boolean;
     inboxMonitorWithinBootGrace: boolean;
     autoDiscovered: boolean;
+    lacksManagedPlacement: boolean;
   },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
@@ -185,6 +187,11 @@ function isAutoDiscovered(agent: AgentRecord): boolean {
     agent.agent_id.startsWith("auto-") ||
     agent.task_summary === "(auto-discovered)"
   );
+}
+
+/** Seats cmuxlayer did not place via managed spawn_agent (won't move panes per #170). */
+function lacksManagedPlacement(agent: AgentRecord): boolean {
+  return isAutoDiscovered(agent) || agent.task_summary === "(resync-repaired)";
 }
 
 function looksLeadLike(text: string | null | undefined): boolean {
@@ -320,7 +327,10 @@ export function evaluateAgentHealth(
     );
   }
 
-  if (input.monitor_alive === false && input.inbox_channel_dir_deleted === true) {
+  if (
+    input.monitor_alive === false &&
+    input.inbox_channel_dir_deleted === true
+  ) {
     addIssue(
       issueCodes,
       issues,
@@ -508,6 +518,7 @@ export function evaluateAgentHealth(
   const issueSeverities = deriveIssueSeverities(issueCodes, {
     screenActive,
     autoDiscovered,
+    lacksManagedPlacement: lacksManagedPlacement(agent),
     inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
       agent,
       deps.now?.() ?? Date.now(),
