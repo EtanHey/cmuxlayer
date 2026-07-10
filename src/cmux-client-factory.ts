@@ -39,6 +39,12 @@ export interface CreateCmuxClientOptions extends SocketProbeOptions {
   reprobeCapMs?: number;
   /** Injectable random source for deterministic jitter tests */
   random?: () => number;
+  /** Called after sustained socket-denial and CLI-denial failures. */
+  onIrrecoverableTransport?: () => void;
+  /** Consecutive denial failures required on both transports. */
+  irrecoverableMinFailures?: number;
+  /** Minimum duration of sustained socket denial before signaling. */
+  irrecoverableMinDurationMs?: number;
 }
 
 async function probeUsableSocketWithRetry(
@@ -128,6 +134,9 @@ export async function createCmuxClient(
         random: opts?.random,
         logger,
         sleep: opts?.sleep,
+        onIrrecoverableTransport: opts?.onIrrecoverableTransport,
+        irrecoverableMinFailures: opts?.irrecoverableMinFailures,
+        irrecoverableMinDurationMs: opts?.irrecoverableMinDurationMs,
       }) as unknown as CmuxSocketClient;
     } catch {
       // Socket reachable but not usable — try next candidate before CLI.
@@ -157,6 +166,9 @@ export async function createCmuxClient(
       : undefined,
     logger,
     sleep: opts?.sleep,
+    onIrrecoverableTransport: opts?.onIrrecoverableTransport,
+    irrecoverableMinFailures: opts?.irrecoverableMinFailures,
+    irrecoverableMinDurationMs: opts?.irrecoverableMinDurationMs,
   }) as unknown as CmuxClient;
 }
 

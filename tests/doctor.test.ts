@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import net from "node:net";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   checkMcpConfigDrift,
   detectRuntimeProvenance,
@@ -95,7 +98,108 @@ function runDoctorForTest(opts: Parameters<typeof runDoctor>[0]) {
     listMcpConfigPaths: async () => [],
     readMcpConfigFile: async () => "",
     ...opts,
+    env: {
+      CMUXLAYER_DAEMON_SOCKET: join(
+        "/tmp",
+        `cmuxlayer-doctor-no-daemon-${process.pid}.sock`,
+      ),
+      ...opts.env,
+    },
   });
+}
+
+const doctorServers: Array<{
+  server: net.Server;
+  path: string;
+  sockets: Set<net.Socket>;
+}> = [];
+
+afterEach(async () => {
+  for (const { server, path, sockets } of doctorServers.splice(0)) {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(path, { force: true });
+  }
+});
+
+async function startDoctorDaemon(
+  path: string,
+  opts: {
+    version?: string;
+    degraded?: boolean;
+    cmuxSocketPath?: string;
+    unresponsive?: boolean;
+  } = {},
+): Promise<void> {
+  rmSync(path, { force: true });
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    if (opts.unresponsive) return;
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line.trim()) continue;
+        const message = JSON.parse(line) as {
+          id?: string | number;
+          method?: string;
+          params?: { name?: string };
+        };
+        if (message.method === "initialize") {
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                protocolVersion: "2025-03-26",
+                capabilities: {},
+                serverInfo: {
+                  name: "cmuxlayer",
+                  version: opts.version ?? "0.3.33",
+                },
+              },
+            })}\n`,
+          );
+        } else if (
+          message.method === "tools/call" &&
+          message.params?.name === "control_health"
+        ) {
+          socket.write(
+            `${JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                content: [],
+                structuredContent: {
+                  health: {
+                    selected_transport: {
+                      transport_mode: opts.degraded ? "cli" : "socket",
+                      transport_degraded: opts.degraded ?? false,
+                      current_socket_path:
+                        opts.cmuxSocketPath ?? "/tmp/cmux-test.sock",
+                    },
+                  },
+                },
+              },
+            })}\n`,
+          );
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  doctorServers.push({ server, path, sockets });
 }
 
 describe("runDoctor — report shape", () => {
@@ -130,16 +234,114 @@ describe("runDoctor — report shape", () => {
     expect(report.caskSelfHeal.note).toMatch(/no cask/i);
   });
 
-  it("marks §5 daemon integrity as not-applicable (stdio MCP, no daemon)", async () => {
+  it("reports no daemon as healthy because it starts on demand", async () => {
     const report = await runDoctorForTest({
       version: "0.3.0",
       env: {},
       brew: makeBrew({}),
     });
-    expect(report.daemon.applicable).toBe(false);
-    expect(report.daemon.note).toMatch(/not-applicable/i);
-    expect(report.daemon.note).toMatch(/stdio MCP/i);
-    expect(report.daemon.note).toMatch(/no daemon/i);
+    expect(report.daemon.applicable).toBe(true);
+    expect(report.daemon.ok).toBe(true);
+    expect(report.daemon.listening).toBe(false);
+    expect(report.daemon.note).toMatch(/no daemon running.*starts on demand/i);
+  });
+
+  it("reports a healthy matching daemon", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-healthy-${process.pid}.sock`);
+    await startDoctorDaemon(path, { version: "0.3.33" });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: ({ running }) => ({
+        stale: false,
+        running: running ?? "unknown",
+        installed: "0.3.33",
+      }),
+    });
+
+    expect(report.daemon).toMatchObject({
+      applicable: true,
+      ok: true,
+      listening: true,
+      runningVersion: "0.3.33",
+      installedVersion: "0.3.33",
+    });
+    expect(report.healthy).toBe(true);
+  });
+
+  it("flags a stale daemon version mismatch", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-stale-${process.pid}.sock`);
+    await startDoctorDaemon(path, { version: "0.3.31" });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: ({ running }) => ({
+        stale: true,
+        running: running ?? "unknown",
+        installed: "0.3.33",
+      }),
+    });
+
+    expect(report.daemon.ok).toBe(false);
+    expect(report.daemon.note).toMatch(
+      /stale daemon v0\.3\.31 serving \(installed v0\.3\.33\).*proxies respawn/i,
+    );
+    expect(report.healthy).toBe(false);
+  });
+
+  it("flags degraded daemon transport while the reported cmux socket is live", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-degraded-${process.pid}.sock`);
+    const cmuxPath = join("/tmp", `cmuxlayer-doctor-live-cmux-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      degraded: true,
+      cmuxSocketPath: cmuxPath,
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: ({ running }) => ({
+        stale: false,
+        running: running ?? "unknown",
+        installed: "0.3.33",
+      }),
+      probeCmuxSocket: async (socketPath) => ({
+        usable: socketPath === cmuxPath,
+        socketPath,
+      }),
+    });
+
+    expect(report.daemon.ok).toBe(false);
+    expect(report.daemon.note).toMatch(
+      /daemon transport degraded while cmux socket alive.*stale-daemon-on-dead-socket class/i,
+    );
+    expect(report.healthy).toBe(false);
+  });
+
+  it("flags a listening but unresponsive daemon with the probe error", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-hung-${process.pid}.sock`);
+    await startDoctorDaemon(path, { unresponsive: true });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      daemonProbeTimeoutMs: 30,
+    });
+
+    expect(report.daemon).toMatchObject({
+      applicable: true,
+      ok: false,
+      listening: true,
+    });
+    expect(report.daemon.note).toMatch(/timed out/i);
+    expect(report.healthy).toBe(false);
   });
 
   it("reports the tap as present + formula resolvable when brew lists it", async () => {
@@ -572,8 +774,10 @@ describe("renderDoctorText", () => {
         note: "not-applicable: stdio MCP, no cask (§1 account-rename self-heal)",
       },
       daemon: {
-        applicable: false,
-        note: "not-applicable: stdio MCP, no daemon (§5 daemon integrity)",
+        applicable: true,
+        ok: true,
+        listening: false,
+        note: "no daemon running (starts on demand)",
       },
       tap: {
         brewAvailable: true,
@@ -620,9 +824,9 @@ describe("renderDoctorText", () => {
     expect(text).toMatch(/not-applicable: stdio MCP, no cask/i);
   });
 
-  it("prints the §5 not-applicable line explicitly", () => {
+  it("prints the §5 daemon integrity line", () => {
     const text = renderDoctorText(baseReport());
-    expect(text).toMatch(/not-applicable: stdio MCP, no daemon/i);
+    expect(text).toMatch(/§5.*no daemon running.*starts on demand/i);
   });
 
   it("prints the tap status and the trust note for casks", () => {
@@ -696,8 +900,10 @@ describe("renderDoctorJson", () => {
         note: "not-applicable: stdio MCP, no cask",
       },
       daemon: {
-        applicable: false,
-        note: "not-applicable: stdio MCP, no daemon",
+        applicable: true,
+        ok: true,
+        listening: false,
+        note: "no daemon running (starts on demand)",
       },
       tap: {
         brewAvailable: true,
@@ -743,7 +949,8 @@ describe("renderDoctorJson", () => {
     expect(parsed.healthy).toBe(true);
     expect(parsed.version.value).toBe("0.3.0");
     expect(parsed.caskSelfHeal.applicable).toBe(false);
-    expect(parsed.daemon.applicable).toBe(false);
+    expect(parsed.daemon.applicable).toBe(true);
+    expect(parsed.daemon.ok).toBe(true);
     expect(parsed.tap.tapPresent).toBe(true);
     expect(parsed.socketPath.set).toBe(true);
     expect(parsed.socketPath.value).toBe("/tmp/x.sock");

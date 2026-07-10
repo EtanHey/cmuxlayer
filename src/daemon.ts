@@ -14,7 +14,10 @@ import type {
   RequestId,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createCmuxClient } from "./cmux-client-factory.js";
+import {
+  createCmuxClient,
+  type CreateCmuxClientOptions,
+} from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
@@ -32,8 +35,14 @@ import {
   callerContextFromMessage,
   runWithCallerContext,
 } from "./caller-context.js";
+import {
+  detectStaleBuild,
+  type DetectStaleBuildDeps,
+  type StaleBuildResult,
+} from "./version.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
 const LISTEN_FD_START = 3;
 
 /**
@@ -52,6 +61,11 @@ export type DaemonHotReloadHandler = (
 ) => Promise<"not_implemented">;
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
+export type DaemonRetirementReason = "stale-build" | "irrecoverable-transport";
+export type DaemonShutdownReason =
+  | NodeJS.Signals
+  | "manual"
+  | DaemonRetirementReason;
 
 export class SocketJsonRpcTransport implements Transport {
   onclose?: () => void;
@@ -206,7 +220,18 @@ export interface CmuxLayerDaemonOptions extends Omit<
   drainTimeoutMs?: number;
   context?: CmuxServerContext;
   client?: CmuxLayerClient;
-  createClient?: () => Promise<CmuxLayerClient>;
+  createClient?: (
+    opts: Pick<CreateCmuxClientOptions, "onIrrecoverableTransport">,
+  ) => Promise<CmuxLayerClient>;
+  detectStaleBuild?: (
+    deps?: DetectStaleBuildDeps,
+  ) => StaleBuildResult | null;
+  staleCheckIntervalMs?: number;
+  logger?: Pick<Console, "error">;
+  onRetire?: (
+    reason: DaemonRetirementReason,
+    result: DaemonShutdownResult,
+  ) => Promise<void> | void;
   serverFactory?: (
     connectionListener: (socket: net.Socket) => void,
   ) => net.Server;
@@ -216,6 +241,16 @@ export interface DaemonShutdownResult {
   forced: boolean;
   activeConnections: number;
   inFlightRequests: number;
+}
+
+export function daemonExitCode(
+  reason: DaemonShutdownReason,
+  result: DaemonShutdownResult,
+): number {
+  if (reason === "stale-build" || reason === "irrecoverable-transport") {
+    return 0;
+  }
+  return result.forced ? 1 : 0;
 }
 
 function parseListenFd(env: NodeJS.ProcessEnv): number | undefined {
@@ -320,12 +355,23 @@ export class CmuxLayerDaemon {
   private inFlightRequests = 0;
   private draining = false;
   private shutdownPromise: Promise<DaemonShutdownResult> | null = null;
+  private staleCheckTimer: NodeJS.Timeout | null = null;
+  private retirementPromise: Promise<void> | null = null;
+  private readonly detectStaleBuildFn: (
+    deps?: DetectStaleBuildDeps,
+  ) => StaleBuildResult | null;
+  private readonly staleCheckIntervalMs: number;
+  private readonly logger: Pick<Console, "error">;
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
     this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.listenFd = opts.listenFd ?? parseListenFd(process.env);
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
+    this.detectStaleBuildFn = opts.detectStaleBuild ?? detectStaleBuild;
+    this.staleCheckIntervalMs =
+      opts.staleCheckIntervalMs ?? DEFAULT_STALE_CHECK_INTERVAL_MS;
+    this.logger = opts.logger ?? console;
   }
 
   async start(): Promise<void> {
@@ -351,19 +397,20 @@ export class CmuxLayerDaemon {
 
     if (this.listenFd !== undefined) {
       await this.listen({ fd: this.listenFd });
-      return;
+    } else {
+      await this.listen(this.socketPath);
     }
-
-    await this.listen(this.socketPath);
+    this.startStaleBuildWatcher();
   }
 
   async shutdown(
-    _signal: NodeJS.Signals | "manual" = "manual",
+    _signal: DaemonShutdownReason = "manual",
   ): Promise<DaemonShutdownResult> {
     if (this.shutdownPromise) {
       return this.shutdownPromise;
     }
 
+    this.clearStaleBuildWatcher();
     this.shutdownPromise = this.doShutdown();
     return this.shutdownPromise;
   }
@@ -385,10 +432,16 @@ export class CmuxLayerDaemon {
         const client =
           this.opts.client ??
           (this.opts.createClient
-            ? await this.opts.createClient()
+            ? await this.opts.createClient({
+                onIrrecoverableTransport: () =>
+                  this.requestRetirement("irrecoverable-transport"),
+              })
             : this.opts.exec || this.opts.bin
               ? undefined
-              : await createCmuxClient());
+              : await createCmuxClient({
+                  onIrrecoverableTransport: () =>
+                    this.requestRetirement("irrecoverable-transport"),
+                }));
         this.context = createServerContext({
           exec: this.opts.exec,
           bin: this.opts.bin,
@@ -503,6 +556,48 @@ export class CmuxLayerDaemon {
     };
   }
 
+  private startStaleBuildWatcher(): void {
+    this.staleCheckTimer = setInterval(() => {
+      const stale = this.detectStaleBuildFn();
+      if (stale?.stale) {
+        this.requestRetirement("stale-build", stale);
+      }
+    }, this.staleCheckIntervalMs);
+    this.staleCheckTimer.unref?.();
+  }
+
+  private clearStaleBuildWatcher(): void {
+    if (this.staleCheckTimer) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
+  }
+
+  private requestRetirement(
+    reason: DaemonRetirementReason,
+    stale?: StaleBuildResult,
+  ): void {
+    if (this.retirementPromise) {
+      return;
+    }
+    if (reason === "stale-build" && stale) {
+      this.logger.error(
+        `[cmuxlayer-daemon] installed version bump detected (running v${stale.running}, installed v${stale.installed}); retiring`,
+      );
+    } else {
+      this.logger.error(
+        "[cmuxlayer-daemon] transport irrecoverably denied (orphaned ancestry); retiring so a pane-descended respawn can reconnect",
+      );
+    }
+    this.retirementPromise = this.shutdown(reason)
+      .then(async (result) => {
+        await this.opts.onRetire?.(reason, result);
+      })
+      .catch((error) => {
+        this.logger.error("[cmuxlayer-daemon] retirement failed", error);
+      });
+  }
+
   private pauseActiveTransports(): void {
     for (const transport of this.activeTransports) {
       transport.pauseInput();
@@ -577,21 +672,34 @@ export async function runDaemon(
 ): Promise<CmuxLayerDaemon> {
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
-  const daemon = new CmuxLayerDaemon(opts);
-  const shutdown = (signal: NodeJS.Signals) => {
+  let exitStarted = false;
+  const exitAfterShutdown = (
+    reason: DaemonShutdownReason,
+    result: DaemonShutdownResult,
+  ) => {
+    if (exitStarted) return;
+    exitStarted = true;
+    process.exit(daemonExitCode(reason, result));
+  };
+  const daemon = new CmuxLayerDaemon({
+    ...opts,
+    onRetire: async (reason, result) => {
+      await opts.onRetire?.(reason, result);
+      exitAfterShutdown(reason, result);
+    },
+  });
+  const shutdownThenExit = (signal: NodeJS.Signals) => {
     daemon
       .shutdown(signal)
-      .then((result) => {
-        process.exit(result.forced ? 1 : 0);
-      })
+      .then((result) => exitAfterShutdown(signal, result))
       .catch((error) => {
         console.error("[cmuxlayer-daemon] shutdown failed", error);
         process.exit(1);
       });
   };
 
-  process.once("SIGTERM", shutdown);
-  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdownThenExit);
+  process.once("SIGINT", shutdownThenExit);
   await daemon.start();
   return daemon;
 }

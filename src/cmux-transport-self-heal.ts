@@ -25,6 +25,9 @@ export const DEFAULT_TRANSPORT_REPROBE_CAP_MS = 30_000;
 export const DEFAULT_INTERACTIVE_RETRY_ATTEMPTS = 3;
 export const DEFAULT_INTERACTIVE_RETRY_BASE_MS = 100;
 export const DEFAULT_INTERACTIVE_RETRY_CAP_MS = 400;
+export const DEFAULT_IRRECOVERABLE_MIN_FAILURES = 3;
+export const DEFAULT_IRRECOVERABLE_MIN_DURATION_MS = 60_000;
+const UPGRADE_FAILURE_LOG_INTERVAL_MS = 30_000;
 
 export interface TransportHealthSignal {
   mode: "socket" | "cli";
@@ -59,6 +62,10 @@ export interface CmuxSelfHealingClientOptions {
   retryAttempts?: number;
   retryBaseMs?: number;
   retryCapMs?: number;
+  irrecoverableMinFailures?: number;
+  irrecoverableMinDurationMs?: number;
+  onIrrecoverableTransport?: () => void;
+  now?: () => number;
 }
 
 const FORWARDED_ASYNC_METHODS = [
@@ -173,11 +180,20 @@ export class CmuxSelfHealingClient {
   private flushingFailedPayloadQueue: Promise<void> | null = null;
   private transportDenial: TransportDenialSignal | null = null;
   private completedRetryCount = 0;
+  private denialProbeFailures = 0;
+  private denialProbeStartedAt: number | null = null;
+  private cliDenialFailures = 0;
+  private irrecoverableSignaled = false;
+  private lastUpgradeFailureLogAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly opts: CmuxSelfHealingClientOptions) {
     this.socketClient = opts.socket ?? null;
     this.delegate = opts.socket ?? opts.cli;
     this.transportDenial = opts.initialDenial ?? null;
+    if (opts.initialDenial) {
+      this.denialProbeFailures = 1;
+      this.denialProbeStartedAt = (opts.now ?? Date.now)();
+    }
     if (this.socketClient) {
       this.pinCliToSocket(this.socketClient);
     }
@@ -290,8 +306,15 @@ export class CmuxSelfHealingClient {
       this.socketClient !== null && delegate === this.socketClient;
     this.inFlight += 1;
     try {
-      return await this.callDelegate(method, args, delegate);
+      const result = await this.callDelegate(method, args, delegate);
+      if (delegate === this.opts.cli) {
+        this.cliDenialFailures = 0;
+      }
+      return result;
     } catch (error) {
+      if (delegate === this.opts.cli) {
+        this.recordCliFailure(error);
+      }
       const replay = this.recoverFailedPayload(
         error,
         method,
@@ -455,10 +478,22 @@ export class CmuxSelfHealingClient {
       await sleep(delayMs);
       this.completedRetryCount = retryCount;
       recordTransportRetry();
+      const delegate = this.delegate;
       try {
-        return await this.callDelegate(payload.method, payload.args);
+        const result = await this.callDelegate(
+          payload.method,
+          payload.args,
+          delegate,
+        );
+        if (delegate === this.opts.cli) {
+          this.cliDenialFailures = 0;
+        }
+        return result;
       } catch (error) {
         lastError = error;
+        if (delegate === this.opts.cli) {
+          this.recordCliFailure(error);
+        }
         if (!this.canRetryPayload(error, payload.method)) break;
       }
     }
@@ -523,28 +558,25 @@ export class CmuxSelfHealingClient {
     const factoryOpts = this.opts.factoryOpts;
     const sleep = this.opts.sleep ?? defaultSleep;
     const resolvePath = this.opts.resolvePath ?? resolveSocketPath;
-
-    let socketPath = this.opts.socketPath;
-    if (!socketPath) {
-      socketPath = await resolvePath(factoryOpts);
-    }
-    if (!socketPath) {
-      this.startReprobe();
-      return;
-    }
-    const probeResult = await this.checkSocketHealth(socketPath, factoryOpts);
-    if (probeResult.denied_reason === "access-control") {
-      this.recordAccessControlDenial(probeResult);
-      this.startReprobe();
-      return;
-    }
-    if (!probeResult.usable) {
-      this.startReprobe();
-      return;
-    }
-
     this.upgrading = true;
     try {
+      let socketPath = this.opts.socketPath;
+      if (!socketPath) {
+        socketPath = await resolvePath(factoryOpts);
+      }
+      if (!socketPath) {
+        return;
+      }
+      const probeResult = await this.checkSocketHealth(socketPath, factoryOpts);
+      const denialClass = this.recordProbeResult(probeResult);
+      if (denialClass) {
+        this.recordAccessControlDenial(probeResult);
+        return;
+      }
+      if (!probeResult.usable) {
+        return;
+      }
+
       while (this.inFlight > 0) {
         await sleep(10);
       }
@@ -565,7 +597,9 @@ export class CmuxSelfHealingClient {
       this.clearReprobe();
       this.previousReprobeDelayMs = 0;
       this.opts.logger?.error("[cmuxlayer] transport upgraded: cli -> socket");
-    } catch {
+    } catch (error) {
+      this.recordProbeFailure(error);
+      this.logUpgradeFailure(error);
       // Stay on CLI until the next re-probe tick.
     } finally {
       this.upgrading = false;
@@ -599,6 +633,103 @@ export class CmuxSelfHealingClient {
     };
     this.opts.logger?.error(
       `[cmuxlayer] transport denied: access-control (${result.socketPath}): ${this.transportDenial.error}`,
+    );
+  }
+
+  private isDenialClassError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /(?:\bEPIPE\b|broken pipe|errno\s*32|access denied)/i.test(message);
+  }
+
+  private recordProbeResult(result: SocketProbeResult): boolean {
+    const denialClass =
+      result.denied_reason === "access-control" ||
+      (typeof result.error === "string" &&
+        this.isDenialClassError(result.error));
+    if (!denialClass) {
+      this.resetProbeDenial();
+      return false;
+    }
+    this.recordProbeDenial();
+    return true;
+  }
+
+  private recordProbeFailure(error: unknown): void {
+    if (this.isDenialClassError(error)) {
+      this.recordProbeDenial();
+      return;
+    }
+    this.resetProbeDenial();
+  }
+
+  private recordProbeDenial(): void {
+    const now = (this.opts.now ?? Date.now)();
+    if (this.denialProbeFailures === 0) {
+      this.denialProbeStartedAt = now;
+    }
+    this.denialProbeFailures += 1;
+    this.maybeSignalIrrecoverable(now);
+  }
+
+  private resetProbeDenial(): void {
+    this.denialProbeFailures = 0;
+    this.denialProbeStartedAt = null;
+  }
+
+  private recordCliFailure(error: unknown): void {
+    if (!this.isDenialClassError(error)) {
+      this.cliDenialFailures = 0;
+      return;
+    }
+    this.cliDenialFailures += 1;
+    this.maybeSignalIrrecoverable((this.opts.now ?? Date.now)());
+  }
+
+  private maybeSignalIrrecoverable(now: number): void {
+    if (this.irrecoverableSignaled || !this.opts.onIrrecoverableTransport) {
+      return;
+    }
+    const minFailures =
+      this.opts.irrecoverableMinFailures ?? DEFAULT_IRRECOVERABLE_MIN_FAILURES;
+    const minDurationMs =
+      this.opts.irrecoverableMinDurationMs ??
+      DEFAULT_IRRECOVERABLE_MIN_DURATION_MS;
+    if (
+      this.denialProbeStartedAt === null ||
+      this.denialProbeFailures < minFailures ||
+      this.cliDenialFailures < minFailures ||
+      now - this.denialProbeStartedAt < minDurationMs
+    ) {
+      return;
+    }
+    this.irrecoverableSignaled = true;
+    try {
+      this.opts.onIrrecoverableTransport();
+    } catch (error) {
+      this.opts.logger?.error(
+        "[cmuxlayer] irrecoverable transport callback failed",
+        error,
+      );
+    }
+  }
+
+  private logUpgradeFailure(error: unknown): void {
+    const now = (this.opts.now ?? Date.now)();
+    if (now - this.lastUpgradeFailureLogAt < UPGRADE_FAILURE_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastUpgradeFailureLogAt = now;
+    const message = error instanceof Error ? error.message : String(error);
+    let errorClass = "Error";
+    if (error && typeof error === "object" && "code" in error) {
+      errorClass = String((error as { code: unknown }).code);
+    } else {
+      errorClass =
+        /\b(?:EPIPE|ECONNREFUSED|ECONNRESET)\b/i.exec(message)?.[0] ??
+        (error instanceof Error ? error.name : "Error");
+    }
+    this.opts.logger?.error(
+      `[cmuxlayer] transport upgrade failed (${errorClass}): ${message}`,
     );
   }
 

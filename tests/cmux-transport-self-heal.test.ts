@@ -291,6 +291,249 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("signals irrecoverable transport only after repeated socket and CLI denial failures", async () => {
+    const socketPath = join(tmpdir(), `cmux-irrecoverable-${process.pid}.sock`);
+    const onIrrecoverableTransport = vi.fn();
+    const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: false,
+      socketPath,
+      error: "write EPIPE",
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+      irrecoverableMinFailures: 2,
+      irrecoverableMinDurationMs: 20,
+      onIrrecoverableTransport,
+    });
+
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    await waitForExpectation(
+      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    await waitForExpectation(
+      async () => expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+
+    client.stop();
+  });
+
+  it("preserves the transport error when the irrecoverable callback throws", async () => {
+    const socketPath = join(tmpdir(), `cmux-callback-throw-${process.pid}.sock`);
+    const logger = { error: vi.fn() };
+    const onIrrecoverableTransport = vi.fn(() => {
+      throw new Error("retirement callback failed");
+    });
+    const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath,
+      logger,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      retryAttempts: 1,
+      probeSocketHealth: async () => ({
+        usable: false,
+        socketPath,
+        error: "write EPIPE",
+      }),
+      irrecoverableMinFailures: 1,
+      irrecoverableMinDurationMs: 0,
+      onIrrecoverableTransport,
+    });
+
+    await waitForExpectation(
+      async () =>
+        expect(
+          (client as any).denialProbeFailures,
+        ).toBeGreaterThanOrEqual(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer] irrecoverable transport callback failed",
+      expect.objectContaining({ message: "retirement callback failed" }),
+    );
+    client.stop();
+  });
+
+  it("logs and reschedules after the socket health probe rejects", async () => {
+    const socketPath = join(tmpdir(), `cmux-probe-reject-${process.pid}.sock`);
+    const logger = { error: vi.fn() };
+    const probeSocketHealth = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("write EPIPE"))
+      .mockResolvedValue({
+        usable: false,
+        socketPath,
+        error: "connect ECONNREFUSED",
+      });
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath,
+      logger,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+    });
+
+    await waitForExpectation(
+      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("transport upgrade failed"),
+    );
+    client.stop();
+  });
+
+  it("counts the factory initial denial as the first socket denial", async () => {
+    const socketPath = join(tmpdir(), `cmux-initial-denial-${process.pid}.sock`);
+    const onIrrecoverableTransport = vi.fn();
+    const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
+    const probeSocketHealth = vi
+      .fn()
+      .mockResolvedValueOnce({ usable: false, socketPath, error: "write EPIPE" })
+      .mockResolvedValue({
+        usable: false,
+        socketPath,
+        error: "connect ECONNREFUSED",
+      });
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath,
+      retryAttempts: 1,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      initialDenial: {
+        denied_reason: "access-control",
+        socketPath,
+        error: "write EPIPE",
+      },
+      probeSocketHealth,
+      irrecoverableMinFailures: 2,
+      irrecoverableMinDurationMs: 0,
+      onIrrecoverableTransport,
+    });
+
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    await waitForExpectation(
+      async () => expect(probeSocketHealth).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+
+    expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1);
+    client.stop();
+  });
+
+  it("attributes retry bookkeeping to the delegate used for that attempt", async () => {
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath: "/tmp/cmux-retry-attribution.sock",
+      retryAttempts: 2,
+      retryBaseMs: 0,
+      retryCapMs: 0,
+      sleep: async () => {},
+      reprobeIntervalMs: 60_000,
+    });
+    const internals = client as any;
+    internals.cliDenialFailures = 1;
+    internals.delegate = {
+      listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
+    };
+
+    await expect(
+      internals.retryPayload({
+        method: "listWorkspaces",
+        args: [],
+        error: new Error("write EPIPE"),
+      }),
+    ).resolves.toEqual({ workspaces: [] });
+    expect(internals.cliDenialFailures).toBe(1);
+
+    internals.cliDenialFailures = 0;
+    internals.delegate = {
+      listWorkspaces: vi.fn().mockRejectedValue(new Error("write EPIPE")),
+    };
+    await expect(
+      internals.retryPayload({
+        method: "listWorkspaces",
+        args: [],
+        error: new Error("write EPIPE"),
+      }),
+    ).rejects.toThrow(/EPIPE/);
+    expect(internals.cliDenialFailures).toBe(0);
+    client.stop();
+  });
+
+  it("does not signal irrecoverable transport when the cmux app is down", async () => {
+    const socketPath = join(tmpdir(), `cmux-app-down-${process.pid}.sock`);
+    const onIrrecoverableTransport = vi.fn();
+    const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: false,
+      socketPath,
+      error: "connect ECONNREFUSED",
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+      irrecoverableMinFailures: 2,
+      irrecoverableMinDurationMs: 10,
+      onIrrecoverableTransport,
+    });
+
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    await waitForExpectation(
+      async () => expect(probeSocketHealth.mock.calls.length).toBeGreaterThan(2),
+      { timeout: 1_000, interval: 5 },
+    );
+    await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(onIrrecoverableTransport).not.toHaveBeenCalled();
+    client.stop();
+  });
+
+  it("logs the error class when a socket upgrade attempt fails", async () => {
+    const socketPath = join(tmpdir(), `cmux-upgrade-log-${process.pid}.sock`);
+    const logger = { error: vi.fn() };
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: true,
+      socketPath,
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath,
+      factoryOpts: { socketPath },
+      logger,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+    });
+
+    await waitForExpectation(
+      async () =>
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining("transport upgrade failed"),
+        ),
+      { timeout: 1_000, interval: 5 },
+    );
+
+    client.stop();
+  });
+
   it("logs and exposes cmux access-control denial instead of generic CLI fallback", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "cmux-access-denied-"));
     const socketPath = join(stateDir, "denied.sock");

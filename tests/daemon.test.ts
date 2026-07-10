@@ -7,7 +7,11 @@ import { join } from "node:path";
 import net from "node:net";
 import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
-import { CmuxLayerDaemon, SocketJsonRpcTransport } from "../src/daemon.js";
+import {
+  CmuxLayerDaemon,
+  daemonExitCode,
+  SocketJsonRpcTransport,
+} from "../src/daemon.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
@@ -264,6 +268,19 @@ async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("timed out waiting for condition");
+    }
+    await delay(5);
+  }
+}
+
 async function rawToolCall(
   path: string,
   params: Record<string, unknown>,
@@ -428,6 +445,128 @@ describe("CmuxLayerDaemon", () => {
 
     await expect(transport.start()).rejects.toThrow(/closed/i);
     socket.destroy();
+  });
+
+  it("exits zero for retirement even when draining was forced", () => {
+    const forced = {
+      forced: true,
+      activeConnections: 1,
+      inFlightRequests: 1,
+    };
+
+    expect(daemonExitCode("stale-build", forced)).toBe(0);
+    expect(daemonExitCode("irrecoverable-transport", forced)).toBe(0);
+    expect(daemonExitCode("SIGTERM", forced)).toBe(1);
+  });
+
+  it("retires exactly once when the installed build becomes stale", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("stale-retire");
+    const onRetire = vi.fn();
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      staleCheckIntervalMs: 5,
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.31",
+        installed: "0.3.33",
+      }),
+      onRetire,
+    });
+    const shutdown = vi.spyOn(daemon, "shutdown");
+
+    await daemon.start();
+    await waitUntil(() => onRetire.mock.calls.length === 1);
+    await delay(20);
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(onRetire).toHaveBeenCalledWith(
+      "stale-build",
+      expect.objectContaining({ forced: false }),
+    );
+  });
+
+  it("does not retire for null or matching stale-build checks", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("not-stale");
+    const detectStaleBuild = vi
+      .fn()
+      .mockReturnValueOnce(null)
+      .mockReturnValue({
+        stale: false,
+        running: "0.3.33",
+        installed: "0.3.33",
+      });
+    const onRetire = vi.fn();
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      staleCheckIntervalMs: 5,
+      detectStaleBuild,
+      onRetire,
+    });
+
+    await daemon.start();
+    await delay(25);
+
+    expect(detectStaleBuild).toHaveBeenCalled();
+    expect(onRetire).not.toHaveBeenCalled();
+    await daemon.shutdown();
+  });
+
+  it("retires exactly once when the self-healing client signals irrecoverable denial", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("transport-retire");
+    let signalIrrecoverable: (() => void) | undefined;
+    const onRetire = vi.fn();
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      createClient: async (opts) => {
+        signalIrrecoverable = opts.onIrrecoverableTransport;
+        return {} as any;
+      },
+      skipAgentLifecycle: true,
+      staleCheckIntervalMs: 60_000,
+      detectStaleBuild: () => null,
+      onRetire,
+    });
+    const shutdown = vi.spyOn(daemon, "shutdown");
+
+    await daemon.start();
+    expect(signalIrrecoverable).toBeTypeOf("function");
+    signalIrrecoverable?.();
+    signalIrrecoverable?.();
+    await waitUntil(() => onRetire.mock.calls.length === 1);
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(onRetire).toHaveBeenCalledWith(
+      "irrecoverable-transport",
+      expect.objectContaining({ forced: false }),
+    );
+  });
+
+  it("clears the stale-build timer after shutdown", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("stale-timer-clear");
+    const detectStaleBuild = vi.fn(() => null);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      staleCheckIntervalMs: 5,
+      detectStaleBuild,
+    });
+
+    await daemon.start();
+    await waitUntil(() => detectStaleBuild.mock.calls.length >= 2);
+    await daemon.shutdown();
+    const callsAfterShutdown = detectStaleBuild.mock.calls.length;
+    await delay(20);
+
+    expect(detectStaleBuild).toHaveBeenCalledTimes(callsAfterShutdown);
   });
 
   it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {

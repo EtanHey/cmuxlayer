@@ -2,11 +2,11 @@
  * cmuxlayer doctor — the STDIO reference impl for the Robust Brew Layer standard
  * (~/Gits/orchestrator/standards/robust-brew-layer.md §0, §1, §3, §6).
  *
- * cmuxlayer is a stdio MCP server with NO cask and NO daemon, so two of the
- * standard's conformance classes are structurally not-applicable:
+ * cmuxlayer is a stdio MCP server with no cask and an on-demand shared daemon,
+ * so one conformance class is structurally not-applicable:
  *   - §1 (account-rename self-heal): N/A — there is no Caskroom artifact to
  *     go stale. `doctor` MUST say so explicitly, not silently no-op.
- *   - §5 (daemon integrity): N/A — there is no socket/launchd daemon.
+ *   - §5 (daemon integrity): probe the on-demand daemon when it is listening.
  *
  * The checks `doctor` actually runs:
  *   (a) version resolves/prints;
@@ -24,10 +24,21 @@
  */
 
 import { execFile } from "node:child_process";
+import net from "node:net";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import {
+  probeSocketHealth,
+  type SocketProbeResult,
+} from "./cmux-socket-probe.js";
+import {
+  detectStaleBuild,
+  type DetectStaleBuildDeps,
+  type StaleBuildResult,
+} from "./version.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -114,8 +125,18 @@ export interface DoctorReport {
   version: { ok: boolean; value: string };
   /** §1 account-rename self-heal — not-applicable for a stdio/no-cask layer. */
   caskSelfHeal: { applicable: false; note: string };
-  /** §5 daemon integrity — not-applicable for a stdio/no-daemon layer. */
-  daemon: { applicable: false; note: string };
+  /** §5 daemon integrity — a missing daemon is healthy because it starts on demand. */
+  daemon: {
+    applicable: true;
+    ok: boolean;
+    listening: boolean;
+    socketPath: string;
+    note: string;
+    runningVersion?: string;
+    installedVersion?: string;
+    transportDegraded?: boolean;
+    currentSocketPath?: string | null;
+  };
   /** §3 tap — best-effort report; brew may be absent. */
   tap: {
     brewAvailable: boolean;
@@ -157,6 +178,253 @@ export interface RunDoctorOptions {
   readMcpConfigFile?: McpConfigFileReader;
   /** Injectable runtime provenance probe for tests. */
   runtimeProvenance?: () => RuntimeProvenanceReport;
+  /** Injectable installed-build detector for daemon version comparisons. */
+  detectStaleBuild?: (
+    deps?: DetectStaleBuildDeps,
+  ) => StaleBuildResult | null;
+  /** Injectable cmux socket health probe for degraded-daemon verification. */
+  probeCmuxSocket?: (
+    socketPath: string,
+  ) => Promise<SocketProbeResult>;
+  /** Bound for daemon connect/initialize/control_health (default 1500ms). */
+  daemonProbeTimeoutMs?: number;
+}
+
+type DaemonMcpProbeResult =
+  | { kind: "not-listening" }
+  | {
+      kind: "responding";
+      version: string;
+      transportDegraded: boolean;
+      currentSocketPath: string | null;
+    }
+  | { kind: "error"; error: string };
+
+function daemonProbeError(message: unknown): string {
+  return message instanceof Error ? message.message : String(message);
+}
+
+function probeDaemonMcp(
+  socketPath: string,
+  timeoutMs: number,
+): Promise<DaemonMcpProbeResult> {
+  return new Promise((resolveProbe) => {
+    const socket = net.createConnection(socketPath);
+    let connected = false;
+    let settled = false;
+    let buffer = "";
+    let version: string | null = null;
+    const settle = (result: DaemonMcpProbeResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.removeAllListeners();
+      socket.on("error", () => {});
+      socket.destroy();
+      resolveProbe(result);
+    };
+    const send = (message: Record<string, unknown>) => {
+      socket.write(`${JSON.stringify(message)}\n`);
+    };
+    const timeout = setTimeout(() => {
+      settle(
+        connected
+          ? {
+              kind: "error",
+              error: `daemon probe timed out after ${timeoutMs}ms`,
+            }
+          : { kind: "not-listening" },
+      );
+    }, timeoutMs);
+
+    socket.once("connect", () => {
+      connected = true;
+      try {
+        send({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "cmuxlayer-doctor", version: "1" },
+          },
+        });
+      } catch (error) {
+        settle({ kind: "error", error: daemonProbeError(error) });
+      }
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line.trim()) continue;
+        try {
+          const message = JSON.parse(line) as Record<string, unknown>;
+          if (message.error) {
+            settle({
+              kind: "error",
+              error: `daemon RPC error: ${JSON.stringify(message.error)}`,
+            });
+            return;
+          }
+          if (message.id === 1) {
+            const result = isRecord(message.result) ? message.result : null;
+            const serverInfo =
+              result && isRecord(result.serverInfo) ? result.serverInfo : null;
+            version =
+              serverInfo && typeof serverInfo.version === "string"
+                ? serverInfo.version
+                : null;
+            if (!version) {
+              settle({
+                kind: "error",
+                error: "daemon initialize response missing serverInfo.version",
+              });
+              return;
+            }
+            send({
+              jsonrpc: "2.0",
+              method: "notifications/initialized",
+              params: {},
+            });
+            send({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "tools/call",
+              params: { name: "control_health", arguments: {} },
+            });
+          } else if (message.id === 2) {
+            const result = isRecord(message.result) ? message.result : null;
+            const structured =
+              result && isRecord(result.structuredContent)
+                ? result.structuredContent
+                : null;
+            const health =
+              structured && isRecord(structured.health)
+                ? structured.health
+                : null;
+            const selected =
+              health && isRecord(health.selected_transport)
+                ? health.selected_transport
+                : null;
+            if (!version || !selected) {
+              settle({
+                kind: "error",
+                error: "daemon control_health response missing selected_transport",
+              });
+              return;
+            }
+            settle({
+              kind: "responding",
+              version,
+              transportDegraded: selected.transport_degraded === true,
+              currentSocketPath:
+                typeof selected.current_socket_path === "string"
+                  ? selected.current_socket_path
+                  : null,
+            });
+          }
+        } catch (error) {
+          settle({
+            kind: "error",
+            error: `daemon probe parse failure: ${daemonProbeError(error)}`,
+          });
+          return;
+        }
+      }
+    });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (!connected && (error.code === "ENOENT" || error.code === "ECONNREFUSED")) {
+        settle({ kind: "not-listening" });
+        return;
+      }
+      settle({ kind: "error", error: daemonProbeError(error) });
+    });
+    socket.once("close", () => {
+      if (!settled) {
+        settle({
+          kind: connected ? "error" : "not-listening",
+          ...(connected ? { error: "daemon closed during MCP probe" } : {}),
+        } as DaemonMcpProbeResult);
+      }
+    });
+  });
+}
+
+async function checkDaemonIntegrity(
+  opts: RunDoctorOptions,
+  env: NodeJS.ProcessEnv,
+): Promise<DoctorReport["daemon"]> {
+  const socketPath = defaultDaemonSocketPath(env);
+  const probe = await probeDaemonMcp(
+    socketPath,
+    opts.daemonProbeTimeoutMs ?? 1_500,
+  );
+  if (probe.kind === "not-listening") {
+    return {
+      applicable: true,
+      ok: true,
+      listening: false,
+      socketPath,
+      note: "no daemon running (starts on demand)",
+    };
+  }
+  if (probe.kind === "error") {
+    return {
+      applicable: true,
+      ok: false,
+      listening: true,
+      socketPath,
+      note: `daemon probe failed: ${probe.error}`,
+    };
+  }
+
+  const detect = opts.detectStaleBuild ?? detectStaleBuild;
+  const stale = detect({ running: probe.version });
+  const base = {
+    applicable: true as const,
+    listening: true,
+    socketPath,
+    runningVersion: probe.version,
+    ...(stale ? { installedVersion: stale.installed } : {}),
+    transportDegraded: probe.transportDegraded,
+    currentSocketPath: probe.currentSocketPath,
+  };
+  if (stale?.stale) {
+    return {
+      ...base,
+      ok: false,
+      note: `stale daemon v${stale.running} serving (installed v${stale.installed}) — kill it; proxies respawn the installed daemon`,
+    };
+  }
+
+  if (probe.transportDegraded && probe.currentSocketPath) {
+    try {
+      const cmuxProbe = await (
+        opts.probeCmuxSocket ?? ((path) => probeSocketHealth(path))
+      )(probe.currentSocketPath);
+      if (cmuxProbe.usable) {
+        return {
+          ...base,
+          ok: false,
+          note: "daemon transport degraded while cmux socket alive (stale-daemon-on-dead-socket class)",
+        };
+      }
+    } catch {
+      // A failed cmux probe cannot establish the specific live-socket fault.
+    }
+  }
+
+  return {
+    ...base,
+    ok: true,
+    note: stale
+      ? `daemon v${probe.version} healthy (installed v${stale.installed})`
+      : `daemon v${probe.version} healthy (installed version unavailable)`,
+  };
 }
 
 /**
@@ -506,11 +774,12 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     listMcpConfigPaths: opts.listMcpConfigPaths,
     readMcpConfigFile: opts.readMcpConfigFile,
   });
+  const daemon = await checkDaemonIntegrity(opts, env);
 
   // Health: only the version must resolve. Brew/tap gaps are reported but, per
   // the standard's "brew best-effort" rule, must NOT make the doctor unhealthy
   // (so it exits 0 on machines without brew or without the tap added yet).
-  const healthy = versionOk;
+  const healthy = versionOk && daemon.ok;
 
   return {
     healthy,
@@ -519,10 +788,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
       applicable: false,
       note: "not-applicable: stdio MCP, no cask (§1 account-rename self-heal)",
     },
-    daemon: {
-      applicable: false,
-      note: "not-applicable: stdio MCP, no daemon (§5 daemon integrity)",
-    },
+    daemon,
     tap,
     socketPath: socketSet
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
@@ -550,8 +816,7 @@ export function renderDoctorText(report: DoctorReport): string {
   // §1 — not-applicable, stated explicitly (no silent no-op)
   lines.push(`│ — §1 ${report.caskSelfHeal.note}`);
 
-  // §5 — not-applicable, stated explicitly
-  lines.push(`│ — §5 ${report.daemon.note}`);
+  lines.push(`│ ${mark(report.daemon.ok)} §5 ${report.daemon.note}`);
 
   // (b) §3 tap
   if (!report.tap.brewAvailable) {

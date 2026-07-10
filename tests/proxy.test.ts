@@ -12,7 +12,11 @@ import type {
   JSONRPCMessage,
   JSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CmuxLayerProxy, computeReconnectDelay } from "../src/proxy.js";
+import {
+  CmuxLayerProxy,
+  computeReconnectDelay,
+  VersionBumpReconnectGuard,
+} from "../src/proxy.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-proxy-test");
 
@@ -787,6 +791,106 @@ describe("CmuxLayerProxy", () => {
     expect(
       delays.every((delay, index) => index === 0 || delay > delays[index - 1]),
     ).toBe(true);
+  });
+
+  it("spawns the installed daemon after the second refused reconnect attempt", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn");
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(undefined);
+    const attempts: number[] = [];
+    const { proxy } = createProxy(path, {
+      initialBackoffMs: 10,
+      maxBackoffMs: 10,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => spawnDaemonForVersionBump.mock.calls.length === 1);
+    await proxy.stop();
+
+    expect(attempts.slice(0, 2)).toEqual([0, 1]);
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledWith(
+      expect.objectContaining({
+        daemonScriptPath: "/opt/cmuxlayer/dist/daemon.js",
+        socketPath: path,
+      }),
+    );
+  });
+
+  it("caps reconnect-driven daemon spawns within the guard window", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn-guard");
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(undefined);
+    const attempts: number[] = [];
+    createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      reconnectDaemonSpawnGuard: new VersionBumpReconnectGuard({
+        maxAttempts: 2,
+        windowMs: 60_000,
+      }),
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => attempts.length >= 6);
+
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays queued requests after reconnect autostart brings up the daemon", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn-replay");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    const spawnDaemonForVersionBump = vi.fn(async () => daemon.start());
+    const { input, collector } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 10,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      requestTimeoutMs: 1_000,
+      spawnDaemonForVersionBump,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(
+      daemon.connections[0].messages
+        .filter((message) => "method" in message)
+        .map((message) => message.method),
+    ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
+  });
+
+  it("does not resolve or spawn a daemon during reconnect when no callback is set", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-no-spawn");
+    const attempts: number[] = [];
+    const installedDaemonScriptPath = vi.fn(() => {
+      throw new Error("should not resolve without a spawn callback");
+    });
+    const { proxy } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath,
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+    });
+
+    await waitFor(() => attempts.length >= 3);
+
+    expect(installedDaemonScriptPath).not.toHaveBeenCalled();
+    expect(proxy.isRunning()).toBe(true);
   });
 
   it("returns a JSON-RPC error when buffered requests exceed the cap", async () => {

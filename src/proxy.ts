@@ -17,7 +17,10 @@ import {
   attachCallerContextToMessage,
   callerContextFromEnv,
 } from "./caller-context.js";
-import type { SpawnDaemonOptions } from "./entry.js";
+import {
+  spawnDaemonProcess,
+  type SpawnDaemonOptions,
+} from "./daemon-spawn.js";
 import {
   detectStaleBuild,
   type DetectStaleBuildDeps,
@@ -33,6 +36,7 @@ const DEFAULT_MAX_BUFFERED_REQUESTS = 100;
 const DEFAULT_STALE_RECHECK_INTERVAL_MS = 30_000;
 const DEFAULT_VERSION_BUMP_MAX_ATTEMPTS = 5;
 const DEFAULT_VERSION_BUMP_WINDOW_MS = 60_000;
+const DEFAULT_RECONNECT_DAEMON_SPAWN_MAX_ATTEMPTS = 3;
 const PROXY_ERROR_CODE = -32001;
 
 export interface ReconnectDelayOptions {
@@ -93,6 +97,7 @@ export interface CmuxLayerProxyOptions {
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
   versionBumpReconnectGuard?: VersionBumpReconnectGuard;
+  reconnectDaemonSpawnGuard?: VersionBumpReconnectGuard;
 }
 
 type JsonRpcRequest = JSONRPCMessage & {
@@ -231,6 +236,7 @@ export class CmuxLayerProxy {
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
   private readonly versionBumpReconnectGuard: VersionBumpReconnectGuard;
+  private readonly reconnectDaemonSpawnGuard: VersionBumpReconnectGuard;
 
   private readonly agentReadBuffer = new JsonRpcLineBuffer();
   private daemonReadBuffer: JsonRpcLineBuffer | null = null;
@@ -285,6 +291,12 @@ export class CmuxLayerProxy {
     this.spawnDaemonForVersionBump = opts.spawnDaemonForVersionBump;
     this.versionBumpReconnectGuard =
       opts.versionBumpReconnectGuard ?? new VersionBumpReconnectGuard();
+    this.reconnectDaemonSpawnGuard =
+      opts.reconnectDaemonSpawnGuard ??
+      new VersionBumpReconnectGuard({
+        maxAttempts: DEFAULT_RECONNECT_DAEMON_SPAWN_MAX_ATTEMPTS,
+        windowMs: DEFAULT_VERSION_BUMP_WINDOW_MS,
+      });
   }
 
   start(): void {
@@ -443,6 +455,7 @@ export class CmuxLayerProxy {
         return;
       } catch {
         const attempt = this.reconnectAttempt++;
+        await this.spawnInstalledDaemonAfterReconnectFailure(attempt);
         const delayMs = computeReconnectDelay(attempt, {
           initialBackoffMs: this.initialBackoffMs,
           maxBackoffMs: this.maxBackoffMs,
@@ -482,6 +495,35 @@ export class CmuxLayerProxy {
       socket.once("connect", onConnect);
       socket.once("error", onError);
     });
+  }
+
+  private async spawnInstalledDaemonAfterReconnectFailure(
+    attempt: number,
+  ): Promise<void> {
+    if (
+      attempt < 1 ||
+      !this.spawnDaemonForVersionBump ||
+      !this.reconnectDaemonSpawnGuard.allow()
+    ) {
+      return;
+    }
+    try {
+      const daemonScriptPath = this.installedDaemonScriptPath();
+      if (!daemonScriptPath) {
+        return;
+      }
+      await this.spawnDaemonForVersionBump({
+        socketPath: this.socketPath,
+        env: process.env,
+        logger: this.logger,
+        daemonScriptPath,
+      });
+    } catch (error) {
+      this.logger.error(
+        "[cmuxlayer-proxy] failed to spawn installed daemon after reconnect failure",
+        error,
+      );
+    }
   }
 
   private attachDaemonSocket(socket: net.Socket): void {
@@ -920,7 +962,7 @@ const isMain =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
-  runProxy().catch((error) => {
+  runProxy({ spawnDaemonForVersionBump: spawnDaemonProcess }).catch((error) => {
     console.error("[cmuxlayer-proxy] fatal", error);
     process.exit(1);
   });
