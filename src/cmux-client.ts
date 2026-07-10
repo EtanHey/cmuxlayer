@@ -6,7 +6,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { isAbsolute } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type {
   CmuxPane,
@@ -19,9 +19,11 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
+  CmuxStatusUpdate,
   CmuxTerminalMetadata,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
+import { CmuxSocketError } from "./cmux-socket-error.js";
 
 const execFileAsync = promisify(execFile);
 const STANDARD_BUNDLED_CMUX =
@@ -111,6 +113,9 @@ export class CmuxClient {
     const explicitBin = cleanAbsoluteOrCommand(this.bin);
     if (explicitBin) return explicitBin;
 
+    const shim = this.resolvePathShim(env?.PATH ?? process.env.PATH);
+    if (shim) return shim;
+
     const envBundled = cleanAbsolutePath(env?.CMUX_BUNDLED_CLI_PATH);
     if (envBundled) return envBundled;
 
@@ -124,6 +129,15 @@ export class CmuxClient {
     }
 
     return "cmux";
+  }
+
+  private resolvePathShim(pathValue: string | undefined): string | null {
+    for (const directory of pathValue?.split(delimiter) ?? []) {
+      if (!directory) continue;
+      const candidate = join(directory, "cmux");
+      if (this.existsSync(candidate)) return candidate;
+    }
+    return null;
   }
 
   private parse<T>(raw: string, command: string): T {
@@ -188,7 +202,17 @@ export class CmuxClient {
       details.push(`exit ${String(code)}`);
 
     const suffix = details.length > 0 ? ` (${details.join(", ")})` : "";
-    return new Error(`cmux ${args[0]} failed: ${error.message}${suffix}`);
+    const message = `cmux ${args[0]} failed: ${error.message}${suffix}`;
+    if (/\b(?:EPIPE|ECONNRESET|broken pipe|errno\s*32)\b/i.test(message)) {
+      const stdout =
+        "stdout" in error && typeof error.stdout === "string"
+          ? error.stdout.trim()
+          : "";
+      return new CmuxSocketError(message, "connection_error", {
+        transportPhase: stdout ? "response" : "write",
+      });
+    }
+    return new Error(message);
   }
 
   private assertSupportedSendOptions(opts?: CmuxSendOptions): void {
@@ -573,6 +597,14 @@ export class CmuxClient {
         : undefined);
     if (workspace) args.push("--workspace", workspace);
     await this.run(args);
+  }
+
+  async setStatuses(updates: CmuxStatusUpdate[]): Promise<boolean> {
+    if (updates.length === 0) return true;
+    console.error(
+      `[cmuxlayer] skipped ${updates.length} sidebar status pushes while socket batching is unavailable`,
+    );
+    return false;
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {

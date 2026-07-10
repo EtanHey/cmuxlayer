@@ -16,11 +16,15 @@ import {
   resolveSocketPath,
   type SocketProbeResult,
 } from "./cmux-socket-probe.js";
+import { recordTransportRetry } from "./transport-retry-context.js";
 
 export const DEFAULT_PING_RETRY_ATTEMPTS = 3;
 export const DEFAULT_PING_RETRY_BACKOFF_MS = [100, 250, 500] as const;
 export const DEFAULT_TRANSPORT_REPROBE_MS = 5_000;
 export const DEFAULT_TRANSPORT_REPROBE_CAP_MS = 30_000;
+export const DEFAULT_INTERACTIVE_RETRY_ATTEMPTS = 3;
+export const DEFAULT_INTERACTIVE_RETRY_BASE_MS = 100;
+export const DEFAULT_INTERACTIVE_RETRY_CAP_MS = 400;
 
 export interface TransportHealthSignal {
   mode: "socket" | "cli";
@@ -52,6 +56,9 @@ export interface CmuxSelfHealingClientOptions {
   probeUsable?: typeof probeUsableSocket;
   probeSocketHealth?: typeof probeSocketHealth;
   resolvePath?: typeof resolveSocketPath;
+  retryAttempts?: number;
+  retryBaseMs?: number;
+  retryCapMs?: number;
 }
 
 const FORWARDED_ASYNC_METHODS = [
@@ -72,6 +79,7 @@ const FORWARDED_ASYNC_METHODS = [
   "renameTab",
   "notify",
   "setStatus",
+  "setStatuses",
   "clearStatus",
   "setProgress",
   "clearProgress",
@@ -88,6 +96,7 @@ type ForwardedAsyncMethod = (typeof FORWARDED_ASYNC_METHODS)[number];
 interface FailedPayload {
   method: ForwardedAsyncMethod;
   args: unknown[];
+  error: unknown;
 }
 
 interface QueuedFailedPayload {
@@ -95,6 +104,16 @@ interface QueuedFailedPayload {
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 }
+
+const READ_ONLY_METHODS = new Set<ForwardedAsyncMethod>([
+  "listWorkspaces",
+  "listPaneSurfaces",
+  "listPanes",
+  "listTerminalMetadata",
+  "readScreen",
+  "listStatus",
+  "identify",
+]);
 
 export function decorrelatedJitterDelayMs(opts: {
   baseMs: number;
@@ -153,6 +172,7 @@ export class CmuxSelfHealingClient {
   private failedPayloadQueue: QueuedFailedPayload[] = [];
   private flushingFailedPayloadQueue: Promise<void> | null = null;
   private transportDenial: TransportDenialSignal | null = null;
+  private completedRetryCount = 0;
 
   constructor(private readonly opts: CmuxSelfHealingClientOptions) {
     this.socketClient = opts.socket ?? null;
@@ -193,6 +213,12 @@ export class CmuxSelfHealingClient {
       current_socket_path: this.opts.socketPath,
       ...denial,
     };
+  }
+
+  consumeRetryCount(): number {
+    const count = this.completedRetryCount;
+    this.completedRetryCount = 0;
+    return count;
   }
 
   setEnv(env: NodeJS.ProcessEnv | undefined): void {
@@ -258,6 +284,7 @@ export class CmuxSelfHealingClient {
     method: ForwardedAsyncMethod,
     args: unknown[],
   ): Promise<unknown> {
+    this.completedRetryCount = 0;
     const delegate = this.delegate;
     const startedOnSocket =
       this.socketClient !== null && delegate === this.socketClient;
@@ -344,14 +371,18 @@ export class CmuxSelfHealingClient {
     args: unknown[],
     startedOnSocket: boolean,
   ): Promise<unknown> | null {
-    if (!startedOnSocket || !this.isRecoverableSocketError(error)) {
+    if (
+      startedOnSocket &&
+      this.socketClient &&
+      this.isRecoverableSocketError(error)
+    ) {
+      this.downgradeToCli();
+    }
+    if (!this.canRetryPayload(error, method)) {
       return null;
     }
 
-    const replay = this.enqueueFailedPayload({ method, args });
-    if (this.socketClient) {
-      this.downgradeToCli();
-    }
+    const replay = this.enqueueFailedPayload({ method, args, error });
     void this.flushFailedPayloadQueue();
     return replay;
   }
@@ -371,10 +402,7 @@ export class CmuxSelfHealingClient {
       while (this.failedPayloadQueue.length > 0) {
         const entry = this.failedPayloadQueue[0]!;
         try {
-          const result = await this.callDelegate(
-            entry.payload.method,
-            entry.payload.args,
-          );
+          const result = await this.retryPayload(entry.payload);
           entry.resolve(result);
         } catch (error) {
           entry.reject(error);
@@ -387,6 +415,69 @@ export class CmuxSelfHealingClient {
     });
 
     return this.flushingFailedPayloadQueue;
+  }
+
+  private canRetryPayload(
+    error: unknown,
+    method: ForwardedAsyncMethod,
+  ): boolean {
+    if (!this.isRecoverableSocketError(error)) return false;
+    if (READ_ONLY_METHODS.has(method)) return true;
+    const phase =
+      error instanceof CmuxSocketError ? error.transport_phase : undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+      phase === "connect" ||
+      phase === "write" ||
+      (phase === undefined && /\bwrite\b/i.test(message))
+    );
+  }
+
+  private async retryPayload(payload: FailedPayload): Promise<unknown> {
+    const attempts = Math.max(
+      1,
+      this.opts.retryAttempts ?? DEFAULT_INTERACTIVE_RETRY_ATTEMPTS,
+    );
+    const baseMs = this.opts.retryBaseMs ?? DEFAULT_INTERACTIVE_RETRY_BASE_MS;
+    const capMs = this.opts.retryCapMs ?? DEFAULT_INTERACTIVE_RETRY_CAP_MS;
+    const sleep = this.opts.sleep ?? defaultSleep;
+    let previousMs = baseMs;
+    let lastError = payload.error;
+
+    for (let retryCount = 1; retryCount < attempts; retryCount++) {
+      const delayMs = decorrelatedJitterDelayMs({
+        baseMs,
+        previousMs,
+        capMs,
+        random: this.opts.random,
+      });
+      previousMs = delayMs;
+      await sleep(delayMs);
+      this.completedRetryCount = retryCount;
+      recordTransportRetry();
+      try {
+        return await this.callDelegate(payload.method, payload.args);
+      } catch (error) {
+        lastError = error;
+        if (!this.canRetryPayload(error, payload.method)) break;
+      }
+    }
+
+    throw this.annotateRetryError(lastError, this.completedRetryCount);
+  }
+
+  private annotateRetryError(error: unknown, retryCount: number): unknown {
+    if (error && typeof error === "object") {
+      Object.assign(error, {
+        retry_count: retryCount,
+        transport_state:
+          error instanceof CmuxSocketError &&
+          error.transport_phase === "response"
+            ? "response_failed"
+            : "write_failed",
+      });
+    }
+    return error;
   }
 
   private downgradeToCli(): void {

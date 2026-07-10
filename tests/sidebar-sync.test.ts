@@ -21,6 +21,7 @@ const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 type MockClient = CmuxClient & {
   notify: ReturnType<typeof vi.fn>;
   notifyLifecycleEvent: ReturnType<typeof vi.fn>;
+  setStatuses: ReturnType<typeof vi.fn>;
 };
 
 function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
@@ -42,6 +43,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
     }),
     renameTab: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
+    setStatuses: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
     listPanes: vi.fn().mockResolvedValue({ panes: [] }),
@@ -176,6 +178,34 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("batches a 12-agent sweep into one status session and keeps skipped rows dirty", async () => {
+    for (let index = 0; index < 12; index++) {
+      const agentId = `batch-${index}`;
+      const surfaceId = `surface:${index}`;
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: surfaceId,
+          workspace_id: "workspace:cmuxlayer",
+          cli_session_id: `session-${index}`,
+        }),
+      );
+      liveSurfaces.push(makeSurface(surfaceId));
+      writeHeartbeat(agentId, inboxOpts);
+    }
+    await engine.getRegistry().reconstitute();
+    mockClient.setStatuses.mockResolvedValue(false);
+
+    await engine.runSweep();
+
+    expect(mockClient.setStatuses).toHaveBeenCalledTimes(1);
+    expect(mockClient.setStatuses.mock.calls[0]?.[0]).toHaveLength(12);
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+
+    await engine.runSweep();
+    expect(mockClient.setStatuses).toHaveBeenCalledTimes(2);
+  });
+
   it("discriminates health by state instead of marking every missing-session row unhealthy", async () => {
     stateMgr.writeState(
       makeRecord({
@@ -204,15 +234,21 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "booting-agent",
-      "brainlayer | role=worker | state=booting | health=healthy | blocked=- | last_prompt=Boot worker | worktree=- | branch=- | report=n/a | pr=n/a",
-      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
-    );
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "working-agent",
-      "brainlayer | role=worker | state=working | health=healthy(missing_cli_session_id:info,non_resumable:info) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
-      expect.objectContaining({ workspace: "workspace:cmuxlayer" }),
+    expect(mockClient.setStatuses).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "booting-agent",
+          value:
+            "brainlayer | role=worker | state=booting | health=healthy | blocked=- | last_prompt=Boot worker | worktree=- | branch=- | report=n/a | pr=n/a",
+          workspace: "workspace:cmuxlayer",
+        }),
+        expect.objectContaining({
+          key: "working-agent",
+          value:
+            "brainlayer | role=worker | state=working | health=healthy(missing_cli_session_id:info,non_resumable:info) | blocked=- | last_prompt=Run worker | worktree=- | branch=- | report=n/a | pr=n/a",
+          workspace: "workspace:cmuxlayer",
+        }),
+      ]),
     );
   });
 
@@ -326,15 +362,11 @@ describe("Sidebar Sync", () => {
 
     await expect(engine.runSweep()).resolves.toBeUndefined();
 
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "a1",
-      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
-      expect.objectContaining({ surface: "surface:1" }),
-    );
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "a2",
-      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
-      expect.objectContaining({ surface: "surface:2" }),
+    expect(mockClient.setStatuses).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "a1", surface: "surface:1" }),
+        expect.objectContaining({ key: "a2", surface: "surface:2" }),
+      ]),
     );
   });
 
@@ -1189,15 +1221,19 @@ describe("Sidebar Sync", () => {
     await engine.runSweep();
 
     expect(mockClient.setProgress).not.toHaveBeenCalled();
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "a1",
-      expect.stringContaining("state=working"),
-      expect.objectContaining({ workspace: "workspace:alpha" }),
-    );
-    expect(mockClient.setStatus).toHaveBeenCalledWith(
-      "a2",
-      expect.stringContaining("state=done"),
-      expect.objectContaining({ workspace: "workspace:beta" }),
+    expect(mockClient.setStatuses).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "a1",
+          value: expect.stringContaining("state=working"),
+          workspace: "workspace:alpha",
+        }),
+        expect.objectContaining({
+          key: "a2",
+          value: expect.stringContaining("state=done"),
+          workspace: "workspace:beta",
+        }),
+      ]),
     );
   });
 

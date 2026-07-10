@@ -19,6 +19,7 @@ import type {
   CmuxReadScreenResult,
   CmuxSendOptions,
   CmuxStatusEntry,
+  CmuxStatusUpdate,
   CmuxTerminalMetadata,
 } from "./types.js";
 import { CmuxClient } from "./cmux-client.js";
@@ -34,12 +35,6 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const V1_SAFE_VALUE_RE = /^(?!-)[A-Za-z0-9_./:@%+=#,-]+$/;
 const RETRY_SAFE_V2_METHODS = new Set([
   "system.ping",
-  "system.identify",
-  "workspace.list",
-  "surface.list",
-  "pane.list",
-  "surface.read_text",
-  "status.list",
 ]);
 
 interface V1RawArg {
@@ -599,6 +594,13 @@ export class CmuxSocketClient {
     const tabId = await this.resolveSidebarTabId(opts);
     if (tabId) args.push(this.rawV1Arg(`--tab=${tabId}`));
     await this.sendV1Args("set_status", args);
+  }
+
+  async setStatuses(updates: CmuxStatusUpdate[]): Promise<boolean> {
+    for (const update of updates) {
+      await this.setStatus(update.key, update.value, update);
+    }
+    return true;
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {

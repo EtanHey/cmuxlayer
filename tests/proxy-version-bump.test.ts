@@ -130,6 +130,7 @@ describe("proxy version-bump auto-reconnect", () => {
   const proxies: CmuxLayerProxy[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     for (const proxy of proxies.splice(0)) {
       await proxy.stop();
     }
@@ -207,6 +208,39 @@ describe("proxy version-bump auto-reconnect", () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining("installed version bump detected"),
     );
+  });
+
+  it("reconnects an idle proxy after a version bump with zero agent requests", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("idle-bump");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    let stale = false;
+    const detectStaleBuild = vi.fn(() =>
+      stale
+        ? { stale: true, running: "0.3.31", installed: "0.3.32" }
+        : { stale: false, running: "0.3.31", installed: "0.3.31" },
+    );
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(undefined);
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input: new PassThrough(),
+      output: new PassThrough(),
+      staleRecheckIntervalMs: 60_000,
+      detectStaleBuild,
+      spawnDaemonForVersionBump,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+    });
+    proxies.push(proxy);
+    vi.useFakeTimers();
+    proxy.start();
+    stale = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(detectStaleBuild).toHaveBeenCalled();
   });
 
   it("trips the reconnect-storm guard after repeated version-bump attempts", () => {

@@ -2479,6 +2479,7 @@ describe("tool handler integration", () => {
     expect(Object.keys(data).sort()).toEqual([
       "ok",
       "pane",
+      "retry_count",
       "surface",
       "workspace",
     ]);
