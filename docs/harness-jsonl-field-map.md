@@ -48,7 +48,10 @@ One JSON object per line, **wrapped**: `{ type, timestamp, payload }`. Real type
   - `info.total_token_usage = { ... }` — **cumulative across session; NOT context occupancy.**
   - `info.model_context_window` — **the REAL window for this session** (e.g. `258400`). ✅ in-JSONL.
 - **tokens_used (context occupancy):** `info.last_token_usage.total_tokens` of the **last** token_count event.
-- **context_window:** `info.model_context_window` — **ALWAYS prefer this; never a constant/table.**
+- **context_window:** `info.model_context_window`, except when an explicitly versioned verified
+  table rule is larger. Use the larger value because client CLIs can lag model reality and an
+  under-denominator can wrongly retire an orchestrated seat. Unknown models keep JSONL as their
+  only signal.
 - **model:** last `turn_context` event → `payload.model` (e.g. `"gpt-5.5"`). (`session_meta` has `cwd`,`id`,`cli_version`,`model_provider` but NOT the model id.)
 - **last_text:** last `agent_message` → `payload.message`.
 - **last_tool:** last of `{function_call, custom_tool_call, mcp_tool_call_end}` → `payload.name`.
@@ -65,16 +68,18 @@ One JSON object per line: `{ role, message:{ content:[...] } }`. **Claude-style 
 - **last_tool:** last `message.content[]` item `type:"tool_use"` → `.name` on an `assistant` row.
 - **done:** no explicit field; liveness from screen-peek.
 
-## Verified per-model context-window table (Claude denominator + no-JSONL fallback ONLY)
-Source: researcher, citation-backed, BrainLayer `brainbar-8a3da79c-159` (2026-06-04).
-Used for Claude (no window in JSONL) and as a fallback when a harness's JSONL is unavailable.
-**Codex never uses this — it has `model_context_window` in-JSONL.**
+## Verified per-model context-window table
+Source: researcher, citation-backed, BrainLayer `brainbar-8a3da79c-159` (2026-06-04), plus
+gpt-5.6 verified by Etan web-verify + fleet rules doc §10 (2026-07-11).
+Used for Claude (no window in JSONL), as a fallback when harness JSONL is unavailable, and as a
+floor when an explicitly versioned Codex rule is larger than the CLI-reported JSONL window.
 
 | Model (API id / family) | Window | Notes |
 |---|---|---|
 | `claude-opus-4-6/4-7/4-8`, `claude-sonnet-4-6` | 1,000,000 | 1M now standard (not beta) on these gens. |
 | `claude-haiku-4-5`, Sonnet/Opus 4.0–4.5, `opus-4-1` | 200,000 | 200K tier. |
-| gpt-5 / gpt-5.1 / gpt-5.5 / gpt-5-codex | 400,000 | Total window (272K input + 128K output). Codex JSONL overrides per-session. |
+| gpt-5.6 family | 1,050,000 | Verified whole-family window; larger of this and Codex JSONL wins. |
+| gpt-5 / gpt-5.1 / gpt-5.5 / gpt-5-codex | 400,000 | Generic fallback; Codex JSONL overrides per-session. |
 | gpt-4o / gpt-4-turbo | 128,000 | |
 | gemini-2.5 / 3 / 3.1 pro | 1,048,576 | Not 2M. |
 | unknown | `null` | **Never emit a wrong 1M.** Omit context_pct. |

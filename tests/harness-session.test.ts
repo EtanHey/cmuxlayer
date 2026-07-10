@@ -27,6 +27,29 @@ import {
 const FIX = join(__dirname, "fixtures", "harness");
 const read = (name: string) => readFileSync(join(FIX, name), "utf8");
 
+function codexContextJsonl(
+  model: string,
+  tokensUsed: number,
+  contextWindow: number,
+): string {
+  return [
+    JSON.stringify({
+      type: "turn_context",
+      payload: { type: "turn_context", model },
+    }),
+    JSON.stringify({
+      type: "token_count",
+      payload: {
+        type: "token_count",
+        info: {
+          last_token_usage: { total_tokens: tokensUsed },
+          model_context_window: contextWindow,
+        },
+      },
+    }),
+  ].join("\n");
+}
+
 describe("harnessJsonlEnabled (default-ON, opt-out with =0)", () => {
   const prev = process.env.CMUXLAYER_HARNESS_JSONL;
   afterAll(() => {
@@ -70,6 +93,36 @@ describe("parseHarnessSession", () => {
     expect(s.context_pct).toBe(42); // 108569/258400
     expect(s.last_text).toBe("codex latest message");
     expect(s.last_tool).toBe("exec_command");
+  });
+
+  it("Codex: gpt-5.6 family uses the larger verified window over stale JSONL", () => {
+    const s = parseHarnessSession(
+      "codex",
+      codexContextJsonl("gpt-5.6-sol", 105_000, 353_400),
+    );
+
+    expect(s.context_window).toBe(1_050_000);
+    expect(s.context_pct).toBe(10);
+  });
+
+  it("Codex: unknown models keep their JSONL window as the only signal", () => {
+    const s = parseHarnessSession(
+      "codex",
+      codexContextJsonl("future-unknown-model", 70_680, 353_400),
+    );
+
+    expect(s.context_window).toBe(353_400);
+    expect(s.context_pct).toBe(20);
+  });
+
+  it("Codex: a larger JSONL window stays larger than the verified floor", () => {
+    const s = parseHarnessSession(
+      "codex",
+      codexContextJsonl("gpt-5.6-sol", 210_000, 2_100_000),
+    );
+
+    expect(s.context_window).toBe(2_100_000);
+    expect(s.context_pct).toBe(10);
   });
 
   it("Cursor: NO tokens/window in JSONL — text/tool only, context left to the TUI strip", () => {
@@ -221,7 +274,13 @@ describe("modelContextWindow (Claude denominator + no-JSONL fallback)", () => {
     expect(modelContextWindow("claude-opus-4-1")).toBe(200_000);
   });
 
-  it("GPT-5/Codex family = 400K total window (NOT 1M)", () => {
+  it("GPT-5.6 family = 1.05M verified window", () => {
+    expect(modelContextWindow("gpt-5.6")).toBe(1_050_000);
+    expect(modelContextWindow("gpt-5.6-sol")).toBe(1_050_000);
+  });
+
+  it("plain GPT-5/Codex family stays at 400K", () => {
+    expect(modelContextWindow("gpt-5")).toBe(400_000);
     expect(modelContextWindow("gpt-5.5")).toBe(400_000);
     expect(modelContextWindow("gpt-5-codex")).toBe(400_000);
     expect(modelContextWindow("gpt-5.1")).toBe(400_000);
