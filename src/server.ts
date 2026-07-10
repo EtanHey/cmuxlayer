@@ -1852,7 +1852,11 @@ export function createServerContext(
   opts?: Omit<CreateServerOptions, "context">,
 ): CmuxServerContext {
   const client =
-    opts?.client ?? new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+    opts?.client ??
+    new CmuxClient({
+      exec: opts?.exec,
+      bin: opts?.bin ?? (opts?.exec ? "cmux" : undefined),
+    });
   const autoVitestStateDir =
     !opts?.stateDir && process.env.VITEST === "true"
       ? mkdtempSync(join(tmpdir(), "cmuxlayer-vitest-state-"))

@@ -8,13 +8,16 @@ import { CmuxSocketClient } from "./cmux-socket-client.js";
 import {
   candidateSocketPathsForOpts,
   probeUsableSocket,
+  probeSocketHealth,
   resolveSocketPath,
+  type SocketProbeResult,
   type SocketProbeOptions,
 } from "./cmux-socket-probe.js";
 import {
   DEFAULT_PING_RETRY_ATTEMPTS,
   DEFAULT_PING_RETRY_BACKOFF_MS,
   wrapCliWithSelfHeal,
+  wrapSocketWithSelfHeal,
 } from "./cmux-transport-self-heal.js";
 
 export interface CreateCmuxClientOptions extends SocketProbeOptions {
@@ -32,26 +35,33 @@ export interface CreateCmuxClientOptions extends SocketProbeOptions {
   sleep?: (ms: number) => Promise<void>;
   /** CLI→socket live re-probe interval when degraded (default 5s) */
   reprobeIntervalMs?: number;
+  /** Max delay for decorrelated-jitter transport re-probe scheduling */
+  reprobeCapMs?: number;
+  /** Injectable random source for deterministic jitter tests */
+  random?: () => number;
 }
 
 async function probeUsableSocketWithRetry(
   socketPath: string,
   opts?: CreateCmuxClientOptions,
-): Promise<boolean> {
+): Promise<SocketProbeResult> {
   const attempts = opts?.pingRetryAttempts ?? DEFAULT_PING_RETRY_ATTEMPTS;
   const backoff = opts?.pingRetryBackoffMs ?? DEFAULT_PING_RETRY_BACKOFF_MS;
   const sleep = opts?.sleep ?? defaultSleep;
+  let lastResult: SocketProbeResult = { usable: false, socketPath };
 
   for (let attempt = 0; attempt < attempts; attempt++) {
-    if (await probeUsableSocket(socketPath, opts)) {
-      return true;
+    const result = await probeSocketHealth(socketPath, opts);
+    if (result.usable || result.denied_reason === "access-control") {
+      return result;
     }
+    lastResult = result;
     if (attempt < attempts - 1) {
       const delayMs = backoff[attempt] ?? backoff[backoff.length - 1] ?? 100;
       await sleep(delayMs);
     }
   }
-  return false;
+  return lastResult;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -81,9 +91,13 @@ export async function createCmuxClient(
   const pinned = instancePin(opts) !== undefined;
 
   const usable: string[] = [];
+  const denied: SocketProbeResult[] = [];
   for (const socketPath of candidates) {
-    if (await probeUsableSocketWithRetry(socketPath, opts)) {
+    const probeResult = await probeUsableSocketWithRetry(socketPath, opts);
+    if (probeResult.usable) {
       usable.push(socketPath);
+    } else if (probeResult.denied_reason === "access-control") {
+      denied.push(probeResult);
     }
   }
 
@@ -106,17 +120,41 @@ export async function createCmuxClient(
             `you are using.`,
         );
       }
-      return client;
+      return wrapSocketWithSelfHeal(client, cliFallback, {
+        socketPath,
+        factoryOpts: opts,
+        reprobeIntervalMs: opts?.reprobeIntervalMs,
+        reprobeCapMs: opts?.reprobeCapMs,
+        random: opts?.random,
+        logger,
+        sleep: opts?.sleep,
+      }) as unknown as CmuxSocketClient;
     } catch {
       // Socket reachable but not usable — try next candidate before CLI.
     }
   }
 
+  const accessDenied = denied[0] ?? null;
+  if (accessDenied) {
+    const error = accessDenied.error ?? "Access denied";
+    logger.error(
+      `[cmuxlayer] transport denied: access-control (${accessDenied.socketPath}): ${error}`,
+    );
+  }
   logger.error("[cmuxlayer] transport selected: cli (degraded)");
   return wrapCliWithSelfHeal(cliFallback, {
     socketPath: candidates[0] ?? null,
     factoryOpts: opts,
     reprobeIntervalMs: opts?.reprobeIntervalMs,
+    reprobeCapMs: opts?.reprobeCapMs,
+    random: opts?.random,
+    initialDenial: accessDenied
+      ? {
+          denied_reason: "access-control",
+          socketPath: accessDenied.socketPath,
+          error: accessDenied.error ?? "Access denied",
+        }
+      : undefined,
     logger,
     sleep: opts?.sleep,
   }) as unknown as CmuxClient;

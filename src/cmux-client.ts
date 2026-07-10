@@ -5,6 +5,8 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import type {
   CmuxPane,
@@ -22,6 +24,19 @@ import type {
 import { normalizeKeyName } from "./key-names.js";
 
 const execFileAsync = promisify(execFile);
+const STANDARD_BUNDLED_CMUX =
+  "/Applications/cmux.app/Contents/Resources/bin/cmux";
+
+function cleanAbsolutePath(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed || !isAbsolute(trimmed)) return null;
+  return trimmed;
+}
+
+function cleanAbsoluteOrCommand(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
 
 export interface ExecFn {
   (
@@ -29,6 +44,13 @@ export interface ExecFn {
     args: string[],
     env?: NodeJS.ProcessEnv,
   ): Promise<{ stdout: string; stderr: string }>;
+}
+
+interface CmuxClientOptions {
+  exec?: ExecFn;
+  bin?: string;
+  env?: NodeJS.ProcessEnv;
+  existsSync?: (path: string) => boolean;
 }
 
 interface CmuxIdentifyResult {
@@ -46,13 +68,15 @@ interface CmuxIdentifyResult {
 
 export class CmuxClient {
   private exec?: ExecFn;
-  private bin: string;
+  private bin?: string;
   private env?: NodeJS.ProcessEnv;
+  private existsSync: (path: string) => boolean;
 
-  constructor(opts?: { exec?: ExecFn; bin?: string; env?: NodeJS.ProcessEnv }) {
+  constructor(opts?: CmuxClientOptions) {
     this.exec = opts?.exec;
-    this.bin = opts?.bin ?? "cmux";
+    this.bin = opts?.bin;
     this.env = opts?.env;
+    this.existsSync = opts?.existsSync ?? fs.existsSync;
   }
 
   setEnv(env: NodeJS.ProcessEnv | undefined): void {
@@ -67,19 +91,39 @@ export class CmuxClient {
       // The env is forwarded on BOTH the injected-exec path and the real
       // execFile path; dropping it on either is collab O2 #8.
       const env = this.env;
+      const bin = this.resolveBin(env);
       const { stdout } = this.exec
         ? await this.exec(
-            this.bin,
+            bin,
             ["--json", ...args],
             ...(env ? ([env] as const) : ([] as const)),
           )
-        : await execFileAsync(this.bin, ["--json", ...args], {
+        : await execFileAsync(bin, ["--json", ...args], {
             ...(env ? { env } : {}),
           });
       return stdout;
     } catch (error) {
       throw this.normalizeCliError(args, error);
     }
+  }
+
+  private resolveBin(env?: NodeJS.ProcessEnv): string {
+    const explicitBin = cleanAbsoluteOrCommand(this.bin);
+    if (explicitBin) return explicitBin;
+
+    const envBundled = cleanAbsolutePath(env?.CMUX_BUNDLED_CLI_PATH);
+    if (envBundled) return envBundled;
+
+    const processBundled = cleanAbsolutePath(
+      process.env.CMUX_BUNDLED_CLI_PATH,
+    );
+    if (processBundled) return processBundled;
+
+    if (this.existsSync(STANDARD_BUNDLED_CMUX)) {
+      return STANDARD_BUNDLED_CMUX;
+    }
+
+    return "cmux";
   }
 
   private parse<T>(raw: string, command: string): T {

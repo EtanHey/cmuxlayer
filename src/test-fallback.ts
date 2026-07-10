@@ -6,7 +6,7 @@
  */
 
 import { createCmuxClient } from "./cmux-client-factory.js";
-import { CmuxSocketClient } from "./cmux-socket-client.js";
+import { getTransportHealth } from "./cmux-transport-self-heal.js";
 
 function assert(label: string, condition: boolean): void {
   if (condition) {
@@ -20,24 +20,26 @@ function assert(label: string, condition: boolean): void {
 async function test() {
   console.log("=== Manual Test: Graceful Fallback ===\n");
 
-  // Test 1: Socket available → CmuxSocketClient
+  // Test 1: Socket available → socket transport
   const socketClient = await createCmuxClient();
+  const socketHealth = getTransportHealth(socketClient);
   assert(
-    "Socket available → CmuxSocketClient",
-    socketClient instanceof CmuxSocketClient,
+    "Socket available → socket transport",
+    socketHealth?.mode === "socket" && socketHealth.degraded === false,
   );
 
-  // Test 2: Socket unavailable → CmuxClient fallback
+  // Test 2: Socket unavailable → CLI fallback
   const fallbackClient = await createCmuxClient({
     socketPath: "/tmp/nonexistent.sock",
   });
+  const fallbackHealth = getTransportHealth(fallbackClient);
   assert(
     "Fallback to CLI when socket missing",
-    !(fallbackClient instanceof CmuxSocketClient),
+    fallbackHealth?.mode === "cli" && fallbackHealth.degraded === true,
   );
 
   // Test 3-5: Socket client works for real operations
-  if (socketClient instanceof CmuxSocketClient) {
+  if (socketHealth?.mode === "socket") {
     const ws = await socketClient.listWorkspaces();
     assert(
       `Socket listWorkspaces (${ws.workspaces.length} workspaces)`,

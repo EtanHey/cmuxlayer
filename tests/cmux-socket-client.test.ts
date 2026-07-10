@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
+import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
 // ── Mock V2 Socket Server ──────────────────────────────────────────────
 
@@ -1230,17 +1231,23 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
 });
 
 describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
-  it("returns CmuxSocketClient when socket is available", async () => {
+  it("returns a socket-mode client when socket is available", async () => {
     const client = await createCmuxClient({ socketPath: MOCK_SOCKET_PATH });
-    expect(client).toBeInstanceOf(CmuxSocketClient);
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "socket",
+      degraded: false,
+      current_socket_path: MOCK_SOCKET_PATH,
+    });
   });
 
-  it("falls back to CmuxClient when socket is unavailable", async () => {
+  it("falls back to CLI mode when socket is unavailable", async () => {
     const client = await createCmuxClient({
       socketPath: "/tmp/cmux-does-not-exist.sock",
     });
-    // Should not be a CmuxSocketClient
-    expect(client).not.toBeInstanceOf(CmuxSocketClient);
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+    });
   });
 
   it("uses last-socket-path before legacy defaults when no env socket is set", async () => {
@@ -1262,7 +1269,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         logger,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: liveSocketPath,
+      });
       expect(logger.error).toHaveBeenCalledWith(
         "[cmuxlayer] transport selected: socket",
       );
@@ -1305,7 +1316,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         bin: fakeCmux,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: liveSocketPath,
+      });
       const result = await (client as CmuxSocketClient).newSurface({
         pane: "pane:1",
         workspace: "workspace:1",
@@ -1334,7 +1349,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         socketStateDir: stateDir,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: liveSocketPath,
+      });
     } finally {
       if (savedEnv === undefined) {
         delete process.env.CMUX_SOCKET_PATH;
@@ -1364,7 +1383,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
       const client = await createCmuxClient({
         socketStateDir: stateDir,
       });
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: firstSocketPath,
+      });
       expect(await client.ping()).toBe(true);
 
       await stopSocketServer(firstServer, firstSocketPath);
@@ -1389,10 +1412,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
     }
   });
 
-  it("does not replay mutating calls after re-probing a failed socket", async () => {
+  it("flushes a failed mutating socket call through CLI fallback", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
     const firstSocketPath = join(stateDir, "first.sock");
-    const secondSocketPath = join(stateDir, "second.sock");
     fs.writeFileSync(
       join(stateDir, "last-socket-path"),
       `${firstSocketPath}\n`,
@@ -1404,29 +1426,45 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
     );
     const savedEnv = process.env.CMUX_SOCKET_PATH;
     delete process.env.CMUX_SOCKET_PATH;
+    const exec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
 
-    let secondServer: net.Server | null = null;
     try {
       const client = await createCmuxClient({
         socketStateDir: stateDir,
+        exec,
+        bin: "cmux",
+        reprobeIntervalMs: 60_000,
       });
-      expect(client).toBeInstanceOf(CmuxSocketClient);
-
-      fs.writeFileSync(
-        join(stateDir, "last-socket-path"),
-        `${secondSocketPath}\n`,
-        "utf-8",
-      );
-      secondServer = await startSocketServer(secondSocketPath);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: firstSocketPath,
+      });
 
       await expect(
         client.send("surface:1", "do-not-duplicate", {
           workspace: "workspace:1",
         }),
-      ).rejects.toThrow(/Socket closed unexpectedly|Socket error/i);
+      ).resolves.toBeUndefined();
       expect(first.seenMethods).toContain("surface.send_text");
-
-      await expect(client.ping()).resolves.toBe(true);
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        [
+          "--json",
+          "send",
+          "--surface",
+          "surface:1",
+          "--workspace",
+          "workspace:1",
+          "do-not-duplicate",
+        ],
+        expect.objectContaining({ CMUX_SOCKET_PATH: firstSocketPath }),
+      );
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "cli",
+        degraded: true,
+        current_socket_path: firstSocketPath,
+      });
     } finally {
       if (savedEnv === undefined) {
         delete process.env.CMUX_SOCKET_PATH;
@@ -1434,9 +1472,6 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         process.env.CMUX_SOCKET_PATH = savedEnv;
       }
       await stopSocketServer(first.server, firstSocketPath);
-      if (secondServer) {
-        await stopSocketServer(secondServer, secondSocketPath);
-      }
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
@@ -1487,7 +1522,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
       const client = await createCmuxClient({
         socketStateDir: stateDir,
       });
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: firstSocketPath,
+      });
       expect(await client.ping()).toBe(true);
 
       await stopSocketServer(firstServer, firstSocketPath);

@@ -92,13 +92,22 @@ export class CmuxPersistentSocket {
   /** Advance backoff to the next exponential step. */
   incrementBackoff(): void {
     this.backoffAttempt++;
-    const exponential = Math.min(
-      this.backoffBaseMs * Math.pow(2, this.backoffAttempt - 1),
+    if (!this.backoffJitter) {
+      this._currentBackoffMs = Math.min(
+        this.backoffBaseMs * Math.pow(2, this.backoffAttempt - 1),
+        this.backoffMaxMs,
+      );
+      return;
+    }
+
+    const previous = this._currentBackoffMs || this.backoffBaseMs;
+    const upper = Math.max(this.backoffBaseMs, previous * 3);
+    this._currentBackoffMs = Math.min(
       this.backoffMaxMs,
+      Math.round(
+        this.backoffBaseMs + Math.random() * (upper - this.backoffBaseMs),
+      ),
     );
-    this._currentBackoffMs = this.backoffJitter
-      ? Math.round(exponential * (0.5 + Math.random() * 0.5))
-      : exponential;
   }
 
   /** Reset backoff after a successful connection. */
@@ -122,6 +131,7 @@ export class CmuxPersistentSocket {
         this.resetBackoff();
         resolve();
       });
+      this.raiseSocketListenerLimit(this.socket);
 
       this.socket.on("data", (chunk: Buffer) => {
         this.buffer += chunk.toString("utf-8");
@@ -130,21 +140,12 @@ export class CmuxPersistentSocket {
 
       this.socket.on("error", (err: Error) => {
         this.connected = false;
-        this.rejectAllPending(
-          new CmuxSocketError(
-            `Socket error: ${err.message}`,
-            "connection_error",
-          ),
-        );
+        const socketError = this.toConnectionError(err);
+        this.rejectAllPending(socketError);
         if (!settled) {
           settled = true;
           this.connectPromise = null;
-          reject(
-            new CmuxSocketError(
-              `Socket error: ${err.message}`,
-              "connection_error",
-            ),
-          );
+          reject(socketError);
         }
       });
 
@@ -162,6 +163,13 @@ export class CmuxPersistentSocket {
     });
 
     return this.connectPromise;
+  }
+
+  private raiseSocketListenerLimit(socket: net.Socket): void {
+    const current = socket.getMaxListeners();
+    if (current > 0 && current < this.maxInFlight + 8) {
+      socket.setMaxListeners(this.maxInFlight + 8);
+    }
   }
 
   private async ensureConnected(): Promise<void> {
@@ -278,7 +286,56 @@ export class CmuxPersistentSocket {
   private writeNextV1(): void {
     if (!this.socket || this.pendingV1.length === 0) return;
     const entry = this.pendingV1[0];
-    this.socket.write(entry.payload);
+    this.writePayload(entry.payload, (error) => {
+      const index = this.pendingV1.indexOf(entry);
+      if (index === -1) return;
+      const wasHead = index === 0;
+      this.pendingV1.splice(index, 1);
+      clearTimeout(entry.timer);
+      entry.reject(error);
+      if (wasHead) this.writeNextV1();
+    });
+  }
+
+  private toConnectionError(error: Error): CmuxSocketError {
+    return new CmuxSocketError(
+      `Socket error: ${error.message}`,
+      "connection_error",
+    );
+  }
+
+  private writePayload(
+    payload: string,
+    onWriteError: (error: CmuxSocketError) => void,
+  ): void {
+    const socket = this.socket;
+    if (!socket) {
+      onWriteError(new CmuxSocketError("Socket disconnected", "connection_closed"));
+      return;
+    }
+
+    let settled = false;
+    const cleanup = () => {
+      socket.off("error", onError);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      onWriteError(this.toConnectionError(error));
+    };
+    const onError = (error: Error) => fail(error);
+
+    socket.once("error", onError);
+    try {
+      socket.write(payload, () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   private assertInFlightCapacity(): void {
@@ -327,7 +384,13 @@ export class CmuxPersistentSocket {
         timer,
       });
 
-      this.socket!.write(payload);
+      this.writePayload(payload, (error) => {
+        const entry = this.pending.get(id);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        this.pending.delete(id);
+        entry.reject(error);
+      });
     });
   }
 

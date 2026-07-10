@@ -13,6 +13,13 @@ export interface SocketProbeOptions {
   password?: string;
 }
 
+export interface SocketProbeResult {
+  usable: boolean;
+  socketPath: string;
+  denied_reason?: "access-control";
+  error?: string;
+}
+
 /**
  * Bound on the probe `system.ping`. A wedged cmux can ACCEPT the socket connect
  * but never answer (the Surface.deinit deadlock), and probing every candidate
@@ -20,6 +27,17 @@ export interface SocketProbeOptions {
  * hung instance. The probe only needs a liveness yes/no, so cap it short.
  */
 const PROBE_PING_TIMEOUT_MS = 2000;
+const ACCESS_CONTROL_DENIED_RE =
+  /Access denied\s*[—-]\s*only processes started inside cmux can connect/i;
+
+export function isCmuxAccessControlDenied(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return ACCESS_CONTROL_DENIED_RE.test(message);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * Probe whether a Unix socket is listening.
@@ -63,8 +81,15 @@ export async function probeUsableSocket(
   socketPath: string,
   opts?: Pick<SocketProbeOptions, "timeoutMs" | "password">,
 ): Promise<boolean> {
+  return (await probeSocketHealth(socketPath, opts)).usable;
+}
+
+export async function probeSocketHealth(
+  socketPath: string,
+  opts?: Pick<SocketProbeOptions, "timeoutMs" | "password">,
+): Promise<SocketProbeResult> {
   if (!(await probeSocket(socketPath, opts?.timeoutMs))) {
-    return false;
+    return { usable: false, socketPath };
   }
 
   const transport = new CmuxPersistentSocket({
@@ -80,9 +105,18 @@ export async function probeUsableSocket(
       await transport.call("auth.login", { password: opts.password });
     }
     const result = await transport.call<{ pong: boolean }>("system.ping");
-    return result.pong === true;
-  } catch {
-    return false;
+    return { usable: result.pong === true, socketPath };
+  } catch (error) {
+    const message = errorMessage(error);
+    if (isCmuxAccessControlDenied(error)) {
+      return {
+        usable: false,
+        socketPath,
+        denied_reason: "access-control",
+        error: message,
+      };
+    }
+    return { usable: false, socketPath, error: message };
   } finally {
     transport.disconnect();
   }
