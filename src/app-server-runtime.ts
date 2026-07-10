@@ -167,6 +167,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       log: async () => {},
       listWorkspaces: () => this.client.listWorkspaces(),
       setStatus: async () => {},
+      setStatuses: async () => {},
       clearStatus: async () => {},
       readScreen: (surface, readOpts) => this.client.readScreen(surface, readOpts),
       send: (surface, text, sendOpts) =>

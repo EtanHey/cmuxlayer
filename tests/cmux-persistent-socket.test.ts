@@ -4,6 +4,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
+import { CmuxSocketError } from "../src/cmux-socket-error.js";
 
 const TEST_ROOT = join("/tmp", "cmux-persistent-socket-test");
 const servers: net.Server[] = [];
@@ -234,9 +235,12 @@ describe("CmuxPersistentSocket V1 demux", () => {
     class FakeSocket extends EventEmitter {
       destroyed = false;
 
-      once(event: string, listener: (...args: unknown[]) => void): this {
-        if (event === "error") events.push("once:error");
-        return super.once(event, listener);
+      prependOnceListener(
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ): this {
+        if (event === "error") events.push("prependOnce:error");
+        return super.prependOnceListener(event, listener);
       }
 
       write(payload: string, callback?: () => void): boolean {
@@ -258,7 +262,7 @@ describe("CmuxPersistentSocket V1 demux", () => {
     const result = socket.call("system.ping");
     await Promise.resolve();
     expect(capturedPayload).toContain("system.ping");
-    expect(events.slice(0, 2)).toEqual(["once:error", "write"]);
+    expect(events.slice(0, 2)).toEqual(["prependOnce:error", "write"]);
     const request = JSON.parse(capturedPayload.trim()) as { id: string };
     (
       socket as unknown as {
@@ -306,6 +310,45 @@ describe("CmuxPersistentSocket V1 demux", () => {
     expect(
       (socket as unknown as { pending: Map<string, unknown> }).pending.size,
     ).toBe(0);
+    socket.disconnect();
+  });
+
+  it("classifies an asynchronously emitted write EPIPE before the global socket listener", async () => {
+    class EmittingSocket extends EventEmitter {
+      destroyed = false;
+
+      write(): boolean {
+        const error = new Error("write EPIPE");
+        (error as NodeJS.ErrnoException).code = "EPIPE";
+        queueMicrotask(() => this.emit("error", error));
+        return true;
+      }
+
+      destroy(): void {
+        this.destroyed = true;
+      }
+    }
+
+    const socket = new CmuxPersistentSocket({ timeoutMs: 500 });
+    const transport = new EmittingSocket();
+    transport.on("error", (error: Error) => {
+      const internals = socket as unknown as {
+        rejectAllPending: (error: CmuxSocketError) => void;
+      };
+      internals.rejectAllPending(
+        new CmuxSocketError(`Socket error: ${error.message}`, "connection_error", {
+          transportPhase: "response",
+        }),
+      );
+    });
+    (socket as unknown as { connected: boolean }).connected = true;
+    (socket as unknown as { socket: EmittingSocket }).socket =
+      transport;
+
+    await expect(socket.call("surface.send_text")).rejects.toMatchObject({
+      code: "connection_error",
+      transport_phase: "write",
+    });
     socket.disconnect();
   });
 });

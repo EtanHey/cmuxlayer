@@ -279,7 +279,7 @@ function startEngineServer(
 }
 
 describe("Phase 10 painpoint e2e replay", () => {
-  it("sidebar-scale sweeps many agents with bounded, diffed status emissions", async () => {
+  it("sidebar-scale sweeps skip degraded-CLI status bursts", async () => {
     const dir = tempDir("sidebar-scale");
     const stateMgr = new StateManager(dir);
     const agentCount = 25;
@@ -309,17 +309,7 @@ describe("Phase 10 painpoint e2e replay", () => {
 
       await engine.runSweep();
 
-      expect(statusCalls).toHaveLength(agentCount);
-      expect(statusCalls.map((call) => call.key).sort()).toEqual(
-        [...agentIds].sort(),
-      );
-      expect(
-        statusCalls.every(
-          (call) =>
-            call.value.includes("role=worker") &&
-            call.value.includes("state=ready"),
-        ),
-      ).toBe(true);
+      expect(statusCalls).toEqual([]);
 
       statusCalls.length = 0;
       await engine.runSweep();

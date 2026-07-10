@@ -16,6 +16,10 @@ import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, readVersion } from "./version.js";
 import { StateManager } from "./state-manager.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
+import {
+  currentTransportRetryCount,
+  withTransportRetryTracking,
+} from "./transport-retry-context.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
   AgentEngine,
@@ -562,7 +566,11 @@ function surfaceGonePayload(
 }
 
 function ok(data: Record<string, unknown>): ToolReturn {
-  const payload = { ok: true, ...data };
+  const payload = {
+    ok: true,
+    retry_count: currentTransportRetryCount(),
+    ...data,
+  };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
@@ -574,7 +582,11 @@ function okFormatted(
   formattedText: string,
   data: Record<string, unknown>,
 ): ToolReturn {
-  const payload = { ok: true, ...data };
+  const payload = {
+    ok: true,
+    retry_count: currentTransportRetryCount(),
+    ...data,
+  };
   return {
     content: [{ type: "text", text: formattedText }],
     structuredContent: payload,
@@ -593,7 +605,32 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           control: error.control,
         }
       : {};
-  const payload = { ok: false, error: message, ...modeExtra, ...extra };
+  const retryMeta =
+    error && typeof error === "object"
+      ? {
+          retry_count:
+            "retry_count" in error &&
+            typeof (error as { retry_count?: unknown }).retry_count === "number"
+              ? (error as { retry_count: number }).retry_count
+              : currentTransportRetryCount(),
+          ...(error &&
+          "transport_state" in error &&
+          typeof (error as { transport_state?: unknown }).transport_state ===
+            "string"
+            ? {
+                transport_state: (error as { transport_state: string })
+                  .transport_state,
+              }
+            : {}),
+        }
+      : { retry_count: currentTransportRetryCount() };
+  const payload = {
+    ok: false,
+    error: message,
+    ...retryMeta,
+    ...modeExtra,
+    ...extra,
+  };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
@@ -2335,6 +2372,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }
       : undefined,
   );
+  const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  (
+    server as unknown as { tool: (...args: unknown[]) => unknown }
+  ).tool = (...args: unknown[]): unknown => {
+    const handlerIndex = args.length - 1;
+    const handler = args[handlerIndex];
+    if (typeof handler === "function") {
+      args[handlerIndex] = (...handlerArgs: unknown[]) =>
+        withTransportRetryTracking(() => handler(...handlerArgs));
+    }
+    return rawTool(...args);
+  };
   if (ownsContext) {
     const close = server.close.bind(server);
     server.close = async (): Promise<void> => {
@@ -6126,6 +6175,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           listWorkspaces: () => client.listWorkspaces(),
           setStatus: (key, value, statusOpts) =>
             client.setStatus(key, value, statusOpts),
+          setStatuses: async (updates) => {
+            if (typeof client.setStatuses === "function") {
+              return client.setStatuses(updates);
+            }
+            for (const update of updates) {
+              await client.setStatus(update.key, update.value, update);
+            }
+            return true;
+          },
           clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
           readScreen: (surface, readOpts) =>
             client.readScreen(surface, readOpts),

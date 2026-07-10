@@ -23,6 +23,7 @@ import type {
   CmuxNewSurfaceResult,
   CmuxReadScreenResult,
   CmuxSendOptions,
+  CmuxStatusUpdate,
   CmuxWorkspace,
 } from "./types.js";
 import {
@@ -453,6 +454,7 @@ interface AgentEngineClient {
       surface?: string;
     },
   ): Promise<void>;
+  setStatuses?(updates: CmuxStatusUpdate[]): Promise<boolean | void>;
   readScreen(
     surface: string,
     opts?: { workspace?: string; lines?: number; scrollback?: boolean },
@@ -2520,6 +2522,11 @@ export class AgentEngine {
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
     const surfaceTopology = await collectSurfaceTopology(this.client);
+    const statusUpdates: CmuxStatusUpdate[] = [];
+    const pendingStatusSnapshots: Array<{
+      agentId: string;
+      snapshot: SidebarStatusSnapshot;
+    }> = [];
 
     for (const originalAgent of agents) {
       const sweepCtx: SweepAgentContext = {};
@@ -2683,20 +2690,27 @@ export class AgentEngine {
           }
         }
         const sidebar = STATE_SIDEBAR[state];
-        await this.client.setStatus(agentId, statusValue, {
+        statusUpdates.push({
+          key: agentId,
+          value: statusValue,
           icon: sidebar.icon,
           color: sidebar.color,
           surface: surface_id,
           workspace: agent.workspace_id ?? undefined,
         });
       }
-      this.sidebarSnapshot.set(agentId, {
+      const nextSnapshot = {
         ...statusSnapshot,
         healthSignature:
           shouldNotifyHealth && !healthNotificationDelivered
             ? (prev?.healthSignature ?? "pending_health_notification")
             : statusSnapshot.healthSignature,
-      });
+      };
+      if (statusChanged) {
+        pendingStatusSnapshots.push({ agentId, snapshot: nextSnapshot });
+      } else {
+        this.sidebarSnapshot.set(agentId, nextSnapshot);
+      }
 
       // Quality tracking: check context usage for non-terminal agents
       // AIDEV-NOTE: Uses parseScreen for model-aware context_pct (handles Claude, Codex, Gemini).
@@ -2738,6 +2752,26 @@ export class AgentEngine {
         } catch {
           // readScreen failures are non-fatal — next sweep will retry
         }
+      }
+    }
+
+    let statusBatchApplied = true;
+    if (statusUpdates.length === 1) {
+      const [update] = statusUpdates;
+      await this.client.setStatus(update.key, update.value, update);
+    } else if (statusUpdates.length > 1) {
+      if (this.client.setStatuses) {
+        statusBatchApplied =
+          (await this.client.setStatuses(statusUpdates)) !== false;
+      } else {
+        for (const update of statusUpdates) {
+          await this.client.setStatus(update.key, update.value, update);
+        }
+      }
+    }
+    if (statusBatchApplied) {
+      for (const pending of pendingStatusSnapshots) {
+        this.sidebarSnapshot.set(pending.agentId, pending.snapshot);
       }
     }
 

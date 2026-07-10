@@ -140,7 +140,10 @@ export class CmuxPersistentSocket {
 
       this.socket.on("error", (err: Error) => {
         this.connected = false;
-        const socketError = this.toConnectionError(err);
+        const socketError = this.toConnectionError(
+          err,
+          settled ? "response" : "connect",
+        );
         this.rejectAllPending(socketError);
         if (!settled) {
           settled = true;
@@ -157,6 +160,7 @@ export class CmuxPersistentSocket {
           new CmuxSocketError(
             "Socket closed unexpectedly",
             "connection_closed",
+            { transportPhase: "response" },
           ),
         );
       });
@@ -297,10 +301,14 @@ export class CmuxPersistentSocket {
     });
   }
 
-  private toConnectionError(error: Error): CmuxSocketError {
+  private toConnectionError(
+    error: Error,
+    transportPhase: "connect" | "write" | "response" = "response",
+  ): CmuxSocketError {
     return new CmuxSocketError(
       `Socket error: ${error.message}`,
       "connection_error",
+      { transportPhase },
     );
   }
 
@@ -310,7 +318,11 @@ export class CmuxPersistentSocket {
   ): void {
     const socket = this.socket;
     if (!socket) {
-      onWriteError(new CmuxSocketError("Socket disconnected", "connection_closed"));
+      onWriteError(
+        new CmuxSocketError("Socket disconnected", "connection_closed", {
+          transportPhase: "write",
+        }),
+      );
       return;
     }
 
@@ -322,11 +334,15 @@ export class CmuxPersistentSocket {
       if (settled) return;
       settled = true;
       cleanup();
-      onWriteError(this.toConnectionError(error));
+      onWriteError(this.toConnectionError(error, "write"));
     };
     const onError = (error: Error) => fail(error);
 
-    socket.once("error", onError);
+    // Run the write-scoped listener before the connection-wide listener. Node
+    // invokes EventEmitter listeners in registration order; without prepend,
+    // an asynchronous EPIPE is conservatively mislabeled as post-response and
+    // a safe pre-response mutation retry is suppressed.
+    socket.prependOnceListener("error", onError);
     try {
       socket.write(payload, () => {
         if (settled) return;

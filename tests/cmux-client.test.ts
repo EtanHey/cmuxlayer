@@ -537,6 +537,30 @@ describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
 });
 
 describe("CmuxClient CLI binary resolution", () => {
+  it("prefers the reload-aware PATH shim while preserving the pinned socket env", async () => {
+    const exec = mockExec({ workspaces: [] });
+    const client = new CmuxClient({
+      exec,
+      env: {
+        CMUX_SOCKET_PATH: "/tmp/pinned.sock",
+        CMUX_BUNDLED_CLI_PATH:
+          "/Applications/cmux.app/Contents/Resources/bin/cmux",
+        PATH: "/opt/cmux-shims:/usr/bin",
+      },
+      existsSync: (candidate) =>
+        candidate === "/opt/cmux-shims/cmux" ||
+        candidate === STANDARD_BUNDLED_CMUX,
+    });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith(
+      "/opt/cmux-shims/cmux",
+      ["--json", "list-workspaces"],
+      expect.objectContaining({ CMUX_SOCKET_PATH: "/tmp/pinned.sock" }),
+    );
+  });
+
   it("uses explicit opts.bin before any bundled cmux env", async () => {
     const exec = mockExec({ workspaces: [] });
     const client = new CmuxClient({

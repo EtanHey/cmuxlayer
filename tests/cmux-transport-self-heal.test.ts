@@ -143,6 +143,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
   const servers: Array<{ server: net.Server; path: string }> = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     for (const { server, path } of servers.splice(0)) {
       await stopPingServer(server, path);
     }
@@ -430,6 +431,93 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("retries an interactive CLI call after errno 32 with injected backoff", async () => {
+    vi.useFakeTimers();
+    const transportFailure = Object.assign(
+      new Error("Failed to write to socket (Broken pipe, errno 32)"),
+      { code: 1, stderr: "Failed to write to socket (Broken pipe, errno 32)" },
+    );
+    const exec = vi
+      .fn()
+      .mockRejectedValueOnce(transportFailure)
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath: "/tmp/retry.sock",
+      reprobeIntervalMs: 60_000,
+      retryBaseMs: 100,
+      retryCapMs: 400,
+      retryAttempts: 3,
+      random: () => 0,
+    });
+
+    const result = client.listWorkspaces();
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(result).resolves.toEqual({ workspaces: [] });
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(client.consumeRetryCount()).toBe(1);
+    client.stop();
+  });
+
+  it("surfaces exhausted transport state and retry count", async () => {
+    vi.useFakeTimers();
+    const transportFailure = Object.assign(
+      new Error("write ECONNRESET"),
+      { code: 1, stderr: "write ECONNRESET" },
+    );
+    const exec = vi.fn().mockRejectedValue(transportFailure);
+    const client = wrapCliWithSelfHeal(new CmuxClient({ exec, bin: "cmux" }), {
+      socketPath: "/tmp/retry-exhausted.sock",
+      reprobeIntervalMs: 60_000,
+      retryBaseMs: 100,
+      retryCapMs: 400,
+      retryAttempts: 3,
+      random: () => 0,
+    });
+
+    const result = client.listWorkspaces();
+    const rejection = expect(result).rejects.toMatchObject({
+      retry_count: 2,
+      transport_state: "write_failed",
+    });
+    await vi.advanceTimersByTimeAsync(200);
+
+    await rejection;
+    expect(exec).toHaveBeenCalledTimes(3);
+    client.stop();
+  });
+
+  it("does not replay a mutation after a post-response transport failure", async () => {
+    const socketPath = join(tmpdir(), `cmux-response-${process.pid}.sock`);
+    const exec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const cli = new CmuxClient({
+      exec,
+      bin: "cmux",
+    });
+    const responseFailure = Object.assign(
+      new CmuxSocketError("connection reset after response", "connection_error"),
+      { transport_phase: "response" },
+    );
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      closeSurface: vi.fn().mockRejectedValue(responseFailure),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+    });
+
+    await expect(
+      client.closeSurface("surface:1", { workspace: "workspace:1" }),
+    ).rejects.toBe(responseFailure);
+    expect(exec).not.toHaveBeenCalled();
+    client.stop();
+  });
+
   it("flushes queued failed payloads sequentially", async () => {
     const socketPath = join(tmpdir(), `cmux-queue-seq-${process.pid}.sock`);
     let activeFlushes = 0;
@@ -450,7 +538,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       send: vi
         .fn()
         .mockRejectedValue(
-          new CmuxSocketError("Socket error: ECONNRESET", "connection_error"),
+          new CmuxSocketError("Socket error: ECONNRESET", "connection_error", {
+            transportPhase: "write",
+          }),
         ),
       ping: vi
         .fn()

@@ -162,6 +162,11 @@ export interface CmuxStatusEntry {
   color?: string;
 }
 
+export interface CmuxStatusUpdate extends CmuxStatusEntry {
+  workspace?: string;
+  surface?: string;
+}
+
 export interface ToolResult {
   ok: boolean;
   surface?: string;

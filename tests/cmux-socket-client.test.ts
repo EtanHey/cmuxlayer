@@ -602,6 +602,22 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     // No throw = success
   });
 
+  it("sends a 12-entry status batch through one persistent connection", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.setStatuses(
+      Array.from({ length: 12 }, (_, index) => ({
+        key: `agent-${index}`,
+        value: "working",
+      })),
+    );
+
+    expect(connectionCount).toBe(1);
+    expect(
+      mockEvents.filter((event) => event.type === "v1"),
+    ).toHaveLength(12);
+  });
+
   it("authenticates before V1 commands when password is configured", async () => {
     const client = new CmuxSocketClient({
       socketPath: MOCK_SOCKET_PATH,
@@ -1412,7 +1428,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
     }
   });
 
-  it("flushes a failed mutating socket call through CLI fallback", async () => {
+  it("does not replay a mutation when the socket closes after receiving it", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "cmux-state-"));
     const firstSocketPath = join(stateDir, "first.sock");
     fs.writeFileSync(
@@ -1445,21 +1461,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         client.send("surface:1", "do-not-duplicate", {
           workspace: "workspace:1",
         }),
-      ).resolves.toBeUndefined();
+      ).rejects.toMatchObject({ transport_phase: "response" });
       expect(first.seenMethods).toContain("surface.send_text");
-      expect(exec).toHaveBeenCalledWith(
-        "cmux",
-        [
-          "--json",
-          "send",
-          "--surface",
-          "surface:1",
-          "--workspace",
-          "workspace:1",
-          "do-not-duplicate",
-        ],
-        expect.objectContaining({ CMUX_SOCKET_PATH: firstSocketPath }),
-      );
+      expect(exec).not.toHaveBeenCalled();
       expect(getTransportHealth(client)).toMatchObject({
         mode: "cli",
         degraded: true,
