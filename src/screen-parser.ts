@@ -9,10 +9,11 @@ import type {
 import { modelContextWindow } from "./harness-session.js";
 
 // AIDEV-NOTE: DEFAULT context window sizes per model family. Verified numbers (researcher,
-// BrainLayer brainbar-8a3da79c-159, 2026-06-04) — do NOT guess/round. This is the SCREEN-PARSER
-// FALLBACK only: when the harness JSONL is available it carries the real per-session window
-// (esp. Codex's model_context_window) and supersedes this table — see harness-session.ts +
-// docs/harness-jsonl-field-map.md. All Claude models default to 200K; the 1M tier is detected
+// BrainLayer brainbar-8a3da79c-159, 2026-06-04; gpt-5.6: Etan web-verify + fleet rules doc §10,
+// 2026-07-11) — do NOT guess/round. This is the SCREEN-PARSER FALLBACK only: harness JSONL
+// normally carries the real per-session window, but an explicitly versioned verified rule can
+// floor a stale smaller CLI value — see harness-session.ts + docs/harness-jsonl-field-map.md.
+// All Claude models default to 200K; the 1M tier is detected
 // via version-aware rules, "(1M" suffix, or token_count > 200K (Claude-only — it's the Claude
 // Max/standard tier).
 // ORDER MATTERS: resolveModelMax uses substring matching — longer keys must come first.
@@ -22,7 +23,9 @@ export const MODEL_MAX_TOKENS: Record<string, number> = {
   opus: 200_000,
   sonnet: 200_000,
   haiku: 200_000,
-  // OpenAI GPT-5 / Codex family — 400K TOTAL window (272K input + 128K output). NOT 1M.
+  // OpenAI GPT-5.6 / Codex family — whole family is 1.05M.
+  "gpt-5.6": 1_050_000,
+  // OpenAI generic GPT-5 / Codex family — 400K TOTAL window (272K input + 128K output).
   "gpt-5": 400_000,
   // OpenAI GPT-4 family (gpt-4o, gpt-4-turbo)
   "gpt-4": 128_000,

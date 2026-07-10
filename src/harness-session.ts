@@ -32,10 +32,13 @@ export interface HarnessSessionState {
 }
 
 // AIDEV-NOTE: Verified per-model context windows (researcher, BrainLayer brainbar-8a3da79c-159,
-// 2026-06-04). Used ONLY as the Claude denominator (Claude JSONL has no window) and as the
-// no-JSONL fallback. Codex NEVER uses this — it carries model_context_window in-JSONL per session.
-// Ordered longest-key-first via length sort below for deterministic substring matching.
-const MODEL_WINDOW_RULES: Array<[RegExp, number]> = [
+// 2026-06-04; gpt-5.6: Etan web-verify + fleet rules doc §10, 2026-07-11). Used as the
+// Claude denominator (Claude JSONL has no window), the no-JSONL fallback, and a floor only
+// for explicitly versioned Codex rules when a lagging CLI reports a smaller session window.
+// Rules are checked in order, so specific versions must precede generic family matches.
+const MODEL_WINDOW_RULES: Array<
+  [pattern: RegExp, window: number, jsonlFloor?: boolean]
+> = [
   // Claude — current gen ships 1M standard (Opus 4.6/4.7/4.8, Sonnet 4.6)
   [/(opus-4-?[678])|(sonnet-4-?6)/, 1_000_000],
   // Claude — Fable (Mythos tier) ships 1M standard. A live 151% reading proved it was
@@ -43,7 +46,9 @@ const MODEL_WINDOW_RULES: Array<[RegExp, number]> = [
   [/fable/, 1_000_000],
   // Claude — 200K tier (Haiku, and 4.0–4.5 generation incl. opus-4-1)
   [/haiku|(sonnet-4(?!-6))|(opus-4(?!-?[678]))|(opus-4-1)/, 200_000],
-  // OpenAI GPT-5 / Codex family — 400K total window (272K input + 128K output)
+  // OpenAI GPT-5.6 / Codex family — whole family is 1.05M.
+  [/gpt-5[.-]6(?:$|[^0-9])/, 1_050_000, true],
+  // OpenAI generic GPT-5 / Codex family — 400K total window (272K input + 128K output)
   [/gpt-5/, 400_000],
   // OpenAI GPT-4 family
   [/gpt-4/, 128_000],
@@ -54,13 +59,23 @@ const MODEL_WINDOW_RULES: Array<[RegExp, number]> = [
 /**
  * Resolve a model's context window from the verified table.
  * Returns null for unknown models — NEVER a wrong 1M.
- * NOTE: Codex must prefer its in-JSONL model_context_window over this.
+ * NOTE: Codex normally prefers its in-JSONL model_context_window; explicitly versioned
+ * rules may provide a verified larger floor when the client CLI lags model reality.
  */
 export function modelContextWindow(model: string | null): number | null {
   if (!model) return null;
   const lower = model.toLowerCase().trim();
   for (const [re, window] of MODEL_WINDOW_RULES) {
     if (re.test(lower)) return window;
+  }
+  return null;
+}
+
+function modelContextWindowJsonlFloor(model: string | null): number | null {
+  if (!model) return null;
+  const lower = model.toLowerCase().trim();
+  for (const [re, window, jsonlFloor] of MODEL_WINDOW_RULES) {
+    if (jsonlFloor && re.test(lower)) return window;
   }
   return null;
 }
@@ -292,11 +307,18 @@ function parseCodex(events: Record<string, unknown>[]): HarnessSessionState {
       }
     }
   }
+  const verifiedWindowFloor = modelContextWindowJsonlFloor(model);
+  if (verifiedWindowFloor !== null) {
+    // Client CLIs can lag model reality (codex-cli 0.144.1 reports 353400 for gpt-5.6).
+    // Prefer the larger denominator: undersizing wrongly retires orchestrated seats, while
+    // unknown models retain JSONL as their only signal because they have no verified floor.
+    window = window === null ? verifiedWindowFloor : Math.max(window, verifiedWindowFloor);
+  }
   return {
     harness: "codex",
     model,
     tokens_used: tokensUsed,
-    context_window: window, // ALWAYS the in-JSONL value; never the table
+    context_window: window,
     context_pct: pct(tokensUsed, window),
     last_text: lastText,
     last_tool: lastTool,
