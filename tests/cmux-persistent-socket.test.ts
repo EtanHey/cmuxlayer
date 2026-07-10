@@ -1,4 +1,5 @@
 import net from "node:net";
+import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -163,8 +164,17 @@ describe("CmuxPersistentSocket V1 demux", () => {
       const first = socket.call("list_workspaces");
       const second = socket.call("list_panes");
 
-      await expect(first).rejects.toMatchObject({ code: "protocol_error" });
-      await expect(second).rejects.toMatchObject({ code: "protocol_error" });
+      const results = await Promise.allSettled([first, second]);
+      expect(results).toEqual([
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ code: "protocol_error" }),
+        }),
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ code: "protocol_error" }),
+        }),
+      ]);
       expect(received).toHaveLength(2);
     } finally {
       socket.disconnect();
@@ -198,8 +208,17 @@ describe("CmuxPersistentSocket V1 demux", () => {
     try {
       const first = socket.call("list_workspaces");
       const second = socket.call("list_panes");
-      await expect(first).rejects.toMatchObject({ code: "protocol_error" });
-      await expect(second).rejects.toMatchObject({ code: "protocol_error" });
+      const results = await Promise.allSettled([first, second]);
+      expect(results).toEqual([
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ code: "protocol_error" }),
+        }),
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({ code: "protocol_error" }),
+        }),
+      ]);
 
       await expect(socket.sendLine("set_status after malformed")).resolves.toBe(
         "OK",
@@ -207,5 +226,86 @@ describe("CmuxPersistentSocket V1 demux", () => {
     } finally {
       socket.disconnect();
     }
+  });
+
+  it("attaches a socket error listener before writing each V2 payload", async () => {
+    const events: string[] = [];
+    let capturedPayload = "";
+    class FakeSocket extends EventEmitter {
+      destroyed = false;
+
+      once(event: string, listener: (...args: unknown[]) => void): this {
+        if (event === "error") events.push("once:error");
+        return super.once(event, listener);
+      }
+
+      write(payload: string, callback?: () => void): boolean {
+        events.push("write");
+        capturedPayload = payload;
+        callback?.();
+        return true;
+      }
+
+      destroy(): void {
+        this.destroyed = true;
+      }
+    }
+
+    const socket = new CmuxPersistentSocket({ timeoutMs: 500 });
+    (socket as unknown as { connected: boolean }).connected = true;
+    (socket as unknown as { socket: FakeSocket }).socket = new FakeSocket();
+
+    const result = socket.call("system.ping");
+    await Promise.resolve();
+    expect(capturedPayload).toContain("system.ping");
+    expect(events.slice(0, 2)).toEqual(["once:error", "write"]);
+    const request = JSON.parse(capturedPayload.trim()) as { id: string };
+    (
+      socket as unknown as {
+        buffer: string;
+        processBuffer: () => void;
+      }
+    ).buffer = `${JSON.stringify({
+      id: request.id,
+      ok: true,
+      result: { pong: true },
+    })}\n`;
+    (
+      socket as unknown as {
+        processBuffer: () => void;
+      }
+    ).processBuffer();
+    await expect(result).resolves.toEqual({ pong: true });
+    socket.disconnect();
+  });
+
+  it("rejects and clears pending V2 state when a write throws EPIPE", async () => {
+    class ThrowingSocket extends EventEmitter {
+      destroyed = false;
+
+      write(): boolean {
+        const error = new Error("write EPIPE");
+        (error as NodeJS.ErrnoException).code = "EPIPE";
+        throw error;
+      }
+
+      destroy(): void {
+        this.destroyed = true;
+      }
+    }
+
+    const socket = new CmuxPersistentSocket({ timeoutMs: 500 });
+    (socket as unknown as { connected: boolean }).connected = true;
+    (socket as unknown as { socket: ThrowingSocket }).socket =
+      new ThrowingSocket();
+
+    await expect(socket.call("system.ping")).rejects.toMatchObject({
+      name: "CmuxSocketError",
+      code: "connection_error",
+    });
+    expect(
+      (socket as unknown as { pending: Map<string, unknown> }).pending.size,
+    ).toBe(0);
+    socket.disconnect();
   });
 });

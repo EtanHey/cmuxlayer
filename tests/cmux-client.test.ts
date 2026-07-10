@@ -1,5 +1,21 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
+
+const STANDARD_BUNDLED_CMUX =
+  "/Applications/cmux.app/Contents/Resources/bin/cmux";
+const savedBundledCliPath = process.env.CMUX_BUNDLED_CLI_PATH;
+
+beforeEach(() => {
+  delete process.env.CMUX_BUNDLED_CLI_PATH;
+});
+
+afterEach(() => {
+  if (savedBundledCliPath === undefined) {
+    delete process.env.CMUX_BUNDLED_CLI_PATH;
+  } else {
+    process.env.CMUX_BUNDLED_CLI_PATH = savedBundledCliPath;
+  }
+});
 
 function mockExec(response: object | string): ExecFn {
   const stdout =
@@ -9,7 +25,7 @@ function mockExec(response: object | string): ExecFn {
 
 function mockClient(response: object | string) {
   const exec = mockExec(response);
-  const client = new CmuxClient({ exec });
+  const client = new CmuxClient({ exec, existsSync: () => false });
   return { client, exec };
 }
 
@@ -178,7 +194,7 @@ describe("CmuxClient.newSplit", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({ stdout: JSON.stringify(split), stderr: "" });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await client.newSplit("left", {
       workspace: "workspace:1",
@@ -229,7 +245,7 @@ describe("CmuxClient.newSplit", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({ stdout: JSON.stringify(split), stderr: "" });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await client.newSplit("left", {
       workspace: "workspace:1",
@@ -489,7 +505,7 @@ describe("CmuxClient.pasteText", () => {
 describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
   it("forwards CMUX_SOCKET_PATH to an injected exec when env is set", async () => {
     const exec = mockExec({});
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
     client.setEnv({ ...process.env, CMUX_SOCKET_PATH: "/tmp/nightly.sock" });
 
     await client.pasteText("surface:1", "hello", { workspace: "workspace:1" });
@@ -506,7 +522,7 @@ describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
 
   it("does not pass an env argument to an injected exec when env is unset", async () => {
     const exec = mockExec({});
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await client.selectWorkspace("workspace:1");
 
@@ -516,6 +532,95 @@ describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
       "select-workspace",
       "--workspace",
       "workspace:1",
+    ]);
+  });
+});
+
+describe("CmuxClient CLI binary resolution", () => {
+  it("uses explicit opts.bin before any bundled cmux env", async () => {
+    const exec = mockExec({ workspaces: [] });
+    const client = new CmuxClient({
+      exec,
+      bin: "/tmp/custom-cmux",
+      env: {
+        ...process.env,
+        CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+      },
+    });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith(
+      "/tmp/custom-cmux",
+      ["--json", "list-workspaces"],
+      expect.objectContaining({
+        CMUX_BUNDLED_CLI_PATH:
+          "/Applications/cmux.app/Contents/Resources/bin/cmux",
+      }),
+    );
+  });
+
+  it("execs the absolute bundled cmux path from the per-run env", async () => {
+    const exec = mockExec({ workspaces: [] });
+    const bundledPath = "/Applications/cmux.app/Contents/Resources/bin/cmux";
+    const client = new CmuxClient({ exec, existsSync: () => false });
+    client.setEnv({
+      ...process.env,
+      CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+      CMUX_BUNDLED_CLI_PATH: bundledPath,
+    });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith(
+      bundledPath,
+      ["--json", "list-workspaces"],
+      expect.objectContaining({
+        CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+        CMUX_BUNDLED_CLI_PATH: bundledPath,
+      }),
+    );
+    expect(bundledPath.startsWith("/")).toBe(true);
+  });
+
+  it("execs the absolute bundled cmux path from process.env when no per-run env is set", async () => {
+    const exec = mockExec({ workspaces: [] });
+    process.env.CMUX_BUNDLED_CLI_PATH =
+      "/Applications/cmux.app/Contents/Resources/bin/cmux";
+    const client = new CmuxClient({ exec, existsSync: () => false });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith(process.env.CMUX_BUNDLED_CLI_PATH, [
+      "--json",
+      "list-workspaces",
+    ]);
+  });
+
+  it("probes the standard bundled cmux location before falling back to PATH", async () => {
+    const exec = mockExec({ workspaces: [] });
+    const client = new CmuxClient({
+      exec,
+      existsSync: (candidate) => candidate === STANDARD_BUNDLED_CMUX,
+    });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith(STANDARD_BUNDLED_CMUX, [
+      "--json",
+      "list-workspaces",
+    ]);
+  });
+
+  it("uses bare cmux only as the last resort", async () => {
+    const exec = mockExec({ workspaces: [] });
+    const client = new CmuxClient({ exec, existsSync: () => false });
+
+    await client.listWorkspaces();
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "list-workspaces",
     ]);
   });
 });
@@ -683,7 +788,7 @@ describe("CmuxClient.listStatus", () => {
       ].join("\n"),
       stderr: "",
     });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     const result = await client.listStatus({ workspace: "workspace:1" });
 
@@ -778,7 +883,7 @@ describe("CmuxClient CLI error handling", () => {
         stderr: "surface not found",
       }),
     );
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await expect(client.readScreen("surface:999")).rejects.toThrow();
   });
@@ -790,7 +895,7 @@ describe("CmuxClient CLI error handling", () => {
         stderr: "surface not found",
       }),
     );
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await expect(client.readScreen("surface:999")).rejects.toThrow(
       /surface not found/,
@@ -802,7 +907,7 @@ describe("CmuxClient CLI error handling", () => {
       stdout: "not json",
       stderr: "",
     });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, existsSync: () => false });
 
     await expect(client.listWorkspaces()).rejects.toThrow(
       /invalid JSON.*list-workspaces/i,

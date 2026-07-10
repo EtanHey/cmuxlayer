@@ -11,9 +11,9 @@ import * as net from "node:net";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CmuxSocketClient } from "../src/cmux-socket-client.js";
 import { createCmuxClient } from "../src/cmux-client-factory.js";
 import { stateSocketPath } from "../src/cmux-socket-path.js";
+import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
 
@@ -107,7 +107,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       });
 
       // Authoritative pin: a down pin falls back to CLI, NOT the other live one.
-      expect(client).not.toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "cli",
+        degraded: true,
+      });
       expect(logger.error).not.toHaveBeenCalledWith(
         expect.stringContaining(otherInstance),
       );
@@ -127,7 +130,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
         logger,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: mine,
+      });
       // Pinned: no ambiguity warning even though it bound to a socket.
       expect(logger.error).not.toHaveBeenCalledWith(
         expect.stringContaining("live cmux sockets found"),
@@ -157,7 +164,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
         logger,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: first,
+      });
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining("live cmux sockets found"),
       );
@@ -185,7 +196,11 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
         logger,
       });
 
-      expect(client).toBeInstanceOf(CmuxSocketClient);
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: only,
+      });
       expect(logger.error).not.toHaveBeenCalledWith(
         expect.stringContaining("live cmux sockets found"),
       );

@@ -13,6 +13,23 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-control-health-test");
+const ACCESS_CONTROL_DENIED_TEXT =
+  "Access denied — only processes started inside cmux can connect";
+
+async function advanceTimers(ms: number): Promise<void> {
+  const advanceAsync = (
+    vi as unknown as {
+      advanceTimersByTimeAsync?: (value: number) => Promise<void>;
+    }
+  ).advanceTimersByTimeAsync;
+  if (advanceAsync) {
+    await advanceAsync.call(vi, ms);
+  } else {
+    vi.advanceTimersByTime(ms);
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+}
 
 function createHealthNotificationEngine() {
   const stateDir = join(TEST_ROOT, `engine-${Date.now()}-${Math.random()}`);
@@ -311,6 +328,44 @@ describe("control health", () => {
     }
   });
 
+  it("surfaces cmux access-control transport denial in selected transport and warnings", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-denied");
+    const tmp = join(TEST_ROOT, "tmp-denied");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    const socketPath = join(tmp, "cmux-denied.sock");
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "/bin", CMUX_SOCKET_PATH: socketPath },
+      client: {
+        constructor: { name: "CmuxSelfHealingClient" },
+        getTransportHealth: () => ({
+          mode: "cli",
+          degraded: true,
+          current_socket_path: socketPath,
+          denied_reason: "access-control",
+          last_error: ACCESS_CONTROL_DENIED_TEXT,
+        }),
+      },
+      execFile: async () => ({ stdout: "" }),
+      now: () => new Date("2026-07-10T12:00:00.000Z"),
+    });
+
+    expect(health.selected_transport).toMatchObject({
+      transport_mode: "cli",
+      transport_degraded: true,
+      current_socket_path: socketPath,
+      transport_denied: "access-control",
+      transport_error: ACCESS_CONTROL_DENIED_TEXT,
+    });
+    expect(health.warnings).toContain(
+      `cmuxlayer control transport denied: access-control; ${ACCESS_CONTROL_DENIED_TEXT}`,
+    );
+    expect(formatControlHealth(health)).toContain(ACCESS_CONTROL_DENIED_TEXT);
+  });
+
   it("periodically appends control health snapshots without tool invocation", async () => {
     vi.useFakeTimers();
     rmSync(TEST_ROOT, { recursive: true, force: true });
@@ -367,7 +422,7 @@ describe("control health", () => {
     });
 
     createServer({ context });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await advanceTimers(10_000);
 
     context.dispose();
     const lines = readFileSync(join(TEST_ROOT, "events.jsonl"), "utf8")

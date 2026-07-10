@@ -80,6 +80,8 @@ export interface ControlHealth {
     current_socket_path?: string;
     transport_mode?: "socket" | "cli";
     transport_degraded?: boolean;
+    transport_denied?: "access-control";
+    transport_error?: string;
   };
   cmux_instances: {
     production: CmuxInstanceHealth;
@@ -314,6 +316,12 @@ function describeClient(client: unknown): ControlHealth["selected_transport"] {
       ? {
           transport_mode: transportHealth.mode,
           transport_degraded: transportHealth.degraded,
+          ...(transportHealth.denied_reason
+            ? { transport_denied: transportHealth.denied_reason }
+            : {}),
+          ...(transportHealth.last_error
+            ? { transport_error: transportHealth.last_error }
+            : {}),
         }
       : {}),
   };
@@ -373,6 +381,13 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   }
 
   if (
+    health.selected_transport.transport_denied === "access-control" &&
+    health.selected_transport.transport_error
+  ) {
+    warnings.push(
+      `cmuxlayer control transport denied: access-control; ${health.selected_transport.transport_error}`,
+    );
+  } else if (
     health.selected_transport.transport_degraded === true &&
     !warnings.some((warning) => warning.includes("transport degraded"))
   ) {
@@ -536,6 +551,12 @@ export function formatControlHealth(health: ControlHealth): string {
         ? ` (${health.selected_transport.current_socket_path})`
         : ""
     }`,
+    ...(health.selected_transport.transport_denied
+      ? [
+          `transport_denied: ${health.selected_transport.transport_denied}`,
+          `transport_error: ${health.selected_transport.transport_error ?? "unknown"}`,
+        ]
+      : []),
     `env CMUX_SOCKET_PATH: ${health.current_process.env.CMUX_SOCKET_PATH ?? "unset"}`,
     `env CMUX_BUNDLED_CLI_PATH: ${health.current_process.env.CMUX_BUNDLED_CLI_PATH ?? "unset"}`,
     "cmux resolution:",

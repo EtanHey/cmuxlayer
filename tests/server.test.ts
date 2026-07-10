@@ -97,11 +97,44 @@ function makePhantomNoBootPrompt(): string {
 }
 
 async function advanceTimers(ms: number): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  vi.advanceTimersByTime(ms);
-  await Promise.resolve();
-  await Promise.resolve();
+  const advanceAsync = (
+    vi as unknown as {
+      advanceTimersByTimeAsync?: (value: number) => Promise<void>;
+    }
+  ).advanceTimersByTimeAsync;
+  if (advanceAsync) {
+    await advanceAsync.call(vi, ms);
+    return;
+  }
+  const flush = async () => {
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+    }
+  };
+  vi.advanceTimersByTime(0);
+  await flush();
+  let remaining = ms;
+  while (remaining > 0) {
+    const step = Math.min(remaining, 50);
+    vi.advanceTimersByTime(step);
+    await flush();
+    remaining -= step;
+  }
+  vi.advanceTimersByTime(0);
+  await flush();
+}
+
+function setFakeSystemTime(now: Date): void {
+  const setSystemTime = (
+    vi as unknown as {
+      setSystemTime?: (value: Date) => void;
+    }
+  ).setSystemTime;
+  if (setSystemTime) {
+    setSystemTime.call(vi, now);
+  } else {
+    vi.useFakeTimers({ now });
+  }
 }
 
 describe("createServer", () => {
@@ -401,7 +434,7 @@ describe("Claude channels", () => {
 
   it("includes health issue summary in health channel notifications", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-05T12:00:00.000Z"));
+    setFakeSystemTime(new Date("2026-07-05T12:00:00.000Z"));
     rmSync(CHANNEL_TEST_DIR, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     const inboxDir = join(CHANNEL_TEST_DIR, "inbox");
@@ -3872,7 +3905,7 @@ describe("tool handler integration", () => {
     expect(parsed.status).toBe("delivering");
     expect(parsed.submit_verified).toBeNull();
 
-    await vi.advanceTimersByTimeAsync(3_000);
+    await advanceTimers(3_000);
 
     const readAfterDelivery = await readTool.handler(
       { surface: "surface:agent-bg", parsed_only: true },
@@ -3962,7 +3995,7 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceTimers(6_000);
     const result = await resultPromise;
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -4046,7 +4079,7 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
-    await vi.advanceTimersByTimeAsync(250);
+    await advanceTimers(250);
     const result = await resultPromise;
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -4129,7 +4162,7 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
-    await vi.advanceTimersByTimeAsync(6_000);
+    await advanceTimers(6_000);
     const result = await resultPromise;
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
