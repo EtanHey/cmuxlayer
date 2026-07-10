@@ -401,21 +401,27 @@ async function checkDaemonIntegrity(
     };
   }
 
-  if (probe.transportDegraded && probe.currentSocketPath) {
+  if (probe.transportDegraded) {
+    const pinnedSocketPath = env.CMUX_SOCKET_PATH?.trim();
+    const cmuxSocketPath = pinnedSocketPath || probe.currentSocketPath;
+    let cmuxSocketUsable = false;
     try {
-      const cmuxProbe = await (
-        opts.probeCmuxSocket ?? ((path) => probeSocketHealth(path))
-      )(probe.currentSocketPath);
-      if (cmuxProbe.usable) {
-        return {
-          ...base,
-          ok: false,
-          note: "daemon transport degraded while cmux socket alive (stale-daemon-on-dead-socket class)",
-        };
+      if (cmuxSocketPath) {
+        const cmuxProbe = await (
+          opts.probeCmuxSocket ?? ((path) => probeSocketHealth(path))
+        )(cmuxSocketPath);
+        cmuxSocketUsable = cmuxProbe.usable;
       }
     } catch {
-      // A failed cmux probe cannot establish the specific live-socket fault.
+      // A failed probe is the socket-down branch, but degraded is always red.
     }
+    return {
+      ...base,
+      ok: false,
+      note: cmuxSocketUsable
+        ? "daemon transport degraded while cmux socket alive (access-control denial class; stale-daemon-on-dead-socket class)"
+        : "daemon transport degraded while cmux socket down (app not running)",
+    };
   }
 
   return {

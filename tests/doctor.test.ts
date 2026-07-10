@@ -1,7 +1,7 @@
 import net from "node:net";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkMcpConfigDrift,
   detectRuntimeProvenance,
@@ -322,6 +322,73 @@ describe("runDoctor — report shape", () => {
       /daemon transport degraded while cmux socket alive.*stale-daemon-on-dead-socket class/i,
     );
     expect(report.healthy).toBe(false);
+  });
+
+  it("never reports a degraded daemon healthy when the cmux socket is down", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-degraded-down-${process.pid}.sock`);
+    const cmuxPath = join("/tmp", `cmuxlayer-doctor-down-cmux-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      degraded: true,
+      cmuxSocketPath: cmuxPath,
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: ({ running }) => ({
+        stale: false,
+        running: running ?? "unknown",
+        installed: "0.3.33",
+      }),
+      probeCmuxSocket: async (socketPath) => ({
+        usable: false,
+        socketPath,
+        error: "connect ECONNREFUSED",
+      }),
+    });
+
+    expect(report.daemon.ok).toBe(false);
+    expect(report.daemon.note).toMatch(
+      /daemon transport degraded.*cmux socket down.*app not running/i,
+    );
+    expect(report.healthy).toBe(false);
+  });
+
+  it("probes the CMUX_SOCKET_PATH pin instead of the daemon-reported default", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-degraded-pin-${process.pid}.sock`);
+    const reportedPath = join("/tmp", `cmuxlayer-doctor-reported-${process.pid}.sock`);
+    const pinnedPath = join("/tmp", `cmuxlayer-doctor-pinned-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      degraded: true,
+      cmuxSocketPath: reportedPath,
+    });
+    const probeCmuxSocket = vi.fn(async (socketPath: string) => ({
+      usable: socketPath === pinnedPath,
+      socketPath,
+    }));
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: {
+        CMUXLAYER_DAEMON_SOCKET: path,
+        CMUX_SOCKET_PATH: pinnedPath,
+      },
+      brew: makeBrew({}),
+      detectStaleBuild: ({ running }) => ({
+        stale: false,
+        running: running ?? "unknown",
+        installed: "0.3.33",
+      }),
+      probeCmuxSocket,
+    });
+
+    expect(probeCmuxSocket).toHaveBeenCalledWith(pinnedPath);
+    expect(probeCmuxSocket).not.toHaveBeenCalledWith(reportedPath);
+    expect(report.daemon.ok).toBe(false);
+    expect(report.daemon.note).toMatch(/access-control denial class/i);
   });
 
   it("flags a listening but unresponsive daemon with the probe error", async () => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import net from "node:net";
-import { mkdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
@@ -362,6 +362,7 @@ export class CmuxLayerDaemon {
   ) => StaleBuildResult | null;
   private readonly staleCheckIntervalMs: number;
   private readonly logger: Pick<Console, "error">;
+  private ownedSocketIdentity: { dev: number; ino: number } | null = null;
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
@@ -399,19 +400,21 @@ export class CmuxLayerDaemon {
       await this.listen({ fd: this.listenFd });
     } else {
       await this.listen(this.socketPath);
+      const stats = await lstat(this.socketPath);
+      this.ownedSocketIdentity = { dev: stats.dev, ino: stats.ino };
     }
     this.startStaleBuildWatcher();
   }
 
   async shutdown(
-    _signal: DaemonShutdownReason = "manual",
+    signal: DaemonShutdownReason = "manual",
   ): Promise<DaemonShutdownResult> {
     if (this.shutdownPromise) {
       return this.shutdownPromise;
     }
 
     this.clearStaleBuildWatcher();
-    this.shutdownPromise = this.doShutdown();
+    this.shutdownPromise = this.doShutdown(signal);
     return this.shutdownPromise;
   }
 
@@ -530,10 +533,31 @@ export class CmuxLayerDaemon {
     }
   }
 
-  private async doShutdown(): Promise<DaemonShutdownResult> {
+  private async doShutdown(
+    reason: DaemonShutdownReason,
+  ): Promise<DaemonShutdownResult> {
     this.draining = true;
     this.pauseActiveTransports();
     const listenerClosed = this.closeListener();
+
+    const retiring =
+      reason === "stale-build" || reason === "irrecoverable-transport";
+    if (retiring) {
+      const forced = this.inFlightRequests > 0;
+      for (const transport of [...this.activeTransports]) {
+        transport.destroy();
+      }
+      for (const server of [...this.activeServers]) {
+        await server.close().catch(() => {});
+      }
+      await listenerClosed;
+      this.context?.dispose();
+      return {
+        forced,
+        activeConnections: this.activeTransports.size,
+        inFlightRequests: this.inFlightRequests,
+      };
+    }
 
     const forced = !(await this.waitForDrain());
     for (const server of [...this.activeServers]) {
@@ -627,14 +651,61 @@ export class CmuxLayerDaemon {
     });
   }
 
-  private closeListener(): Promise<void> {
+  private async closeListener(): Promise<void> {
     const server = this.server;
     if (!server) {
-      return Promise.resolve();
+      return;
     }
-    return new Promise((resolve) => {
+    const detachedSocket = await this.detachOwnedSocketPath();
+    await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
+    if (detachedSocket?.restore) {
+      await rename(detachedSocket.path, this.socketPath);
+    } else if (detachedSocket) {
+      await unlink(detachedSocket.path).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") {
+            throw error;
+          }
+        },
+      );
+    }
+  }
+
+  private async detachOwnedSocketPath(): Promise<{
+    path: string;
+    restore: boolean;
+  } | null> {
+    if (this.listenFd !== undefined || !this.ownedSocketIdentity) {
+      return null;
+    }
+
+    let current: Awaited<ReturnType<typeof lstat>>;
+    try {
+      current = await lstat(this.socketPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        await writeFile(this.socketPath, "", { flag: "wx" });
+        return null;
+      }
+      throw error;
+    }
+
+    if (
+      current.dev !== this.ownedSocketIdentity.dev ||
+      current.ino !== this.ownedSocketIdentity.ino
+    ) {
+      const shelteredPath = `${this.socketPath}.foreign-${process.pid}-${Date.now()}`;
+      await rename(this.socketPath, shelteredPath);
+      await writeFile(this.socketPath, "", { flag: "wx" });
+      return { path: shelteredPath, restore: true };
+    }
+
+    const detachedPath = `${this.socketPath}.closing-${process.pid}-${Date.now()}`;
+    await rename(this.socketPath, detachedPath);
+    await writeFile(this.socketPath, "", { flag: "wx" });
+    return { path: detachedPath, restore: false };
   }
 
   private waitForDrain(): Promise<boolean> {

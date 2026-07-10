@@ -435,6 +435,73 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("preserves denial evidence across non-denial failures until a usable socket probe", () => {
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath: "/tmp/cmux-preserve-denial.sock",
+      reprobeIntervalMs: 60_000,
+    });
+    const internals = client as any;
+
+    internals.recordProbeResult({
+      usable: false,
+      socketPath: "/tmp/cmux-preserve-denial.sock",
+      error: "write EPIPE",
+    });
+    internals.recordCliFailure(new Error("Broken pipe (errno 32)"));
+
+    internals.recordProbeResult({
+      usable: false,
+      socketPath: "/tmp/cmux-preserve-denial.sock",
+      error: "connect ECONNREFUSED",
+    });
+    internals.recordProbeFailure(new Error("probe timeout"));
+    internals.recordCliFailure(new Error("connect ENOENT"));
+
+    expect(internals.denialProbeFailures).toBe(1);
+    expect(internals.cliDenialFailures).toBe(1);
+
+    internals.recordProbeResult({
+      usable: true,
+      socketPath: "/tmp/cmux-preserve-denial.sock",
+    });
+
+    expect(internals.denialProbeFailures).toBe(0);
+    expect(internals.denialProbeStartedAt).toBeNull();
+    expect(internals.cliDenialFailures).toBe(0);
+    client.stop();
+  });
+
+  it("rate-limits denial evidence progress logs", () => {
+    let now = 1_000;
+    const logger = { error: vi.fn() };
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath: "/tmp/cmux-denial-progress.sock",
+      logger,
+      now: () => now,
+      reprobeIntervalMs: 60_000,
+      irrecoverableMinFailures: 3,
+      irrecoverableMinDurationMs: 60_000,
+    });
+    const internals = client as any;
+    logger.error.mockClear();
+
+    internals.recordProbeDenial();
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer] denial evidence 1/3 probes, 0/3 cli, 0s",
+    );
+
+    now += 1_000;
+    internals.recordCliFailure(new Error("write EPIPE"));
+    expect(logger.error).toHaveBeenCalledTimes(1);
+
+    now += 29_000;
+    internals.recordCliFailure(new Error("write EPIPE"));
+    expect(logger.error).toHaveBeenLastCalledWith(
+      "[cmuxlayer] denial evidence 1/3 probes, 2/3 cli, 30s",
+    );
+    client.stop();
+  });
+
   it("attributes retry bookkeeping to the delegate used for that attempt", async () => {
     const client = wrapCliWithSelfHeal(new CmuxClient(), {
       socketPath: "/tmp/cmux-retry-attribution.sock",

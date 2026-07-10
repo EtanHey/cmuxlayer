@@ -1,6 +1,7 @@
 import net from "node:net";
-import { EventEmitter } from "node:events";
-import { rmSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -44,6 +45,26 @@ function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
     };
     tick();
   });
+}
+
+async function leaveRefusedUnixSocket(path: string): Promise<void> {
+  rmSync(path, { force: true });
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `require("node:net").createServer(() => {}).listen(${JSON.stringify(path)})`,
+    ],
+    { stdio: "ignore" },
+  );
+  try {
+    await waitFor(() => existsSync(path));
+  } catch (error) {
+    child.kill("SIGKILL");
+    throw error;
+  }
+  child.kill("SIGKILL");
+  await once(child, "exit");
 }
 
 function createCollector(stream: NodeJS.ReadableStream) {
@@ -202,7 +223,7 @@ class FakeDaemon {
     });
   }
 
-  async stop(): Promise<void> {
+  async stop(opts: { leaveStaleSocket?: boolean } = {}): Promise<void> {
     for (const socket of this.sockets) {
       socket.destroy();
     }
@@ -214,7 +235,11 @@ class FakeDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    rmSync(this.path, { force: true });
+    if (opts.leaveStaleSocket) {
+      await leaveRefusedUnixSocket(this.path);
+    } else {
+      rmSync(this.path, { force: true });
+    }
   }
 
   releaseHeld(method: string): void {
@@ -868,6 +893,57 @@ describe("CmuxLayerProxy", () => {
     expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
     expect(
       daemon.connections[0].messages
+        .filter((message) => "method" in message)
+        .map((message) => message.method),
+    ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
+  });
+
+  it("autostarts within two reconnect attempts after a connected daemon leaves a stale socket", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("connected-stale-restart");
+    const firstDaemon = new FakeDaemon(path, {
+      holdMethods: new Set(["tools/list"]),
+    });
+    daemons.push(firstDaemon);
+    await firstDaemon.start();
+
+    const secondDaemon = new FakeDaemon(path);
+    daemons.push(secondDaemon);
+    const reconnectAttempts: number[] = [];
+    const spawnDaemonForVersionBump = vi.fn(async () => secondDaemon.start());
+    const { input, collector } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      reconnectJitterRatio: 0,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      requestTimeoutMs: 1_000,
+      onReconnectDelay: (_delayMs, attempt) =>
+        reconnectAttempts.push(attempt),
+      spawnDaemonForVersionBump,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await collector.waitForMessage(isResponseFor(1));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+    await firstDaemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
+
+    await firstDaemon.stop({ leaveStaleSocket: true });
+    daemons.splice(daemons.indexOf(firstDaemon), 1);
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(reconnectAttempts.slice(0, 2)).toEqual([0, 1]);
+    expect(
+      secondDaemon.connections[0].messages
         .filter((message) => "method" in message)
         .map((message) => message.method),
     ).toEqual(["initialize", "notifications/initialized", "tools/list"]);

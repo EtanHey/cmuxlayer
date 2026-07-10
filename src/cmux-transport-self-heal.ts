@@ -28,6 +28,7 @@ export const DEFAULT_INTERACTIVE_RETRY_CAP_MS = 400;
 export const DEFAULT_IRRECOVERABLE_MIN_FAILURES = 3;
 export const DEFAULT_IRRECOVERABLE_MIN_DURATION_MS = 60_000;
 const UPGRADE_FAILURE_LOG_INTERVAL_MS = 30_000;
+const DENIAL_PROGRESS_LOG_INTERVAL_MS = 30_000;
 
 export interface TransportHealthSignal {
   mode: "socket" | "cli";
@@ -185,6 +186,7 @@ export class CmuxSelfHealingClient {
   private cliDenialFailures = 0;
   private irrecoverableSignaled = false;
   private lastUpgradeFailureLogAt = Number.NEGATIVE_INFINITY;
+  private lastDenialProgressLogAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly opts: CmuxSelfHealingClientOptions) {
     this.socketClient = opts.socket ?? null;
@@ -306,11 +308,7 @@ export class CmuxSelfHealingClient {
       this.socketClient !== null && delegate === this.socketClient;
     this.inFlight += 1;
     try {
-      const result = await this.callDelegate(method, args, delegate);
-      if (delegate === this.opts.cli) {
-        this.cliDenialFailures = 0;
-      }
-      return result;
+      return await this.callDelegate(method, args, delegate);
     } catch (error) {
       if (delegate === this.opts.cli) {
         this.recordCliFailure(error);
@@ -480,15 +478,11 @@ export class CmuxSelfHealingClient {
       recordTransportRetry();
       const delegate = this.delegate;
       try {
-        const result = await this.callDelegate(
+        return await this.callDelegate(
           payload.method,
           payload.args,
           delegate,
         );
-        if (delegate === this.opts.cli) {
-          this.cliDenialFailures = 0;
-        }
-        return result;
       } catch (error) {
         lastError = error;
         if (delegate === this.opts.cli) {
@@ -647,7 +641,9 @@ export class CmuxSelfHealingClient {
       (typeof result.error === "string" &&
         this.isDenialClassError(result.error));
     if (!denialClass) {
-      this.resetProbeDenial();
+      if (result.usable) {
+        this.resetDenialEvidence();
+      }
       return false;
     }
     this.recordProbeDenial();
@@ -657,9 +653,7 @@ export class CmuxSelfHealingClient {
   private recordProbeFailure(error: unknown): void {
     if (this.isDenialClassError(error)) {
       this.recordProbeDenial();
-      return;
     }
-    this.resetProbeDenial();
   }
 
   private recordProbeDenial(): void {
@@ -668,21 +662,44 @@ export class CmuxSelfHealingClient {
       this.denialProbeStartedAt = now;
     }
     this.denialProbeFailures += 1;
+    this.logDenialProgress(now);
     this.maybeSignalIrrecoverable(now);
   }
 
-  private resetProbeDenial(): void {
+  private resetDenialEvidence(): void {
     this.denialProbeFailures = 0;
     this.denialProbeStartedAt = null;
+    this.cliDenialFailures = 0;
+    this.lastDenialProgressLogAt = Number.NEGATIVE_INFINITY;
   }
 
   private recordCliFailure(error: unknown): void {
     if (!this.isDenialClassError(error)) {
-      this.cliDenialFailures = 0;
       return;
     }
     this.cliDenialFailures += 1;
-    this.maybeSignalIrrecoverable((this.opts.now ?? Date.now)());
+    const now = (this.opts.now ?? Date.now)();
+    this.logDenialProgress(now);
+    this.maybeSignalIrrecoverable(now);
+  }
+
+  private logDenialProgress(now: number): void {
+    if (
+      now - this.lastDenialProgressLogAt <
+      DENIAL_PROGRESS_LOG_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastDenialProgressLogAt = now;
+    const minFailures =
+      this.opts.irrecoverableMinFailures ?? DEFAULT_IRRECOVERABLE_MIN_FAILURES;
+    const elapsedSeconds = Math.max(
+      0,
+      Math.floor((now - (this.denialProbeStartedAt ?? now)) / 1_000),
+    );
+    this.opts.logger?.error(
+      `[cmuxlayer] denial evidence ${this.denialProbeFailures}/${minFailures} probes, ${this.cliDenialFailures}/${minFailures} cli, ${elapsedSeconds}s`,
+    );
   }
 
   private maybeSignalIrrecoverable(now: number): void {

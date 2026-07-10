@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import net from "node:net";
 import { EventEmitter, once } from "node:events";
@@ -1390,6 +1390,84 @@ describe("CmuxLayerDaemon", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toMatch(/Connection closed|closed/i);
     await client.close().catch(() => {});
+  });
+
+  it("closes client transports promptly when retirement interrupts a hung request", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("retirement-hung-request");
+    const started = deferred<void>();
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        started.resolve();
+        return new Promise(() => {});
+      }
+      return createListSurfacesExec()(_cmd, args);
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec,
+      skipAgentLifecycle: true,
+      drainTimeoutMs: 2_000,
+    });
+
+    await daemon.start();
+    const client = await connectClient(path);
+    const pending = client
+      .callTool({
+        name: "list_surfaces",
+        arguments: { verbose: false },
+      })
+      .then(
+        () => null,
+        (error) => error,
+      );
+    await started.promise;
+
+    const shutdown = daemon.shutdown("irrecoverable-transport");
+    await expect(
+      Promise.race([
+        shutdown,
+        delay(200).then(() => {
+          throw new Error("retirement left the client hanging");
+        }),
+      ]),
+    ).resolves.toMatchObject({ forced: true });
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/Connection closed|closed/i);
+    await client.close().catch(() => {});
+  });
+
+  it("unlinks its owned socket after graceful shutdown", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("owned-cleanup");
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+
+    await daemon.start();
+    expect(existsSync(path)).toBe(true);
+    await daemon.shutdown();
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("does not unlink a replacement file that it does not own", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("foreign-replacement");
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+    });
+
+    await daemon.start();
+    rmSync(path, { force: true });
+    writeFileSync(path, "replacement-owner");
+    await daemon.shutdown();
+
+    await expect(readFile(path, "utf8")).resolves.toBe("replacement-owner");
   });
 
   it("uses listen({ fd }) for socket activation without unlinking the socket path", async () => {
