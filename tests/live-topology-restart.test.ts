@@ -230,6 +230,7 @@ describe("live daemon-first restart topology", () => {
           HOMEBREW_PREFIX: join(root, "brew"),
           CMUX_SOCKET_PATH: cmuxSocket,
           CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+          CMUXLAYER_DEV: "0",
           CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
           CMUXLAYER_STALE_CHECK_INTERVAL_MS: "100",
         },
