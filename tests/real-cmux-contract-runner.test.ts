@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertOwnedDaemonSocket,
@@ -20,12 +21,15 @@ import {
   classifyProductionPin,
   cleanupPidOrder,
   daemonPidFromHealth,
+  daemonExitPidFromLog,
   daemonSpawnPidFromLog,
   extractStructuredContent,
   isAncestryDenial,
+  McpPeer,
   parseOrphanReceipt,
   probeSystemPing,
   selectTerminalSurface,
+  trackChildPid,
   waitForChildExit,
 } from "../scripts/run-real-cmux-contract.js";
 
@@ -335,6 +339,71 @@ describe("real cmux contract runner helpers", () => {
         "[cmuxlayer-proxy] daemon spawn fired (script=/tmp/dist/daemon.js, pid=unknown)",
       ),
     ).toBeNull();
+    expect(
+      daemonExitPidFromLog(
+        "[cmuxlayer-proxy] spawned daemon exited (pid=12345, code=0, signal=none)",
+      ),
+    ).toBe(12345);
+  });
+
+  it("rejects MCP requests on malformed child output instead of throwing", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+    };
+    child.pid = 4242;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const peer = new McpPeer(child as never);
+
+    const pending = peer.request("initialize");
+    child.stdout.write("not-json\n");
+
+    await expect(pending).rejects.toThrow(/malformed JSON/);
+    await expect(peer.request("tools/list")).rejects.toThrow(/malformed JSON/);
+    peer.close();
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  });
+
+  it("disposes MCP listeners and pending timers when closed", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+    };
+    child.pid = 4242;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const peer = new McpPeer(child as never);
+    const pending = peer.request("initialize", {}, 50);
+
+    peer.close();
+
+    await expect(pending).rejects.toThrow(/closed/);
+    expect(child.stdout.listenerCount("data")).toBe(0);
+    expect(child.stderr.listenerCount("data")).toBe(0);
+    expect(child.listenerCount("exit")).toBe(0);
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  });
+
+  it("removes tracked child pids as soon as the child exits", () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number };
+    child.pid = 4242;
+    const pids = new Set<number>();
+
+    trackChildPid(child, pids);
+    expect(pids).toEqual(new Set([4242]));
+    child.emit("exit", 0, null);
+    expect(pids).toEqual(new Set());
   });
 
   it("requires socket-mode health on the exact live cmux pin", () => {

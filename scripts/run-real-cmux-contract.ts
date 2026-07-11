@@ -338,6 +338,16 @@ export function daemonSpawnPidFromLog(message: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+export function daemonExitPidFromLog(message: string): number | null {
+  const matches = [
+    ...message.matchAll(/spawned daemon exited \(pid=(\d+),[^\n]*\)/g),
+  ];
+  const match = matches.at(-1);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
 export function assertLiveHealth(
   payload: Record<string, unknown>,
   cmuxSocket: string,
@@ -414,6 +424,22 @@ function processExists(pid: number): boolean {
   }
 }
 
+interface PidExitEmitter {
+  pid?: number;
+  once(event: "exit", listener: (...args: any[]) => void): unknown;
+}
+
+export function trackChildPid(
+  child: PidExitEmitter,
+  recordedPids: Set<number>,
+): number {
+  const pid = child.pid;
+  if (!pid) throw new Error("child did not expose a pid");
+  recordedPids.add(pid);
+  child.once("exit", () => recordedPids.delete(pid));
+  return pid;
+}
+
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs: number,
@@ -448,7 +474,7 @@ async function waitForFile(path: string, timeoutMs: number): Promise<string> {
   return value;
 }
 
-class McpPeer {
+export class McpPeer {
   private nextId = 1;
   private buffer = "";
   private readonly pending = new Map<
@@ -459,34 +485,52 @@ class McpPeer {
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  private fatalError: Error | null = null;
   readonly stderr: string[] = [];
 
   constructor(
     readonly child: ChildProcess,
-    onSpawnedPid?: (pid: number) => void,
+    private readonly onSpawnedPid?: (pid: number) => void,
+    private readonly onExitedPid?: (pid: number) => void,
   ) {
     if (!child.stdin || !child.stdout) {
       throw new Error("dist MCP child stdio must be piped");
     }
-    child.stdout.on("data", (chunk: Buffer) => {
-      this.buffer += chunk.toString("utf8");
-      this.processBuffer();
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      this.stderr.push(chunk.toString("utf8"));
-      const pid = daemonSpawnPidFromLog(this.stderr.join(""));
-      if (pid !== null) onSpawnedPid?.(pid);
-    });
-    child.once("exit", (code, signal) => {
-      const error = new Error(
-        `dist MCP child exited (code=${code ?? "none"}, signal=${signal ?? "none"})\n${this.stderr.join("")}`,
-      );
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(error);
-      }
-      this.pending.clear();
-    });
+    child.stdout.on("data", this.onStdoutData);
+    child.stderr?.on("data", this.onStderrData);
+    child.once("exit", this.onChildExit);
+  }
+
+  private readonly onStdoutData = (chunk: Buffer): void => {
+    this.buffer += chunk.toString("utf8");
+    this.processBuffer();
+  };
+
+  private readonly onStderrData = (chunk: Buffer): void => {
+    this.stderr.push(chunk.toString("utf8"));
+    const pid = daemonSpawnPidFromLog(this.stderr.join(""));
+    if (pid !== null) this.onSpawnedPid?.(pid);
+    const exitedPid = daemonExitPidFromLog(this.stderr.join(""));
+    if (exitedPid !== null) this.onExitedPid?.(exitedPid);
+  };
+
+  private readonly onChildExit = (
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void => {
+    const error = new Error(
+      `dist MCP child exited (code=${code ?? "none"}, signal=${signal ?? "none"})\n${this.stderr.join("")}`,
+    );
+    this.failPending(error);
+  };
+
+  private failPending(error: Error): void {
+    this.fatalError ??= error;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(this.fatalError);
+    }
+    this.pending.clear();
   }
 
   private processBuffer(): void {
@@ -499,9 +543,12 @@ class McpPeer {
       try {
         message = JSON.parse(line);
       } catch (error) {
-        throw new Error(
-          `dist MCP emitted malformed JSON: ${line}; ${error instanceof Error ? error.message : String(error)}`,
+        this.failPending(
+          new Error(
+            `dist MCP emitted malformed JSON: ${line}; ${error instanceof Error ? error.message : String(error)}`,
+          ),
         );
+        return;
       }
       if (!isRecord(message) || typeof message.id !== "number") continue;
       const pending = this.pending.get(message.id);
@@ -523,6 +570,7 @@ class McpPeer {
     params: Record<string, unknown> = {},
     timeoutMs = DEFAULT_TIMEOUT_MS,
   ): Promise<Record<string, unknown>> {
+    if (this.fatalError) return Promise.reject(this.fatalError);
     const id = this.nextId++;
     return new Promise((resolveRequest, reject) => {
       const timer = setTimeout(() => {
@@ -549,6 +597,10 @@ class McpPeer {
   }
 
   close(): void {
+    this.failPending(new Error("dist MCP peer closed"));
+    this.child.stdout?.off("data", this.onStdoutData);
+    this.child.stderr?.off("data", this.onStderrData);
+    this.child.off("exit", this.onChildExit);
     this.child.stdin?.end();
   }
 }
@@ -610,27 +662,30 @@ async function runOrphanContract(
     },
   );
   if (!parent.pid) throw new Error("orphan parent did not expose a pid");
-  recordedPids.add(parent.pid);
+  trackChildPid(parent, recordedPids);
   const parentErrors: string[] = [];
   parent.stderr?.on("data", (chunk: Buffer) => {
     parentErrors.push(chunk.toString("utf8"));
   });
-  await new Promise<void>((resolveExit, reject) => {
-    parent.once("error", reject);
-    parent.once("exit", (code) => {
-      if (code === 0) resolveExit();
-      else
-        reject(
-          new Error(`orphan parent exited ${code}: ${parentErrors.join("")}`),
-        );
-    });
+  const { code, signal } = await waitForChildExit(parent, {
+    timeoutMs: 6_000,
+    killGraceMs: 2_000,
   });
+  if (code !== 0) {
+    throw new Error(
+      `orphan parent exited code=${code ?? "none"} signal=${signal ?? "none"}: ${parentErrors.join("")}`,
+    );
+  }
   const orphanPid = Number((await waitForFile(pidPath, 3_000)).trim());
   if (!Number.isInteger(orphanPid) || orphanPid <= 0) {
     throw new Error(`orphan parent wrote invalid pid: ${orphanPid}`);
   }
   recordedPids.add(orphanPid);
-  return parseOrphanReceipt(await waitForFile(receiptPath, 6_000));
+  const receipt = parseOrphanReceipt(await waitForFile(receiptPath, 6_000));
+  await waitForProcessExit(orphanPid, 2_000)
+    .then(() => recordedPids.delete(orphanPid))
+    .catch(() => {});
+  return receipt;
 }
 
 async function runDoctor(
@@ -646,7 +701,7 @@ async function runDoctor(
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (!child.pid) throw new Error("doctor child did not expose a pid");
-  recordedPids.add(child.pid);
+  trackChildPid(child, recordedPids);
   const stdout: string[] = [];
   const stderr: string[] = [];
   child.stdout?.on("data", (chunk: Buffer) =>
@@ -779,7 +834,10 @@ async function terminateRecordedPid(
   if (!recordedPids.has(pid)) {
     throw new Error(`refusing to signal unrecorded pid ${pid}`);
   }
-  if (!processExists(pid)) return;
+  if (!processExists(pid)) {
+    recordedPids.delete(pid);
+    return;
+  }
   process.kill(pid, signal);
   try {
     await waitForProcessExit(pid, 5_000);
@@ -788,6 +846,7 @@ async function terminateRecordedPid(
     process.kill(pid, "SIGKILL");
     await waitForProcessExit(pid, 2_000);
   }
+  recordedPids.delete(pid);
 }
 
 async function runContract(): Promise<void> {
@@ -849,7 +908,7 @@ async function runContract(): Promise<void> {
     if (!initialDaemon.pid) {
       throw new Error("dist daemon did not expose a pid");
     }
-    recordedPids.add(initialDaemon.pid);
+    trackChildPid(initialDaemon, recordedPids);
     const initialDaemonErrors: string[] = [];
     initialDaemon.stderr?.on("data", (chunk: Buffer) =>
       initialDaemonErrors.push(chunk.toString("utf8")),
@@ -866,8 +925,12 @@ async function runContract(): Promise<void> {
       stdio: ["pipe", "pipe", "pipe"],
     });
     if (!proxy.pid) throw new Error("dist MCP proxy did not expose a pid");
-    recordedPids.add(proxy.pid);
-    peer = new McpPeer(proxy, (pid) => recordedPids.add(pid));
+    trackChildPid(proxy, recordedPids);
+    peer = new McpPeer(
+      proxy,
+      (pid) => recordedPids.add(pid),
+      (pid) => recordedPids.delete(pid),
+    );
 
     await peer.request("initialize", {
       protocolVersion: "2025-03-26",

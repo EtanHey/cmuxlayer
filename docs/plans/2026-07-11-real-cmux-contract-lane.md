@@ -197,3 +197,11 @@ Commit the verified changes, push `test/r4-real-cmux-ci`, and create a ready PR 
 Before probing `system.ping`, canonicalize the requested `CMUX_SOCKET_PATH` and compare it with both production identities: `$HOME/.local/state/cmux/cmux-501.sock` and the path stored in `$HOME/.local/state/cmux/last-socket-path` when that marker exists. A production match must print the specified warn-only skip and exit 0. The deliberate `CMUX_CONTRACT_ALLOW_PROD=1` override bypasses only this production classification; normal reachability and contract assertions still apply.
 
 Use TDD for three cases: default production path skips, `/tmp/cmux-nightly.sock` is admitted by the guard, and production plus the exact override is admitted. Perform this guard before any live socket request so routine releases from production-descended panes do not touch the production cmux socket at all.
+
+## Follow-up: deterministic helper imports and cleanup
+
+Keep every helper exercised by `tests/real-cmux-contract-runner.test.ts` as an explicit top-level export of the runner module, whose guarded entrypoint remains inert on import. The runner has no dependency on the test module, so the import graph stays one-way and load-order independent.
+
+The MCP fixture must also be disposable: closing it rejects and clears pending requests, removes its child/stdout/stderr listeners, and ends stdin. Tests destroy their synthetic streams after use. Replacement and direct child PIDs are removed from the cleanup set as soon as an exit receipt/event is observed, preventing later cleanup from signaling a recycled PID.
+
+Prove determinism with three isolated runner-test executions followed by three complete `bun run test` executions from the final tree.
