@@ -191,3 +191,9 @@ Expected: no whitespace errors, no monitor-registry diff, and only planned files
 **Step 5: Commit, push, and open the PR**
 
 Commit the verified changes, push `test/r4-real-cmux-ci`, and create a ready PR titled `test: real-cmux contract lane (live-instance smoke, opt-in)` with exact verification receipts and any unavailable-live limitation stated explicitly.
+
+## Follow-up: production socket guard
+
+Before probing `system.ping`, canonicalize the requested `CMUX_SOCKET_PATH` and compare it with both production identities: `$HOME/.local/state/cmux/cmux-501.sock` and the path stored in `$HOME/.local/state/cmux/last-socket-path` when that marker exists. A production match must print the specified warn-only skip and exit 0. The deliberate `CMUX_CONTRACT_ALLOW_PROD=1` override bypasses only this production classification; normal reachability and contract assertions still apply.
+
+Use TDD for three cases: default production path skips, `/tmp/cmux-nightly.sock` is admitted by the guard, and production plus the exact override is admitted. Perform this guard before any live socket request so routine releases from production-descended panes do not touch the production cmux socket at all.

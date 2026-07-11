@@ -12,6 +12,8 @@ CMUX_SOCKET_PATH=/tmp/cmux-nightly.sock bun run test:contract
 
 The NIGHTLY app must be running and `/tmp/cmux-nightly.sock` must be its socket. Do not substitute the production socket merely to make the lane run. The more detailed isolation background is in `docs.local/tasks/2026-07-11-nightly-restart-qa.md`.
 
+The runner refuses the production fleet socket before sending even `system.ping`. It recognizes both `$HOME/.local/state/cmux/cmux-501.sock` and the canonical target recorded in `$HOME/.local/state/cmux/last-socket-path`. This makes the automatic release gate warn-only when a release is launched from a production-descended pane. For deliberate diagnostic work only, `CMUX_CONTRACT_ALLOW_PROD=1` bypasses this guard; all read-only and isolated-daemon constraints still apply.
+
 Do not set `CMUXLAYER_DAEMON_SOCKET` for this command. The runner always overrides it with a unique socket inside a fresh temporary directory. It also gives the contract stack a temporary `HOME`, starts the daemon from the repository's freshly built `dist`, records every spawned PID, and signals only those recorded PIDs.
 
 ## What it proves
@@ -29,7 +31,7 @@ It never creates, closes, renames, selects, types into, or otherwise mutates a c
 ## Reading the result
 
 - `PASS real-cmux contract lane`: all live assertions completed, including the isolated retire/autostart cycle.
-- `SKIP`: `CMUX_SOCKET_PATH` was unset or could not answer the bounded ping from this process. This is CI-safe and exit 0, but it is not live coverage. For a pre-release run, launch the command from inside the target NIGHTLY pane and retry.
+- `SKIP`: `CMUX_SOCKET_PATH` was unset, was recognized as production, or could not answer the bounded ping from this process. This is CI-safe and exit 0, but it is not live coverage. For a pre-release run, launch the command from inside the target NIGHTLY pane and retry.
 - `FAIL`: treat this as an environment-fidelity regression. Do not release. Capture the full output, the pinned socket path, cmux/NIGHTLY version, cmuxlayer commit, spawned PID receipts, and whether the failure was ping shape, EPIPE denial, list/read, doctor, or retire/autostart.
 
 An EPIPE assertion failure usually means cmux's ancestry policy changed or the helper did not become a true orphan (`ppid` must be 1). A list/read or doctor failure means unit tests are no longer representative of the real daemon/socket stack. A retire/autostart failure means the release could strand persistent MCP clients after a daemon restart.

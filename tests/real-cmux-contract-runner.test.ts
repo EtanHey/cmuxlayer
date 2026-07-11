@@ -1,6 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -11,6 +17,7 @@ import {
   assertLiveHealth,
   assertPingShape,
   classifyLivePin,
+  classifyProductionPin,
   cleanupPidOrder,
   daemonPidFromHealth,
   daemonSpawnPidFromLog,
@@ -88,6 +95,78 @@ describe("real cmux contract runner helpers", () => {
         result: { pong: true },
       }),
     ).toEqual({ kind: "run", socketPath: "/tmp/cmux-nightly.sock" });
+  });
+
+  it("skips the default production socket before probing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cmux-contract-prod-home-"));
+    tempRoots.push(home);
+    const productionSocket = join(
+      home,
+      ".local",
+      "state",
+      "cmux",
+      "cmux-501.sock",
+    );
+
+    await expect(
+      classifyProductionPin(productionSocket, { homeDir: home, env: {} }),
+    ).resolves.toEqual({
+      kind: "skip",
+      reason: `refusing production cmux socket ${productionSocket}; pin NIGHTLY /tmp/cmux-nightly.sock (or set CMUX_CONTRACT_ALLOW_PROD=1 to override)`,
+    });
+  });
+
+  it("admits the NIGHTLY socket through the production guard", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cmux-contract-nightly-home-"));
+    tempRoots.push(home);
+
+    await expect(
+      classifyProductionPin("/tmp/cmux-nightly.sock", {
+        homeDir: home,
+        env: {},
+      }),
+    ).resolves.toEqual({
+      kind: "admit",
+      socketPath: "/tmp/cmux-nightly.sock",
+    });
+  });
+
+  it("admits production only with the deliberate override", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cmux-contract-prod-override-"));
+    tempRoots.push(home);
+    const productionSocket = join(
+      home,
+      ".local",
+      "state",
+      "cmux",
+      "cmux-501.sock",
+    );
+
+    await expect(
+      classifyProductionPin(productionSocket, {
+        homeDir: home,
+        env: { CMUX_CONTRACT_ALLOW_PROD: "1" },
+      }),
+    ).resolves.toEqual({ kind: "admit", socketPath: productionSocket });
+  });
+
+  it("treats the canonical last-socket-path target as production", async () => {
+    const home = mkdtempSync(join(tmpdir(), "cmux-contract-prod-marker-"));
+    tempRoots.push(home);
+    const stateDir = join(home, ".local", "state", "cmux");
+    const actualSocket = join(home, "actual-production.sock");
+    const socketAlias = join(home, "production-alias.sock");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(actualSocket, "socket fixture");
+    symlinkSync(actualSocket, socketAlias);
+    writeFileSync(join(stateDir, "last-socket-path"), `${socketAlias}\n`);
+
+    await expect(
+      classifyProductionPin(actualSocket, { homeDir: home, env: {} }),
+    ).resolves.toEqual({
+      kind: "skip",
+      reason: `refusing production cmux socket ${actualSocket}; pin NIGHTLY /tmp/cmux-nightly.sock (or set CMUX_CONTRACT_ALLOW_PROD=1 to override)`,
+    });
   });
 
   it("performs a bounded system.ping against an exact Unix socket", async () => {

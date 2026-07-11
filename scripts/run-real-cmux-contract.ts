@@ -2,9 +2,16 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -151,6 +158,66 @@ export function classifyLivePin(
     };
   }
   return { kind: "run", socketPath: pin };
+}
+
+async function canonicalSocketPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== "ENOENT") throw error;
+    return resolve(path);
+  }
+}
+
+function expandHomePath(path: string, homeDir: string): string {
+  if (path === "~") return homeDir;
+  if (path.startsWith(`~${sep}`)) return join(homeDir, path.slice(2));
+  return path;
+}
+
+export async function classifyProductionPin(
+  socketPath: string,
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    homeDir?: string;
+  } = {},
+): Promise<
+  | { kind: "skip"; reason: string }
+  | { kind: "admit"; socketPath: string }
+> {
+  const pin = socketPath.trim();
+  const env = opts.env ?? process.env;
+  if (env.CMUX_CONTRACT_ALLOW_PROD === "1") {
+    return { kind: "admit", socketPath: pin };
+  }
+
+  const homeDir = opts.homeDir ?? homedir();
+  const stateDir = join(homeDir, ".local", "state", "cmux");
+  const productionPaths = [join(stateDir, "cmux-501.sock")];
+  try {
+    const lastSocketPath = (
+      await readFile(join(stateDir, "last-socket-path"), "utf8")
+    ).trim();
+    if (lastSocketPath) {
+      productionPaths.push(expandHomePath(lastSocketPath, homeDir));
+    }
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== "ENOENT") throw error;
+  }
+
+  const canonicalPin = await canonicalSocketPath(pin);
+  const canonicalProduction = await Promise.all(
+    productionPaths.map((path) => canonicalSocketPath(path)),
+  );
+  if (canonicalProduction.includes(canonicalPin)) {
+    return {
+      kind: "skip",
+      reason: `refusing production cmux socket ${pin}; pin NIGHTLY /tmp/cmux-nightly.sock (or set CMUX_CONTRACT_ALLOW_PROD=1 to override)`,
+    };
+  }
+  return { kind: "admit", socketPath: pin };
 }
 
 export function parseOrphanReceipt(raw: string): OrphanProbeReceipt {
@@ -725,8 +792,16 @@ async function terminateRecordedPid(
 
 async function runContract(): Promise<void> {
   const requestedSocket = process.env.CMUX_SOCKET_PATH;
-  const preflight = requestedSocket?.trim()
-    ? await probeSystemPing(requestedSocket.trim(), 2_000)
+  const requestedPin = requestedSocket?.trim();
+  if (requestedPin) {
+    const productionGuard = await classifyProductionPin(requestedPin);
+    if (productionGuard.kind === "skip") {
+      console.warn(`[contract] SKIP: ${productionGuard.reason}`);
+      return;
+    }
+  }
+  const preflight = requestedPin
+    ? await probeSystemPing(requestedPin, 2_000)
     : null;
   const classification = classifyLivePin(requestedSocket, preflight);
   if (classification.kind === "skip") {
