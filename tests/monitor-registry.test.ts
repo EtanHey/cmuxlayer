@@ -102,6 +102,7 @@ describe("monitor registry deadman core", () => {
         monitor_id: "scd-lapsed",
         owner_seat: "skillcreatorLead",
         fired_by_agent_id: "second-agent",
+        dedupe_key: "scd-lapsed:deadman-fired",
       }),
     ]);
     expect(second.fired).toEqual([]);
@@ -467,6 +468,92 @@ describe("monitor registry deadman core", () => {
     });
   });
 
+  it("keeps an already claimed deadman-fired monitor quiet across ten reconcile ticks", async () => {
+    await registerMonitor(
+      {
+        monitor_id: "terminal-quiet",
+        owner_seat: "old-owner",
+        watch_targets: ["/tmp/terminal-quiet"],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    await sweepMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      notify: vi.fn(),
+      sweeperAgentId: "sweeper",
+    });
+    const rearm = vi.fn();
+    const escalate = vi.fn();
+
+    for (let tick = 0; tick < 10; tick += 1) {
+      const result = await reconcileMonitorRegistry({
+        registryPath: registryPath(),
+        now: () => 63_000 + tick * 1_000,
+        ownerAlive: async () => false,
+        rearm,
+        escalate,
+      });
+      expect(result).toMatchObject({
+        rearmed: [],
+        collapsed: [],
+        reaped: [],
+        failed: [],
+      });
+    }
+
+    expect(rearm).not.toHaveBeenCalled();
+    expect(escalate).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "deadman-fired",
+      firing_claimed_by_agent_id: "sweeper",
+    });
+  });
+
+  it("silently reaps an ancient dead-owner monitor exactly once", async () => {
+    await registerMonitor(
+      {
+        monitor_id: "ancient-abandoned",
+        owner_seat: "gone-owner",
+        watch_targets: ["/tmp/ancient-abandoned"],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    await sweepMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      notify: vi.fn(),
+      sweeperAgentId: "sweeper",
+    });
+    const rearm = vi.fn();
+    const escalate = vi.fn();
+    const reaped: string[] = [];
+
+    for (let tick = 0; tick < 10; tick += 1) {
+      const result = await reconcileMonitorRegistry({
+        registryPath: registryPath(),
+        now: () => 172_801_001 + tick * 1_000,
+        reapAfterMs: 86_400_000,
+        ownerAlive: async () => false,
+        rearm,
+        escalate,
+      });
+      reaped.push(...result.reaped);
+    }
+
+    expect(reaped).toEqual(["ancient-abandoned"]);
+    expect(rearm).not.toHaveBeenCalled();
+    expect(escalate).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      monitor_id: "ancient-abandoned",
+      state: "dead",
+    });
+  });
+
   it("collapses a pty-dead owner's monitor and escalates exactly once", async () => {
     const watchedFile = join(TEST_DIR, "owner-pty-dead.md");
     writeFileSync(watchedFile, "# collab\n", "utf8");
@@ -526,6 +613,250 @@ describe("monitor registry deadman core", () => {
       state: "collapsed",
       collapsed_reason: "owner-pty-dead",
     });
+  });
+
+  it("collapses an unacknowledged re-arm for a pane-alive wedged owner exactly once", async () => {
+    const watchedFile = join(TEST_DIR, "owner-wedged.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "owner-wedged",
+        owner_seat: "worker-wedged",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn().mockResolvedValue(undefined);
+    const escalate = vi.fn().mockResolvedValue(undefined);
+    const common = {
+      registryPath: registryPath(),
+      rearmAckTimeoutMs: 10_000,
+      ownerPtyDead: async () => false,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm,
+      escalate,
+    };
+
+    const dispatched = await reconcileMonitorRegistry({
+      ...common,
+      now: () => 62_000,
+    });
+    const wedged = await reconcileMonitorRegistry({
+      ...common,
+      now: () => 72_001,
+    });
+    const repeated = [];
+    for (let tick = 0; tick < 10; tick += 1) {
+      repeated.push(
+        await reconcileMonitorRegistry({
+          ...common,
+          now: () => 82_002 + tick * 10_000,
+        }),
+      );
+    }
+
+    expect(dispatched.rearmed).toEqual(["owner-wedged"]);
+    expect(wedged.collapsed).toEqual([
+      { monitor_id: "owner-wedged", reason: "owner-wedged" },
+    ]);
+    expect(repeated).toEqual(
+      Array.from({ length: 10 }, () =>
+        expect.objectContaining({
+          rearmed: [],
+          collapsed: [],
+          reaped: [],
+          failed: [],
+        }),
+      ),
+    );
+    expect(rearm).toHaveBeenCalledTimes(1);
+    expect(escalate).toHaveBeenCalledTimes(1);
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-wedged",
+    });
+  });
+
+  it("accepts timely monitor progress without owner-wedged escalation", async () => {
+    const watchedFile = join(TEST_DIR, "owner-acks.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "owner-acks",
+        owner_seat: "worker-live",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const escalate = vi.fn();
+    await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      rearm: vi.fn(),
+      escalate,
+    });
+
+    const acknowledged = await signalMonitor("owner-acks", {
+      registryPath: registryPath(),
+      now: () => 65_000,
+    });
+    const next = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 72_001,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm: vi.fn(),
+      escalate,
+    });
+
+    expect(acknowledged).toMatchObject({ state: "alive" });
+    expect(next.collapsed).toEqual([]);
+    expect(escalate).not.toHaveBeenCalled();
+  });
+
+  it("retries normally when the owner progressed after re-arm dispatch", async () => {
+    const watchedFile = join(TEST_DIR, "owner-progressed.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "owner-progressed",
+        owner_seat: "worker-live",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn().mockResolvedValue(undefined);
+    const escalate = vi.fn();
+    await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm,
+      escalate,
+    });
+    const retried = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 72_001,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async (record) =>
+        record.rearm_claimed_at === iso(62_000),
+      rearm,
+      escalate,
+    });
+
+    expect(retried.rearmed).toEqual(["owner-progressed"]);
+    expect(retried.collapsed).toEqual([]);
+    expect(rearm).toHaveBeenCalledTimes(2);
+    expect(escalate).not.toHaveBeenCalled();
+  });
+
+  it("uses daemon fallback once for an explicitly owner-independent wedged monitor", async () => {
+    const watchedFile = join(TEST_DIR, "independent-wedged.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "independent-wedged",
+        owner_seat: "worker-wedged",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn().mockResolvedValue(undefined);
+    const fallbackRearm = vi.fn().mockResolvedValue(undefined);
+    const escalate = vi.fn();
+    const common = {
+      registryPath: registryPath(),
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      ownerIndependent: async () => true,
+      fallbackRearm,
+      rearm,
+      escalate,
+    };
+
+    await reconcileMonitorRegistry({ ...common, now: () => 62_000 });
+    const fallback = await reconcileMonitorRegistry({
+      ...common,
+      now: () => 72_001,
+    });
+    const repeated = await reconcileMonitorRegistry({
+      ...common,
+      now: () => 82_002,
+    });
+
+    expect(fallback.rearmed).toEqual(["independent-wedged"]);
+    expect(fallback.collapsed).toEqual([]);
+    expect(repeated.rearmed).toEqual([]);
+    expect(rearm).toHaveBeenCalledTimes(1);
+    expect(fallbackRearm).toHaveBeenCalledTimes(1);
+    expect(escalate).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "alive",
+      last_signal_at: iso(72_001),
+    });
+  });
+
+  it("clears an owner-wedged collapse when genuine monitor progress resumes", async () => {
+    const watchedFile = join(TEST_DIR, "wedged-recovers.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "wedged-recovers",
+        owner_seat: "worker-wedged",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const common = {
+      registryPath: registryPath(),
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm: vi.fn(),
+      escalate: vi.fn(),
+    };
+    await reconcileMonitorRegistry({ ...common, now: () => 62_000 });
+    await reconcileMonitorRegistry({ ...common, now: () => 72_001 });
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-wedged",
+    });
+
+    const recovered = await signalMonitor("wedged-recovers", {
+      registryPath: registryPath(),
+      now: () => 73_000,
+    });
+
+    expect(recovered).toMatchObject({
+      monitor_id: "wedged-recovers",
+      state: "alive",
+      last_signal_at: iso(73_000),
+    });
+    expect(recovered).not.toHaveProperty("collapsed_reason");
+    expect(recovered).not.toHaveProperty("rearm_claimed_at");
   });
 
   it("continues reconciling later monitors when collapse escalation rejects", async () => {

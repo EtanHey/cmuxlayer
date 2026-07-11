@@ -38,6 +38,7 @@ export interface NotifyPayload {
   body: string;
   source: string;
   priority: string;
+  dedupe_key?: string;
 }
 
 /** A single pending outbox message. */

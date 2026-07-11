@@ -196,6 +196,54 @@ describe("monitor registry MCP tools", () => {
     });
   });
 
+  it("surfaces owner-wedged recovery metadata through list and gate queries", async () => {
+    const watchedFile = join(TEST_DIR, "wedged.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    const server = createMonitorServer();
+    await callTool(server, "register_monitor", {
+      monitor_id: "seat-a-wedged",
+      owner_seat: "seat-a",
+      watch_targets: [watchedFile],
+      mechanism: "event",
+      deadman_timeout_s: 60,
+      rearm_command: `tail -n0 -F ${watchedFile}`,
+    });
+    await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm: vi.fn(),
+    });
+    await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 72_001,
+      rearmAckTimeoutMs: 10_000,
+      ownerAlive: async () => true,
+      ownerProgressedSince: async () => false,
+      rearm: vi.fn(),
+    });
+
+    const listed = await callTool(server, "list_monitors", {
+      monitor_id: "seat-a-wedged",
+    });
+    const queried = await callTool(server, "query_monitor_registry", {
+      gate: "gate-9",
+      monitor_id: "seat-a-wedged",
+    });
+
+    expect(listed.monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-wedged",
+    });
+    expect(queried.monitors[0]).toMatchObject({
+      state: "collapsed",
+      liveness: "collapsed",
+      collapsed_reason: "owner-wedged",
+    });
+  });
+
   it("signal_monitor updates last_signal_at without moving an alive monitor out of alive", async () => {
     const server = createMonitorServer();
     await callTool(server, "register_monitor", {

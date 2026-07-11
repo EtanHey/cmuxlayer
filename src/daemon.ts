@@ -25,9 +25,11 @@ import {
   reconcileMonitorRegistry,
 } from "./monitor-registry.js";
 import {
+  ackedIds,
   dispatchOnce,
   inboxPath,
   monitorAlive,
+  readLastAgentHeartbeat,
   type InboxOpts,
 } from "./inbox.js";
 import type { ExecFn } from "./cmux-client.js";
@@ -70,12 +72,15 @@ export type DaemonHotReloadHandler = (
   plan: DaemonHotReloadPlan,
 ) => Promise<"not_implemented">;
 
-export interface MonitorOwnerPtyDeadNotification {
+export interface MonitorOwnerCollapseNotification {
   title: string;
   body: string;
   source: string;
   priority: "high";
+  dedupe_key: string;
 }
+
+export type MonitorOwnerPtyDeadNotification = MonitorOwnerCollapseNotification;
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
 export type DaemonRetirementReason = "stale-build" | "irrecoverable-transport";
@@ -251,6 +256,9 @@ export interface CmuxLayerDaemonOptions extends Omit<
   monitorReconcileIntervalMs?: number;
   monitorOwnerPtyDeadNotify?: (
     notification: MonitorOwnerPtyDeadNotification,
+  ) => Promise<unknown> | unknown;
+  monitorOwnerWedgedNotify?: (
+    notification: MonitorOwnerCollapseNotification,
   ) => Promise<unknown> | unknown;
   logger?: Pick<Console, "error">;
   onRetire?: (
@@ -438,10 +446,7 @@ export class CmuxLayerDaemon {
     }
 
     const context = await this.getContext();
-    if (
-      !this.monitorReconcileFn &&
-      (this.opts.monitorRegistryPath || process.env.VITEST !== "true")
-    ) {
+    if (!this.monitorReconcileFn && this.opts.monitorRegistryPath) {
       this.monitorReconcileFn = this.createDefaultMonitorReconciler(context);
     }
     context.lifecycleAgentInputDelivererReadyListeners.add(
@@ -543,11 +548,10 @@ export class CmuxLayerDaemon {
     const transport = new SocketJsonRpcTransport(socket);
     const mcpServer = createServer({
       context,
-      outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
-      monitorRegistryPath:
-        this.opts.monitorRegistryPath ?? defaultMonitorRegistryPath(),
+      outboxDrain: this.opts.outboxDrain,
+      monitorRegistryPath: this.opts.monitorRegistryPath,
       monitorRegistryNow: this.opts.monitorRegistryNow,
-      monitorRegistryNotify: httpNotifyMonitorDeadman,
+      monitorRegistryNotify: this.opts.monitorRegistryNotify,
     });
     const pendingRequestIds = new Set<RequestId>();
     this.activeTransports.add(transport);
@@ -676,6 +680,10 @@ export class CmuxLayerDaemon {
       reconcileMonitorRegistry({
         registryPath,
         now: this.opts.monitorRegistryNow,
+        rearmAckTimeoutMs:
+          (this.monitorReconcileIntervalMs > 0
+            ? this.monitorReconcileIntervalMs
+            : DEFAULT_MONITOR_RECONCILE_INTERVAL_MS) * 2,
         ...(options?.rearmClaimTimeoutMs !== undefined
           ? { rearmClaimTimeoutMs: options.rearmClaimTimeoutMs }
           : {}),
@@ -703,6 +711,25 @@ export class CmuxLayerDaemon {
           } catch {
             return false;
           }
+        },
+        ownerProgressedSince: (record) => {
+          const owner = findOwner(record.owner_seat);
+          if (!owner || !record.rearm_claimed_at) return false;
+          const inboxOpts: InboxOpts = {
+            ...(this.opts.inboxBaseDir
+              ? { baseDir: this.opts.inboxBaseDir }
+              : {}),
+            ...(this.opts.monitorRegistryNow
+              ? { now: this.opts.monitorRegistryNow }
+              : {}),
+          };
+          const messageId = `monitor-rearm:${record.monitor_id}:${record.last_signal_at}`;
+          if (ackedIds(owner.agent_id, inboxOpts).has(messageId)) return true;
+          const heartbeat = readLastAgentHeartbeat(owner.agent_id, inboxOpts);
+          return (
+            heartbeat !== null &&
+            heartbeat.ts_ms > Date.parse(record.rearm_claimed_at)
+          );
         },
         rearm: async (record) => {
           const owner = findOwner(record.owner_seat);
@@ -751,15 +778,22 @@ export class CmuxLayerDaemon {
           });
         },
         escalate: async (record) => {
-          const notify =
-            this.opts.monitorOwnerPtyDeadNotify ??
-            ((notification: MonitorOwnerPtyDeadNotification) =>
-              httpDeliver(notification, DEFAULT_NOTIFY_URL));
+          const ownerWedged = record.collapsed_reason === "owner-wedged";
+          const notify = ownerWedged
+            ? (this.opts.monitorOwnerWedgedNotify ??
+              (async () => false))
+            : (this.opts.monitorOwnerPtyDeadNotify ??
+              (async () => false));
           await notify({
-            title: "Monitor owner PTY dead",
-            body: `Monitor ${record.monitor_id} collapsed because owner ${record.owner_seat} cannot accept terminal writes; watch_targets=${record.watch_targets.join(", ")}`,
+            title: ownerWedged
+              ? "Monitor owner wedged"
+              : "Monitor owner PTY dead",
+            body: ownerWedged
+              ? `Monitor ${record.monitor_id} collapsed because pane-alive owner ${record.owner_seat} did not acknowledge re-arm; watch_targets=${record.watch_targets.join(", ")}`
+              : `Monitor ${record.monitor_id} collapsed because owner ${record.owner_seat} cannot accept terminal writes; watch_targets=${record.watch_targets.join(", ")}`,
             source: "cmuxlayer-monitor-registry",
             priority: "high",
+            dedupe_key: `${record.monitor_id}:${record.collapsed_reason}`,
           });
         },
       });
@@ -804,7 +838,7 @@ export class CmuxLayerDaemon {
             }
           }
         }
-        for (const key of ["rearmed", "collapsed"] as const) {
+        for (const key of ["rearmed", "collapsed", "reaped"] as const) {
           const outcomes = result[key];
           if (Array.isArray(outcomes)) {
             for (const outcome of outcomes) {
@@ -996,6 +1030,8 @@ export async function runDaemon(
 ): Promise<CmuxLayerDaemon> {
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
+  const testProcess =
+    process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   let exitStarted = false;
   const exitAfterShutdown = (
     reason: DaemonShutdownReason,
@@ -1007,6 +1043,26 @@ export async function runDaemon(
   };
   const daemon = new CmuxLayerDaemon({
     ...opts,
+    outboxDrain:
+      opts.outboxDrain ??
+      (testProcess
+        ? async () => undefined
+        : () => drainOutbox({ deliver: httpDeliver })),
+    monitorRegistryNotify:
+      opts.monitorRegistryNotify ??
+      (testProcess ? async () => undefined : httpNotifyMonitorDeadman),
+    monitorRegistryPath:
+      opts.monitorRegistryPath ?? defaultMonitorRegistryPath(),
+    monitorOwnerPtyDeadNotify:
+      opts.monitorOwnerPtyDeadNotify ??
+      (testProcess
+        ? async () => false
+        : (notification) => httpDeliver(notification, DEFAULT_NOTIFY_URL)),
+    monitorOwnerWedgedNotify:
+      opts.monitorOwnerWedgedNotify ??
+      (testProcess
+        ? async () => false
+        : (notification) => httpDeliver(notification, DEFAULT_NOTIFY_URL)),
     onRetire: async (reason, result) => {
       await opts.onRetire?.(reason, result);
       exitAfterShutdown(reason, result);

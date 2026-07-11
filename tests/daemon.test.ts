@@ -18,7 +18,7 @@ import {
   readMonitorRegistry,
   registerMonitor,
 } from "../src/monitor-registry.js";
-import { readInbox } from "../src/inbox.js";
+import { ack, readInbox } from "../src/inbox.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 
@@ -438,7 +438,17 @@ async function readOnce(path: string): Promise<string> {
 }
 
 describe("CmuxLayerDaemon", () => {
-  afterEach(() => {
+  const intervalDaemons = new Set<CmuxLayerDaemon>();
+  const trackIntervalDaemon = (daemon: CmuxLayerDaemon): CmuxLayerDaemon => {
+    intervalDaemons.add(daemon);
+    return daemon;
+  };
+
+  afterEach(async () => {
+    await Promise.all(
+      [...intervalDaemons].map((daemon) => daemon.shutdown().catch(() => {})),
+    );
+    intervalDaemons.clear();
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
@@ -598,13 +608,13 @@ describe("CmuxLayerDaemon", () => {
       .fn()
       .mockImplementationOnce(() => firstPass.promise)
       .mockResolvedValue(undefined);
-    const daemon = new CmuxLayerDaemon({
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
       socketPath: socketPath("monitor-reconcile-overlap"),
       exec: createListSurfacesExec(),
       skipAgentLifecycle: true,
       monitorReconcile,
       monitorReconcileIntervalMs: 5,
-    });
+    }));
 
     await daemon.start();
     await delay(20);
@@ -691,13 +701,13 @@ describe("CmuxLayerDaemon", () => {
   it("clears the monitor reconciliation timer during shutdown", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const monitorReconcile = vi.fn().mockResolvedValue(undefined);
-    const daemon = new CmuxLayerDaemon({
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
       socketPath: socketPath("monitor-reconcile-clear"),
       exec: createListSurfacesExec(),
       skipAgentLifecycle: true,
       monitorReconcile,
       monitorReconcileIntervalMs: 5,
-    });
+    }));
 
     await daemon.start();
     await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
@@ -729,6 +739,7 @@ describe("CmuxLayerDaemon", () => {
 
     const clients: ReturnType<typeof createPlacementClient>[] = [];
     const guardedRelays: Array<ReturnType<typeof vi.fn>> = [];
+    const monitorOwnerWedgedNotify = vi.fn().mockResolvedValue(true);
     const createContext = () => {
       const client = createPlacementClient([]);
       clients.push(client);
@@ -771,6 +782,7 @@ describe("CmuxLayerDaemon", () => {
       monitorRegistryPath: registryPath,
       monitorRegistryNow: () => 62_000,
       monitorReconcileIntervalMs: 0,
+      monitorOwnerWedgedNotify,
       inboxBaseDir,
     });
     await first.start();
@@ -782,6 +794,7 @@ describe("CmuxLayerDaemon", () => {
       monitorRegistryPath: registryPath,
       monitorRegistryNow: () => 123_001,
       monitorReconcileIntervalMs: 0,
+      monitorOwnerWedgedNotify,
       inboxBaseDir,
     });
     await second.start();
@@ -795,8 +808,10 @@ describe("CmuxLayerDaemon", () => {
     });
     expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
       monitor_id: "restart-monitor",
-      state: "rearming",
+      state: "collapsed",
+      collapsed_reason: "owner-wedged",
     });
+    expect(monitorOwnerWedgedNotify).toHaveBeenCalledTimes(1);
     expect(guardedRelays[0]).toHaveBeenCalledWith(
       expect.objectContaining({
         agent_id: "worker-a",
@@ -863,7 +878,7 @@ describe("CmuxLayerDaemon", () => {
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);
     const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
-    const daemon = new CmuxLayerDaemon({
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
       socketPath: socketPath("monitor-owner-pty-dead"),
       context,
       monitorRegistryPath: registryPath,
@@ -871,7 +886,7 @@ describe("CmuxLayerDaemon", () => {
       monitorReconcileIntervalMs: 5,
       monitorOwnerPtyDeadNotify,
       inboxBaseDir,
-    });
+    }));
 
     await daemon.start();
     await waitUntil(
@@ -891,10 +906,186 @@ describe("CmuxLayerDaemon", () => {
         title: "Monitor owner PTY dead",
         body: expect.stringContaining("pty-dead-monitor"),
         priority: "high",
+        dedupe_key: "pty-dead-monitor:owner-pty-dead",
       }),
     );
     expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toEqual([]);
     expect(guardedRelay).not.toHaveBeenCalled();
+  });
+
+  it("collapses and loudly escalates a pane-alive owner that never acknowledges re-arm", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "wedged-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "wedged-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "wedged-inbox");
+    let now = 62_000;
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "wedged-monitor",
+        owner_seat: "worker-wedged",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const context = createServerContext({
+      client: createPlacementClient([]) as any,
+      stateDir: stateDir("wedged-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-wedged",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-wedged",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const guardedRelay = vi.fn().mockResolvedValue(undefined);
+    context.setLifecycleAgentInputDeliverer(guardedRelay);
+    const monitorOwnerWedgedNotify = vi.fn().mockResolvedValue(true);
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-owner-wedged"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
+      monitorReconcileIntervalMs: 5,
+      monitorOwnerWedgedNotify,
+      inboxBaseDir,
+    }));
+
+    await daemon.start();
+    await waitUntil(
+      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
+    );
+    now = 72_001;
+    await waitUntil(
+      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "collapsed",
+    );
+    await delay(20);
+    await daemon.shutdown();
+
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "wedged-monitor",
+      state: "collapsed",
+      collapsed_reason: "owner-wedged",
+    });
+    expect(monitorOwnerWedgedNotify).toHaveBeenCalledTimes(1);
+    expect(monitorOwnerWedgedNotify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Monitor owner wedged",
+        body: expect.stringContaining("wedged-monitor"),
+        priority: "high",
+        dedupe_key: "wedged-monitor:owner-wedged",
+      }),
+    );
+    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toHaveLength(1);
+    expect(guardedRelay).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps normal re-arm flow when the pane-alive owner acknowledges in time", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "acked-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "acked-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "acked-inbox");
+    let now = 62_000;
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "acked-monitor",
+        owner_seat: "worker-live",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const context = createServerContext({
+      client: createPlacementClient([]) as any,
+      stateDir: stateDir("acked-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-live",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-live",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const guardedRelay = vi.fn().mockResolvedValue(undefined);
+    context.setLifecycleAgentInputDeliverer(guardedRelay);
+    const monitorOwnerWedgedNotify = vi.fn();
+    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-owner-acked"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => now,
+      monitorReconcileIntervalMs: 5,
+      monitorOwnerWedgedNotify,
+      inboxBaseDir,
+    }));
+
+    await daemon.start();
+    await waitUntil(
+      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
+    );
+    now = 65_000;
+    ack(
+      "worker-live",
+      `monitor-rearm:acked-monitor:${new Date(1_000).toISOString()}`,
+      "rearmed",
+      { baseDir: inboxBaseDir, now: () => now },
+    );
+    now = 72_001;
+    await waitUntil(
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.rearm_claimed_at ===
+        new Date(72_001).toISOString(),
+    );
+    await daemon.shutdown();
+
+    const record = readMonitorRegistry({ registryPath }).monitors[0];
+    expect(record).toMatchObject({
+      monitor_id: "acked-monitor",
+      state: "rearming",
+    });
+    expect(record).not.toHaveProperty("collapsed_reason");
+    expect(monitorOwnerWedgedNotify).not.toHaveBeenCalled();
+    expect(readInbox("worker-live", { baseDir: inboxBaseDir })).toHaveLength(1);
+    expect(guardedRelay).toHaveBeenCalledTimes(1);
   });
 
   it("retries a claimed monitor as soon as the guarded relay becomes ready", async () => {
@@ -947,6 +1138,7 @@ describe("CmuxLayerDaemon", () => {
       monitorRegistryPath: registryPath,
       monitorRegistryNow: () => 62_000,
       monitorReconcileIntervalMs: 0,
+      monitorOwnerWedgedNotify: vi.fn(),
       inboxBaseDir,
     });
 
