@@ -218,6 +218,65 @@ describe("agent lifecycle health", () => {
     expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
   });
 
+  it("blocks a live-spinner pane after repeated recent broken-pipe writes", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({ state: "done" }),
+      {
+        monitor_alive: true,
+        screen_status: "thinking",
+        surface_write_liveness: {
+          pty_dead: true,
+          consecutive_broken_pipe_failures: 2,
+          last_attempt_at: 2_000,
+        },
+      },
+    );
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("pane_pty_dead");
+    expect(health.issue_severities?.pane_pty_dead).toBe("blocking");
+    expect(health.issue_severities?.registry_screen_disagreement).toBe(
+      "degraded",
+    );
+  });
+
+  it("does not flag one transient broken-pipe write", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({ state: "done" }),
+      {
+        monitor_alive: true,
+        screen_status: "working",
+        surface_write_liveness: {
+          pty_dead: false,
+          consecutive_broken_pipe_failures: 1,
+          last_attempt_at: 1_000,
+        },
+      },
+    );
+
+    expect(health.issue_codes).not.toContain("pane_pty_dead");
+    expect(health.issue_severities?.registry_screen_disagreement).toBe("info");
+    expect(health.status).toBe("healthy");
+  });
+
+  it("leaves active-screen health unchanged after a healthy write", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({ state: "working" }),
+      {
+        monitor_alive: true,
+        screen_status: "thinking",
+        surface_write_liveness: {
+          pty_dead: false,
+          consecutive_broken_pipe_failures: 0,
+          last_attempt_at: 1_000,
+        },
+      },
+    );
+
+    expect(health.issue_codes).not.toContain("pane_pty_dead");
+    expect(health.status).toBe("healthy");
+  });
+
   it("marks registry working while the screen parses done as degraded registry lag", () => {
     const health = evaluateAgentHealth(
       makeRecord({

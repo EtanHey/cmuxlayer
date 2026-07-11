@@ -59,4 +59,19 @@ describe("buildAgentHealthInput", () => {
     expect(input.screen_status).toBeUndefined();
     expect(input.screen_actions).toBeUndefined();
   });
+
+  it("threads the latest surface write-liveness observation into health input", async () => {
+    const observation = {
+      pty_dead: true,
+      consecutive_broken_pipe_failures: 2,
+      last_attempt_at: 2_000,
+    };
+
+    const input = await buildAgentHealthInput(makeAgent(), {
+      observeSurfaceWriteLiveness: (agent) =>
+        agent.surface_id === "surface:1" ? observation : null,
+    });
+
+    expect(input.surface_write_liveness).toEqual(observation);
+  });
 });

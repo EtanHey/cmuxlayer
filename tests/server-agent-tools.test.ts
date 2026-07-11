@@ -2811,6 +2811,49 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("list_agents reports an active pane unhealthy after repeated broken-pipe writes", async () => {
+    const record = makeServerAgentRecord({
+      agent_id: "codex-dead-pty",
+      surface_id: "surface:dead-pty",
+      workspace_id: "workspace:1",
+      state: "done",
+    });
+    const { server, client } = await createBroadcastServer([record]);
+    client.readScreen.mockResolvedValue({
+      surface: record.surface_id,
+      text: "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (41s - esc to interrupt)",
+      lines: 20,
+      scrollback_used: false,
+    });
+    client.send.mockRejectedValue(
+      Object.assign(
+        new Error("Failed to write to socket (Broken pipe, errno 32)"),
+        {
+          code: "EPIPE",
+          errno: 32,
+        },
+      ),
+    );
+    const sendInput = (server as any)._registeredTools["send_input"];
+    const listAgents = (server as any)._registeredTools["list_agents"];
+    const sendArgs = sendInput.inputSchema.parse({
+      surface: record.surface_id,
+      text: "ping",
+      press_enter: false,
+    });
+
+    await sendInput.handler(sendArgs, {} as any);
+    await sendInput.handler(sendArgs, {} as any);
+    const parsed = parseToolResult(await listAgents.handler({}, {} as any)) as {
+      agents: Array<{ health: { status: string; issue_codes: string[] } }>;
+    };
+
+    expect(parsed.agents[0]?.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining(["pane_pty_dead"]),
+    });
+  });
+
   it("list_agents includes resume_command when a session id is captured", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
