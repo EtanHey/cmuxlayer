@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { httpDeliver } from "./outbox-drainer.js";
 
 export type MonitorMechanism = "event" | "offset-poll";
@@ -118,6 +118,8 @@ export type MonitorCollapseReason =
 export interface MonitorRegistryReconcileOptions extends MonitorRegistryOptions {
   ownerAlive: (ownerSeat: string) => Promise<boolean> | boolean;
   watchTargetExists?: (target: string) => boolean;
+  rearmClaimTimeoutMs?: number;
+  monitorIds?: readonly string[];
   rearm: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
 }
 
@@ -276,6 +278,19 @@ function validWatchTargets(value: unknown): string[] | null {
   const targets = value.map(cleanString);
   if (targets.some((target) => target === null)) return null;
   return targets as string[];
+}
+
+function canonicalFileWatchTarget(target: string): string {
+  if (target === "~") return homedir();
+  if (target.startsWith("~/")) {
+    return join(homedir(), target.slice(2));
+  }
+  if (!isAbsolute(target)) {
+    throw new Error(
+      "rearm-capable watch_targets must be absolute or home-relative file paths",
+    );
+  }
+  return resolve(target);
 }
 
 function normalizeAddressee(value: unknown): string | null {
@@ -662,7 +677,9 @@ export async function registerMonitor(
     const next: MonitorRegistryRecord = {
       monitor_id: input.monitor_id,
       owner_seat: input.owner_seat,
-      watch_targets: [...input.watch_targets],
+      watch_targets: input.rearm_command
+        ? input.watch_targets.map(canonicalFileWatchTarget)
+        : [...input.watch_targets],
       mechanism: input.mechanism,
       ...(input.pattern ? { pattern: input.pattern } : {}),
       ...(cleanWatermarkKey(input.watermark_key)
@@ -792,6 +809,16 @@ function isMonitorStale(record: MonitorRegistryRecord, nowMs: number): boolean {
   );
 }
 
+function isRearmClaimExpired(
+  record: MonitorRegistryRecord,
+  nowMs: number,
+  timeoutMs: number,
+): boolean {
+  if (record.state !== "rearming" || !record.rearm_claimed_at) return false;
+  const claimedAtMs = parseTimeMs(record.rearm_claimed_at);
+  return claimedAtMs !== null && nowMs - claimedAtMs >= timeoutMs;
+}
+
 export async function reconcileMonitorRegistry(
   opts: MonitorRegistryReconcileOptions,
 ): Promise<MonitorRegistryReconcileResult> {
@@ -799,6 +826,8 @@ export async function reconcileMonitorRegistry(
   const nowMs = (opts.now ?? Date.now)();
   const claimedAt = new Date(nowMs).toISOString();
   const watchTargetExists = opts.watchTargetExists ?? existsSync;
+  const rearmClaimTimeoutMs = opts.rearmClaimTimeoutMs ?? 60_000;
+  const monitorIds = opts.monitorIds ? new Set(opts.monitorIds) : null;
   const rearmed: string[] = [];
   const collapsed: Array<{
     monitor_id: string;
@@ -806,17 +835,23 @@ export async function reconcileMonitorRegistry(
   }> = [];
   const failed: string[] = [];
   const candidates = readMonitorRegistry({ registryPath: path }).monitors.filter(
-    (record) => record.state === "alive" && isMonitorStale(record, nowMs),
+    (record) =>
+      (!monitorIds || monitorIds.has(record.monitor_id)) &&
+      isMonitorStale(record, nowMs) &&
+      (record.state === "alive" ||
+        isRearmClaimExpired(record, nowMs, rearmClaimTimeoutMs)),
   );
 
   for (const candidate of candidates) {
     let collapseReason: MonitorCollapseReason | null = null;
-    if (candidate.watch_targets.some((target) => !watchTargetExists(target))) {
+    if (!candidate.rearm_command) {
+      collapseReason = "rearm-command-missing";
+    } else if (
+      candidate.watch_targets.some((target) => !watchTargetExists(target))
+    ) {
       collapseReason = "watch-target-missing";
     } else if (!(await opts.ownerAlive(candidate.owner_seat))) {
       collapseReason = "owner-not-alive";
-    } else if (!candidate.rearm_command) {
-      collapseReason = "rearm-command-missing";
     }
 
     let claimed: MonitorRegistryRecord | null = null;
@@ -827,8 +862,13 @@ export async function reconcileMonitorRegistry(
         if (
           !current ||
           current.monitor_id !== candidate.monitor_id ||
-          current.state !== "alive" ||
-          !isMonitorStale(current, nowMs)
+          !isMonitorStale(current, nowMs) ||
+          (current.state !== "alive" &&
+            !isRearmClaimExpired(
+              current,
+              nowMs,
+              rearmClaimTimeoutMs,
+            ))
         ) {
           return raw;
         }
@@ -859,26 +899,6 @@ export async function reconcileMonitorRegistry(
       rearmed.push(candidate.monitor_id);
     } catch {
       failed.push(candidate.monitor_id);
-      withRegistryWriteLock(path, () => {
-        const registry = readRawRegistry(path);
-        const monitors = registry.monitors.map((raw) => {
-          const current = toValidRecord(raw);
-          if (
-            current?.monitor_id !== candidate.monitor_id ||
-            current.state !== "rearming" ||
-            current.rearm_claimed_at !== claimedAt
-          ) {
-            return raw;
-          }
-          const {
-            rearm_claimed_at: _rearmClaimedAt,
-            collapsed_reason: _collapsedReason,
-            ...rest
-          } = current;
-          return { ...rest, state: "alive" };
-        });
-        writeRawRegistry(path, monitors);
-      });
     }
   }
 

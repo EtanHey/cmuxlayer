@@ -615,6 +615,79 @@ describe("CmuxLayerDaemon", () => {
     await daemon.shutdown();
   });
 
+  it("does not force a second pass when relay readiness lands during a successful pass", async () => {
+    let finishFirst: ((value: unknown) => void) | null = null;
+    const firstPass = new Promise((resolve) => {
+      finishFirst = resolve;
+    });
+    const monitorReconcile = vi
+      .fn()
+      .mockImplementationOnce(() => firstPass)
+      .mockResolvedValue({ rearmed: [], collapsed: [], failed: [] });
+    const context = createServerContext({
+      exec: createListSurfacesExec(),
+      stateDir: stateDir("relay-ready-successful-pass"),
+      skipAgentLifecycle: true,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("relay-ready-successful-pass"),
+      context,
+      monitorReconcile,
+      monitorReconcileIntervalMs: 0,
+    });
+
+    await daemon.start();
+    await waitUntil(() => monitorReconcile.mock.calls.length === 1);
+    context.setLifecycleAgentInputDeliverer(vi.fn().mockResolvedValue(undefined));
+    finishFirst?.({ rearmed: ["monitor-a"], collapsed: [], failed: [] });
+    await delay(20);
+
+    expect(monitorReconcile).toHaveBeenCalledTimes(1);
+    await daemon.shutdown();
+  });
+
+  it("scopes a relay-ready retry to failed monitors from a mixed pass", async () => {
+    let finishFirst: ((value: unknown) => void) | null = null;
+    const firstPass = new Promise((resolve) => {
+      finishFirst = resolve;
+    });
+    const monitorReconcile = vi
+      .fn()
+      .mockImplementationOnce(() => firstPass)
+      .mockResolvedValue({
+        rearmed: ["monitor-a"],
+        collapsed: [],
+        failed: [],
+      });
+    const context = createServerContext({
+      exec: createListSurfacesExec(),
+      stateDir: stateDir("relay-ready-mixed-pass"),
+      skipAgentLifecycle: true,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("relay-ready-mixed-pass"),
+      context,
+      monitorReconcile,
+      monitorReconcileIntervalMs: 0,
+    });
+
+    await daemon.start();
+    await waitUntil(() => monitorReconcile.mock.calls.length === 1);
+    context.setLifecycleAgentInputDeliverer(vi.fn().mockResolvedValue(undefined));
+    finishFirst?.({
+      rearmed: ["monitor-b"],
+      collapsed: [],
+      failed: ["monitor-a"],
+    });
+    await waitUntil(() => monitorReconcile.mock.calls.length === 2);
+
+    expect(monitorReconcile.mock.calls[1]?.[0]).toEqual({
+      rearmClaimTimeoutMs: 0,
+      monitorIds: ["monitor-a"],
+    });
+    await daemon.shutdown();
+  });
+
   it("clears the monitor reconciliation timer during shutdown", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const monitorReconcile = vi.fn().mockResolvedValue(undefined);
@@ -654,12 +727,19 @@ describe("CmuxLayerDaemon", () => {
       { registryPath, now: () => 1_000 },
     );
 
+    const clients: ReturnType<typeof createPlacementClient>[] = [];
+    const guardedRelays: Array<ReturnType<typeof vi.fn>> = [];
     const createContext = () => {
+      const client = createPlacementClient([]);
+      clients.push(client);
       const context = createServerContext({
-        client: createPlacementClient([]) as any,
+        client: client as any,
         stateDir: sharedStateDir,
         skipAgentLifecycle: true,
       });
+      const guardedRelay = vi.fn().mockResolvedValue(undefined);
+      guardedRelays.push(guardedRelay);
+      context.setLifecycleAgentInputDeliverer(guardedRelay);
       if (context.stateMgr.listStates().length === 0) {
         context.stateMgr.writeState({
           agent_id: "worker-a",
@@ -700,7 +780,7 @@ describe("CmuxLayerDaemon", () => {
       socketPath: socketPath("monitor-restart-second"),
       context: createContext(),
       monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 63_000,
+      monitorRegistryNow: () => 123_001,
       monitorReconcileIntervalMs: 0,
       inboxBaseDir,
     });
@@ -717,6 +797,84 @@ describe("CmuxLayerDaemon", () => {
       monitor_id: "restart-monitor",
       state: "rearming",
     });
+    expect(guardedRelays[0]).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "worker-a",
+        text: expect.stringContaining("read"),
+        press_enter: true,
+        allow_busy: true,
+        source_event: "dispatch_nudge",
+      }),
+    );
+    expect(clients[0]?.send).not.toHaveBeenCalled();
+    expect(clients[0]?.sendKey).not.toHaveBeenCalled();
+  });
+
+  it("retries a claimed monitor as soon as the guarded relay becomes ready", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "relay-ready-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "relay-ready-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "relay-ready-inbox");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "relay-ready-monitor",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const context = createServerContext({
+      client: createPlacementClient([]) as any,
+      stateDir: stateDir("relay-ready-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-a",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-a",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-relay-ready"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir,
+    });
+
+    await daemon.start();
+    await waitUntil(
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state ===
+        "rearming",
+    );
+    const guardedRelay = vi.fn().mockResolvedValue(undefined);
+    context.setLifecycleAgentInputDeliverer(guardedRelay);
+
+    await waitUntil(() => guardedRelay.mock.calls.length === 1);
+    expect(readInbox("worker-a", { baseDir: inboxBaseDir })).toHaveLength(1);
+    await daemon.shutdown();
   });
 
   it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {
@@ -734,6 +892,9 @@ describe("CmuxLayerDaemon", () => {
       expect((firstServer as any)._registeredTools.interact._engine).toBe(
         (secondServer as any)._registeredTools.interact._engine,
       );
+      expect(context.lifecycleAgentInputDeliverer).toBeNull();
+      await context.lifecycleStartPromise;
+      expect(context.lifecycleAgentInputDeliverer).toBeTypeOf("function");
     } finally {
       context.dispose();
     }

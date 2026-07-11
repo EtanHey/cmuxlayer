@@ -19,7 +19,7 @@
 1. Add a failing test with a stale `alive` record, existing watched file, live owner callback, and explicit `rearm_command`; assert one re-arm call, durable `rearming` state, and no second call on another reconciliation.
 2. Run `bunx vitest run tests/monitor-registry.test.ts` and confirm failure is caused by the missing reconciliation API/state.
 3. Add minimal `rearm_command`, `rearming`, `collapsed`, claim timestamp, collapse reason, result types, and injected `ownerAlive`, `watchTargetExists`, and `rearm` dependencies.
-4. Claim under the existing registry lock before invoking `rearm`; roll a failed callback back to `alive` without changing its heartbeat.
+4. Claim under the existing registry lock before invoking `rearm`; keep failed claims in `rearming` until their lease expires so deadman cannot race recovery.
 5. Re-run the focused suite and confirm the new behavior passes.
 
 ### Task 2: Specify unsafe-collapse and deadman idempotency
@@ -54,8 +54,8 @@
 
 1. Add failing daemon tests for one immediate boot reconciliation, non-overlapping periodic reconciliation, timer cleanup on shutdown, and two daemon instances sharing a registry without duplicate re-arm delivery.
 2. Run `bunx vitest run tests/daemon.test.ts` and confirm the absent coordinator causes the failures.
-3. Add injectable daemon reconciliation options and a default production adapter. Resolve owners from `StateManager.listStates()`, reject terminal records, verify the recorded surface with `readScreen`, and append a deterministic `monitor-rearm` inbox record containing the exact command.
-4. Use a stable inbox message id derived from the monitor recovery claim; ensure a duplicate id is not appended twice.
+3. Add injectable daemon reconciliation options and a default production adapter. Resolve owners from `StateManager.listStates()`, reject terminal records, verify the recorded surface with `readScreen`, and append a deterministic `monitor-rearm` inbox record containing the exact command. Reject relative re-arm file targets because daemon CWD is not owner CWD.
+4. Use a stable inbox message id derived from the monitor id and stale heartbeat; ensure a duplicate id is not appended twice, nudge through the guarded lifecycle relay when the owner's inbox heartbeat is stale, and immediately retry a boot-time claim when that relay becomes ready.
 5. Start reconciliation after context creation, schedule the unref'd interval, guard overlap, and clear it before shutdown.
 6. Re-run the daemon and inbox focused suites.
 

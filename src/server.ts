@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
@@ -1823,6 +1823,14 @@ interface ReadScreenSnapshot {
   topology: SurfaceTopologySnapshot | null;
 }
 
+export type LifecycleAgentInputDeliverer = (args: {
+  agent_id: string;
+  text: string;
+  press_enter: boolean;
+  allow_busy?: boolean;
+  source_event: DeliveryEventType;
+}) => Promise<unknown>;
+
 export interface CmuxServerContext {
   client: CmuxLayerClient;
   stateDir: string;
@@ -1847,6 +1855,11 @@ export interface CmuxServerContext {
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
   lifecycleSweepEngine: AgentEngine | null;
+  lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
+  lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
+  setLifecycleAgentInputDeliverer(
+    deliverer: LifecycleAgentInputDeliverer | null,
+  ): void;
   controlHealthCollector?: () => Promise<ControlHealth>;
   controlHealthWarnings: string[];
   controlHealthIntervalMs: number;
@@ -1938,6 +1951,18 @@ export function createServerContext(
     lifecycleStarted: false,
     lifecycleStartPromise: null,
     lifecycleSweepEngine: null,
+    lifecycleAgentInputDeliverer: null,
+    lifecycleAgentInputDelivererReadyListeners: new Set(),
+    setLifecycleAgentInputDeliverer(deliverer) {
+      const becameReady =
+        context.lifecycleAgentInputDeliverer === null && deliverer !== null;
+      context.lifecycleAgentInputDeliverer = deliverer;
+      if (becameReady) {
+        for (const listener of context.lifecycleAgentInputDelivererReadyListeners) {
+          listener();
+        }
+      }
+    },
     controlHealthCollector: opts?.controlHealthCollector,
     controlHealthWarnings: opts?.controlHealthWarnings ?? [],
     controlHealthIntervalMs: resolveControlHealthIntervalMs(
@@ -1951,6 +1976,8 @@ export function createServerContext(
         context.controlHealthTimer = null;
       }
       context.lifecycleSweepEngine = null;
+      context.lifecycleAgentInputDeliverer = null;
+      context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
       if (autoVitestStateDir) {
@@ -2076,15 +2103,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
-  let lifecycleAgentInputDeliverer:
-    | ((args: {
-        agent_id: string;
-        text: string;
-        press_enter: boolean;
-        allow_busy?: boolean;
-        source_event: DeliveryEventType;
-      }) => Promise<unknown>)
-    | null = null;
+  let lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null = null;
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleRefreshManagedMetadata:
     | ((agentId?: string) => Promise<void>)
@@ -2258,6 +2277,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const rearmCommand = nonEmptyString(args.rearm_command);
     if (args.rearm_command !== undefined && !rearmCommand) {
       return monitorRegistryError("invalid-rearm-command", monitorId);
+    }
+    if (
+      rearmCommand &&
+      (watchTargets as string[]).some(
+        (target) =>
+          target !== "~" && !target.startsWith("~/") && !isAbsolute(target),
+      )
+    ) {
+      return monitorRegistryError(
+        "rearm-watch-target-not-absolute",
+        monitorId,
+      );
     }
 
     return {
@@ -6606,6 +6637,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
       engine.startSweep(resolveSweepTiming());
     }
+    // The daemon may immediately use this relay for monitor recovery. Publish
+    // it only after persisted lifecycle state has been reconstituted so route
+    // resolution is ready, then wake any boot-time recovery claim.
+    void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
+      if (context.lifecycleStarted && context.lifecycleSweepEngine === engine) {
+        context.setLifecycleAgentInputDeliverer(deliverAgentInput);
+      }
+    });
 
     // 11. spawn_agent
     server.tool(

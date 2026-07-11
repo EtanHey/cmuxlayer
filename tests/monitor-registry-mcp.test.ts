@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import {
@@ -102,11 +102,13 @@ describe("monitor registry MCP tools", () => {
     const registered = await callTool(server, "register_monitor", {
       monitor_id: "seat-a-collab-watch",
       owner_seat: "seat-a",
-      watch_targets: ["orchestrator/collab/example.md"],
+      watch_targets: [
+        resolve(process.cwd(), "orchestrator/collab/example.md"),
+      ],
       mechanism: "event",
       pattern: "@seat-a|BLOCKED",
       deadman_timeout_s: 60,
-      rearm_command: "tail -n0 -F orchestrator/collab/example.md",
+      rearm_command: `tail -n0 -F ${resolve(process.cwd(), "orchestrator/collab/example.md")}`,
     });
     const listed = await callTool(server, "list_monitors", {});
     const queried = await callTool(server, "query_monitor_registry", {
@@ -120,11 +122,13 @@ describe("monitor registry MCP tools", () => {
       record: {
         monitor_id: "seat-a-collab-watch",
         owner_seat: "seat-a",
-        watch_targets: ["orchestrator/collab/example.md"],
+        watch_targets: [
+          resolve(process.cwd(), "orchestrator/collab/example.md"),
+        ],
         mechanism: "event",
         addressee: "seat-a",
         deadman_timeout_s: 60,
-        rearm_command: "tail -n0 -F orchestrator/collab/example.md",
+        rearm_command: `tail -n0 -F ${resolve(process.cwd(), "orchestrator/collab/example.md")}`,
         state: "alive",
       },
     });
@@ -133,7 +137,7 @@ describe("monitor registry MCP tools", () => {
       monitors: [
         expect.objectContaining({
           monitor_id: "seat-a-collab-watch",
-          rearm_command: "tail -n0 -F orchestrator/collab/example.md",
+          rearm_command: `tail -n0 -F ${resolve(process.cwd(), "orchestrator/collab/example.md")}`,
         }),
       ],
     });
@@ -296,6 +300,14 @@ describe("monitor registry MCP tools", () => {
       watch_targets: ["tail -n0 -F orchestrator/collab/example.md"],
       mechanism: "event",
     });
+    const relativeRearmTarget = await callTool(server, "register_monitor", {
+      monitor_id: "relative-rearm-target",
+      owner_seat: "seat-a",
+      watch_targets: ["orchestrator/collab/example.md"],
+      mechanism: "event",
+      deadman_timeout_s: 60,
+      rearm_command: "watch-collab",
+    });
 
     expect(noWatermark).toMatchObject({
       ok: false,
@@ -306,6 +318,11 @@ describe("monitor registry MCP tools", () => {
       ok: false,
       monitor_id: "tail-no-deadman",
       reason: "invalid-deadman-timeout",
+    });
+    expect(relativeRearmTarget).toMatchObject({
+      ok: false,
+      monitor_id: "relative-rearm-target",
+      reason: "rearm-watch-target-not-absolute",
     });
   });
 

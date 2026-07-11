@@ -24,7 +24,12 @@ import {
   httpNotifyMonitorDeadman,
   reconcileMonitorRegistry,
 } from "./monitor-registry.js";
-import { dispatch } from "./inbox.js";
+import {
+  dispatchOnce,
+  inboxPath,
+  monitorAlive,
+  type InboxOpts,
+} from "./inbox.js";
 import type { ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
@@ -46,6 +51,7 @@ import { isMainModule } from "./is-main.js";
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
 const DEFAULT_MONITOR_RECONCILE_INTERVAL_MS = 15_000;
+const MONITOR_REARM_INBOX_HEARTBEAT_MAX_AGE_MS = 60_000;
 const LISTEN_FD_START = 3;
 
 /**
@@ -230,7 +236,10 @@ export interface CmuxLayerDaemonOptions extends Omit<
     deps?: DetectStaleBuildDeps,
   ) => StaleBuildResult | null;
   staleCheckIntervalMs?: number;
-  monitorReconcile?: () => Promise<unknown> | unknown;
+  monitorReconcile?: (options?: {
+    rearmClaimTimeoutMs?: number;
+    monitorIds?: readonly string[];
+  }) => Promise<unknown> | unknown;
   monitorReconcileIntervalMs?: number;
   logger?: Pick<Console, "error">;
   onRetire?: (
@@ -369,7 +378,19 @@ export class CmuxLayerDaemon {
   private staleCheckTimer: NodeJS.Timeout | null = null;
   private monitorReconcileTimer: NodeJS.Timeout | null = null;
   private monitorReconcileInFlight = false;
-  private monitorReconcileFn: (() => Promise<unknown> | unknown) | null;
+  private monitorRelayReadyPending = false;
+  private readonly monitorReconcileFailedIds = new Set<string>();
+  private monitorReconcileFn:
+    | ((options?: {
+        rearmClaimTimeoutMs?: number;
+        monitorIds?: readonly string[];
+      }) =>
+        | Promise<unknown>
+        | unknown)
+    | null;
+  private readonly monitorRelayReadyListener = () => {
+    void this.retryFailedMonitorRearmsWhenRelayReady();
+  };
   private retirementPromise: Promise<void> | null = null;
   private readonly detectStaleBuildFn: (
     deps?: DetectStaleBuildDeps,
@@ -412,6 +433,9 @@ export class CmuxLayerDaemon {
     ) {
       this.monitorReconcileFn = this.createDefaultMonitorReconciler(context);
     }
+    context.lifecycleAgentInputDelivererReadyListeners.add(
+      this.monitorRelayReadyListener,
+    );
 
     this.server = (this.opts.serverFactory ?? net.createServer)(
       (socket) => void this.acceptConnection(socket),
@@ -623,7 +647,10 @@ export class CmuxLayerDaemon {
 
   private createDefaultMonitorReconciler(
     context: CmuxServerContext,
-  ): () => Promise<unknown> {
+  ): (options?: {
+    rearmClaimTimeoutMs?: number;
+    monitorIds?: readonly string[];
+  }) => Promise<unknown> {
     const registryPath =
       this.opts.monitorRegistryPath ?? defaultMonitorRegistryPath();
     const findOwner = (ownerSeat: string) =>
@@ -634,10 +661,14 @@ export class CmuxLayerDaemon {
             record.agent_id === ownerSeat || record.seat_id === ownerSeat,
         ) ?? null;
 
-    return () =>
+    return (options) =>
       reconcileMonitorRegistry({
         registryPath,
         now: this.opts.monitorRegistryNow,
+        ...(options?.rearmClaimTimeoutMs !== undefined
+          ? { rearmClaimTimeoutMs: options.rearmClaimTimeoutMs }
+          : {}),
+        ...(options?.monitorIds ? { monitorIds: options.monitorIds } : {}),
         ownerAlive: async (ownerSeat) => {
           const owner = findOwner(ownerSeat);
           if (!owner || owner.state === "done" || owner.state === "error") {
@@ -654,41 +685,116 @@ export class CmuxLayerDaemon {
             return false;
           }
         },
-        rearm: (record) => {
+        rearm: async (record) => {
           const owner = findOwner(record.owner_seat);
           if (!owner || !record.rearm_command || !record.rearm_claimed_at) {
-            throw new Error(`Monitor re-arm owner or command missing: ${record.monitor_id}`);
+            throw new Error(
+              `Monitor re-arm owner or command missing: ${record.monitor_id}`,
+            );
           }
-          dispatch(
+          const inboxOpts: InboxOpts = {
+            ...(this.opts.inboxBaseDir
+              ? { baseDir: this.opts.inboxBaseDir }
+              : {}),
+            ...(this.opts.monitorRegistryNow
+              ? { now: this.opts.monitorRegistryNow }
+              : {}),
+          };
+          const message = dispatchOnce(
             owner.agent_id,
             {
-              id: `monitor-rearm:${record.monitor_id}:${record.rearm_claimed_at}`,
+              id: `monitor-rearm:${record.monitor_id}:${record.last_signal_at}`,
               from: "cmuxlayer-daemon",
               tag: "monitor-rearm",
               task: `Re-arm monitor ${record.monitor_id} with this exact command, then signal_monitor after the watcher is live:\n${record.rearm_command}`,
             },
-            {
-              ...(this.opts.inboxBaseDir
-                ? { baseDir: this.opts.inboxBaseDir }
-                : {}),
-              ...(this.opts.monitorRegistryNow
-                ? { now: this.opts.monitorRegistryNow }
-                : {}),
-            },
+            inboxOpts,
           );
+          if (
+            monitorAlive(
+              owner.agent_id,
+              MONITOR_REARM_INBOX_HEARTBEAT_MAX_AGE_MS,
+              inboxOpts,
+            )
+          ) {
+            return;
+          }
+          const guardedRelay = context.lifecycleAgentInputDeliverer;
+          if (!guardedRelay) {
+            throw new Error("guarded agent relay is not ready");
+          }
+          await guardedRelay({
+            agent_id: owner.agent_id,
+            text: `[inbox] monitor recovery message ${message.id} — read ${inboxPath(owner.agent_id, inboxOpts)}, re-arm, then ack`,
+            press_enter: true,
+            allow_busy: true,
+            source_event: "dispatch_nudge",
+          });
         },
       });
   }
 
-  private async runMonitorReconcile(): Promise<void> {
-    if (!this.monitorReconcileFn || this.monitorReconcileInFlight) return;
+  private async retryFailedMonitorRearmsWhenRelayReady(): Promise<void> {
+    if (this.monitorReconcileInFlight) {
+      this.monitorRelayReadyPending = true;
+      return;
+    }
+    const monitorIds = [...this.monitorReconcileFailedIds];
+    if (monitorIds.length === 0) return;
+    await this.runMonitorReconcile({
+      rearmClaimTimeoutMs: 0,
+      monitorIds,
+    });
+  }
+
+  private async runMonitorReconcile(options?: {
+    rearmClaimTimeoutMs?: number;
+    monitorIds?: readonly string[];
+  }): Promise<void> {
+    if (!this.monitorReconcileFn) return;
+    if (this.monitorReconcileInFlight) return;
     this.monitorReconcileInFlight = true;
+    let reconcileResult: unknown;
     try {
-      await this.monitorReconcileFn();
+      reconcileResult = await this.monitorReconcileFn(options);
     } catch (error) {
-      this.logger.error("[cmuxlayer-daemon] monitor reconciliation failed", error);
+      this.logger.error(
+        "[cmuxlayer-daemon] monitor reconciliation failed",
+        error,
+      );
     } finally {
       this.monitorReconcileInFlight = false;
+      if (typeof reconcileResult === "object" && reconcileResult !== null) {
+        const result = reconcileResult as Record<string, unknown>;
+        if (Array.isArray(result.failed)) {
+          for (const monitorId of result.failed) {
+            if (typeof monitorId === "string") {
+              this.monitorReconcileFailedIds.add(monitorId);
+            }
+          }
+        }
+        for (const key of ["rearmed", "collapsed"] as const) {
+          const outcomes = result[key];
+          if (Array.isArray(outcomes)) {
+            for (const outcome of outcomes) {
+              const monitorId =
+                typeof outcome === "string"
+                  ? outcome
+                  : typeof outcome === "object" &&
+                      outcome !== null &&
+                      "monitor_id" in outcome &&
+                      typeof outcome.monitor_id === "string"
+                    ? outcome.monitor_id
+                    : null;
+              if (monitorId) this.monitorReconcileFailedIds.delete(monitorId);
+            }
+          }
+        }
+      }
+      if (this.monitorRelayReadyPending && !this.draining) {
+        this.monitorRelayReadyPending = false;
+        void this.retryFailedMonitorRearmsWhenRelayReady();
+      }
     }
   }
 

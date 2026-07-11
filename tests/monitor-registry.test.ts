@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { queryMonitorRegistryForGates as queryMonitorRegistryForGatesFromPackage } from "../src/lib.js";
 import {
   deregisterMonitor,
@@ -463,6 +463,40 @@ describe("monitor registry deadman core", () => {
     });
   });
 
+  it("rejects relative file targets for re-arm-capable monitors", async () => {
+    await expect(
+      registerMonitor(
+        {
+          monitor_id: "relative-target",
+          owner_seat: "worker-a",
+          watch_targets: ["relative/collab.md"],
+          mechanism: "event",
+          deadman_timeout_s: 60,
+          rearm_command: "watch-collab",
+        },
+        { registryPath: registryPath(), now: () => 1_000 },
+      ),
+    ).rejects.toThrow(/absolute or home-relative/i);
+  });
+
+  it("expands home-relative file targets for re-arm-capable monitors", async () => {
+    const record = await registerMonitor(
+      {
+        monitor_id: "canonical-targets",
+        owner_seat: "worker-a",
+        watch_targets: ["~/Gits/example/collab.md"],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: "watch-collab",
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    expect(record.watch_targets).toEqual([
+      join(homedir(), "Gits/example/collab.md"),
+    ]);
+  });
+
   it("collapses a stale monitor whose owner is gone without firing deadman", async () => {
     const watchedFile = join(TEST_DIR, "owner-gone.md");
     writeFileSync(watchedFile, "# collab\n", "utf8");
@@ -562,7 +596,7 @@ describe("monitor registry deadman core", () => {
     ]);
   });
 
-  it("releases a failed re-arm claim so a later sweep can retry", async () => {
+  it("keeps a failed re-arm out of deadman and retries after its claim lease", async () => {
     const watchedFile = join(TEST_DIR, "retry.md");
     writeFileSync(watchedFile, "# collab\n", "utf8");
     await registerMonitor(
@@ -584,18 +618,36 @@ describe("monitor registry deadman core", () => {
     const failed = await reconcileMonitorRegistry({
       registryPath: registryPath(),
       now: () => 62_000,
+      rearmClaimTimeoutMs: 60_000,
       ownerAlive: async () => true,
       rearm,
     });
-    const retried = await reconcileMonitorRegistry({
+    const notify = vi.fn();
+    const swept = await sweepMonitorRegistry({
       registryPath: registryPath(),
       now: () => 63_000,
+      notify,
+    });
+    const beforeLease = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 63_000,
+      rearmClaimTimeoutMs: 60_000,
+      ownerAlive: async () => true,
+      rearm,
+    });
+    const afterLease = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 122_001,
+      rearmClaimTimeoutMs: 60_000,
       ownerAlive: async () => true,
       rearm,
     });
 
     expect(failed.failed).toEqual(["rearm-retry"]);
-    expect(retried.rearmed).toEqual(["rearm-retry"]);
+    expect(swept.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(beforeLease.rearmed).toEqual([]);
+    expect(afterLease.rearmed).toEqual(["rearm-retry"]);
     expect(rearm).toHaveBeenCalledTimes(2);
   });
 
