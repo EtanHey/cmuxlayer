@@ -491,6 +491,11 @@ interface AgentEngineClient {
     title?: string;
     url?: string;
   }): Promise<CmuxNewSurfaceResult>;
+  renameTab(
+    surface: string,
+    title: string,
+    opts?: { workspace?: string },
+  ): Promise<void>;
   selectWorkspace(workspace: string): Promise<void>;
   listPanes(opts?: { workspace?: string }): Promise<{
     workspace_ref?: string;
@@ -3206,6 +3211,14 @@ export class AgentEngine {
       },
     );
     try {
+      const launcherName =
+        preflight?.launcherName ??
+        launcherNameForCli(spawnParams.repo, spawnParams.cli);
+      await this.client.renameTab(
+        surface.surface,
+        `${launcherName} [${surface.surface}]`,
+        { workspace: surface.actual_workspace ?? surface.workspace },
+      );
       await this.sendLaunchCommand(
         surface.surface,
         surface.actual_workspace ?? surface.workspace,

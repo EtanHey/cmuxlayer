@@ -468,16 +468,13 @@ export function chooseAgentSpawnPlacement(
     layouts.some(isLeadMajorityPane) ||
     context.parentRole === "orchestrator" ||
     context.parentRole === "ic";
-  const hasLeadCaller =
-    context.parentRole === "orchestrator" || context.parentRole === "ic";
   // A worker from a lead-owned single-column workspace has no classified
   // destination surface yet. Seed the right worker column without anchoring the
   // split to the lead pane.
   if (
     role === "worker" &&
     columnCount < 2 &&
-    hasLeadColumn &&
-    (context.worktree || hasLeadCaller)
+    hasLeadColumn
   ) {
     return { kind: "split", direction: "right" };
   }

@@ -1247,7 +1247,7 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
   });
 
-  it("anchors the parentless worker fallback to the rightmost pane", () => {
+  it("seeds a parentless managed worker without anchoring to the lead pane", () => {
     const panes = [makePane("pane:lead", 0, ["surface:orchestrator"])];
     const paneSurfaces = [
       makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
@@ -1267,7 +1267,6 @@ describe("layout policy", () => {
     expect(placement).toEqual({
       kind: "split",
       direction: "right",
-      pane: "pane:lead",
     });
   });
 
