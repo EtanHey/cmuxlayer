@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +20,9 @@ async function callTool(
   if (!tool) {
     throw new Error(`Tool not found: ${name}`);
   }
-  return tool.handler(args, {} as any);
+  const resultPromise = tool.handler(args, {} as any);
+  await vi.advanceTimersByTimeAsync(10_000);
+  return resultPromise;
 }
 
 function readEventLog(): Array<Record<string, unknown>> {
@@ -348,11 +350,16 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
 }
 
 function createReliabilityServer(client: FakeClaudeSurfaceClient) {
-  return createServer({
+  const server = createServer({
     client: client as any,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
   });
+  // These tests exercise registry routing and submit verification, not the
+  // periodic reconciliation loop. Stop its wall-clock sweep so it cannot race
+  // the five-second submit deadline or add unrelated work under parallel load.
+  disposeServer(server);
+  return server;
 }
 
 function registerAgent(server: any, overrides?: Partial<AgentRecord>): AgentRecord {
@@ -403,13 +410,16 @@ describe("enter reliability", () => {
   let server: any;
 
   beforeEach(() => {
+    vi.useFakeTimers({ now: new Date("2026-07-11T12:00:00.000Z") });
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     server = null;
   });
 
-  afterEach(() => {
-    disposeServer(server);
+  afterEach(async () => {
+    await server?.close();
+    vi.clearAllTimers();
+    vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 

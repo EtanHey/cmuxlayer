@@ -165,7 +165,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await server.close();
     rmSync(STATE_DIR, { recursive: true, force: true });
     rmSync(inboxDir, { recursive: true, force: true });
   });
@@ -260,6 +261,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
   });
 
   it("discovers a launcher-spawned Claude permission prompt but does not type a nudge into it", async () => {
+    await server.close();
     exec = makeExec(
       [
         "Do you want to allow this command?",
