@@ -528,6 +528,49 @@ describe("monitor registry deadman core", () => {
     });
   });
 
+  it("continues reconciling later monitors when collapse escalation rejects", async () => {
+    const watchedFile = join(TEST_DIR, "escalation-failure.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    for (const [monitorId, ownerSeat] of [
+      ["escalation-fails", "worker-wedged"],
+      ["healthy-after-failure", "worker-healthy"],
+    ] as const) {
+      await registerMonitor(
+        {
+          monitor_id: monitorId,
+          owner_seat: ownerSeat,
+          watch_targets: [watchedFile],
+          mechanism: "event",
+          deadman_timeout_s: 60,
+          rearm_command: `tail -n0 -F ${watchedFile}`,
+        },
+        { registryPath: registryPath(), now: () => 1_000 },
+      );
+    }
+    const rearm = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      reconcileMonitorRegistry({
+        registryPath: registryPath(),
+        now: () => 62_000,
+        ownerPtyDead: async (ownerSeat) => ownerSeat === "worker-wedged",
+        ownerAlive: async () => true,
+        rearm,
+        escalate: vi.fn().mockRejectedValue(new Error("notify unavailable")),
+      }),
+    ).resolves.toMatchObject({
+      rearmed: ["healthy-after-failure"],
+      collapsed: [
+        { monitor_id: "escalation-fails", reason: "owner-pty-dead" },
+      ],
+      failed: [],
+    });
+    expect(rearm).toHaveBeenCalledTimes(1);
+    expect(rearm).toHaveBeenCalledWith(
+      expect.objectContaining({ monitor_id: "healthy-after-failure" }),
+    );
+  });
+
   it("rejects relative file targets for re-arm-capable monitors", async () => {
     await expect(
       registerMonitor(

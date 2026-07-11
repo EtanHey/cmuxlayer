@@ -898,7 +898,11 @@ export async function reconcileMonitorRegistry(
     if (collapseReason) {
       collapsed.push({ monitor_id: candidate.monitor_id, reason: collapseReason });
       if (collapseReason === "owner-pty-dead") {
-        await opts.escalate?.(claimed);
+        try {
+          await opts.escalate?.(claimed);
+        } catch {
+          // The durable collapsed state is canonical; notification is best-effort.
+        }
       }
       continue;
     }
