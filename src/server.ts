@@ -6372,6 +6372,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           newSplit: (direction, splitOpts) =>
             client.newSplit(direction, splitOpts),
           newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
+          renameTab: (surface, title, renameOpts) =>
+            typeof client.renameTab === "function"
+              ? client.renameTab(surface, title, renameOpts)
+              : Promise.resolve(),
           selectWorkspace: (workspace) => client.selectWorkspace(workspace),
           listPanes: (paneOpts) => client.listPanes(paneOpts),
           listPaneSurfaces: (surfaceOpts) =>

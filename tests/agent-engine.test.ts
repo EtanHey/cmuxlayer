@@ -248,6 +248,51 @@ describe("AgentEngine", () => {
       expect(result.state).toBe("booting");
     });
 
+    it("assigns each managed surface a launcher-preserving unique seat title", async () => {
+      (
+        mockClient.newSplit as ReturnType<typeof vi.fn>
+      ).mockResolvedValueOnce({
+        workspace: "ws:1",
+        surface: "surface:first-worker",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      });
+      (
+        mockClient.newSplit as ReturnType<typeof vi.fn>
+      ).mockResolvedValueOnce({
+        workspace: "ws:1",
+        surface: "surface:second-worker",
+        pane: "pane:1",
+        title: "",
+        type: "terminal",
+      });
+
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        prompt: "First worker",
+      });
+      await engine.spawnAgent({
+        repo: "brainlayer",
+        cli: "codex",
+        prompt: "Second worker",
+      });
+
+      expect(mockClient.renameTab).toHaveBeenNthCalledWith(
+        1,
+        "surface:first-worker",
+        "brainlayerCodex [surface:first-worker]",
+        { workspace: "ws:1" },
+      );
+      expect(mockClient.renameTab).toHaveBeenNthCalledWith(
+        2,
+        "surface:second-worker",
+        "brainlayerCodex [surface:second-worker]",
+        { workspace: "ws:1" },
+      );
+    });
+
     it("enforces max children when parent and children are rehydrated from disk", async () => {
       const parent = makeRecord({
         agent_id: "parent-claude",
