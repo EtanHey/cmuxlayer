@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
   cpSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -103,6 +104,16 @@ async function startFakeCmuxSocket(path: string): Promise<void> {
 
 function packageJson(version: string): string {
   return `${JSON.stringify({ name: "cmuxlayer", version, type: "module" })}\n`;
+}
+
+function runningPackageVersion(): string {
+  const metadata: unknown = JSON.parse(
+    readFileSync(resolve("package.json"), "utf8"),
+  );
+  if (!isRecord(metadata) || typeof metadata.version !== "string") {
+    throw new Error("package.json must contain a string version");
+  }
+  return metadata.version;
 }
 
 function createFormulaFixture(root: string, version: string): {
@@ -218,7 +229,9 @@ describe("live daemon-first restart topology", () => {
       ROOTS.add(root);
       const daemonSocket = join(root, "stated.sock");
       const cmuxSocket = join(root, "cmux.sock");
-      const formula = createFormulaFixture(root, "0.3.33");
+      const runningVersion = runningPackageVersion();
+      const upgradedVersion = `${runningVersion}-live-topology-upgrade`;
+      const formula = createFormulaFixture(root, runningVersion);
       await startFakeCmuxSocket(cmuxSocket);
 
       const stderr: string[] = [];
@@ -261,8 +274,8 @@ describe("live daemon-first restart topology", () => {
       const initialDaemonPid = daemonPidFromHealth(initialHealth);
       expect(processExists(initialDaemonPid)).toBe(true);
 
-      writeFileSync(formula.rootPackage, packageJson("0.3.34"));
-      writeFileSync(formula.libexecPackage, packageJson("0.3.34"));
+      writeFileSync(formula.rootPackage, packageJson(upgradedVersion));
+      writeFileSync(formula.libexecPackage, packageJson(upgradedVersion));
       await waitFor(
         () => !processExists(initialDaemonPid),
         5_000,
