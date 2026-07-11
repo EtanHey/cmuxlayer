@@ -153,6 +153,7 @@ import {
   loadSeatRegistryFromConfig,
   type SeatRegistry,
 } from "./seat-identity.js";
+import { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -1807,6 +1808,8 @@ export interface CreateServerOptions {
    * entrypoint (index.ts) passes `true`.
    */
   enableCloseForensics?: boolean;
+  /** Override per-surface PTY write-liveness tracking (primarily for tests). */
+  surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -1830,6 +1833,7 @@ export interface CmuxServerContext {
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
+  surfaceWriteLiveness: SurfaceWriteLivenessTracker;
   enableClaudeChannels: boolean;
   skipAgentLifecycle: boolean;
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
@@ -1917,6 +1921,8 @@ export function createServerContext(
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
     readScreenInflight: new Map(),
+    surfaceWriteLiveness:
+      opts?.surfaceWriteLiveness ?? new SurfaceWriteLivenessTracker(),
     enableClaudeChannels:
       opts?.enableClaudeChannels ??
       process.env.CMUXLAYER_ENABLE_CLAUDE_CHANNELS === "1",
@@ -2015,6 +2021,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const latestDeliveryBySurface = context.latestDeliveryBySurface;
   const activeDeliveryBySurface = context.activeDeliveryBySurface;
   const activeSurfaceWrites = context.activeSurfaceWrites;
+  const surfaceWriteLiveness = context.surfaceWriteLiveness;
   const enableClaudeChannels =
     opts?.enableClaudeChannels ?? context.enableClaudeChannels;
   const skipAgentLifecycle =
@@ -2503,6 +2510,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       toolName?: string;
       workspace?: string;
       owner?: string;
+      observePtyWrite?: boolean;
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
@@ -2511,7 +2519,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const owner = opts.owner ?? `surface-write:${randomUUID()}`;
     acquireSurfaceWrite(surface, owner);
     try {
-      return await fn();
+      const result = await fn();
+      if (opts.observePtyWrite) {
+        surfaceWriteLiveness.recordSuccess(surface);
+      }
+      return result;
+    } catch (error) {
+      if (opts.observePtyWrite) {
+        surfaceWriteLiveness.recordFailure(surface, error);
+      }
+      throw error;
     } finally {
       releaseSurfaceWrite(surface, owner);
     }
@@ -2553,6 +2570,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     error?: string,
     failedChunk?: number,
   ) => {
+    if (status === "delivered") {
+      surfaceWriteLiveness.recordSuccess(record.surface);
+    } else if (status === "failed") {
+      surfaceWriteLiveness.recordFailure(record.surface, error);
+    }
     record.status = status;
     record.completed_at = new Date().toISOString();
     record.error = error;
@@ -3448,7 +3470,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: opts.workspace,
         });
       }
-    }, { toolName: "send_command", workspace: opts.workspace });
+    }, {
+      toolName: "send_command",
+      workspace: opts.workspace,
+      observePtyWrite: true,
+    });
   };
 
   const deliverBootPrompt = async (opts: {
@@ -3520,7 +3546,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
               : undefined,
           }),
-        { toolName: "boot_prompt", workspace: opts.workspace },
+        {
+          toolName: "boot_prompt",
+          workspace: opts.workspace,
+          observePtyWrite: true,
+        },
       );
       return {
         ...delivery,
@@ -3901,6 +3931,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
         resolveSurfaceWorkspace: (target) =>
           resolveSurfaceWorkspace(target.surface_id),
+        observeSurfaceWriteLiveness: (target) =>
+          surfaceWriteLiveness.observe(target.surface_id),
       },
       overrides,
     );
@@ -5023,7 +5055,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_event: "send_input",
             verify_submit: shouldVerifySubmit,
           });
-        }, { toolName: "send_input", workspace: args.workspace });
+        }, {
+          toolName: "send_input",
+          workspace: args.workspace,
+          observePtyWrite: true,
+        });
 
         const identity = resolveTargetIdentity(stateMgr, args.surface);
         const data = {
@@ -5145,7 +5181,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             source_event: "send_command",
             verify_submit: bootPromptPath ? false : shouldVerifySubmit,
           });
-        }, { toolName: "send_command", workspace: args.workspace });
+        }, {
+          toolName: "send_command",
+          workspace: args.workspace,
+          observePtyWrite: true,
+        });
 
         let bootPromptDelivery:
           | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -5241,7 +5281,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const key = normalizeKeyName(args.key);
         await withSurfaceWrite(args.surface, async () => {
           await sendKeyWithRetry(args.surface, key, args.workspace);
-        }, { toolName: "send_key", workspace: args.workspace });
+        }, {
+          toolName: "send_key",
+          workspace: args.workspace,
+          observePtyWrite: true,
+        });
         const data = { surface: args.surface, key };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
@@ -6191,13 +6235,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             withSurfaceWrite(
               surface,
               () => client.send(surface, text, sendOpts),
-              { toolName: "agent_engine", workspace: sendOpts?.workspace },
+              {
+                toolName: "agent_engine",
+                workspace: sendOpts?.workspace,
+                observePtyWrite: true,
+              },
             ),
           sendKey: (surface, key, keyOpts) =>
             withSurfaceWrite(
               surface,
               () => client.sendKey(surface, key, keyOpts),
-              { toolName: "send_key", workspace: keyOpts?.workspace },
+              {
+                toolName: "send_key",
+                workspace: keyOpts?.workspace,
+                observePtyWrite: true,
+              },
             ),
           setProgress: (value, progressOpts) =>
             client.setProgress(value, progressOpts),
@@ -6510,6 +6562,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         {
           toolName: args.source_event,
           workspace: route.workspace_id ?? undefined,
+          observePtyWrite: true,
         },
       );
     };
@@ -8210,6 +8263,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 {
                   toolName: "interact",
                   workspace: agent.workspace_id ?? undefined,
+                  observePtyWrite: true,
                 },
               );
               const d = { agent_id: args.agent, action: "interrupt" };

@@ -1,5 +1,6 @@
 import type { AgentRecord, AgentRole, AgentState } from "./agent-types.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
+import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
 import {
   inferAgentRole,
   inferRecordRoleOrNull,
@@ -17,6 +18,7 @@ export type AgentHealthIssueCode =
   | "inbox_monitor_not_alive"
   | "stale_inbox_dispatches"
   | "agent_wedged"
+  | "pane_pty_dead"
   | "registry_screen_disagreement"
   | "registry_surface_workspace_mismatch"
   | "closure_without_artifact"
@@ -39,6 +41,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   AgentHealthIssueSeverity
 > = {
   agent_wedged: "blocking",
+  pane_pty_dead: "blocking",
   closure_without_artifact: "blocking",
   pr_loop_incomplete: "blocking",
   kept_open_contract_incomplete: "blocking",
@@ -77,6 +80,7 @@ export interface AgentHealthInput {
   harvestability?: WorkerHarvestability | null;
   screen_actions?: string[] | null;
   topology?: AgentTopologyHealthInput | null;
+  surface_write_liveness?: SurfaceWriteLivenessObservation | null;
 }
 
 export interface AgentHealth {
@@ -121,6 +125,7 @@ function issueSeverity(
     inboxMonitorWithinBootGrace: boolean;
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
+    panePtyDead: boolean;
   },
 ): AgentHealthIssueSeverity {
   if (
@@ -130,7 +135,11 @@ function issueSeverity(
   ) {
     return "info";
   }
-  if (code === "registry_screen_disagreement" && context.screenActive) {
+  if (
+    code === "registry_screen_disagreement" &&
+    context.screenActive &&
+    !context.panePtyDead
+  ) {
     return "info";
   }
   if (
@@ -149,6 +158,7 @@ function deriveIssueSeverities(
     inboxMonitorWithinBootGrace: boolean;
     autoDiscovered: boolean;
     lacksManagedPlacement: boolean;
+    panePtyDead: boolean;
   },
 ): Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>> {
   const severities: Partial<
@@ -366,6 +376,16 @@ export function evaluateAgentHealth(
 
   const screenActive =
     input.screen_status === "working" || input.screen_status === "thinking";
+  const panePtyDead =
+    screenActive && input.surface_write_liveness?.pty_dead === true;
+  if (panePtyDead) {
+    addIssue(
+      issueCodes,
+      issues,
+      "pane_pty_dead",
+      `screen parses as ${input.screen_status} but the last ${input.surface_write_liveness?.consecutive_broken_pipe_failures ?? "several"} surface writes failed with a broken pipe`,
+    );
+  }
   const screenDone = input.screen_status === "done";
   let reconciledState: AgentState | undefined;
   const registryActive =
@@ -519,6 +539,7 @@ export function evaluateAgentHealth(
     screenActive,
     autoDiscovered,
     lacksManagedPlacement: lacksManagedPlacement(agent),
+    panePtyDead,
     inboxMonitorWithinBootGrace: isWithinInboxMonitorBootGrace(
       agent,
       deps.now?.() ?? Date.now(),

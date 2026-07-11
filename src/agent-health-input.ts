@@ -4,6 +4,7 @@ import type {
   AgentTopologyHealthInput,
 } from "./agent-health.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
+import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
 import {
   channelDirDeletedAfterCreate,
   monitorAlive,
@@ -30,6 +31,7 @@ export interface AgentHealthInputOverrides {
   closure_artifact_verified?: boolean | null;
   harvestability?: WorkerHarvestability | null;
   inbox_channel_dir_deleted?: boolean | null;
+  surface_write_liveness?: SurfaceWriteLivenessObservation | null;
 }
 
 export interface AgentHealthInputDeps {
@@ -46,6 +48,9 @@ export interface AgentHealthInputDeps {
     agent: AgentRecord,
   ) => Promise<ParsedSurfaceHealthInput | null>;
   resolveSurfaceWorkspace?: (agent: AgentRecord) => Promise<string | null>;
+  observeSurfaceWriteLiveness?: (
+    agent: AgentRecord,
+  ) => SurfaceWriteLivenessObservation | null;
 }
 
 export async function buildAgentHealthInput(
@@ -107,6 +112,10 @@ export async function buildAgentHealthInput(
     overrides.surface_workspace_id !== undefined
       ? overrides.surface_workspace_id
       : await deps.resolveSurfaceWorkspace?.(agent);
+  const surfaceWriteLiveness =
+    overrides.surface_write_liveness !== undefined
+      ? overrides.surface_write_liveness
+      : deps.observeSurfaceWriteLiveness?.(agent);
 
   return {
     monitor_alive: alive,
@@ -119,5 +128,6 @@ export async function buildAgentHealthInput(
     topology,
     closure_artifact_verified: closureArtifactVerified,
     harvestability,
+    surface_write_liveness: surfaceWriteLiveness,
   };
 }
