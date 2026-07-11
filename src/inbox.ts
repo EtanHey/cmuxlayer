@@ -185,6 +185,17 @@ export function dispatch(
   return msg;
 }
 
+export function dispatchOnce(
+  agentId: string,
+  input: DispatchInput & { id: string },
+  opts?: InboxOpts,
+): InboxMessage {
+  const existing = readInbox(agentId, opts).find(
+    (message) => message.id === input.id,
+  );
+  return existing ?? dispatch(agentId, input, opts);
+}
+
 export function readInbox(agentId: string, opts?: InboxOpts): InboxMessage[] {
   return readJsonl<InboxMessage>(inboxPath(agentId, opts));
 }

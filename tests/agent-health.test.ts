@@ -43,6 +43,28 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent lifecycle health", () => {
+  it("marks an owner unhealthy when its registered monitor collapsed", () => {
+    const health = evaluateAgentHealth(makeRecord(), {
+      monitor_alive: true,
+      collapsed_monitors: [
+        {
+          monitor_id: "collab-watch",
+          reason: "watch-target-missing",
+        },
+      ],
+    });
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("monitor_collapsed");
+    expect(health.issue_severities?.monitor_collapsed).toBe("blocking");
+    expect(health.issues).toContain(
+      "registered monitor collab-watch collapsed: watch-target-missing",
+    );
+    expect(health.recommended_actions).toContain(
+      "repair_or_replace_collapsed_monitor",
+    );
+  });
+
   it("keeps a fresh agent healthy when it only has info-tier launch-time issues", () => {
     const createdAt = "2026-06-26T20:00:00.000Z";
     const health = evaluateAgentHealth(

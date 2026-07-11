@@ -7,6 +7,7 @@ import {
   ackedIds,
   agentDir,
   dispatch,
+  dispatchOnce,
   inboxPath,
   monitorAlive,
   pendingDispatches,
@@ -35,6 +36,26 @@ describe("inbox write-channel", () => {
     const all = readInbox("a1", opts);
     expect(all).toHaveLength(1);
     expect(all[0].task).toBe("do X");
+  });
+
+  it("dispatchOnce keeps one durable message for a stable recovery id", () => {
+    const first = dispatchOnce(
+      "a1-once",
+      { from: "daemon", task: "rearm", id: "monitor-rearm:m1:signal-1" },
+      opts,
+    );
+    const second = dispatchOnce(
+      "a1-once",
+      {
+        from: "daemon",
+        task: "duplicate rearm",
+        id: "monitor-rearm:m1:signal-1",
+      },
+      opts,
+    );
+
+    expect(second).toEqual(first);
+    expect(readInbox("a1-once", opts)).toEqual([first]);
   });
 
   it("FM#2 replayUndelivered returns un-acked messages oldest-first; ack removes them", () => {
