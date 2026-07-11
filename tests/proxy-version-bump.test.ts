@@ -5,7 +5,7 @@ import net from "node:net";
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ReadBuffer,
@@ -67,7 +67,10 @@ class FakeDaemon {
 
   constructor(
     private readonly path: string,
-    private readonly opts: { holdFirstToolsList?: boolean } = {},
+    private readonly opts: {
+      holdFirstToolsList?: boolean;
+      holdFirstInitialize?: boolean;
+    } = {},
   ) {}
 
   async start(): Promise<void> {
@@ -89,6 +92,9 @@ class FakeDaemon {
           };
           messages.push(req);
           if (req.method === "initialize") {
+            if (this.opts.holdFirstInitialize && connectionIndex === 0) {
+              continue;
+            }
             socket.write(
               serializeMessage({
                 jsonrpc: "2.0",
@@ -417,5 +423,658 @@ describe("proxy version-bump auto-reconnect", () => {
     expect(guard.allow()).toBe(true);
     expect(guard.allow()).toBe(true);
     expect(guard.allow()).toBe(false);
+  });
+
+  it("execs the realpath-resolved installed MCP entrypoint exactly once", async () => {
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect: () => new net.Socket(),
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.38",
+        installed: "0.3.39",
+      }),
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await Promise.all([
+      (
+        proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+      ).checkVersionBumpReconnect(),
+      (
+        proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+      ).checkVersionBumpReconnect(),
+    ]);
+
+    expect(execve).toHaveBeenCalledTimes(1);
+    expect(execve).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        process.execPath,
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      ],
+      expect.objectContaining({
+        CMUXLAYER_SELF_REEXECED: "0.3.38->0.3.39",
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: "dev mode",
+      env: { CMUXLAYER_DEV: "1" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+    },
+    {
+      name: "source tree",
+      env: { CMUXLAYER_DEV: "0" },
+      runningEntryScriptPath: "/Users/dev/Gits/cmuxlayer/dist/index.js",
+    },
+  ])("never self-reexecs from $name", async ({ env, runningEntryScriptPath }) => {
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect: () => new net.Socket(),
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.38",
+        installed: "0.3.39",
+      }),
+      runningEntryScriptPath,
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      execve,
+      env,
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(execve).not.toHaveBeenCalled();
+  });
+
+  it("honors the cross-exec storm marker when a version keeps mismatching", async () => {
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect: () => new net.Socket(),
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.38",
+        installed: "0.3.39",
+      }),
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      execve,
+      env: {
+        CMUXLAYER_DEV: "0",
+        CMUXLAYER_SELF_REEXECED: "0.3.38->0.3.39",
+      },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(execve).not.toHaveBeenCalled();
+  });
+
+  it("allows a later distinct version transition after an earlier self-reexec", async () => {
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect: () => new net.Socket(),
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.39",
+        installed: "0.3.40",
+      }),
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.40/libexec/dist/index.js",
+      execve,
+      env: {
+        CMUXLAYER_DEV: "0",
+        CMUXLAYER_SELF_REEXECED: "0.3.38->0.3.39",
+      },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(execve).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a request still in flight at the drain deadline before exec", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-drain");
+    const daemon = new FakeDaemon(path, { holdFirstToolsList: true });
+    daemons.push(daemon);
+    await daemon.start();
+
+    let stale = false;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const collector = createCollector(output);
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.38", installed: "0.3.39" }
+          : { stale: false, running: "0.3.38", installed: "0.3.38" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      selfReexecDrainTimeoutMs: 10,
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() =>
+      collector.messages.some((message) => "id" in message && message.id === 1),
+    );
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    await waitFor(() =>
+      daemon.messages[0]?.some(
+        (message) => "method" in message && message.method === "tools/list",
+      ),
+    );
+
+    stale = true;
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(
+      collector.messages.find((message) => "id" in message && message.id === 2),
+    ).toEqual(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringContaining("refreshing stale MCP child"),
+        }),
+      }),
+    );
+    expect(execve).toHaveBeenCalledTimes(1);
+    const handoff = JSON.parse(
+      execve.mock.calls[0][2].CMUXLAYER_SELF_REEXEC_HANDOFF,
+    );
+    expect(handoff).toEqual(
+      expect.objectContaining({
+        initializeRequest: expect.objectContaining({ method: "initialize" }),
+        initializedNotification: expect.objectContaining({
+          method: "notifications/initialized",
+        }),
+      }),
+    );
+  });
+
+  it("hydrates the MCP handshake after exec and reinitializes the daemon", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-handoff");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input: new PassThrough(),
+      output: new PassThrough(),
+      env: {
+        CMUXLAYER_SELF_REEXECED: "0.3.38->0.3.39",
+        CMUXLAYER_SELF_REEXEC_HANDOFF: JSON.stringify({
+          initializeRequest: {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: { capabilities: {} },
+          },
+          initializedNotification: {
+            jsonrpc: "2.0",
+            method: "notifications/initialized",
+          },
+        }),
+      },
+      detectStaleBuild: () => null,
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await waitFor(
+      () =>
+        daemon.messages[0]?.some(
+          (message) =>
+            "method" in message &&
+            message.method === "notifications/initialized",
+        ) ?? false,
+    );
+
+    expect(daemon.messages[0].filter((message) => "method" in message)).toEqual([
+      expect.objectContaining({ method: "initialize" }),
+      expect.objectContaining({ method: "notifications/initialized" }),
+    ]);
+  });
+
+  it("keeps the current session alive when the handshake handoff is oversized", async () => {
+    const execve = vi.fn();
+    const logger = { error: vi.fn() };
+    const env = {
+      CMUXLAYER_DEV: "0",
+      CMUXLAYER_SELF_REEXEC_HANDOFF: JSON.stringify({
+        initializeRequest: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { capabilities: { oversized: "x".repeat(40_000) } },
+        },
+        initializedNotification: {
+          jsonrpc: "2.0",
+          method: "notifications/initialized",
+        },
+      }),
+    };
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect: () => new net.Socket(),
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.38",
+        installed: "0.3.39",
+      }),
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      execve,
+      env,
+      logger,
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(execve).not.toHaveBeenCalled();
+    expect(proxy.isRunning()).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("handshake handoff exceeds"),
+    );
+  });
+
+  it("does not emit a duplicate error while a successful response is flushing", async () => {
+    class DelayedOutput extends Writable {
+      readonly messages: JSONRPCMessage[] = [];
+      private releaseWrite: (() => void) | null = null;
+
+      _write(
+        chunk: Buffer,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ) {
+        const message = JSON.parse(chunk.toString("utf8")) as JSONRPCMessage;
+        this.messages.push(message);
+        if (
+          "id" in message &&
+          message.id === 2 &&
+          "result" in message
+        ) {
+          this.releaseWrite = callback;
+          return;
+        }
+        callback();
+      }
+
+      release(): void {
+        const release = this.releaseWrite;
+        this.releaseWrite = null;
+        release?.();
+      }
+    }
+
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-output-flush");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+    let stale = false;
+    const input = new PassThrough();
+    const output = new DelayedOutput();
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.38", installed: "0.3.39" }
+          : { stale: false, running: "0.3.38", installed: "0.3.38" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      selfReexecDrainTimeoutMs: 10,
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() => output.messages.some((message) => "id" in message && message.id === 1));
+    writeFrame(input, { jsonrpc: "2.0", method: "notifications/initialized" });
+    writeFrame(input, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    await waitFor(() =>
+      output.messages.some(
+        (message) => "id" in message && message.id === 2 && "result" in message,
+      ),
+    );
+
+    stale = true;
+    const remediation = (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(execve).not.toHaveBeenCalled();
+    expect(
+      output.messages.filter((message) => "id" in message && message.id === 2),
+    ).toHaveLength(1);
+    output.release();
+    await remediation;
+    expect(execve).not.toHaveBeenCalled();
+    expect(
+      output.messages.filter((message) => "id" in message && message.id === 2),
+    ).toHaveLength(1);
+
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+    expect(execve).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for a daemon notification to flush before considering re-exec", async () => {
+    class DelayedNotificationOutput extends Writable {
+      readonly messages: JSONRPCMessage[] = [];
+      private releaseWrite: (() => void) | null = null;
+
+      _write(
+        chunk: Buffer,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ) {
+        const message = JSON.parse(chunk.toString("utf8")) as JSONRPCMessage;
+        this.messages.push(message);
+        if (
+          "method" in message &&
+          message.method === "notifications/progress"
+        ) {
+          this.releaseWrite = callback;
+          return;
+        }
+        callback();
+      }
+
+      release(): void {
+        const release = this.releaseWrite;
+        this.releaseWrite = null;
+        release?.();
+      }
+    }
+
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-notification-flush");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+    let stale = false;
+    const input = new PassThrough();
+    const output = new DelayedNotificationOutput();
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.38", installed: "0.3.39" }
+          : { stale: false, running: "0.3.38", installed: "0.3.38" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      selfReexecDrainTimeoutMs: 10,
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() => output.messages.some((message) => "id" in message && message.id === 1));
+    writeFrame(input, { jsonrpc: "2.0", method: "notifications/initialized" });
+    daemon.connections[0].write(
+      serializeMessage({
+        jsonrpc: "2.0",
+        method: "notifications/progress",
+        params: { progressToken: "r8", progress: 1 },
+      }),
+    );
+    await waitFor(() =>
+      output.messages.some(
+        (message) =>
+          "method" in message && message.method === "notifications/progress",
+      ),
+    );
+
+    stale = true;
+    const remediation = (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(execve).not.toHaveBeenCalled();
+    output.release();
+    await remediation;
+    expect(execve).not.toHaveBeenCalled();
+  });
+
+  it("does not hand off initialize when its request was rejected at the drain deadline", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-initialize-timeout");
+    const daemon = new FakeDaemon(path, { holdFirstInitialize: true });
+    daemons.push(daemon);
+    await daemon.start();
+    let stale = false;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const collector = createCollector(output);
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.38", installed: "0.3.39" }
+          : { stale: false, running: "0.3.38", installed: "0.3.38" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      selfReexecDrainTimeoutMs: 10,
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() => daemon.messages[0]?.length === 1);
+    stale = true;
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(
+      collector.messages.find((message) => "id" in message && message.id === 1),
+    ).toEqual(expect.objectContaining({ error: expect.any(Object) }));
+    const handoff = JSON.parse(
+      execve.mock.calls[0][2].CMUXLAYER_SELF_REEXEC_HANDOFF,
+    );
+    expect(handoff).toEqual({
+      initializeRequest: null,
+      initializedNotification: null,
+    });
+  });
+
+  it("waits for a backpressured timeout error before re-exec", async () => {
+    class DelayedErrorOutput extends Writable {
+      readonly messages: JSONRPCMessage[] = [];
+      private releaseWrite: (() => void) | null = null;
+
+      _write(
+        chunk: Buffer,
+        _encoding: BufferEncoding,
+        callback: (error?: Error | null) => void,
+      ) {
+        const message = JSON.parse(chunk.toString("utf8")) as JSONRPCMessage;
+        this.messages.push(message);
+        if ("id" in message && message.id === 2 && "error" in message) {
+          this.releaseWrite = callback;
+          return;
+        }
+        callback();
+      }
+
+      release(): void {
+        const release = this.releaseWrite;
+        this.releaseWrite = null;
+        release?.();
+      }
+    }
+
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("self-reexec-timeout-flush");
+    const daemon = new FakeDaemon(path, { holdFirstToolsList: true });
+    daemons.push(daemon);
+    await daemon.start();
+    let stale = false;
+    const input = new PassThrough();
+    const output = new DelayedErrorOutput();
+    const execve = vi.fn();
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      requestTimeoutMs: 10,
+      selfReexecDrainTimeoutMs: 10,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.38", installed: "0.3.39" }
+          : { stale: false, running: "0.3.38", installed: "0.3.38" },
+      runningEntryScriptPath:
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.38/libexec/dist/index.js",
+      installedEntryScriptPath: () =>
+        "/opt/homebrew/Cellar/cmuxlayer/0.3.39/libexec/dist/index.js",
+      execve,
+      env: { CMUXLAYER_DEV: "0" },
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() => output.messages.some((message) => "id" in message && message.id === 1));
+    writeFrame(input, { jsonrpc: "2.0", method: "notifications/initialized" });
+    writeFrame(input, { jsonrpc: "2.0", id: 2, method: "tools/list" });
+    await waitFor(() =>
+      output.messages.some(
+        (message) => "id" in message && message.id === 2 && "error" in message,
+      ),
+    );
+
+    stale = true;
+    const remediation = (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(execve).not.toHaveBeenCalled();
+    output.release();
+    await remediation;
+    expect(execve).not.toHaveBeenCalled();
   });
 });

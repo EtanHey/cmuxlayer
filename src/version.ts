@@ -129,9 +129,23 @@ export function defaultOptPackageJsonPath(): string | null {
 export function resolveInstalledDaemonScript(
   optPackageJsonPath: string | null = defaultOptPackageJsonPath(),
 ): string | null {
+  return resolveInstalledScript("daemon.js", optPackageJsonPath);
+}
+
+/** Resolve the brew-installed MCP stdio entrypoint for in-place refresh. */
+export function resolveInstalledEntryScript(
+  optPackageJsonPath: string | null = defaultOptPackageJsonPath(),
+): string | null {
+  return resolveInstalledScript("index.js", optPackageJsonPath);
+}
+
+function resolveInstalledScript(
+  filename: string,
+  optPackageJsonPath: string | null,
+): string | null {
   const optPackageJson = optPackageJsonPath;
   if (!optPackageJson) return null;
-  const script = join(dirname(optPackageJson), "dist", "daemon.js");
+  const script = join(dirname(optPackageJson), "dist", filename);
   try {
     return realpathSync(script);
   } catch {
