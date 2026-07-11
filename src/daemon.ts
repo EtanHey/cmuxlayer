@@ -51,6 +51,7 @@ import { isMainModule } from "./is-main.js";
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
 const DEFAULT_MONITOR_RECONCILE_INTERVAL_MS = 15_000;
+const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const MONITOR_REARM_INBOX_HEARTBEAT_MAX_AGE_MS = 60_000;
 const LISTEN_FD_START = 3;
 
@@ -68,6 +69,13 @@ export interface DaemonHotReloadPlan {
 export type DaemonHotReloadHandler = (
   plan: DaemonHotReloadPlan,
 ) => Promise<"not_implemented">;
+
+export interface MonitorOwnerPtyDeadNotification {
+  title: string;
+  body: string;
+  source: string;
+  priority: "high";
+}
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
 export type DaemonRetirementReason = "stale-build" | "irrecoverable-transport";
@@ -241,6 +249,9 @@ export interface CmuxLayerDaemonOptions extends Omit<
     monitorIds?: readonly string[];
   }) => Promise<unknown> | unknown;
   monitorReconcileIntervalMs?: number;
+  monitorOwnerPtyDeadNotify?: (
+    notification: MonitorOwnerPtyDeadNotification,
+  ) => Promise<unknown> | unknown;
   logger?: Pick<Console, "error">;
   onRetire?: (
     reason: DaemonRetirementReason,
@@ -669,6 +680,14 @@ export class CmuxLayerDaemon {
           ? { rearmClaimTimeoutMs: options.rearmClaimTimeoutMs }
           : {}),
         ...(options?.monitorIds ? { monitorIds: options.monitorIds } : {}),
+        ownerPtyDead: (ownerSeat) => {
+          const owner = findOwner(ownerSeat);
+          return (
+            owner !== null &&
+            context.surfaceWriteLiveness.observe(owner.surface_id)?.pty_dead ===
+              true
+          );
+        },
         ownerAlive: async (ownerSeat) => {
           const owner = findOwner(ownerSeat);
           if (!owner || owner.state === "done" || owner.state === "error") {
@@ -729,6 +748,18 @@ export class CmuxLayerDaemon {
             press_enter: true,
             allow_busy: true,
             source_event: "dispatch_nudge",
+          });
+        },
+        escalate: async (record) => {
+          const notify =
+            this.opts.monitorOwnerPtyDeadNotify ??
+            ((notification: MonitorOwnerPtyDeadNotification) =>
+              httpDeliver(notification, DEFAULT_NOTIFY_URL));
+          await notify({
+            title: "Monitor owner PTY dead",
+            body: `Monitor ${record.monitor_id} collapsed because owner ${record.owner_seat} cannot accept terminal writes; watch_targets=${record.watch_targets.join(", ")}`,
+            source: "cmuxlayer-monitor-registry",
+            priority: "high",
           });
         },
       });

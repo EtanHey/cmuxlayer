@@ -810,6 +810,93 @@ describe("CmuxLayerDaemon", () => {
     expect(clients[0]?.sendKey).not.toHaveBeenCalled();
   });
 
+  it("collapses and loudly escalates a pty-dead monitor owner without inbox re-arm", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "pty-dead-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "pty-dead-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "pty-dead-inbox");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "pty-dead-monitor",
+        owner_seat: "worker-wedged",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const context = createServerContext({
+      client: createPlacementClient([]) as any,
+      stateDir: stateDir("pty-dead-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-wedged",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-wedged",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    context.surfaceWriteLiveness.recordFailure("surface:caller", {
+      code: "EPIPE",
+    });
+    context.surfaceWriteLiveness.recordFailure("surface:caller", {
+      code: "EPIPE",
+    });
+    const guardedRelay = vi.fn().mockResolvedValue(undefined);
+    context.setLifecycleAgentInputDeliverer(guardedRelay);
+    const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-owner-pty-dead"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 5,
+      monitorOwnerPtyDeadNotify,
+      inboxBaseDir,
+    });
+
+    await daemon.start();
+    await waitUntil(
+      () => readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
+    );
+    await delay(20);
+    await daemon.shutdown();
+
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "pty-dead-monitor",
+      state: "collapsed",
+      collapsed_reason: "owner-pty-dead",
+    });
+    expect(monitorOwnerPtyDeadNotify).toHaveBeenCalledTimes(1);
+    expect(monitorOwnerPtyDeadNotify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Monitor owner PTY dead",
+        body: expect.stringContaining("pty-dead-monitor"),
+        priority: "high",
+      }),
+    );
+    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toEqual([]);
+    expect(guardedRelay).not.toHaveBeenCalled();
+  });
+
   it("retries a claimed monitor as soon as the guarded relay becomes ready", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const registryPath = join(TEST_ROOT, "relay-ready-monitor-registry.json");

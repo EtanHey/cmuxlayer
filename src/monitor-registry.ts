@@ -112,15 +112,18 @@ export interface MonitorRegistrySweepOptions extends MonitorRegistryOptions {
 
 export type MonitorCollapseReason =
   | "owner-not-alive"
+  | "owner-pty-dead"
   | "watch-target-missing"
   | "rearm-command-missing";
 
 export interface MonitorRegistryReconcileOptions extends MonitorRegistryOptions {
   ownerAlive: (ownerSeat: string) => Promise<boolean> | boolean;
+  ownerPtyDead?: (ownerSeat: string) => Promise<boolean> | boolean;
   watchTargetExists?: (target: string) => boolean;
   rearmClaimTimeoutMs?: number;
   monitorIds?: readonly string[];
   rearm: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
+  escalate?: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
 }
 
 export interface MonitorRegistryReconcileResult {
@@ -429,6 +432,7 @@ function monitorIdForInvalid(record: RawMonitorRecord): string {
 function isMonitorCollapseReason(value: unknown): value is MonitorCollapseReason {
   return (
     value === "owner-not-alive" ||
+    value === "owner-pty-dead" ||
     value === "watch-target-missing" ||
     value === "rearm-command-missing"
   );
@@ -850,6 +854,8 @@ export async function reconcileMonitorRegistry(
       candidate.watch_targets.some((target) => !watchTargetExists(target))
     ) {
       collapseReason = "watch-target-missing";
+    } else if (await opts.ownerPtyDead?.(candidate.owner_seat)) {
+      collapseReason = "owner-pty-dead";
     } else if (!(await opts.ownerAlive(candidate.owner_seat))) {
       collapseReason = "owner-not-alive";
     }
@@ -891,6 +897,13 @@ export async function reconcileMonitorRegistry(
     if (!claimed) continue;
     if (collapseReason) {
       collapsed.push({ monitor_id: candidate.monitor_id, reason: collapseReason });
+      if (collapseReason === "owner-pty-dead") {
+        try {
+          await opts.escalate?.(claimed);
+        } catch {
+          // The durable collapsed state is canonical; notification is best-effort.
+        }
+      }
       continue;
     }
 

@@ -154,7 +154,7 @@ describe("monitor registry MCP tools", () => {
     });
   });
 
-  it("surfaces collapsed recovery metadata through list and gate queries", async () => {
+  it("surfaces owner-pty-dead recovery metadata through list and gate queries", async () => {
     const watchedFile = join(TEST_DIR, "collapsed.md");
     writeFileSync(watchedFile, "# collab\n", "utf8");
     const server = createMonitorServer();
@@ -170,7 +170,8 @@ describe("monitor registry MCP tools", () => {
     await reconcileMonitorRegistry({
       registryPath: registryPath(),
       now: () => now,
-      ownerAlive: async () => false,
+      ownerPtyDead: async () => true,
+      ownerAlive: async () => true,
       rearm: vi.fn(),
     });
 
@@ -185,13 +186,13 @@ describe("monitor registry MCP tools", () => {
     expect(listed.monitors[0]).toMatchObject({
       monitor_id: "seat-a-collapsed",
       state: "collapsed",
-      collapsed_reason: "owner-not-alive",
+      collapsed_reason: "owner-pty-dead",
     });
     expect(queried.monitors[0]).toMatchObject({
       monitor_id: "seat-a-collapsed",
       state: "collapsed",
       liveness: "collapsed",
-      collapsed_reason: "owner-not-alive",
+      collapsed_reason: "owner-pty-dead",
     });
   });
 
