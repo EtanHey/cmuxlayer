@@ -1,3 +1,13 @@
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   assertBuildVersion,
@@ -8,12 +18,31 @@ import {
 } from "../src/version.js";
 
 describe("resolveInstalledDaemonScript", () => {
-  it("resolves the daemon beside the formula libexec package.json", () => {
+  it("falls back to the unresolved daemon path when realpath is unavailable", () => {
     expect(
       resolveInstalledDaemonScript(
-        "/opt/homebrew/opt/cmuxlayer/libexec/package.json",
+        "/missing/homebrew/opt/cmuxlayer/libexec/package.json",
       ),
-    ).toBe("/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js");
+    ).toBe("/missing/homebrew/opt/cmuxlayer/libexec/dist/daemon.js");
+  });
+
+  it("returns the real Cellar daemon path when the opt tree is a symlink", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-version-realpath-"));
+    try {
+      const cellar = join(root, "Cellar", "cmuxlayer", "1.2.3", "libexec");
+      const opt = join(root, "opt", "cmuxlayer");
+      mkdirSync(join(cellar, "dist"), { recursive: true });
+      mkdirSync(join(root, "opt"), { recursive: true });
+      writeFileSync(join(cellar, "package.json"), "{}");
+      writeFileSync(join(cellar, "dist", "daemon.js"), "");
+      symlinkSync(join(root, "Cellar", "cmuxlayer", "1.2.3"), opt, "dir");
+
+      expect(
+        resolveInstalledDaemonScript(join(opt, "libexec", "package.json")),
+      ).toBe(realpathSync(join(cellar, "dist", "daemon.js")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -117,19 +117,49 @@ function runningPackageVersion(): string {
 }
 
 function createFormulaFixture(root: string, version: string): {
+  cellarRoot: string;
+  optRoot: string;
   rootPackage: string;
   libexecPackage: string;
 } {
+  const cellarRoot = join(root, "brew", "Cellar", "cmuxlayer", version);
   const optRoot = join(root, "brew", "opt", "cmuxlayer");
-  const libexec = join(optRoot, "libexec");
+  const libexec = join(cellarRoot, "libexec");
   mkdirSync(libexec, { recursive: true });
   cpSync(resolve("dist"), join(libexec, "dist"), { recursive: true });
   symlinkSync(resolve("node_modules"), join(libexec, "node_modules"), "dir");
-  const rootPackage = join(optRoot, "package.json");
+  const rootPackage = join(cellarRoot, "package.json");
   const libexecPackage = join(libexec, "package.json");
   writeFileSync(rootPackage, packageJson(version));
   writeFileSync(libexecPackage, packageJson(version));
-  return { rootPackage, libexecPackage };
+  mkdirSync(dirname(optRoot), { recursive: true });
+  symlinkSync(cellarRoot, optRoot, "dir");
+  return { cellarRoot, optRoot, rootPackage, libexecPackage };
+}
+
+function upgradeFormulaFixture(
+  root: string,
+  oldFormula: ReturnType<typeof createFormulaFixture>,
+  version: string,
+): ReturnType<typeof createFormulaFixture> {
+  const newCellarRoot = join(root, "brew", "Cellar", "cmuxlayer", version);
+  const newLibexec = join(newCellarRoot, "libexec");
+  mkdirSync(newLibexec, { recursive: true });
+  cpSync(resolve("dist"), join(newLibexec, "dist"), { recursive: true });
+  symlinkSync(resolve("node_modules"), join(newLibexec, "node_modules"), "dir");
+  const rootPackage = join(newCellarRoot, "package.json");
+  const libexecPackage = join(newLibexec, "package.json");
+  writeFileSync(rootPackage, packageJson(version));
+  writeFileSync(libexecPackage, packageJson(version));
+  rmSync(oldFormula.optRoot);
+  symlinkSync(newCellarRoot, oldFormula.optRoot, "dir");
+  rmSync(oldFormula.cellarRoot, { recursive: true, force: true });
+  return {
+    cellarRoot: newCellarRoot,
+    optRoot: oldFormula.optRoot,
+    rootPackage,
+    libexecPackage,
+  };
 }
 
 function createMcpPeer(child: ChildProcess, stderr: string[]) {
@@ -235,20 +265,24 @@ describe("live daemon-first restart topology", () => {
       await startFakeCmuxSocket(cmuxSocket);
 
       const stderr: string[] = [];
-      const child = spawn(process.execPath, [resolve("dist", "index.js")], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HOME: root,
-          HOMEBREW_PREFIX: join(root, "brew"),
-          CMUX_SOCKET_PATH: cmuxSocket,
-          CMUXLAYER_DAEMON_SOCKET: daemonSocket,
-          CMUXLAYER_DEV: "0",
-          CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
-          CMUXLAYER_STALE_CHECK_INTERVAL_MS: "100",
+      const child = spawn(
+        process.execPath,
+        [join(formula.optRoot, "libexec", "dist", "index.js")],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: root,
+            HOMEBREW_PREFIX: join(root, "brew"),
+            CMUX_SOCKET_PATH: cmuxSocket,
+            CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+            CMUXLAYER_DEV: "0",
+            CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
+            CMUXLAYER_STALE_CHECK_INTERVAL_MS: "100",
+          },
+          stdio: ["pipe", "pipe", "pipe"],
         },
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      );
       CHILDREN.add(child);
       const peer = createMcpPeer(child, stderr);
 
@@ -274,8 +308,7 @@ describe("live daemon-first restart topology", () => {
       const initialDaemonPid = daemonPidFromHealth(initialHealth);
       expect(processExists(initialDaemonPid)).toBe(true);
 
-      writeFileSync(formula.rootPackage, packageJson(upgradedVersion));
-      writeFileSync(formula.libexecPackage, packageJson(upgradedVersion));
+      upgradeFormulaFixture(root, formula, upgradedVersion);
       await waitFor(
         () => !processExists(initialDaemonPid),
         5_000,
@@ -296,5 +329,57 @@ describe("live daemon-first restart topology", () => {
       process.kill(replacementDaemonPid, "SIGTERM");
     },
     70_000,
+  );
+
+  it(
+    "executes a daemon launched through the Homebrew opt symlink",
+    async () => {
+      const rootPath = join(
+        "/tmp",
+        `cmuxlayer-live-symlink-main-${process.pid}-${Date.now()}`,
+      );
+      mkdirSync(rootPath, { recursive: true });
+      const root = realpathSync(rootPath);
+      ROOTS.add(root);
+      const daemonSocket = join(root, "stated.sock");
+      const cmuxSocket = join(root, "cmux.sock");
+      const formula = createFormulaFixture(root, runningPackageVersion());
+      await startFakeCmuxSocket(cmuxSocket);
+
+      const child = spawn(
+        process.execPath,
+        [join(formula.optRoot, "libexec", "dist", "daemon.js")],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: root,
+            CMUX_SOCKET_PATH: cmuxSocket,
+            CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+            CMUXLAYER_DEV: "0",
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      CHILDREN.add(child);
+      const stderr: string[] = [];
+      child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
+
+      await waitFor(
+        () => {
+          try {
+            return (
+              processExists(child.pid ?? -1) &&
+              realpathSync(daemonSocket).length > 0
+            );
+          } catch {
+            return false;
+          }
+        },
+        5_000,
+        `symlink-launched daemon socket; stderr=${stderr.join("")}`,
+      );
+    },
+    20_000,
   );
 });

@@ -1,9 +1,19 @@
 import { execFile } from "node:child_process";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+
+const RUNNING_SCRIPT_PATH = (() => {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return null;
+  try {
+    return realpathSync(entrypoint);
+  } catch {
+    return resolve(entrypoint);
+  }
+})();
 
 export interface ControlHealthExecResult {
   stdout: string;
@@ -22,6 +32,7 @@ export interface ControlHealthOptions {
   pid?: number;
   ppid?: number;
   cwd?: string;
+  scriptPath?: string | null;
   client?: unknown;
   execFile?: ControlHealthExecFile;
   readFile?: typeof readFile;
@@ -74,6 +85,7 @@ export interface ControlHealth {
     cmux_resolution: ExecutableStatus[];
     ps?: string;
     ps_error?: string;
+    script_path?: string | null;
   };
   selected_transport: {
     client_class: string | null;
@@ -484,6 +496,8 @@ export async function collectControlHealth(
       pid: opts.pid ?? process.pid,
       ppid: opts.ppid ?? process.ppid,
       cwd: opts.cwd ?? process.cwd(),
+      script_path:
+        opts.scriptPath === undefined ? RUNNING_SCRIPT_PATH : opts.scriptPath,
       stdin_is_tty: process.stdin.isTTY === true,
       env: envSnapshot,
       path_entries: pathEntries,

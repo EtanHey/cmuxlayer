@@ -13,7 +13,7 @@ import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
-import { createStaleBuildWarner, readVersion } from "./version.js";
+import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
 import { StateManager } from "./state-manager.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import {
@@ -2373,7 +2373,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const server = new McpServer(
     {
       name: "cmuxlayer",
-      version: readVersion(),
+      version: RUNNING_VERSION,
     },
     enableClaudeChannels
       ? { instructions: CLAUDE_CHANNEL_INSTRUCTIONS }

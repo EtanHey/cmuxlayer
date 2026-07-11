@@ -3,7 +3,6 @@
 import net from "node:net";
 import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
@@ -40,6 +39,7 @@ import {
   type DetectStaleBuildDeps,
   type StaleBuildResult,
 } from "./version.js";
+import { isMainModule } from "./is-main.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
@@ -783,10 +783,7 @@ export async function runDaemon(
   return daemon;
 }
 
-const isMain =
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-
-if (isMain) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runDaemon().catch((error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
     process.exit(1);

@@ -873,6 +873,37 @@ describe("CmuxLayerProxy", () => {
     );
   });
 
+  it(
+    "logs a successful daemon spawn that exits suspiciously quickly",
+    async () => {
+      mkdirSync(TEST_ROOT, { recursive: true });
+      const path = socketPath("reconnect-spawn-quick-exit");
+      const logger = { error: vi.fn() };
+      const spawned = new EventEmitter() as EventEmitter & { pid: number };
+      spawned.pid = 4242;
+      const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(spawned);
+      const { proxy } = createProxy(path, {
+        initialBackoffMs: 5,
+        maxBackoffMs: 5,
+        installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+        logger,
+        spawnDaemonForVersionBump,
+      });
+
+      await waitFor(() => spawnDaemonForVersionBump.mock.calls.length === 1);
+      await waitFor(() => spawned.listenerCount("exit") > 0);
+      spawned.emit("exit", 0, null);
+      await waitFor(() =>
+        logger.error.mock.calls.some(([message]) =>
+          String(message).includes(
+            "daemon spawn suspicious quick-exit (isMain/symlink mismatch?)",
+          ),
+        ),
+      );
+      await proxy.stop();
+    },
+  );
+
   it("caps reconnect-driven daemon spawns within the guard window", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("reconnect-spawn-guard");
