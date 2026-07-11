@@ -1,14 +1,16 @@
 import net from "node:net";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkMcpConfigDrift,
@@ -162,6 +164,8 @@ async function startDoctorDaemon(
     degraded?: boolean;
     cmuxSocketPath?: string;
     unresponsive?: boolean;
+    ps?: string;
+    scriptPath?: string;
   } = {},
 ): Promise<void> {
   rmSync(path, { force: true });
@@ -210,6 +214,10 @@ async function startDoctorDaemon(
                 content: [],
                 structuredContent: {
                   health: {
+                    current_process: {
+                      ps: opts.ps ?? "",
+                      script_path: opts.scriptPath ?? null,
+                    },
                     selected_transport: {
                       transport_mode: opts.degraded ? "cli" : "socket",
                       transport_degraded: opts.degraded ?? false,
@@ -322,6 +330,47 @@ describe("runDoctor — report shape", () => {
     expect(report.daemon.ok).toBe(false);
     expect(report.daemon.note).toMatch(
       /stale daemon v0\.3\.31 serving \(installed v0\.3\.33\).*proxies respawn/i,
+    );
+    expect(report.healthy).toBe(false);
+  });
+
+  it("flags a daemon whose running script was deleted by brew cleanup", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-deleted-${process.pid}.sock`);
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-doctor-deleted-tree-"));
+    doctorTempDirs.push(root);
+    const oldRoot = join(root, "Cellar", "cmuxlayer", "0.3.31");
+    const newRoot = join(root, "Cellar", "cmuxlayer", "0.3.35");
+    const optRoot = join(root, "opt", "cmuxlayer");
+    const relativeScript = join("libexec", "dist", "daemon.js");
+    mkdirSync(join(oldRoot, "libexec", "dist"), { recursive: true });
+    mkdirSync(join(newRoot, "libexec", "dist"), { recursive: true });
+    mkdirSync(dirname(optRoot), { recursive: true });
+    writeFileSync(join(oldRoot, relativeScript), "");
+    writeFileSync(join(newRoot, relativeScript), "");
+    symlinkSync(oldRoot, optRoot, "dir");
+    const runningScript = realpathSync(join(optRoot, relativeScript));
+    rmSync(optRoot);
+    symlinkSync(newRoot, optRoot, "dir");
+    rmSync(oldRoot, { recursive: true, force: true });
+
+    expect(existsSync(join(optRoot, relativeScript))).toBe(true);
+    expect(existsSync(runningScript)).toBe(false);
+    await startDoctorDaemon(path, {
+      version: "0.3.31",
+      ps: `123 1 123 0 S ?? node ${join(optRoot, relativeScript)}`,
+      scriptPath: runningScript,
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.35",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.daemon.ok).toBe(false);
+    expect(report.daemon.note).toBe(
+      "daemon running from a deleted install (brew cleanup?) — stale detection is blind; retire it",
     );
     expect(report.healthy).toBe(false);
   });

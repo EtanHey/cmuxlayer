@@ -25,7 +25,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, existsSync } from "node:fs";
 import net from "node:net";
 import {
   access,
@@ -159,6 +159,7 @@ export interface DoctorReport {
     installedVersion?: string;
     transportDegraded?: boolean;
     currentSocketPath?: string | null;
+    runningScriptPath?: string;
   };
   /** §3 tap — best-effort report; brew may be absent. */
   tap: {
@@ -211,6 +212,8 @@ export interface RunDoctorOptions {
   ) => Promise<SocketProbeResult>;
   /** Bound for daemon connect/initialize/control_health (default 1500ms). */
   daemonProbeTimeoutMs?: number;
+  /** Injectable path existence check for daemon provenance tests. */
+  pathExists?: (path: string) => boolean;
 }
 
 type DaemonMcpProbeResult =
@@ -220,11 +223,16 @@ type DaemonMcpProbeResult =
       version: string;
       transportDegraded: boolean;
       currentSocketPath: string | null;
+      scriptPath: string | null;
     }
   | { kind: "error"; error: string };
 
 function daemonProbeError(message: unknown): string {
   return message instanceof Error ? message.message : String(message);
+}
+
+function daemonScriptPathFromPs(ps: string): string | null {
+  return ps.match(/(?:^|\s)(\/[^\s]*\/daemon\.js)(?:\s|$)/)?.[1] ?? null;
 }
 
 function probeDaemonMcp(
@@ -333,6 +341,16 @@ function probeDaemonMcp(
               health && isRecord(health.selected_transport)
                 ? health.selected_transport
                 : null;
+            const currentProcess =
+              health && isRecord(health.current_process)
+                ? health.current_process
+                : null;
+            const scriptPath =
+              currentProcess && typeof currentProcess.script_path === "string"
+                ? currentProcess.script_path
+                : currentProcess && typeof currentProcess.ps === "string"
+                  ? daemonScriptPathFromPs(currentProcess.ps)
+                  : null;
             if (!version || !selected) {
               settle({
                 kind: "error",
@@ -348,6 +366,7 @@ function probeDaemonMcp(
                 typeof selected.current_socket_path === "string"
                   ? selected.current_socket_path
                   : null,
+              scriptPath,
             });
           }
         } catch (error) {
@@ -415,7 +434,21 @@ async function checkDaemonIntegrity(
     ...(stale ? { installedVersion: stale.installed } : {}),
     transportDegraded: probe.transportDegraded,
     currentSocketPath: probe.currentSocketPath,
+    ...(probe.scriptPath ? { runningScriptPath: probe.scriptPath } : {}),
   };
+  if (probe.scriptPath) {
+    try {
+      if (!(opts.pathExists ?? existsSync)(probe.scriptPath)) {
+        return {
+          ...base,
+          ok: false,
+          note: "daemon running from a deleted install (brew cleanup?) — stale detection is blind; retire it",
+        };
+      }
+    } catch {
+      // Provenance checks are best-effort; other daemon checks still run.
+    }
+  }
   if (stale?.stale) {
     return {
       ...base,

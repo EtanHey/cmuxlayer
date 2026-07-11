@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,9 @@ export function readVersion(): string {
     return "unknown";
   }
 }
+
+/** Process identity is immutable even if Homebrew deletes this Cellar tree. */
+export const RUNNING_VERSION = readVersion();
 
 export interface BuildVersionCheck {
   /** True when the running build matches `expected`. */
@@ -38,7 +41,7 @@ export function assertBuildVersion(
   expected: string,
   opts?: { throwOnMismatch?: boolean; running?: string },
 ): BuildVersionCheck {
-  const running = opts?.running ?? readVersion();
+  const running = opts?.running ?? RUNNING_VERSION;
   const ok = running === expected;
   if (!ok && opts?.throwOnMismatch) {
     throw new Error(
@@ -128,7 +131,12 @@ export function resolveInstalledDaemonScript(
 ): string | null {
   const optPackageJson = optPackageJsonPath;
   if (!optPackageJson) return null;
-  return join(dirname(optPackageJson), "dist", "daemon.js");
+  const script = join(dirname(optPackageJson), "dist", "daemon.js");
+  try {
+    return realpathSync(script);
+  } catch {
+    return script;
+  }
 }
 
 /**
@@ -148,8 +156,14 @@ export function detectStaleBuild(
     const isDev = deps.isDev ?? process.env.CMUXLAYER_DEV === "1";
     if (isDev) return null;
 
-    const running = deps.running ?? readVersion();
+    const running = deps.running ?? RUNNING_VERSION;
     if (!running || running === "unknown") return null;
+
+    if (deps.running === undefined && readVersion() === "unknown") {
+      // Homebrew cleanup can unlink the package.json backing this still-live
+      // process. The cached version remains authoritative; the unreadable
+      // running tree corroborates an upgrade instead of making it unjudgeable.
+    }
 
     const optPath =
       deps.optPackageJsonPath === undefined

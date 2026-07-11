@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import net from "node:net";
-import { pathToFileURL } from "node:url";
 import type { Readable, Writable } from "node:stream";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
@@ -27,6 +26,7 @@ import {
   type StaleBuildResult,
   resolveInstalledDaemonScript,
 } from "./version.js";
+import { isMainModule } from "./is-main.js";
 
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
@@ -40,6 +40,29 @@ const DEFAULT_RECONNECT_DAEMON_SPAWN_MAX_ATTEMPTS = 3;
 const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_RECONNECT_LOG_INTERVAL_MS = 5_000;
 const PROXY_ERROR_CODE = -32001;
+const SUSPICIOUS_DAEMON_EXIT_MS = 5_000;
+
+function instrumentSpawnedDaemon(
+  spawned: unknown,
+  startedAt: number,
+  logger: Pick<Console, "error">,
+): void {
+  if (
+    !spawned ||
+    typeof spawned !== "object" ||
+    !("once" in spawned) ||
+    typeof spawned.once !== "function"
+  ) {
+    return;
+  }
+  spawned.once("exit", (code: number | null) => {
+    if (code === 0 && Date.now() - startedAt <= SUSPICIOUS_DAEMON_EXIT_MS) {
+      logger.error(
+        "[cmuxlayer-proxy] daemon spawn suspicious quick-exit (isMain/symlink mismatch?)",
+      );
+    }
+  });
+}
 
 export interface ReconnectDelayOptions {
   initialBackoffMs: number;
@@ -565,12 +588,14 @@ export class CmuxLayerProxy {
         );
         return;
       }
+      const spawnStartedAt = Date.now();
       const spawned = await this.spawnDaemonForVersionBump({
         socketPath: this.socketPath,
         env: process.env,
         logger: this.logger,
         daemonScriptPath,
       });
+      instrumentSpawnedDaemon(spawned, spawnStartedAt, this.logger);
       const pid =
         spawned &&
         typeof spawned === "object" &&
@@ -1034,12 +1059,14 @@ export class CmuxLayerProxy {
       const daemonScriptPath = this.installedDaemonScriptPath();
       if (daemonScriptPath && this.spawnDaemonForVersionBump) {
         try {
+          const spawnStartedAt = Date.now();
           const spawned = await this.spawnDaemonForVersionBump({
             socketPath: this.socketPath,
             env: process.env,
             logger: this.logger,
             daemonScriptPath,
           });
+          instrumentSpawnedDaemon(spawned, spawnStartedAt, this.logger);
           const pid =
             spawned &&
             typeof spawned === "object" &&
@@ -1081,10 +1108,7 @@ export async function runProxy(
   return proxy;
 }
 
-const isMain =
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-
-if (isMain) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runProxy({ spawnDaemonForVersionBump: spawnDaemonProcess }).catch((error) => {
     console.error("[cmuxlayer-proxy] fatal", error);
     process.exit(1);

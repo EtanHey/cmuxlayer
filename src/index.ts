@@ -23,8 +23,9 @@
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
-import { readVersion } from "./version.js";
+import { RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
+import { isMainModule } from "./is-main.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -53,7 +54,7 @@ Environment:
 async function main() {
   const arg = process.argv[2];
   if (arg === "--version" || arg === "-v") {
-    process.stdout.write(`cmuxlayer ${readVersion()}\n`);
+    process.stdout.write(`cmuxlayer ${RUNNING_VERSION}\n`);
     return;
   }
   if (arg === "--help" || arg === "-h") {
@@ -65,7 +66,7 @@ async function main() {
     // Best-effort brew probes; exits 0 when healthy, 1 otherwise — so a runbook
     // can branch on the code. No bare sudo; never prompts.
     const json = process.argv.includes("--json");
-    const report = await runDoctor({ version: readVersion() });
+    const report = await runDoctor({ version: RUNNING_VERSION });
     process.stdout.write(
       (json ? renderDoctorJson(report) : renderDoctorText(report)) + "\n",
     );
@@ -76,7 +77,9 @@ async function main() {
   await runDaemonFirstEntry();
 }
 
-main().catch((error) => {
-  console.error("[cmuxlayer] fatal", error);
-  process.exit(1);
-});
+if (isMainModule(import.meta.url, process.argv[1])) {
+  main().catch((error) => {
+    console.error("[cmuxlayer] fatal", error);
+    process.exit(1);
+  });
+}
