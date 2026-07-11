@@ -131,6 +131,7 @@ import {
 import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
+  collectSelfHealHealth,
   collectControlHealth,
   formatControlHealth,
   type ControlHealth,
@@ -1844,6 +1845,8 @@ export interface CmuxServerContext {
   latestDeliveryBySurface: Map<string, string>;
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
+  surfaceWriteLivenessCandidates: Set<string>;
+  surfacePtyDeadSince: Map<string, number>;
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
   surfaceWriteLiveness: SurfaceWriteLivenessTracker;
   enableClaudeChannels: boolean;
@@ -1937,6 +1940,8 @@ export function createServerContext(
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
+    surfaceWriteLivenessCandidates: new Set(),
+    surfacePtyDeadSince: new Map(),
     readScreenInflight: new Map(),
     surfaceWriteLiveness:
       opts?.surfaceWriteLiveness ?? new SurfaceWriteLivenessTracker(),
@@ -2053,6 +2058,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const activeDeliveryBySurface = context.activeDeliveryBySurface;
   const activeSurfaceWrites = context.activeSurfaceWrites;
   const surfaceWriteLiveness = context.surfaceWriteLiveness;
+  const surfaceWriteLivenessCandidates =
+    context.surfaceWriteLivenessCandidates;
+  const surfacePtyDeadSince = context.surfacePtyDeadSince;
   const enableClaudeChannels =
     opts?.enableClaudeChannels ?? context.enableClaudeChannels;
   const skipAgentLifecycle =
@@ -2543,6 +2551,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  const recordSurfaceWriteSuccess = (surface: string): void => {
+    surfaceWriteLiveness.recordSuccess(surface);
+    surfaceWriteLivenessCandidates.delete(surface);
+    surfacePtyDeadSince.delete(surface);
+  };
+
+  const recordSurfaceWriteFailure = (
+    surface: string,
+    error: unknown,
+  ): void => {
+    surfaceWriteLiveness.recordFailure(surface, error);
+    const observation = surfaceWriteLiveness.observe(surface);
+    if (!observation || observation.consecutive_broken_pipe_failures === 0) {
+      surfaceWriteLivenessCandidates.delete(surface);
+      surfacePtyDeadSince.delete(surface);
+      return;
+    }
+    if (!observation.pty_dead) {
+      surfaceWriteLivenessCandidates.delete(surface);
+      surfacePtyDeadSince.delete(surface);
+      return;
+    }
+    surfaceWriteLivenessCandidates.add(surface);
+    if (!surfacePtyDeadSince.has(surface)) {
+      surfacePtyDeadSince.set(surface, observation.last_attempt_at);
+    }
+  };
+
   const withSurfaceWrite = async <T>(
     surface: string,
     fn: () => Promise<T>,
@@ -2561,12 +2597,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     try {
       const result = await fn();
       if (opts.observePtyWrite) {
-        surfaceWriteLiveness.recordSuccess(surface);
+        recordSurfaceWriteSuccess(surface);
       }
       return result;
     } catch (error) {
       if (opts.observePtyWrite) {
-        surfaceWriteLiveness.recordFailure(surface, error);
+        recordSurfaceWriteFailure(surface, error);
       }
       throw error;
     } finally {
@@ -2611,9 +2647,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     failedChunk?: number,
   ) => {
     if (status === "delivered") {
-      surfaceWriteLiveness.recordSuccess(record.surface);
+      recordSurfaceWriteSuccess(record.surface);
     } else if (status === "failed") {
-      surfaceWriteLiveness.recordFailure(record.surface, error);
+      recordSurfaceWriteFailure(record.surface, error);
     }
     record.status = status;
     record.completed_at = new Date().toISOString();
@@ -2753,13 +2789,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const rawHealth = controlHealthCollector
       ? await controlHealthCollector()
       : await collectControlHealth({ client });
+    const knownSurfaceIds = [
+      ...stateMgr.listStates().map((record) => record.surface_id),
+      ...roleSurfaceOverrides.keys(),
+      ...latestDeliveryBySurface.keys(),
+      ...activeSurfaceWrites.keys(),
+      ...surfaceWriteLivenessCandidates,
+    ];
+    const healthWithSelfHeal: ControlHealth = {
+      ...rawHealth,
+      self_heal: collectSelfHealHealth({
+        surfaceWriteLiveness,
+        surfaceIds: knownSurfaceIds,
+        panePtyDeadSince: surfacePtyDeadSince,
+        monitorRegistry: opts?.monitorRegistryPath
+          ? monitorRegistryOptions()
+          : undefined,
+      }),
+    };
     const health =
       controlHealthWarnings.length > 0
         ? {
-            ...rawHealth,
-            warnings: [...rawHealth.warnings, ...controlHealthWarnings],
+            ...healthWithSelfHeal,
+            warnings: [
+              ...healthWithSelfHeal.warnings,
+              ...controlHealthWarnings,
+            ],
           }
-        : rawHealth;
+        : healthWithSelfHeal;
     eventLog.appendControlHealth({
       ts: health.generated_at,
       event_type: "control_health",

@@ -1,9 +1,23 @@
 import { execFile } from "node:child_process";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
-import { constants as fsConstants, realpathSync } from "node:fs";
+import {
+  constants as fsConstants,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  queryMonitorRegistryForGates,
+  readMonitorRegistry,
+  type MonitorRegistryOptions,
+} from "./monitor-registry.js";
+import type { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
+
+const MAX_SELF_HEAL_DETAILS = 100;
+const MAX_MONITOR_REGISTRY_BYTES = 1024 * 1024;
 
 const RUNNING_SCRIPT_PATH = (() => {
   const entrypoint = process.argv[1];
@@ -39,6 +53,31 @@ export interface ControlHealthOptions {
   stat?: typeof stat;
   access?: typeof access;
   now?: () => Date;
+  surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
+  surfaceIds?: readonly string[];
+  panePtyDeadSince?: ReadonlyMap<string, number>;
+  monitorRegistryPath?: string;
+}
+
+export interface ControlHealthSelfHeal {
+  pane_pty_dead: {
+    count: number;
+    surfaces: Array<{
+      surface_id: string;
+      since_at?: string;
+      last_attempt_at: string;
+    }>;
+    truncated: boolean;
+  };
+  monitor_registry: {
+    available: boolean;
+    error?: string;
+    total: number;
+    rearming: number;
+    collapsed: number;
+    collapsed_monitors: Array<{ monitor_id: string; reason: string }>;
+    truncated: boolean;
+  };
 }
 
 export interface PathStatus {
@@ -99,7 +138,104 @@ export interface ControlHealth {
     production: CmuxInstanceHealth;
     nightly: CmuxInstanceHealth;
   };
+  self_heal: ControlHealthSelfHeal;
   warnings: string[];
+}
+
+export function collectSelfHealHealth(opts: {
+  surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
+  surfaceIds?: readonly string[];
+  panePtyDeadSince?: ReadonlyMap<string, number>;
+  monitorRegistry?: MonitorRegistryOptions;
+} = {}): ControlHealthSelfHeal {
+  const surfaceIds = [...new Set(opts.surfaceIds ?? [])];
+  const deadSurfaces: ControlHealthSelfHeal["pane_pty_dead"]["surfaces"] = [];
+  let deadSurfaceCount = 0;
+  if (opts.surfaceWriteLiveness) {
+    for (const surfaceId of surfaceIds) {
+      try {
+        const observation = opts.surfaceWriteLiveness.observe(surfaceId);
+        if (!observation?.pty_dead) continue;
+        deadSurfaceCount += 1;
+        if (deadSurfaces.length >= MAX_SELF_HEAL_DETAILS) continue;
+        const sinceAt = opts.panePtyDeadSince?.get(surfaceId);
+        deadSurfaces.push({
+          surface_id: surfaceId,
+          ...(sinceAt === undefined
+            ? {}
+            : { since_at: new Date(sinceAt).toISOString() }),
+          last_attempt_at: new Date(
+            observation.last_attempt_at,
+          ).toISOString(),
+        });
+      } catch {
+        // One malformed/stale surface observation must not break control_health.
+      }
+    }
+  }
+
+  let monitors: ReturnType<typeof readMonitorRegistry>["monitors"] = [];
+  let monitorRegistryAvailable = false;
+  let monitorRegistryError: string | undefined;
+  const registryPath = opts.monitorRegistry?.registryPath;
+  if (registryPath) {
+    try {
+      const registryStat = statSync(registryPath);
+      if (registryStat.size > MAX_MONITOR_REGISTRY_BYTES) {
+        throw new Error(
+          `monitor registry exceeds ${MAX_MONITOR_REGISTRY_BYTES} bytes`,
+        );
+      }
+      const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as unknown;
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !Array.isArray((parsed as { monitors?: unknown }).monitors)
+      ) {
+        throw new Error("monitor registry JSON has invalid shape");
+      }
+      const registryQuery = queryMonitorRegistryForGates(
+        opts.monitorRegistry,
+      );
+      if (
+        registryQuery.monitors.some(
+          (monitor) => monitor.liveness === "invalid",
+        )
+      ) {
+        throw new Error("monitor registry contains invalid records");
+      }
+      monitors = readMonitorRegistry(opts.monitorRegistry).monitors;
+      monitorRegistryAvailable = true;
+    } catch (error) {
+      monitorRegistryError =
+        error instanceof Error ? error.message : String(error);
+    }
+  } else {
+    monitorRegistryError = "monitor registry path is not configured";
+  }
+  const collapsedMonitors = monitors
+    .filter((monitor) => monitor.state === "collapsed")
+    .map((monitor) => ({
+      monitor_id: monitor.monitor_id,
+      reason: monitor.collapsed_reason ?? "unknown",
+    }));
+
+  return {
+    pane_pty_dead: {
+      count: deadSurfaceCount,
+      surfaces: deadSurfaces,
+      truncated: deadSurfaceCount > deadSurfaces.length,
+    },
+    monitor_registry: {
+      available: monitorRegistryAvailable,
+      ...(monitorRegistryError ? { error: monitorRegistryError } : {}),
+      total: monitors.length,
+      rearming: monitors.filter((monitor) => monitor.state === "rearming").length,
+      collapsed: collapsedMonitors.length,
+      collapsed_monitors: collapsedMonitors.slice(0, MAX_SELF_HEAL_DETAILS),
+      truncated: collapsedMonitors.length > MAX_SELF_HEAL_DETAILS,
+    },
+  };
 }
 
 const ENV_KEYS = [
@@ -532,6 +668,14 @@ export async function collectControlHealth(
         ),
       },
     },
+    self_heal: collectSelfHealHealth({
+      surfaceWriteLiveness: opts.surfaceWriteLiveness,
+      surfaceIds: opts.surfaceIds,
+      panePtyDeadSince: opts.panePtyDeadSince,
+      monitorRegistry: opts.monitorRegistryPath
+        ? { registryPath: opts.monitorRegistryPath }
+        : undefined,
+    }),
   };
 
   return { ...base, warnings: buildWarnings(base) };
@@ -588,6 +732,20 @@ export function formatControlHealth(health: ControlHealth): string {
       }),
     ...formatInstance(health.cmux_instances.production),
     ...formatInstance(health.cmux_instances.nightly),
+    `pane_pty_dead: ${health.self_heal.pane_pty_dead.count}`,
+    ...health.self_heal.pane_pty_dead.surfaces.map(
+      (surface) => `  ${surface.surface_id} since ${surface.since_at}`,
+    ),
+    ...(health.self_heal.monitor_registry.available
+      ? [
+          `monitor registry: total=${health.self_heal.monitor_registry.total} rearming=${health.self_heal.monitor_registry.rearming} collapsed=${health.self_heal.monitor_registry.collapsed}`,
+        ]
+      : [
+          `monitor registry: unavailable (${health.self_heal.monitor_registry.error ?? "unknown error"})`,
+        ]),
+    ...health.self_heal.monitor_registry.collapsed_monitors.map(
+      (monitor) => `  ${monitor.monitor_id}: ${monitor.reason}`,
+    ),
   ];
 
   if (health.current_process.cmux_resolution.length === 0) {

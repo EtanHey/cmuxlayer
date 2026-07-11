@@ -166,6 +166,20 @@ async function startDoctorDaemon(
     unresponsive?: boolean;
     ps?: string;
     scriptPath?: string;
+    selfHeal?: {
+      pane_pty_dead: {
+        count: number;
+        surfaces: Array<{ surface_id: string; since_at: string }>;
+        truncated: boolean;
+      };
+      monitor_registry: {
+        total: number;
+        rearming: number;
+        collapsed: number;
+        collapsed_monitors: Array<{ monitor_id: string; reason: string }>;
+        truncated: boolean;
+      };
+    };
   } = {},
 ): Promise<void> {
   rmSync(path, { force: true });
@@ -224,6 +238,27 @@ async function startDoctorDaemon(
                       current_socket_path:
                         opts.cmuxSocketPath ?? "/tmp/cmux-test.sock",
                     },
+                    ...(opts.selfHeal
+                      ? {
+                          self_heal: {
+                            ...opts.selfHeal,
+                            pane_pty_dead: {
+                              ...opts.selfHeal.pane_pty_dead,
+                              surfaces:
+                                opts.selfHeal.pane_pty_dead.surfaces.map(
+                                  (surface) => ({
+                                    ...surface,
+                                    last_attempt_at: surface.since_at,
+                                  }),
+                                ),
+                            },
+                            monitor_registry: {
+                              available: true,
+                              ...opts.selfHeal.monitor_registry,
+                            },
+                          },
+                        }
+                      : {}),
                   },
                 },
               },
@@ -310,6 +345,233 @@ describe("runDoctor — report shape", () => {
       installedVersion: "0.3.33",
     });
     expect(report.healthy).toBe(true);
+  });
+
+  it("reports pane_pty_dead surfaces from daemon control_health", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-pty-dead-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: {
+          count: 1,
+          surfaces: [
+            {
+              surface_id: "surface:pty-dead",
+              since_at: "2026-07-11T12:00:01.000Z",
+            },
+          ],
+          truncated: false,
+        },
+        monitor_registry: {
+          total: 2,
+          rearming: 0,
+          collapsed: 0,
+          collapsed_monitors: [],
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal).toMatchObject({ available: true, ok: false });
+    expect(report.healthy).toBe(false);
+    expect(renderDoctorText(report)).toMatch(
+      /✗.*pane_pty_dead.*surface:pty-dead.*2026-07-11T12:00:01.000Z/i,
+    );
+  });
+
+  it("reports collapsed monitors with their reasons from daemon control_health", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-collapsed-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: { count: 0, surfaces: [], truncated: false },
+        monitor_registry: {
+          total: 3,
+          rearming: 1,
+          collapsed: 1,
+          collapsed_monitors: [
+            {
+              monitor_id: "monitor-collapsed",
+              reason: "owner-not-alive",
+            },
+          ],
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal).toMatchObject({ available: true, ok: false });
+    expect(report.healthy).toBe(false);
+    expect(renderDoctorText(report)).toMatch(
+      /✗.*collapsed monitors.*monitor-collapsed: owner-not-alive/i,
+    );
+  });
+
+  it("reports healthy pane liveness and monitor reconciliation state", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-self-heal-green-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: { count: 0, surfaces: [], truncated: false },
+        monitor_registry: {
+          total: 4,
+          rearming: 1,
+          collapsed: 0,
+          collapsed_monitors: [],
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal).toMatchObject({ available: true, ok: true });
+    expect(report.healthy).toBe(true);
+    expect(renderDoctorText(report)).toMatch(/✔.*pane_pty_dead: none/i);
+    expect(renderDoctorText(report)).toMatch(
+      /✔.*monitor registry: total=4 rearming=1 collapsed=0/i,
+    );
+  });
+
+  it("rejects impossible monitor summary counters as unavailable", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-self-heal-invalid-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: { count: 0, surfaces: [], truncated: false },
+        monitor_registry: {
+          total: 1,
+          rearming: 2,
+          collapsed: 0,
+          collapsed_monitors: [],
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal).toMatchObject({
+      available: false,
+      ok: true,
+      note: expect.stringMatching(/malformed/i),
+    });
+  });
+
+  it("preserves and renders truncation when daemon detail arrays exceed the bound", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-self-heal-truncated-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: {
+          count: 101,
+          surfaces: Array.from({ length: 101 }, (_, index) => ({
+            surface_id: `surface:${index}`,
+            since_at: "2026-07-11T12:00:01.000Z",
+          })),
+          truncated: false,
+        },
+        monitor_registry: {
+          total: 101,
+          rearming: 0,
+          collapsed: 101,
+          collapsed_monitors: Array.from({ length: 101 }, (_, index) => ({
+            monitor_id: `monitor:${index}`,
+            reason: "owner-not-alive",
+          })),
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal.panePtyDead).toMatchObject({
+      count: 101,
+      truncated: true,
+    });
+    expect(report.selfHeal.panePtyDead.surfaces).toHaveLength(100);
+    expect(report.selfHeal.monitorRegistry).toMatchObject({
+      collapsed: 101,
+      truncated: true,
+    });
+    expect(report.selfHeal.monitorRegistry.collapsedMonitors).toHaveLength(100);
+    expect(renderDoctorText(report)).toMatch(/pane_pty_dead: 101.*truncated/i);
+    expect(renderDoctorText(report)).toMatch(
+      /collapsed monitors:.*truncated/i,
+    );
+  });
+
+  it("rejects self-heal counters that contradict their detail rows", async () => {
+    const path = join("/tmp", `cmuxlayer-doctor-self-heal-contradiction-${process.pid}.sock`);
+    await startDoctorDaemon(path, {
+      version: "0.3.33",
+      selfHeal: {
+        pane_pty_dead: {
+          count: 0,
+          surfaces: [
+            {
+              surface_id: "surface:unexpected",
+              since_at: "2026-07-11T12:00:01.000Z",
+            },
+          ],
+          truncated: false,
+        },
+        monitor_registry: {
+          total: 1,
+          rearming: 0,
+          collapsed: 0,
+          collapsed_monitors: [
+            {
+              monitor_id: "monitor:unexpected",
+              reason: "owner-not-alive",
+            },
+          ],
+          truncated: false,
+        },
+      },
+    });
+
+    const report = await runDoctorForTest({
+      version: "0.3.33",
+      env: { CMUXLAYER_DAEMON_SOCKET: path },
+      brew: makeBrew({}),
+      detectStaleBuild: () => null,
+    });
+
+    expect(report.selfHeal).toMatchObject({
+      available: false,
+      note: expect.stringMatching(/malformed/i),
+    });
   });
 
   it("flags a stale daemon version mismatch", async () => {
@@ -993,6 +1255,20 @@ describe("renderDoctorText", () => {
         listening: false,
         note: "no daemon running (starts on demand)",
       },
+      selfHeal: {
+        available: false,
+        ok: true,
+        panePtyDead: { count: 0, surfaces: [], truncated: false },
+        monitorRegistry: {
+          available: false,
+          total: 0,
+          rearming: 0,
+          collapsed: 0,
+          collapsedMonitors: [],
+          truncated: false,
+        },
+        note: "no daemon running (starts on demand)",
+      },
       tap: {
         brewAvailable: true,
         tapPresent: true,
@@ -1123,6 +1399,20 @@ describe("renderDoctorJson", () => {
         applicable: true,
         ok: true,
         listening: false,
+        note: "no daemon running (starts on demand)",
+      },
+      selfHeal: {
+        available: false,
+        ok: true,
+        panePtyDead: { count: 0, surfaces: [], truncated: false },
+        monitorRegistry: {
+          available: false,
+          total: 0,
+          rearming: 0,
+          collapsed: 0,
+          collapsedMonitors: [],
+          truncated: false,
+        },
         note: "no daemon running (starts on demand)",
       },
       tap: {
