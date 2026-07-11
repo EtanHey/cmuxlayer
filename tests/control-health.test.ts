@@ -11,6 +11,7 @@ import type { ControlHealth } from "../src/control-health.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
+import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-control-health-test");
 const ACCESS_CONTROL_DENIED_TEXT =
@@ -185,6 +186,358 @@ describe("control health", () => {
     expect(formatControlHealth(health)).toContain("cmuxlayer control_health");
 
     rmSync(TEST_ROOT, { recursive: true, force: true });
+  });
+
+  it("reports pane_pty_dead surfaces and monitor recovery state", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-observability");
+    const tmp = join(TEST_ROOT, "tmp-observability");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    let nowMs = Date.parse("2026-07-11T12:00:00.000Z");
+    const tracker = new SurfaceWriteLivenessTracker({ now: () => nowMs });
+    tracker.recordFailure("surface:pty-dead", { code: "EPIPE" });
+    nowMs += 1_000;
+    tracker.recordFailure("surface:pty-dead", { code: "EPIPE" });
+    tracker.recordSuccess("surface:healthy");
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify({
+        version: 1,
+        monitors: [
+          {
+            monitor_id: "monitor-alive",
+            owner_seat: "seat-a",
+            watch_targets: ["/tmp/alive"],
+            mechanism: "event",
+            deadman_timeout_s: 60,
+            armed_at: "2026-07-11T11:55:00.000Z",
+            last_signal_at: "2026-07-11T11:59:00.000Z",
+            state: "alive",
+          },
+          {
+            monitor_id: "monitor-rearming",
+            owner_seat: "seat-b",
+            watch_targets: ["/tmp/rearming"],
+            mechanism: "event",
+            deadman_timeout_s: 60,
+            armed_at: "2026-07-11T11:55:00.000Z",
+            last_signal_at: "2026-07-11T11:58:00.000Z",
+            state: "rearming",
+            rearm_command: "resume monitor-rearming",
+            rearm_claimed_at: "2026-07-11T11:59:30.000Z",
+          },
+          {
+            monitor_id: "monitor-collapsed",
+            owner_seat: "seat-c",
+            watch_targets: ["/tmp/collapsed"],
+            mechanism: "event",
+            deadman_timeout_s: 60,
+            armed_at: "2026-07-11T11:55:00.000Z",
+            last_signal_at: "2026-07-11T11:57:00.000Z",
+            state: "collapsed",
+            collapsed_reason: "watch-target-missing",
+          },
+        ],
+      }),
+    );
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      now: () => new Date(nowMs),
+      surfaceWriteLiveness: tracker,
+      surfaceIds: ["surface:pty-dead", "surface:healthy"],
+      panePtyDeadSince: new Map([
+        ["surface:pty-dead", Date.parse("2026-07-11T12:00:01.000Z")],
+      ]),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.pane_pty_dead).toEqual({
+      count: 1,
+      surfaces: [
+        {
+          surface_id: "surface:pty-dead",
+          since_at: "2026-07-11T12:00:01.000Z",
+          last_attempt_at: "2026-07-11T12:00:01.000Z",
+        },
+      ],
+      truncated: false,
+    });
+    expect(health.self_heal.monitor_registry).toEqual({
+      available: true,
+      total: 3,
+      rearming: 1,
+      collapsed: 1,
+      collapsed_monitors: [
+        {
+          monitor_id: "monitor-collapsed",
+          reason: "watch-target-missing",
+        },
+      ],
+      truncated: false,
+    });
+    expect(formatControlHealth(health)).toMatch(
+      /pane_pty_dead: 1.*surface:pty-dead.*2026-07-11T12:00:01.000Z/s,
+    );
+    expect(formatControlHealth(health)).toMatch(
+      /monitor registry: total=3 rearming=1 collapsed=1.*monitor-collapsed: watch-target-missing/s,
+    );
+  });
+
+  it("counts pane_pty_dead surfaces beyond the bounded detail limit", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-bounded");
+    const tmp = join(TEST_ROOT, "tmp-bounded");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-bounded.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(monitorRegistryPath, JSON.stringify({ version: 1, monitors: [] }));
+    const tracker = new SurfaceWriteLivenessTracker({
+      now: () => Date.parse("2026-07-11T12:00:00.000Z"),
+    });
+    tracker.recordFailure("surface:100", { code: "EPIPE" });
+    tracker.recordFailure("surface:100", { code: "EPIPE" });
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      surfaceWriteLiveness: tracker,
+      surfaceIds: Array.from({ length: 101 }, (_, index) => `surface:${index}`),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.pane_pty_dead.count).toBe(1);
+    expect(health.self_heal.pane_pty_dead.surfaces).toEqual([
+      expect.objectContaining({ surface_id: "surface:100" }),
+    ]);
+    expect(formatControlHealth(health)).toContain(
+      "surface:100 since 2026-07-11T12:00:00.000Z",
+    );
+    expect(formatControlHealth(health)).not.toContain("since undefined");
+  });
+
+  it("reports a malformed monitor registry as unavailable", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-malformed-registry");
+    const tmp = join(TEST_ROOT, "tmp-malformed-registry");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-malformed.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(monitorRegistryPath, "{not-json");
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toMatchObject({
+      available: false,
+      total: 0,
+      rearming: 0,
+      collapsed: 0,
+      error: expect.stringMatching(/malformed|json/i),
+    });
+    expect(formatControlHealth(health)).toMatch(/monitor registry: unavailable/i);
+  });
+
+  it("treats an absent monitor registry as an empty healthy registry", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-absent-registry");
+    const tmp = join(TEST_ROOT, "tmp-absent-registry");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-absent.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toEqual({
+      available: true,
+      total: 0,
+      rearming: 0,
+      collapsed: 0,
+      collapsed_monitors: [],
+      truncated: false,
+    });
+  });
+
+  it("accepts the public registry API's legacy top-level array shape", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-array-registry");
+    const tmp = join(TEST_ROOT, "tmp-array-registry");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-array.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify([
+        {
+          monitor_id: "monitor-collapsed-array",
+          owner_seat: "seat-array",
+          watch_targets: ["/tmp/array-target"],
+          mechanism: "event",
+          deadman_timeout_s: 60,
+          armed_at: "2026-07-11T11:55:00.000Z",
+          last_signal_at: "2026-07-11T11:57:00.000Z",
+          state: "collapsed",
+          collapsed_reason: "watch-target-missing",
+        },
+      ]),
+    );
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toMatchObject({
+      available: true,
+      total: 1,
+      collapsed: 1,
+      collapsed_monitors: [
+        {
+          monitor_id: "monitor-collapsed-array",
+          reason: "watch-target-missing",
+        },
+      ],
+    });
+  });
+
+  it("reports structurally invalid monitor records as unavailable", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-invalid-monitor-record");
+    const tmp = join(TEST_ROOT, "tmp-invalid-monitor-record");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-invalid-record.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify({ version: 1, monitors: [{}] }),
+    );
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toMatchObject({
+      available: false,
+      total: 0,
+      error: expect.stringMatching(/invalid/i),
+    });
+  });
+
+  it("retains untracked PTY failures and the first detected-at time in control_health", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-untracked-surface");
+    const tmp = join(TEST_ROOT, "tmp-untracked-surface");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-untracked.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(monitorRegistryPath, JSON.stringify({ version: 1, monitors: [] }));
+    const rawHealth = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+    let nowMs = Date.parse("2026-07-11T12:00:00.000Z");
+    const tracker = new SurfaceWriteLivenessTracker({ now: () => nowMs });
+    let writeError: Error = Object.assign(new Error("broken pipe"), {
+      code: "EPIPE",
+    });
+    const client = {
+      sendKey: vi.fn(async () => {
+        throw writeError;
+      }),
+    };
+    const server = createServer({
+      client: client as any,
+      stateDir: join(TEST_ROOT, "untracked-state"),
+      skipAgentLifecycle: true,
+      surfaceWriteLiveness: tracker,
+      controlHealthCollector: async () => rawHealth,
+      monitorRegistryPath,
+    });
+    const sendKey = (server as any)._registeredTools["send_key"];
+    const controlHealth = (server as any)._registeredTools["control_health"];
+
+    try {
+      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      nowMs += 1_000;
+      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      const first = await controlHealth.handler({}, {} as any);
+      nowMs += 1_000;
+      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      const second = await controlHealth.handler({}, {} as any);
+      const firstHealth = first.structuredContent.health.self_heal.pane_pty_dead;
+      const secondHealth = second.structuredContent.health.self_heal.pane_pty_dead;
+
+      expect(firstHealth).toMatchObject({
+        count: 1,
+        surfaces: [
+          expect.objectContaining({
+            surface_id: "surface:untracked",
+            since_at: "2026-07-11T12:00:01.000Z",
+          }),
+        ],
+      });
+      expect(secondHealth.surfaces[0].since_at).toBe(
+        firstHealth.surfaces[0].since_at,
+      );
+
+      writeError = new Error("submit verification failed");
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
+      const afterNonPtyFailure = await controlHealth.handler({}, {} as any);
+      expect(
+        afterNonPtyFailure.structuredContent.health.self_heal.pane_pty_dead,
+      ).toMatchObject({
+        count: 1,
+        surfaces: [
+          expect.objectContaining({
+            since_at: firstHealth.surfaces[0].since_at,
+          }),
+        ],
+      });
+      writeError = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+
+      nowMs += 31_000;
+      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      nowMs += 1_000;
+      await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);
+      const nextEpisode = await controlHealth.handler({}, {} as any);
+      expect(
+        nextEpisode.structuredContent.health.self_heal.pane_pty_dead.surfaces[0]
+          .since_at,
+      ).toBe("2026-07-11T12:00:34.000Z");
+    } finally {
+      await server.close();
+    }
   });
 
   it("control_health tool appends prod and Nightly snapshot data to events.jsonl", async () => {

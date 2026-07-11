@@ -161,6 +161,8 @@ export interface DoctorReport {
     currentSocketPath?: string | null;
     runningScriptPath?: string;
   };
+  /** Additive §5 visibility into PTY write-liveness and monitor reconciliation. */
+  selfHeal: DoctorSelfHealReport;
   /** §3 tap — best-effort report; brew may be absent. */
   tap: {
     brewAvailable: boolean;
@@ -183,6 +185,30 @@ export interface DoctorReport {
   mcpReconnectProcedure: McpReconnectProcedureReport;
   /** Read-only `.mcp.json` drift report; does NOT affect health. */
   mcpConfigDrift: McpConfigDriftReport;
+}
+
+export interface DoctorSelfHealReport {
+  available: boolean;
+  ok: boolean;
+  panePtyDead: {
+    count: number;
+    surfaces: Array<{
+      surfaceId: string;
+      sinceAt?: string;
+      lastAttemptAt: string;
+    }>;
+    truncated: boolean;
+  };
+  monitorRegistry: {
+    available: boolean;
+    error?: string;
+    total: number;
+    rearming: number;
+    collapsed: number;
+    collapsedMonitors: Array<{ monitorId: string; reason: string }>;
+    truncated: boolean;
+  };
+  note: string;
 }
 
 export interface RunDoctorOptions {
@@ -224,8 +250,145 @@ type DaemonMcpProbeResult =
       transportDegraded: boolean;
       currentSocketPath: string | null;
       scriptPath: string | null;
+      selfHeal: DoctorSelfHealReport;
     }
   | { kind: "error"; error: string };
+
+function unavailableSelfHeal(note: string): DoctorSelfHealReport {
+  return {
+    available: false,
+    ok: true,
+    panePtyDead: { count: 0, surfaces: [], truncated: false },
+    monitorRegistry: {
+      available: false,
+      error: note,
+      total: 0,
+      rearming: 0,
+      collapsed: 0,
+      collapsedMonitors: [],
+      truncated: false,
+    },
+    note,
+  };
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0
+    ? value
+    : null;
+}
+
+function parseDoctorSelfHeal(value: unknown): DoctorSelfHealReport {
+  if (!isRecord(value)) {
+    return unavailableSelfHeal("self-heal state unavailable from control_health");
+  }
+  const pane = isRecord(value.pane_pty_dead) ? value.pane_pty_dead : null;
+  const registry = isRecord(value.monitor_registry)
+    ? value.monitor_registry
+    : null;
+  if (!pane || !registry) {
+    return unavailableSelfHeal("self-heal state unavailable from control_health");
+  }
+
+  const paneCount = nonNegativeInteger(pane.count);
+  const registryAvailable = registry.available;
+  const total = nonNegativeInteger(registry.total);
+  const rearming = nonNegativeInteger(registry.rearming);
+  const collapsed = nonNegativeInteger(registry.collapsed);
+  if (
+    paneCount === null ||
+    typeof registryAvailable !== "boolean" ||
+    total === null ||
+    rearming === null ||
+    collapsed === null ||
+    rearming > total ||
+    collapsed > total ||
+    rearming + collapsed > total
+  ) {
+    return unavailableSelfHeal("self-heal state malformed in control_health");
+  }
+
+  const rawSurfaces = Array.isArray(pane.surfaces) ? pane.surfaces : [];
+  const surfaces = rawSurfaces
+    .slice(0, 100)
+    .flatMap((surface) => {
+      if (!isRecord(surface)) return [];
+      if (
+        typeof surface.surface_id !== "string" ||
+        typeof surface.last_attempt_at !== "string" ||
+        (surface.since_at !== undefined &&
+          typeof surface.since_at !== "string")
+      ) {
+        return [];
+      }
+      return [
+        {
+          surfaceId: surface.surface_id,
+          ...(typeof surface.since_at === "string"
+            ? { sinceAt: surface.since_at }
+            : {}),
+          lastAttemptAt: surface.last_attempt_at,
+        },
+      ];
+    });
+  const rawCollapsedMonitors = Array.isArray(registry.collapsed_monitors)
+    ? registry.collapsed_monitors
+    : [];
+  const collapsedMonitors = rawCollapsedMonitors
+    .slice(0, 100)
+    .flatMap((monitor) => {
+      if (!isRecord(monitor)) return [];
+      if (
+        typeof monitor.monitor_id !== "string" ||
+        typeof monitor.reason !== "string"
+      ) {
+        return [];
+      }
+      return [{ monitorId: monitor.monitor_id, reason: monitor.reason }];
+    });
+  if (
+    surfaces.length !== Math.min(rawSurfaces.length, 100) ||
+    collapsedMonitors.length !== Math.min(rawCollapsedMonitors.length, 100) ||
+    paneCount < rawSurfaces.length ||
+    collapsed < rawCollapsedMonitors.length
+  ) {
+    return unavailableSelfHeal("self-heal state malformed in control_health");
+  }
+  const registryError =
+    typeof registry.error === "string" ? registry.error : undefined;
+  const ok = paneCount === 0 && registryAvailable && collapsed === 0;
+  return {
+    available: true,
+    ok,
+    panePtyDead: {
+      count: paneCount,
+      surfaces,
+      truncated:
+        pane.truncated === true ||
+        rawSurfaces.length > 100 ||
+        paneCount > surfaces.length,
+    },
+    monitorRegistry: {
+      available: registryAvailable,
+      ...(registryError ? { error: registryError } : {}),
+      total,
+      rearming,
+      collapsed,
+      collapsedMonitors,
+      truncated:
+        registry.truncated === true ||
+        rawCollapsedMonitors.length > 100 ||
+        collapsed > collapsedMonitors.length,
+    },
+    note: ok
+      ? "pane write-liveness and monitor reconciliation healthy"
+      : registryAvailable
+        ? "pane write-liveness or monitor reconciliation requires attention"
+        : `monitor registry unavailable: ${registryError ?? "unknown error"}`,
+  };
+}
 
 function daemonProbeError(message: unknown): string {
   return message instanceof Error ? message.message : String(message);
@@ -367,6 +530,7 @@ function probeDaemonMcp(
                   ? selected.current_socket_path
                   : null,
               scriptPath,
+              selfHeal: parseDoctorSelfHeal(health?.self_heal),
             });
           }
         } catch (error) {
@@ -399,7 +563,10 @@ function probeDaemonMcp(
 async function checkDaemonIntegrity(
   opts: RunDoctorOptions,
   env: NodeJS.ProcessEnv,
-): Promise<DoctorReport["daemon"]> {
+): Promise<{
+  daemon: DoctorReport["daemon"];
+  selfHeal: DoctorSelfHealReport;
+}> {
   const socketPath = defaultDaemonSocketPath(env);
   const probe = await probeDaemonMcp(
     socketPath,
@@ -407,20 +574,26 @@ async function checkDaemonIntegrity(
   );
   if (probe.kind === "not-listening") {
     return {
-      applicable: true,
-      ok: true,
-      listening: false,
-      socketPath,
-      note: "no daemon running (starts on demand)",
+      daemon: {
+        applicable: true,
+        ok: true,
+        listening: false,
+        socketPath,
+        note: "no daemon running (starts on demand)",
+      },
+      selfHeal: unavailableSelfHeal("no daemon running (starts on demand)"),
     };
   }
   if (probe.kind === "error") {
     return {
-      applicable: true,
-      ok: false,
-      listening: true,
-      socketPath,
-      note: `daemon probe failed: ${probe.error}`,
+      daemon: {
+        applicable: true,
+        ok: false,
+        listening: true,
+        socketPath,
+        note: `daemon probe failed: ${probe.error}`,
+      },
+      selfHeal: unavailableSelfHeal("daemon control_health probe failed"),
     };
   }
 
@@ -440,9 +613,12 @@ async function checkDaemonIntegrity(
     try {
       if (!(opts.pathExists ?? existsSync)(probe.scriptPath)) {
         return {
-          ...base,
-          ok: false,
-          note: "daemon running from a deleted install (brew cleanup?) — stale detection is blind; retire it",
+          daemon: {
+            ...base,
+            ok: false,
+            note: "daemon running from a deleted install (brew cleanup?) — stale detection is blind; retire it",
+          },
+          selfHeal: probe.selfHeal,
         };
       }
     } catch {
@@ -451,9 +627,12 @@ async function checkDaemonIntegrity(
   }
   if (stale?.stale) {
     return {
-      ...base,
-      ok: false,
-      note: `stale daemon v${stale.running} serving (installed v${stale.installed}) — kill it; proxies respawn the installed daemon`,
+      daemon: {
+        ...base,
+        ok: false,
+        note: `stale daemon v${stale.running} serving (installed v${stale.installed}) — kill it; proxies respawn the installed daemon`,
+      },
+      selfHeal: probe.selfHeal,
     };
   }
 
@@ -472,20 +651,26 @@ async function checkDaemonIntegrity(
       // A failed probe is the socket-down branch, but degraded is always red.
     }
     return {
-      ...base,
-      ok: false,
-      note: cmuxSocketUsable
-        ? "daemon transport degraded while cmux socket alive (access-control denial class; stale-daemon-on-dead-socket class)"
-        : "daemon transport degraded while cmux socket down (app not running)",
+      daemon: {
+        ...base,
+        ok: false,
+        note: cmuxSocketUsable
+          ? "daemon transport degraded while cmux socket alive (access-control denial class; stale-daemon-on-dead-socket class)"
+          : "daemon transport degraded while cmux socket down (app not running)",
+      },
+      selfHeal: probe.selfHeal,
     };
   }
 
   return {
-    ...base,
-    ok: true,
-    note: stale
-      ? `daemon v${probe.version} healthy (installed v${stale.installed})`
-      : `daemon v${probe.version} healthy (installed version unavailable)`,
+    daemon: {
+      ...base,
+      ok: true,
+      note: stale
+        ? `daemon v${probe.version} healthy (installed v${stale.installed})`
+        : `daemon v${probe.version} healthy (installed version unavailable)`,
+    },
+    selfHeal: probe.selfHeal,
   };
 }
 
@@ -944,11 +1129,12 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     listMcpConfigPaths: opts.listMcpConfigPaths,
     readMcpConfigFile: opts.readMcpConfigFile,
   });
-  const daemon = await checkDaemonIntegrity(opts, env);
+  const { daemon, selfHeal } = await checkDaemonIntegrity(opts, env);
 
   // Brew/tap gaps stay best-effort, but an unusable referenced launcher is an
   // operational failure: configs can look correct while every MCP launch fails.
-  const healthy = versionOk && daemon.ok && mcpConfigDrift.launcherOk;
+  const healthy =
+    versionOk && daemon.ok && selfHeal.ok && mcpConfigDrift.launcherOk;
 
   return {
     healthy,
@@ -958,6 +1144,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
       note: "not-applicable: stdio MCP, no cask (§1 account-rename self-heal)",
     },
     daemon,
+    selfHeal,
     tap,
     socketPath: socketSet
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
@@ -986,6 +1173,40 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(`│ — §1 ${report.caskSelfHeal.note}`);
 
   lines.push(`│ ${mark(report.daemon.ok)} §5 ${report.daemon.note}`);
+  if (!report.selfHeal.available) {
+    lines.push(`│ — §5 self-heal observability: ${report.selfHeal.note}`);
+  } else {
+    const paneDetails = report.selfHeal.panePtyDead.surfaces
+      .map((surface) =>
+        surface.sinceAt
+          ? `${surface.surfaceId} since ${surface.sinceAt} (last attempt ${surface.lastAttemptAt})`
+          : `${surface.surfaceId} last attempt ${surface.lastAttemptAt}`,
+      )
+      .join(", ");
+    lines.push(
+      `│ ${mark(report.selfHeal.panePtyDead.count === 0)}    pane_pty_dead: ${
+        report.selfHeal.panePtyDead.count === 0
+          ? "none"
+          : `${report.selfHeal.panePtyDead.count} (${paneDetails || "details unavailable"})`
+      }${report.selfHeal.panePtyDead.truncated ? " [details truncated]" : ""}`,
+    );
+    if (!report.selfHeal.monitorRegistry.available) {
+      lines.push(
+        `│ ✗    monitor registry: unavailable (${report.selfHeal.monitorRegistry.error ?? "unknown error"})`,
+      );
+    } else {
+      const collapsedDetails = report.selfHeal.monitorRegistry.collapsedMonitors
+        .map((monitor) => `${monitor.monitorId}: ${monitor.reason}`)
+        .join(", ");
+      lines.push(
+        `│ ${mark(report.selfHeal.monitorRegistry.collapsed === 0)}    monitor registry: total=${report.selfHeal.monitorRegistry.total} rearming=${report.selfHeal.monitorRegistry.rearming} collapsed=${report.selfHeal.monitorRegistry.collapsed}${
+          report.selfHeal.monitorRegistry.collapsed > 0
+            ? `; collapsed monitors: ${collapsedDetails || "details unavailable"}`
+            : ""
+        }${report.selfHeal.monitorRegistry.truncated ? " [details truncated]" : ""}`,
+      );
+    }
+  }
 
   // (b) §3 tap
   if (!report.tap.brewAvailable) {
