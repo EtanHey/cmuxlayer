@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,6 +45,16 @@ export async function spawnDaemonProcess(
       `[cmuxlayer-proxy] spawned daemon exited (pid=${child.pid ?? "unknown"}, code=${code ?? "none"}, signal=${signal ?? "none"})`,
     );
   });
+  const pidReceipt = env.CMUXLAYER_DAEMON_PID_RECEIPT?.trim();
+  if (pidReceipt && child.pid) {
+    try {
+      await mkdir(dirname(pidReceipt), { recursive: true });
+      await appendFile(pidReceipt, `${child.pid}\n`, "utf8");
+    } catch (error) {
+      child.kill("SIGKILL");
+      throw error;
+    }
+  }
   child.unref();
   return child;
 }

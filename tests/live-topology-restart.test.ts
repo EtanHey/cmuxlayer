@@ -17,6 +17,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const ROOTS = new Set<string>();
 const CHILDREN = new Set<ChildProcess>();
+const DAEMON_PID_RECEIPTS = new Set<string>();
 const SERVERS = new Set<{
   server: net.Server;
   sockets: Set<net.Socket>;
@@ -55,6 +56,40 @@ async function waitFor(
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
   throw new Error(`timed out waiting for ${description}`);
+}
+
+function readRecordedDaemonPids(): Set<number> {
+  const pids = new Set<number>();
+  for (const receiptPath of DAEMON_PID_RECEIPTS) {
+    try {
+      for (const line of readFileSync(receiptPath, "utf8").split(/\r?\n/)) {
+        const pid = Number(line.trim());
+        if (Number.isInteger(pid) && pid > 0) pids.add(pid);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return pids;
+}
+
+async function terminateFixturePid(pid: number): Promise<void> {
+  if (!processExists(pid)) return;
+  process.kill(pid, "SIGTERM");
+  try {
+    await waitFor(
+      () => !processExists(pid),
+      2_000,
+      `fixture pid ${pid} to exit`,
+    );
+  } catch {
+    if (processExists(pid)) process.kill(pid, "SIGKILL");
+    await waitFor(
+      () => !processExists(pid),
+      2_000,
+      `fixture pid ${pid} to exit after SIGKILL`,
+    );
+  }
 }
 
 async function startFakeCmuxSocket(path: string): Promise<void> {
@@ -232,11 +267,28 @@ function daemonPidFromHealth(
 }
 
 afterEach(async () => {
+  const cleanupErrors: unknown[] = [];
+  const directPids = [...CHILDREN]
+    .map((child) => child.pid)
+    .filter((pid): pid is number => typeof pid === "number");
   for (const child of CHILDREN) {
     child.stdin?.end();
     child.kill("SIGTERM");
   }
   CHILDREN.clear();
+  for (const pid of directPids) {
+    await terminateFixturePid(pid).catch((error) => cleanupErrors.push(error));
+  }
+  let recordedDaemonPids = new Set<number>();
+  try {
+    recordedDaemonPids = readRecordedDaemonPids();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  for (const pid of recordedDaemonPids) {
+    await terminateFixturePid(pid).catch((error) => cleanupErrors.push(error));
+  }
+  DAEMON_PID_RECEIPTS.clear();
   for (const { server, sockets } of SERVERS) {
     for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
@@ -244,6 +296,9 @@ afterEach(async () => {
   SERVERS.clear();
   for (const root of ROOTS) rmSync(root, { recursive: true, force: true });
   ROOTS.clear();
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, "fixture process cleanup failed");
+  }
 });
 
 describe("live daemon-first restart topology", () => {
@@ -258,6 +313,8 @@ describe("live daemon-first restart topology", () => {
       const root = realpathSync(rootPath);
       ROOTS.add(root);
       const daemonSocket = join(root, "stated.sock");
+      const daemonPidReceipt = join(root, "daemon-pids.txt");
+      DAEMON_PID_RECEIPTS.add(daemonPidReceipt);
       const cmuxSocket = join(root, "cmux.sock");
       const runningVersion = runningPackageVersion();
       const upgradedVersion = `${runningVersion}-live-topology-upgrade`;
@@ -276,6 +333,7 @@ describe("live daemon-first restart topology", () => {
             HOMEBREW_PREFIX: join(root, "brew"),
             CMUX_SOCKET_PATH: cmuxSocket,
             CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+            CMUXLAYER_DAEMON_PID_RECEIPT: daemonPidReceipt,
             CMUXLAYER_DEV: "0",
             CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
             CMUXLAYER_STALE_CHECK_INTERVAL_MS: "100",
@@ -326,7 +384,6 @@ describe("live daemon-first restart topology", () => {
       const replacementDaemonPid = daemonPidFromHealth(recoveredHealth, stderr);
       expect(replacementDaemonPid).not.toBe(initialDaemonPid);
       expect(Date.now() - recoveryStartedAt).toBeLessThan(15_000);
-      process.kill(replacementDaemonPid, "SIGTERM");
     },
     70_000,
   );

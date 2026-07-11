@@ -14,7 +14,8 @@
  *       resolves (`brew info etanhey/layers/cmuxlayer`). Tap CASKS need
  *       `brew trust etanhey/layers`; cmuxlayer is a formula, not gated.
  *   (c) CMUX_SOCKET_PATH if set, else "unset (auto-discover)";
- *   (d) read-only `.mcp.json` drift detection for stale `cmux` keys or entries
+ *   (d) live cmux app version compatibility against the internal tested set;
+ *   (e) read-only `.mcp.json` drift detection for stale `cmux` keys or entries
  *       that bypass `~/.golems/bin/cmuxlayer-mcp`, plus existence, symlink-target,
  *       and executable-bit checks for every referenced launcher.
  *
@@ -39,6 +40,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import {
+  assessCmuxVersionCompatibility,
+  type CmuxVersionCompatibilityReport,
+  type CmuxVersionRunner,
+} from "./cmux-version-compatibility.js";
 import {
   probeSocketHealth,
   type SocketProbeResult,
@@ -172,6 +178,8 @@ export interface DoctorReport {
   };
   /** CMUX_SOCKET_PATH pin (auto-discover when unset). */
   socketPath: { set: boolean; value: string | null; note: string };
+  /** Best-effort internal cmux app compatibility note; never affects health. */
+  cmuxCompatibility: CmuxVersionCompatibilityReport;
   /** Durable sleep-survival guard: pmset assertion plus launchd KeepAlive job. */
   sleepGuard: {
     systemSleepPrevented: boolean;
@@ -236,6 +244,8 @@ export interface RunDoctorOptions {
   probeCmuxSocket?: (
     socketPath: string,
   ) => Promise<SocketProbeResult>;
+  /** Injectable `cmux --version` runner for the selected app CLI. */
+  cmuxVersion?: CmuxVersionRunner;
   /** Bound for daemon connect/initialize/control_health (default 1500ms). */
   daemonProbeTimeoutMs?: number;
   /** Injectable path existence check for daemon provenance tests. */
@@ -764,6 +774,28 @@ export const realLaunchctlRunner: LaunchctlRunner = async () => {
   }
 };
 
+export const realCmuxVersionRunner: CmuxVersionRunner = async (env) => {
+  const bin = env.CMUX_BUNDLED_CLI_PATH?.trim() || "cmux";
+  try {
+    const { stdout, stderr } = await execFileAsync(bin, ["--version"], {
+      env,
+      timeout: 1_500,
+    });
+    return { ok: true, stdout, stderr };
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & {
+      stdout?: string;
+      stderr?: string;
+    };
+    return {
+      ok: false,
+      stdout: failure.stdout ?? "",
+      stderr: failure.stderr ?? failure.message,
+      ...(failure.code === "ENOENT" ? { notFound: true } : {}),
+    };
+  }
+};
+
 export const realMcpConfigPathLister: McpConfigPathLister = async () => {
   try {
     const entries = await readdir(join(homedir(), "Gits"), {
@@ -1125,6 +1157,9 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   const runtimeProvenance = (
     opts.runtimeProvenance ?? (() => detectRuntimeProvenance({ env }))
   )();
+  const cmuxCompatibility = assessCmuxVersionCompatibility(
+    await (opts.cmuxVersion ?? realCmuxVersionRunner)(env),
+  );
   const mcpConfigDrift = await checkMcpConfigDrift({
     listMcpConfigPaths: opts.listMcpConfigPaths,
     readMcpConfigFile: opts.readMcpConfigFile,
@@ -1149,6 +1184,7 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     socketPath: socketSet
       ? { set: true, value: socketRaw, note: "pinned via CMUX_SOCKET_PATH" }
       : { set: false, value: null, note: "unset (auto-discover)" },
+    cmuxCompatibility,
     sleepGuard,
     runtimeProvenance,
     mcpReconnectProcedure: mcpReconnectProcedure(),
@@ -1232,6 +1268,10 @@ export function renderDoctorText(report: DoctorReport): string {
     `│ — CMUX_SOCKET_PATH: ${
       report.socketPath.set ? report.socketPath.value : report.socketPath.note
     }`,
+  );
+
+  lines.push(
+    `│ — cmux compatibility ${report.cmuxCompatibility.severity.toUpperCase()}: ${report.cmuxCompatibility.note}`,
   );
 
   lines.push(

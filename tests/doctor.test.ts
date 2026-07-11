@@ -16,6 +16,7 @@ import {
   checkMcpConfigDrift,
   detectRuntimeProvenance,
   parseSystemSleepPrevented,
+  realCmuxVersionRunner,
   runDoctor,
   renderDoctorText,
   renderDoctorJson,
@@ -107,6 +108,11 @@ function runDoctorForTest(opts: Parameters<typeof runDoctor>[0]) {
     launchctl: missingLaunchctl,
     listMcpConfigPaths: async () => [],
     readMcpConfigFile: async () => "",
+    cmuxVersion: async () => ({
+      ok: false,
+      stdout: "",
+      stderr: "cmux version unavailable in test",
+    }),
     ...opts,
     env: {
       CMUXLAYER_DAEMON_SOCKET: join(
@@ -279,6 +285,110 @@ async function startDoctorDaemon(
 }
 
 describe("runDoctor — report shape", () => {
+  it("reads the selected cmux app CLI version when available", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-cmux-version-"));
+    doctorTempDirs.push(root);
+    const cmuxBin = join(root, "cmux");
+    writeFileSync(
+      cmuxBin,
+      "#!/bin/sh\nprintf '%s\\n' 'cmux 0.64.17 (97) [test]'\n",
+    );
+    chmodSync(cmuxBin, 0o755);
+
+    await expect(
+      realCmuxVersionRunner({
+        ...process.env,
+        CMUX_BUNDLED_CLI_PATH: cmuxBin,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      stdout: "cmux 0.64.17 (97) [test]\n",
+    });
+  });
+
+  it("reports tested cmux app versions as informational", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({}),
+      cmuxVersion: async () => ({
+        ok: true,
+        stdout: "cmux 0.64.17 (97) [9ed29d81a]",
+        stderr: "",
+      }),
+    });
+
+    expect(report.cmuxCompatibility).toMatchObject({
+      available: true,
+      liveVersion: "0.64.17",
+      severity: "info",
+      tested: true,
+      testedVersions: ["0.64.17", "0.64.14-nightly"],
+    });
+    expect(report.cmuxCompatibility.note).toMatch(
+      /running cmux v0\.64\.17; tested against v0\.64\.17, v0\.64\.14-nightly/i,
+    );
+    expect(report.healthy).toBe(true);
+  });
+
+  it("warns without failing health when the live cmux app version is untested", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({}),
+      cmuxVersion: async () => ({
+        ok: true,
+        stdout: "cmux 0.65.0 (101) [abcdef]",
+        stderr: "",
+      }),
+    });
+
+    expect(report.cmuxCompatibility).toMatchObject({
+      available: true,
+      liveVersion: "0.65.0",
+      severity: "warn",
+      tested: false,
+    });
+    expect(report.cmuxCompatibility.note).toMatch(
+      /running cmux v0\.65\.0; tested against v0\.64\.17, v0\.64\.14-nightly — behavior unverified/i,
+    );
+    expect(report.healthy).toBe(true);
+  });
+
+  it("accepts build-qualified versions from the tested nightly line", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({}),
+      cmuxVersion: async () => ({
+        ok: true,
+        stdout: "cmux 0.64.14-nightly.2912634120001 (2912634120001) [abcdef]",
+        stderr: "",
+      }),
+    });
+
+    expect(report.cmuxCompatibility.tested).toBe(true);
+    expect(report.cmuxCompatibility.severity).toBe("info");
+    expect(report.healthy).toBe(true);
+  });
+
+  it("does not broaden a tested production version into a version family", async () => {
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({}),
+      cmuxVersion: async () => ({
+        ok: true,
+        stdout: "cmux 0.64.17.1 (98) [abcdef]",
+        stderr: "",
+      }),
+    });
+
+    expect(report.cmuxCompatibility.tested).toBe(false);
+    expect(report.cmuxCompatibility.severity).toBe("warn");
+    expect(report.healthy).toBe(true);
+  });
+
   it("reports the version when it resolves", async () => {
     const report = await runDoctorForTest({
       version: "0.3.0",
@@ -1276,6 +1386,14 @@ describe("renderDoctorText", () => {
         note: "tap CASKS need `brew trust etanhey/layers`; cmuxlayer is a formula, not gated",
       },
       socketPath: { set: false, value: null, note: "unset (auto-discover)" },
+      cmuxCompatibility: {
+        available: true,
+        liveVersion: "0.64.17",
+        severity: "info",
+        tested: true,
+        testedVersions: ["0.64.17", "0.64.14-nightly"],
+        note: "running cmux v0.64.17; tested against v0.64.17, v0.64.14-nightly",
+      },
       sleepGuard: {
         systemSleepPrevented: false,
         keepAliveLoaded: false,
@@ -1331,6 +1449,21 @@ describe("renderDoctorText", () => {
     const text = renderDoctorText(baseReport());
     expect(text).toMatch(/CMUX_SOCKET_PATH/);
     expect(text).toMatch(/unset \(auto-discover\)/i);
+  });
+
+  it("prints the cmux compatibility severity and note", () => {
+    const text = renderDoctorText({
+      ...baseReport(),
+      cmuxCompatibility: {
+        available: true,
+        liveVersion: "0.65.0",
+        severity: "warn",
+        tested: false,
+        testedVersions: ["0.64.17", "0.64.14-nightly"],
+        note: "running cmux v0.65.0; tested against v0.64.17, v0.64.14-nightly — behavior unverified",
+      },
+    });
+    expect(text).toMatch(/WARN.*running cmux v0\.65\.0/i);
   });
 
   it("prints sleep guard status and install hint when not durable", () => {
@@ -1422,6 +1555,14 @@ describe("renderDoctorJson", () => {
         note: "ok",
       },
       socketPath: { set: true, value: "/tmp/x.sock", note: "set" },
+      cmuxCompatibility: {
+        available: true,
+        liveVersion: "0.64.17",
+        severity: "info",
+        tested: true,
+        testedVersions: ["0.64.17", "0.64.14-nightly"],
+        note: "running cmux v0.64.17; tested against v0.64.17, v0.64.14-nightly",
+      },
       sleepGuard: {
         systemSleepPrevented: true,
         keepAliveLoaded: true,
@@ -1466,6 +1607,7 @@ describe("renderDoctorJson", () => {
     expect(parsed.tap.tapPresent).toBe(true);
     expect(parsed.socketPath.set).toBe(true);
     expect(parsed.socketPath.value).toBe("/tmp/x.sock");
+    expect(parsed.cmuxCompatibility.tested).toBe(true);
     expect(parsed.sleepGuard.durable).toBe(true);
     expect(parsed.runtimeProvenance.mode).toBe("dist");
     expect(parsed.mcpReconnectProcedure.automation).toBe(false);

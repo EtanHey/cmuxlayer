@@ -849,6 +849,20 @@ async function terminateRecordedPid(
   recordedPids.delete(pid);
 }
 
+async function addPidReceiptToSet(
+  receiptPath: string,
+  recordedPids: Set<number>,
+): Promise<void> {
+  try {
+    for (const line of (await readFile(receiptPath, "utf8")).split(/\r?\n/)) {
+      const pid = Number(line.trim());
+      if (Number.isInteger(pid) && pid > 0) recordedPids.add(pid);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 async function runContract(): Promise<void> {
   const requestedSocket = process.env.CMUX_SOCKET_PATH;
   const requestedPin = requestedSocket?.trim();
@@ -873,6 +887,7 @@ async function runContract(): Promise<void> {
 
   const root = await mkdtemp(join(tmpdir(), "cmuxlayer-real-contract-"));
   const daemonSocket = join(root, "cmuxlayer-stated.sock");
+  const daemonPidReceipt = join(root, "daemon-pids.txt");
   const home = join(root, "home");
   const recordedPids = new Set<number>();
   let peer: McpPeer | null = null;
@@ -897,6 +912,7 @@ async function runContract(): Promise<void> {
       HOME: home,
       CMUX_SOCKET_PATH: cmuxSocket,
       CMUXLAYER_DAEMON_SOCKET: daemonSocket,
+      CMUXLAYER_DAEMON_PID_RECEIPT: daemonPidReceipt,
       CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
     };
 
@@ -993,7 +1009,23 @@ async function runContract(): Promise<void> {
   } finally {
     peer?.close();
     const proxyPid = peer?.child.pid;
-    for (const pid of cleanupPidOrder(recordedPids, proxyPid)) {
+    if (proxyPid && recordedPids.has(proxyPid)) {
+      await terminateRecordedPid(proxyPid, recordedPids, "SIGTERM", true).catch(
+        (error) => {
+          console.error(
+            `[contract] cleanup warning for pid ${proxyPid}:`,
+            error,
+          );
+        },
+      );
+    }
+    await addPidReceiptToSet(daemonPidReceipt, recordedPids).catch((error) => {
+      console.error(
+        "[contract] cleanup warning reading daemon pid receipt:",
+        error,
+      );
+    });
+    for (const pid of cleanupPidOrder(recordedPids, undefined)) {
       await terminateRecordedPid(pid, recordedPids, "SIGTERM", true).catch(
         (error) => {
           console.error(`[contract] cleanup warning for pid ${pid}:`, error);
