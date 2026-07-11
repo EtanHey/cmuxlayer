@@ -1087,8 +1087,39 @@ function isMethodNotFoundError(error: unknown): boolean {
 }
 
 function pasteRequiredError(reason: string): Error {
+  if (reason.startsWith("paste delivery is required")) {
+    return new Error(reason);
+  }
   return new Error(
-    `paste delivery is required for chunked or multiline input: ${reason}`,
+    `paste delivery is required for chunked or multiline input: ${reason}. No Return key was sent. Write the payload to a file and send "Read and follow <path>"; for launcher boot prompts, pass boot_prompt_path.`,
+  );
+}
+
+const MULTILINE_INLINE_AGENT_CLIS = new Set<CliType>([
+  "codex",
+  "claude",
+  "cursor",
+  "gemini",
+]);
+
+function assertInteractiveMultilineInputAllowed(opts: {
+  tool: "send_input" | "send_to" | "send_to_agent" | "spawn_agent";
+  value: string | undefined;
+  cli: CliType | undefined;
+  allowLongInline?: boolean;
+}): void {
+  if (
+    opts.allowLongInline ||
+    !opts.value ||
+    !opts.cli ||
+    !MULTILINE_INLINE_AGENT_CLIS.has(opts.cli) ||
+    !/\r?\n[\t ]*\r?\n/.test(opts.value)
+  ) {
+    return;
+  }
+
+  throw new Error(
+    `${opts.tool} refuses multi-paragraph inline text for an interactive ${opts.cli} composer because paragraph breaks can become separate submitted messages. Write the payload to a file and send "Read and follow <path>" instead; for launcher boot prompts, pass boot_prompt_path. To deliberately bypass this guard, pass allow_long_inline:true.`,
   );
 }
 
@@ -2706,8 +2737,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !isRetryableDeliveryError(error) ||
           attempt >= SEND_INPUT_RETRY_ATTEMPTS
         ) {
-          const message =
+          const rawMessage =
             error instanceof Error ? error.message : String(error);
+          const message = shouldPaste
+            ? pasteRequiredError(rawMessage).message
+            : rawMessage;
           throw new DeliveryError(
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
@@ -3616,11 +3650,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const rawPrompt = bootPromptPath
       ? await readFile(bootPromptPath, "utf8")
       : opts.prompt!;
+    const useFilePointer =
+      Boolean(bootPromptPath) &&
+      (/[\r\n]/.test(rawPrompt) || rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
     const promptWarning =
-      bootPromptPath && rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS
+      bootPromptPath &&
+      rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS &&
+      !useFilePointer
         ? `boot_prompt_path is ${rawPrompt.length} characters; prefer a one-line file pointer for boot prompts over ${BOOT_PROMPT_PATH_WARNING_CHARS} characters`
         : null;
-    const sanitizedText = sanitizeTerminalInput(rawPrompt);
+    const deliveryText = useFilePointer
+      ? `Read and follow ${bootPromptPath}`
+      : rawPrompt;
+    const sanitizedText = sanitizeTerminalInput(deliveryText);
     const chunks =
       sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
         ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
@@ -4563,7 +4605,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 2. new_split
   server.tool(
     "new_split",
-    "Create a new split pane (terminal or browser). PLACEMENT IS BY ROLE, NOT BY HAND: pass `role` (or let it infer from the launcher title) and the layout policy enforces the two-column invariant — leads/orchestrators land in the LEFT column, workers land in the RIGHT column, and extra workers dock as tabs in the rightmost worker pane (never a third column). Workspace-targeted splits auto-focus the target before splitting and restore your prior focus after the new pane renders, so you do not hand-run focus-pane around splits. For terminal panes that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
+    "Create a new split pane (terminal or browser). PLACEMENT IS BY ROLE, NOT BY HAND: pass `role` (or let it infer from the launcher title) and the layout policy enforces the two-column invariant — leads/orchestrators land in the LEFT column, workers land in the RIGHT column, and extra workers dock as tabs in the rightmost worker pane (never a third column). Workspace-targeted splits auto-focus the target before splitting and restore your prior focus after the new pane renders, so you do not hand-run focus-pane around splits. For terminal panes that boot an agent, boot_prompt_path safely submits multiline or over-cap files as one `Read and follow <path>` pointer after the agent reaches a ready prompt.",
     {
       direction: z
         .enum(["left", "right", "up", "down"])
@@ -4594,7 +4636,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .nullable()
         .optional()
         .describe(
-          "Optional path to a prompt file to read after readiness and submit to the new terminal surface. Checked before pane creation. Mutually exclusive with inline prompt fields.",
+          "Optional readable prompt-file path. Checked before pane creation. Multiline or over-cap files are delivered as one `Read and follow <path>` pointer after readiness; shorter files retain direct delivery. Mutually exclusive with inline prompt fields.",
         ),
       boot_prompt_timeout_ms: z
         .number()
@@ -4836,7 +4878,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 3. new_surface
   server.tool(
     "new_surface",
-    "Create a new surface (tab) in an existing pane. For terminal tabs that boot an agent, boot_prompt_path can deliver a file prompt after the agent reaches a ready prompt.",
+    "Create a new surface (tab) in an existing pane. For terminal tabs that boot an agent, boot_prompt_path safely submits multiline or over-cap files as one `Read and follow <path>` pointer after the agent reaches a ready prompt.",
     {
       pane: z.string().describe("Target pane ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -4852,7 +4894,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .nullable()
         .optional()
         .describe(
-          "Optional path to a prompt file to read after readiness and submit to the new terminal surface. Checked before tab creation.",
+          "Optional readable prompt-file path. Checked before tab creation. Multiline or over-cap files are delivered as one `Read and follow <path>` pointer after readiness; shorter files retain direct delivery.",
         ),
       boot_prompt_timeout_ms: z
         .number()
@@ -5044,7 +5086,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 6. send_input
   server.tool(
     "send_input",
-    `Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare \`@word\` (e.g. \`@narration-lead\`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats \`@\` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (\`narration-lead:\`) for pane-to-pane addressing; reserve \`@<name>\` for collab-file posts where monitors match it. If a literal \`@\` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); write large payloads to a file and send one line: "Read and follow <path>". Pass allow_long_inline:true only for deliberate raw sends. Text over ${SEND_INPUT_CHUNK_THRESHOLD} characters that is allowed is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.`,
+    `Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare \`@word\` (e.g. \`@narration-lead\`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats \`@\` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (\`narration-lead:\`) for pane-to-pane addressing; reserve \`@<name>\` for collab-file posts where monitors match it. If a literal \`@\` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); tracked Codex/Claude/Cursor/Gemini agents also refuse multi-paragraph inline text by default. Write the payload to a file and send one line: "Read and follow <path>". Pass allow_long_inline:true only for deliberate raw sends. Text over ${SEND_INPUT_CHUNK_THRESHOLD} characters that is allowed is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Paste failure returns an error without pressing Return. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.`,
     {
       surface: z.string().describe("Target surface ref"),
       text: z
@@ -5081,7 +5123,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe(
-          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
+          "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
     },
     ANNOTATIONS.mutating,
@@ -5108,6 +5150,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           stateMgr,
           args.surface,
         );
+        assertInteractiveMultilineInputAllowed({
+          tool: "send_input",
+          value: args.text,
+          cli: targetRecord?.cli,
+          allowLongInline: args.allow_long_inline,
+        });
         const shouldVerifySubmit =
           args.press_enter &&
           !!targetRecord &&
@@ -5219,7 +5267,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 7. send_command
   server.tool(
     "send_command",
-    `Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command only when it fits the ${SEND_INPUT_MAX_INLINE_CHARS}-character inline cap. WARNING — never include a bare \`@word\` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; \`@<name>\` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path reads a prompt file after the launcher reaches readiness and submits it; use boot_prompt_path instead of embedding a long boot prompt in pane keystrokes. Passing boot_prompt_path for plain shell commands is rejected. Pass allow_long_inline:true only for deliberate raw long commands.`,
+    `Atomically send a command and press return on the same raw surface. Prefer this over separate send_input + send_key calls when launching or resuming agents. If the user provided an exact command, send exactly that command only when it fits the ${SEND_INPUT_MAX_INLINE_CHARS}-character inline cap. WARNING — never include a bare \`@word\` in text destined for an interactive agent composer: it fires the receiver's file-reference picker and corrupts delivery (use the bare name; \`@<name>\` belongs in collab files, not pane keystrokes). For known agent launchers with -s (for example brainlayerCodex -s), boot_prompt_path is checked before launch and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness; use it instead of embedding a multi-paragraph boot prompt in pane keystrokes. Passing boot_prompt_path for plain shell commands is rejected. Pass allow_long_inline:true only for deliberate raw long commands.`,
     {
       surface: z.string().describe("Target surface ref"),
       command: z
@@ -5233,7 +5281,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .nullable()
         .optional()
         .describe(
-          "Optional path to a prompt file for launcher commands matching <repo>Codex|Claude|Cursor|Gemini|Kiro with -s. File is checked before sending the launcher and read after readiness.",
+          "Optional readable prompt-file path for launcher commands matching <repo>Codex|Claude|Cursor|Gemini|Kiro with -s. Checked before launch; multiline or over-cap files are submitted as one `Read and follow <path>` pointer after readiness.",
         ),
       boot_prompt_timeout_ms: z
         .number()
@@ -6714,7 +6762,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot prompt, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Inline prompt is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use boot_prompt_path for larger boot prompts. boot_prompt_path is checked before spawning and read after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.`,
+      `Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.`,
       {
         repo: z
           .string()
@@ -6737,7 +6785,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .nullable()
           .optional()
           .describe(
-            "Optional path to a prompt file. The file is checked before spawning, read after readiness, sent with chunked delivery, then submitted with return. Mutually exclusive with prompt.",
+            "Optional readable prompt-file path. Checked before spawning; multiline or over-cap files are submitted as one `Read and follow <path>` pointer and one final return after readiness. Mutually exclusive with prompt.",
           ),
         boot_prompt_timeout_ms: z
           .number()
@@ -6817,6 +6865,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             tool: "spawn_agent",
             arg: "prompt",
             value: args.prompt,
+            allowLongInline: args.allow_long_inline,
+          });
+          assertInteractiveMultilineInputAllowed({
+            tool: "spawn_agent",
+            value: args.prompt,
+            cli: args.cli,
             allowLongInline: args.allow_long_inline,
           });
           if (bootPromptPath) {
@@ -7998,7 +8052,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      `Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); write large payloads to a file and send one line: "Read and follow <path>". For collab supersession, send a short \`/goal Read and follow <absolute goal file>\` reference rather than a long lossy paste. For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path through spawn_agent/send_command instead of routing raw long text through the agent composer. Pass allow_long_inline:true only for deliberate raw sends. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.`,
+      `Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default, and multi-paragraph inline text is refused for Codex/Claude/Cursor/Gemini agents; write the payload to a file and send one line: "Read and follow <path>". For collab supersession, send a short \`/goal Read and follow <absolute goal file>\` reference rather than a long lossy paste. For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path through spawn_agent/send_command instead of routing raw long text through the agent composer. Pass allow_long_inline:true only for deliberate raw sends. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.`,
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -8011,7 +8065,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
-          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
+          "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
       },
       ANNOTATIONS.mutating,
@@ -8029,6 +8083,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             tool: "send_to",
             arg: "text",
             value: args.text,
+            allowLongInline: args.allow_long_inline,
+          });
+          const targetAgent =
+            engine.getAgentState(args.agent_id) ?? registry.get(args.agent_id);
+          assertInteractiveMultilineInputAllowed({
+            tool: "send_to",
+            value: args.text,
+            cli: targetAgent?.cli,
             allowLongInline: args.allow_long_inline,
           });
           const delivery = await deliverAgentInput({
@@ -8081,7 +8143,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
-          "Bypass the inline length cap for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
+          "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
         ),
       },
       ANNOTATIONS.mutating,
@@ -8101,6 +8163,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             tool: "send_to_agent",
             arg: "text",
             value: args.text,
+            allowLongInline: args.allow_long_inline,
+          });
+          const targetAgent =
+            engine.getAgentState(args.agent_id) ?? registry.get(args.agent_id);
+          assertInteractiveMultilineInputAllowed({
+            tool: "send_to_agent",
+            value: args.text,
+            cli: targetAgent?.cli,
             allowLongInline: args.allow_long_inline,
           });
           const delivery = await deliverAgentInput({

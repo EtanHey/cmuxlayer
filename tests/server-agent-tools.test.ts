@@ -1245,7 +1245,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(argv[workspaceIndex + 1]).toBe("ws:1");
   });
 
-  it("spawn_agent delivers inline prompts with blank lines without empty chunks", async () => {
+  it("spawn_agent deliberately allowed inline prompts preserve blank lines without empty chunks", async () => {
     const baseExec = makeLifecycleExec();
     const prompt = `${"a".repeat(500)}\n\n${"b".repeat(600)}`;
     const buffers = new Map<string, string>();
@@ -1296,6 +1296,7 @@ describe("agent lifecycle tool handlers", () => {
         model: "codex",
         cli: "codex",
         prompt,
+        allow_long_inline: true,
       },
       {} as any,
     );
