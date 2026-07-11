@@ -465,9 +465,12 @@ describe("control health", () => {
     });
     let nowMs = Date.parse("2026-07-11T12:00:00.000Z");
     const tracker = new SurfaceWriteLivenessTracker({ now: () => nowMs });
+    let writeError: Error = Object.assign(new Error("broken pipe"), {
+      code: "EPIPE",
+    });
     const client = {
       sendKey: vi.fn(async () => {
-        throw Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+        throw writeError;
       }),
     };
     const server = createServer({
@@ -504,6 +507,24 @@ describe("control health", () => {
       expect(secondHealth.surfaces[0].since_at).toBe(
         firstHealth.surfaces[0].since_at,
       );
+
+      writeError = new Error("submit verification failed");
+      await sendKey.handler(
+        { surface: "surface:untracked", key: "return" },
+        {} as any,
+      );
+      const afterNonPtyFailure = await controlHealth.handler({}, {} as any);
+      expect(
+        afterNonPtyFailure.structuredContent.health.self_heal.pane_pty_dead,
+      ).toMatchObject({
+        count: 1,
+        surfaces: [
+          expect.objectContaining({
+            since_at: firstHealth.surfaces[0].since_at,
+          }),
+        ],
+      });
+      writeError = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
 
       nowMs += 31_000;
       await sendKey.handler({ surface: "surface:untracked", key: "return" }, {} as any);

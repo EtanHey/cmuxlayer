@@ -154,7 +154,10 @@ import {
   loadSeatRegistryFromConfig,
   type SeatRegistry,
 } from "./seat-identity.js";
-import { SurfaceWriteLivenessTracker } from "./surface-write-liveness.js";
+import {
+  isBrokenPipeError,
+  SurfaceWriteLivenessTracker,
+} from "./surface-write-liveness.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -2561,6 +2564,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string,
     error: unknown,
   ): void => {
+    if (!isBrokenPipeError(error)) return;
     surfaceWriteLiveness.recordFailure(surface, error);
     const observation = surfaceWriteLiveness.observe(surface);
     if (!observation || observation.consecutive_broken_pipe_failures === 0) {
