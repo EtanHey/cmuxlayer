@@ -136,6 +136,7 @@ describe("spawn monitor boot", () => {
         model: "sonnet",
         cli: "claude",
         role: "orchestrator",
+        verbose: true,
       },
       {} as any,
     );
@@ -200,6 +201,7 @@ describe("spawn monitor boot", () => {
           model: "sonnet",
           cli: "claude",
           role: "orchestrator",
+          verbose: true,
         },
         {} as any,
       );

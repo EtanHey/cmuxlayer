@@ -14,6 +14,10 @@ import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
+import {
+  buildSpawnToolReturn,
+  shapeSpawnResponse,
+} from "./spawn-response.js";
 import { StateManager } from "./state-manager.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import {
@@ -6762,7 +6766,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `Spawn a managed AI agent in a terminal surface and return an agent_id plus health for future routing. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.`,
+      `Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately.`,
       {
         repo: z
           .string()
@@ -6854,6 +6858,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(false)
           .describe(
             "Bypass the inline prompt length cap for a deliberate raw boot-prompt send. Prefer boot_prompt_path for large prompts.",
+          ),
+        verbose: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Return the full legacy spawn response instead of the lean default.",
           ),
       },
       ANNOTATIONS.mutating,
@@ -7099,8 +7110,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               )
             : undefined;
 
-          return okFormatted(
-            formatOk("spawn_agent", {
+          const formattedData = {
               agent_id: result.agent_id,
               repo: args.repo,
               model: result.model ?? args.model,
@@ -7115,8 +7125,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               duplicate_spawn_warning: duplicateSpawnWarning,
               monitor_boot: monitorBoot,
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-            }),
-            {
+            };
+          const responseData = {
               ...result,
               worktree: worktree.prepared,
               mcp_profile: worktree.mcpProfileLabel,
@@ -7129,7 +7139,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_bytes: bootPromptDelivery?.bytes,
               boot_prompt_submit_verified:
                 bootPromptDelivery?.submit_verified ?? null,
+            };
+          return buildSpawnToolReturn(
+            {
+              retry_count: currentTransportRetryCount(),
+              ...responseData,
             },
+            args.verbose,
+            formatOk("spawn_agent", formattedData),
           );
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
@@ -7146,7 +7163,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "new_worktree_split",
-      "Create or reuse a git worktree and spawn one worker agent into a right-side cmux split. Defaults to inherited MCPs and preserves the existing worker layout policy.",
+      "Create or reuse a git worktree and spawn one worker agent into a right-side cmux split. Returns a lean response by default; pass verbose:true for the full legacy health and worktree bookkeeping. Defaults to inherited MCPs and preserves the existing worker layout policy.",
       {
         repo: z.string().describe("Repository name"),
         model: z.string().describe("Model name"),
@@ -7172,6 +7189,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         parent_agent_id: z.string().optional(),
         auto_archive_on_done: z.boolean().optional().default(false),
         crash_recover: z.boolean().optional(),
+        verbose: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Return the full legacy spawn response instead of the lean default.",
+          ),
       },
       ANNOTATIONS.mutating,
       async (args) => {
@@ -7271,15 +7295,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               )
             : undefined;
 
-          return okFormatted(
-            formatOk("new_worktree_split", {
+          const formattedData = {
               agent_id: result.agent_id,
               surface: result.surface_id,
               worktree: worktree.prepared?.path ?? "",
               mcp_profile: worktree.mcpProfileLabel ?? "inherit",
               health,
-            }),
-            {
+            };
+          const responseData = {
               ...result,
               role: "worker",
               health,
@@ -7289,7 +7312,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_bytes: bootPromptDelivery?.bytes,
               boot_prompt_submit_verified:
                 bootPromptDelivery?.submit_verified ?? null,
+            };
+          return buildSpawnToolReturn(
+            {
+              retry_count: currentTransportRetryCount(),
+              ...responseData,
             },
+            args.verbose,
+            formatOk("new_worktree_split", formattedData),
           );
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
@@ -7312,7 +7342,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "spawn_in_workspace",
-      "Create a workspace and spawn a set of agents into it as a clean 2-pane grid (commanders LEFT, workers RIGHT). Handles workspace creation, selection, and role-based pane placement atomically. Use this instead of repeated spawn_agent calls when standing up a multi-agent team.",
+      "Create a workspace and spawn a set of agents into it as a clean 2-pane grid (commanders LEFT, workers RIGHT). Returns lean per-agent responses by default; pass verbose:true for the full legacy response. Handles workspace creation, selection, and role-based pane placement atomically. Use this instead of repeated spawn_agent calls when standing up a multi-agent team.",
       {
         workspace_title: z
           .string()
@@ -7334,6 +7364,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "Ref of an existing workspace to use instead of creating a new one",
+          ),
+        verbose: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Return the full legacy spawn response instead of the lean default.",
           ),
       },
       ANNOTATIONS.mutating,
@@ -7368,6 +7405,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_delivered?: boolean;
             boot_prompt_submit_verified?: boolean | null;
           }> = [];
+          const leanSpawnedAgents: Record<string, unknown>[] = [];
 
           for (const agent of args.agents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
@@ -7463,6 +7501,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? (bootPromptDelivery?.submit_verified ?? null)
                 : undefined,
             });
+            leanSpawnedAgents.push(
+              shapeSpawnResponse({
+                ...result,
+                role,
+                health,
+                boot_prompt_delivered: hasPrompt
+                  ? isBootPromptDelivered(bootPromptDelivery)
+                  : false,
+                boot_prompt_submit_verified: hasPrompt
+                  ? (bootPromptDelivery?.submit_verified ?? null)
+                  : null,
+              }),
+            );
           }
 
           const lastSurface =
@@ -7476,16 +7527,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const staleWarning = staleBuildWarning();
           const workspaceWarnings = staleWarning ? [staleWarning] : [];
 
-          return okFormatted(
-            formatOk("spawn_in_workspace", {
+          const formattedData = {
               workspace,
               agents: spawnedAgents.length,
               ...(staleWarning ? { warning: staleWarning } : {}),
-            }),
-            {
+            };
+          const responseData = {
               workspace,
               title: workspaceResult.title,
               agents: spawnedAgents,
+              ...(workspaceWarnings.length > 0
+                ? { warnings: workspaceWarnings }
+                : {}),
+            };
+          return buildSpawnToolReturn(
+            {
+              retry_count: currentTransportRetryCount(),
+              ...responseData,
+            },
+            args.verbose,
+            formatOk("spawn_in_workspace", formattedData),
+            {
+              workspace,
+              title: workspaceResult.title,
+              agents: leanSpawnedAgents,
               ...(workspaceWarnings.length > 0
                 ? { warnings: workspaceWarnings }
                 : {}),
