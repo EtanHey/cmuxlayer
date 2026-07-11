@@ -893,6 +893,19 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace).toBe("workspace:grid");
     expect(parsed.agents).toHaveLength(2);
+    expect(parsed).not.toHaveProperty("retry_count");
+    expect(parsed.agents[0]).toMatchObject({
+      agent_id: expect.any(String),
+      surface_id: "surface:1",
+      workspace_id: "workspace:grid",
+      state: "booting",
+      model: expect.any(String),
+      role: "orchestrator",
+      boot_prompt_delivered: false,
+      boot_prompt_submit_verified: null,
+    });
+    expect(parsed.agents[0]).not.toHaveProperty("health");
+    expect(parsed.agents[0]).not.toHaveProperty("monitor_boot");
     expect(calls.slice(0, 4)).toEqual([
       "create:red-team",
       "select:workspace:grid",
@@ -900,6 +913,32 @@ describe("tool handler integration", () => {
       "spawn:workspace:grid:surface:1",
     ]);
     expect(calls).toContain("spawn:workspace:grid:surface:2");
+
+    const verboseResult = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            workspace_title: "red-team",
+            reuse_workspace: "workspace:grid",
+            verbose: true,
+            agents: [
+              {
+                repo: "cmuxlayer",
+                model: "gpt-5.4",
+                cli: "codex",
+                role: "worker",
+              },
+            ],
+          },
+          {} as any,
+        ),
+      1_000,
+    );
+    expect(verboseResult.structuredContent).toHaveProperty("retry_count", 0);
+    expect(verboseResult.structuredContent.agents[0]).toHaveProperty("health");
+    expect(verboseResult.structuredContent.agents[0]).toHaveProperty(
+      "monitor_boot",
+    );
 
     await server.close();
     rmSync(stateDir, { recursive: true, force: true });

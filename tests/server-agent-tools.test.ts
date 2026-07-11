@@ -215,6 +215,69 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
+describe("lean spawn tool responses", () => {
+  it("spawn_agent defaults to the lean payload in text and structured content", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", cli: "codex" },
+      {} as any,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed).toEqual(result.structuredContent);
+    expect(parsed).toMatchObject({
+      ok: true,
+      agent_id: expect.any(String),
+      surface_id: "surface:new",
+      workspace_id: "workspace:1",
+      state: "booting",
+      model: "codex",
+      role: "worker",
+      boot_prompt_delivered: false,
+      boot_prompt_submit_verified: null,
+    });
+    expect(parsed).not.toHaveProperty("health");
+    expect(parsed).not.toHaveProperty("model_policy");
+    expect(parsed).not.toHaveProperty("retry_count");
+    expect(parsed).not.toHaveProperty("monitor_boot");
+  });
+
+  it("spawn_agent preserves the full legacy payload with verbose true", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", cli: "codex", verbose: true },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toHaveProperty("health");
+    expect(result.structuredContent).toHaveProperty("model_policy");
+    expect(result.structuredContent).toHaveProperty("retry_count", 0);
+    expect(result.content[0].text).not.toBe(
+      JSON.stringify(result.structuredContent),
+    );
+  });
+
+  it("spawn_agent surfaces a real model coercion in lean mode", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex" },
+      {} as any,
+    );
+
+    expect(result.structuredContent.model_policy).toMatchObject({
+      coerced: true,
+      effective_model: "codex",
+    });
+    expect(result.structuredContent.warnings).not.toHaveLength(0);
+  });
+});
+
 function moveOnlyAgentStateDir(prefix: string) {
   const entries = readdirSync(TEST_DIR, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -604,13 +667,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
-    expect(parsed.health).toMatchObject({
-      status: "healthy",
-      issue_codes: expect.arrayContaining([
-        "missing_cli_session_id",
-        "non_resumable",
-      ]),
-    });
+    expect(parsed.health).toBeUndefined();
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -1057,16 +1114,13 @@ describe("agent lifecycle tool handlers", () => {
       secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
-    expect(second.duplicate_spawn_warning).toMatch(/Existing same-lane agent/);
-    expect(second.existing_same_lane_agents).toEqual([
-      expect.objectContaining({
-        agent_id: first.agent_id,
-        surface_id: first.surface_id,
-        workspace_id: "workspace:1",
-        state: "idle",
-        role: "worker",
-      }),
-    ]);
+    expect(second.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Existing same-lane agent/),
+      ]),
+    );
+    expect(second.duplicate_spawn_warning).toBeUndefined();
+    expect(second.existing_same_lane_agents).toBeUndefined();
   });
 
   it("spawn_agent force_new suppresses same-lane duplicate warnings", async () => {
@@ -1104,8 +1158,13 @@ describe("agent lifecycle tool handlers", () => {
       secondResult.structuredContent ?? JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
+    expect(second.warnings).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Existing same-lane agent/),
+      ]),
+    );
     expect(second.duplicate_spawn_warning).toBeUndefined();
-    expect(second.existing_same_lane_agents).toEqual([]);
+    expect(second.existing_same_lane_agents).toBeUndefined();
   });
 
   it("spawn_agent accepts an omitted model and resolves the CLI default", async () => {
@@ -1160,7 +1219,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("ic");
-    expect(parsed.health.status).toBe("healthy");
+    expect(parsed.health).toBeUndefined();
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
     const stateResult = await stateTool.handler(
@@ -1232,7 +1291,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace_id).toBe("workspace:1");
-    expect(parsed.actual_workspace_id).toBe("ws:1");
+    expect(parsed.actual_workspace_id).toBeUndefined();
 
     const promptSendCall = mockExec.mock.calls.find(([, args]) => {
       const argv = args as string[];
@@ -1412,7 +1471,9 @@ describe("agent lifecycle tool handlers", () => {
       created: true,
       reused: false,
     });
-    expect(parsed.mcp_profile).toBe("inherit");
+    expect(parsed.mcp_profile).toBeUndefined();
+    expect(parsed.worktree).not.toHaveProperty("node_modules_linked");
+    expect(parsed.worktree).not.toHaveProperty("mcp_json_copied");
     expect(worktreeExec).toHaveBeenCalledWith("git", [
       "-C",
       repoRoot,
@@ -1461,6 +1522,7 @@ describe("agent lifecycle tool handlers", () => {
         cli: "codex",
         worktree: { name: "sterile worker" },
         mcp_profile: "sterile",
+        verbose: true,
       },
       {} as any,
     );
@@ -1471,6 +1533,8 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("worker");
     expect(parsed.mcp_profile).toBe("sterile");
+    expect(parsed.worktree).toHaveProperty("node_modules_linked");
+    expect(parsed.worktree).toHaveProperty("mcp_json_copied");
     expect(parsed.worktree.path).toBe(worktreePath);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",

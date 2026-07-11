@@ -165,6 +165,7 @@ describe("workspace spawn tools", () => {
     const result = await tool.handler(
       {
         workspace_title: "red-team",
+        verbose: true,
         agents: [
           { repo: "brainlayer", model: "sonnet", cli: "claude", role: "orchestrator" },
           { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
