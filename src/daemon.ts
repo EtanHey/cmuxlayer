@@ -22,7 +22,9 @@ import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
   defaultMonitorRegistryPath,
   httpNotifyMonitorDeadman,
+  reconcileMonitorRegistry,
 } from "./monitor-registry.js";
+import { dispatch } from "./inbox.js";
 import type { ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import type { CmuxClient } from "./cmux-client.js";
@@ -43,6 +45,7 @@ import { isMainModule } from "./is-main.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
+const DEFAULT_MONITOR_RECONCILE_INTERVAL_MS = 15_000;
 const LISTEN_FD_START = 3;
 
 /**
@@ -227,6 +230,8 @@ export interface CmuxLayerDaemonOptions extends Omit<
     deps?: DetectStaleBuildDeps,
   ) => StaleBuildResult | null;
   staleCheckIntervalMs?: number;
+  monitorReconcile?: () => Promise<unknown> | unknown;
+  monitorReconcileIntervalMs?: number;
   logger?: Pick<Console, "error">;
   onRetire?: (
     reason: DaemonRetirementReason,
@@ -362,11 +367,15 @@ export class CmuxLayerDaemon {
   private draining = false;
   private shutdownPromise: Promise<DaemonShutdownResult> | null = null;
   private staleCheckTimer: NodeJS.Timeout | null = null;
+  private monitorReconcileTimer: NodeJS.Timeout | null = null;
+  private monitorReconcileInFlight = false;
+  private monitorReconcileFn: (() => Promise<unknown> | unknown) | null;
   private retirementPromise: Promise<void> | null = null;
   private readonly detectStaleBuildFn: (
     deps?: DetectStaleBuildDeps,
   ) => StaleBuildResult | null;
   private readonly staleCheckIntervalMs: number;
+  private readonly monitorReconcileIntervalMs: number;
   private readonly logger: Pick<Console, "error">;
   private ownedSocketIdentity: { dev: number; ino: number } | null = null;
 
@@ -380,6 +389,9 @@ export class CmuxLayerDaemon {
       opts.staleCheckIntervalMs ??
       positiveEnvMs(process.env.CMUXLAYER_STALE_CHECK_INTERVAL_MS) ??
       DEFAULT_STALE_CHECK_INTERVAL_MS;
+    this.monitorReconcileIntervalMs =
+      opts.monitorReconcileIntervalMs ?? DEFAULT_MONITOR_RECONCILE_INTERVAL_MS;
+    this.monitorReconcileFn = opts.monitorReconcile ?? null;
     this.logger = opts.logger ?? console;
   }
 
@@ -393,7 +405,13 @@ export class CmuxLayerDaemon {
       await unlinkStaleSocket(this.socketPath);
     }
 
-    await this.getContext();
+    const context = await this.getContext();
+    if (
+      !this.monitorReconcileFn &&
+      (this.opts.monitorRegistryPath || process.env.VITEST !== "true")
+    ) {
+      this.monitorReconcileFn = this.createDefaultMonitorReconciler(context);
+    }
 
     this.server = (this.opts.serverFactory ?? net.createServer)(
       (socket) => void this.acceptConnection(socket),
@@ -411,6 +429,8 @@ export class CmuxLayerDaemon {
       const stats = await lstat(this.socketPath);
       this.ownedSocketIdentity = { dev: stats.dev, ino: stats.ino };
     }
+    void this.runMonitorReconcile();
+    this.startMonitorReconcileWatcher();
     this.startStaleBuildWatcher();
   }
 
@@ -422,6 +442,7 @@ export class CmuxLayerDaemon {
     }
 
     this.clearStaleBuildWatcher();
+    this.clearMonitorReconcileWatcher();
     this.shutdownPromise = this.doShutdown(signal);
     return this.shutdownPromise;
   }
@@ -488,7 +509,9 @@ export class CmuxLayerDaemon {
     const mcpServer = createServer({
       context,
       outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
-      monitorRegistryPath: defaultMonitorRegistryPath(),
+      monitorRegistryPath:
+        this.opts.monitorRegistryPath ?? defaultMonitorRegistryPath(),
+      monitorRegistryNow: this.opts.monitorRegistryNow,
       monitorRegistryNotify: httpNotifyMonitorDeadman,
     });
     const pendingRequestIds = new Set<RequestId>();
@@ -596,6 +619,91 @@ export class CmuxLayerDaemon {
       }
     }, this.staleCheckIntervalMs);
     this.staleCheckTimer.unref?.();
+  }
+
+  private createDefaultMonitorReconciler(
+    context: CmuxServerContext,
+  ): () => Promise<unknown> {
+    const registryPath =
+      this.opts.monitorRegistryPath ?? defaultMonitorRegistryPath();
+    const findOwner = (ownerSeat: string) =>
+      context.stateMgr
+        .listStates()
+        .find(
+          (record) =>
+            record.agent_id === ownerSeat || record.seat_id === ownerSeat,
+        ) ?? null;
+
+    return () =>
+      reconcileMonitorRegistry({
+        registryPath,
+        now: this.opts.monitorRegistryNow,
+        ownerAlive: async (ownerSeat) => {
+          const owner = findOwner(ownerSeat);
+          if (!owner || owner.state === "done" || owner.state === "error") {
+            return false;
+          }
+          try {
+            await context.client.readScreen(owner.surface_id, {
+              ...(owner.workspace_id
+                ? { workspace: owner.workspace_id }
+                : {}),
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        rearm: (record) => {
+          const owner = findOwner(record.owner_seat);
+          if (!owner || !record.rearm_command || !record.rearm_claimed_at) {
+            throw new Error(`Monitor re-arm owner or command missing: ${record.monitor_id}`);
+          }
+          dispatch(
+            owner.agent_id,
+            {
+              id: `monitor-rearm:${record.monitor_id}:${record.rearm_claimed_at}`,
+              from: "cmuxlayer-daemon",
+              tag: "monitor-rearm",
+              task: `Re-arm monitor ${record.monitor_id} with this exact command, then signal_monitor after the watcher is live:\n${record.rearm_command}`,
+            },
+            {
+              ...(this.opts.inboxBaseDir
+                ? { baseDir: this.opts.inboxBaseDir }
+                : {}),
+              ...(this.opts.monitorRegistryNow
+                ? { now: this.opts.monitorRegistryNow }
+                : {}),
+            },
+          );
+        },
+      });
+  }
+
+  private async runMonitorReconcile(): Promise<void> {
+    if (!this.monitorReconcileFn || this.monitorReconcileInFlight) return;
+    this.monitorReconcileInFlight = true;
+    try {
+      await this.monitorReconcileFn();
+    } catch (error) {
+      this.logger.error("[cmuxlayer-daemon] monitor reconciliation failed", error);
+    } finally {
+      this.monitorReconcileInFlight = false;
+    }
+  }
+
+  private startMonitorReconcileWatcher(): void {
+    if (!this.monitorReconcileFn || this.monitorReconcileIntervalMs <= 0) return;
+    this.monitorReconcileTimer = setInterval(() => {
+      void this.runMonitorReconcile();
+    }, this.monitorReconcileIntervalMs);
+    this.monitorReconcileTimer.unref?.();
+  }
+
+  private clearMonitorReconcileWatcher(): void {
+    if (!this.monitorReconcileTimer) return;
+    clearInterval(this.monitorReconcileTimer);
+    this.monitorReconcileTimer = null;
   }
 
   private clearStaleBuildWatcher(): void {

@@ -720,8 +720,22 @@ export async function signalMonitor(
     const monitors = registry.monitors.map((record) => {
       if (cleanString(record.monitor_id) !== monitorId) return record;
       const valid = toValidRecord(record);
-      if (!valid || valid.state !== "alive") return record;
-      updated = { ...valid, last_signal_at: nowIso(opts.now) };
+      if (
+        !valid ||
+        (valid.state !== "alive" && valid.state !== "rearming")
+      ) {
+        return record;
+      }
+      const {
+        rearm_claimed_at: _rearmClaimedAt,
+        collapsed_reason: _collapsedReason,
+        ...rest
+      } = valid;
+      updated = {
+        ...rest,
+        last_signal_at: nowIso(opts.now),
+        state: "alive",
+      };
       return updated;
     });
     writeRawRegistry(path, monitors);

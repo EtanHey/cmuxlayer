@@ -27,6 +27,10 @@ import {
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
+import {
+  reconcileMonitorRegistry,
+  registerMonitor,
+} from "../src/monitor-registry.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -2362,6 +2366,56 @@ describe("agent lifecycle tool handlers", () => {
         "missing_cli_session_id",
         "non_resumable",
       ]),
+    });
+  });
+
+  it("list_agents surfaces a collapsed monitor on its owning agent health", async () => {
+    const registryPath = join(TEST_DIR, "monitor-registry.json");
+    const watchedFile = join(TEST_DIR, "collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const list = (server as any)._registeredTools["list_agents"];
+    const spawnResult = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        prompt: "watch collab",
+      },
+      {} as any,
+    );
+    const agentId = parseToolResult(spawnResult).agent_id;
+    await registerMonitor(
+      {
+        monitor_id: "agent-collab-watch",
+        owner_seat: agentId,
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+    await reconcileMonitorRegistry({
+      registryPath,
+      now: () => 62_000,
+      ownerAlive: async () => false,
+      rearm: vi.fn(),
+    });
+
+    const parsed = parseToolResult(await list.handler({}, {} as any));
+
+    expect(parsed.agents[0]?.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining(["monitor_collapsed"]),
     });
   });
 

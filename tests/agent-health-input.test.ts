@@ -74,4 +74,23 @@ describe("buildAgentHealthInput", () => {
 
     expect(input.surface_write_liveness).toEqual(observation);
   });
+
+  it("resolves collapsed monitors by agent and seat identity", async () => {
+    const agent = makeAgent({ seat_id: "seat-a" });
+    const input = await buildAgentHealthInput(agent, {
+      resolveCollapsedMonitors: async (ownerSeats) => {
+        expect(ownerSeats).toEqual(["agent-health-input-test", "seat-a"]);
+        return [
+          {
+            monitor_id: "collab-watch",
+            reason: "owner-not-alive",
+          },
+        ];
+      },
+    });
+
+    expect(input.collapsed_monitors).toEqual([
+      { monitor_id: "collab-watch", reason: "owner-not-alive" },
+    ]);
+  });
 });

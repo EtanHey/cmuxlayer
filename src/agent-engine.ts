@@ -98,6 +98,7 @@ import {
 } from "./seat-identity.js";
 import {
   latestMonitorForOwnerSeats,
+  readMonitorRegistry,
   sweepMonitorRegistry,
   transferMonitorRegistryOwner,
   type MonitorDeadmanNotify,
@@ -2596,6 +2597,22 @@ export class AgentEngine {
           resolveSurfaceWorkspace: async (targetAgent) =>
             surfaceTopology?.workspaceBySurface.get(targetAgent.surface_id) ??
             null,
+          resolveCollapsedMonitors: (ownerSeats) => {
+            if (!this.monitorRegistryPath) return [];
+            const owners = new Set(ownerSeats);
+            return readMonitorRegistry({
+              registryPath: this.monitorRegistryPath,
+            }).monitors
+              .filter(
+                (monitor) =>
+                  monitor.state === "collapsed" &&
+                  owners.has(monitor.owner_seat),
+              )
+              .map((monitor) => ({
+                monitor_id: monitor.monitor_id,
+                reason: monitor.collapsed_reason ?? "unknown",
+              }));
+          },
         },
         {
           ...healthTopologyOverrides(agent, surfaceTopology),

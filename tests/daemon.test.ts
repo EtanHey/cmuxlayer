@@ -14,6 +14,11 @@ import {
 } from "../src/daemon.js";
 import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import {
+  readMonitorRegistry,
+  registerMonitor,
+} from "../src/monitor-registry.js";
+import { readInbox } from "../src/inbox.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 
@@ -567,6 +572,151 @@ describe("CmuxLayerDaemon", () => {
     await delay(20);
 
     expect(detectStaleBuild).toHaveBeenCalledTimes(callsAfterShutdown);
+  });
+
+  it("runs monitor reconciliation immediately on daemon boot", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const monitorReconcile = vi.fn().mockResolvedValue(undefined);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-reconcile-boot"),
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      monitorReconcile,
+      monitorReconcileIntervalMs: 0,
+    });
+
+    await daemon.start();
+
+    expect(monitorReconcile).toHaveBeenCalledTimes(1);
+    await daemon.shutdown();
+  });
+
+  it("does not overlap periodic monitor reconciliation passes", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const firstPass = deferred<void>();
+    const monitorReconcile = vi
+      .fn()
+      .mockImplementationOnce(() => firstPass.promise)
+      .mockResolvedValue(undefined);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-reconcile-overlap"),
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      monitorReconcile,
+      monitorReconcileIntervalMs: 5,
+    });
+
+    await daemon.start();
+    await delay(20);
+    expect(monitorReconcile).toHaveBeenCalledTimes(1);
+
+    firstPass.resolve();
+    await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
+    await daemon.shutdown();
+  });
+
+  it("clears the monitor reconciliation timer during shutdown", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const monitorReconcile = vi.fn().mockResolvedValue(undefined);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-reconcile-clear"),
+      exec: createListSurfacesExec(),
+      skipAgentLifecycle: true,
+      monitorReconcile,
+      monitorReconcileIntervalMs: 5,
+    });
+
+    await daemon.start();
+    await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
+    await daemon.shutdown();
+    const callsAfterShutdown = monitorReconcile.mock.calls.length;
+    await delay(20);
+
+    expect(monitorReconcile).toHaveBeenCalledTimes(callsAfterShutdown);
+  });
+
+  it("does not enqueue a duplicate monitor re-arm after daemon restart", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "restart-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "restart-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "restart-inbox");
+    const sharedStateDir = stateDir("restart-state");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "restart-monitor",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const createContext = () => {
+      const context = createServerContext({
+        client: createPlacementClient([]) as any,
+        stateDir: sharedStateDir,
+        skipAgentLifecycle: true,
+      });
+      if (context.stateMgr.listStates().length === 0) {
+        context.stateMgr.writeState({
+          agent_id: "worker-a",
+          surface_id: "surface:caller",
+          workspace_id: "workspace:1",
+          state: "working",
+          repo: "cmuxlayer",
+          model: "codex",
+          cli: "codex",
+          cli_session_id: "session-a",
+          task_summary: "watch collab",
+          pid: 123,
+          version: 1,
+          created_at: new Date(1_000).toISOString(),
+          updated_at: new Date(1_000).toISOString(),
+          error: null,
+          parent_agent_id: null,
+          spawn_depth: 0,
+          deletion_intent: false,
+          quality: "verified",
+          max_cost_per_agent: null,
+        });
+      }
+      return context;
+    };
+    const first = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-restart-first"),
+      context: createContext(),
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir,
+    });
+    await first.start();
+    await first.shutdown();
+
+    const second = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-restart-second"),
+      context: createContext(),
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 63_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir,
+    });
+    await second.start();
+    await second.shutdown();
+
+    expect(readInbox("worker-a", { baseDir: inboxBaseDir })).toHaveLength(1);
+    expect(readInbox("worker-a", { baseDir: inboxBaseDir })[0]).toMatchObject({
+      from: "cmuxlayer-daemon",
+      tag: "monitor-rearm",
+      task: expect.stringContaining(`tail -n0 -F ${watchedFile}`),
+    });
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "restart-monitor",
+      state: "rearming",
+    });
   });
 
   it("reuses one lifecycle AgentEngine across servers sharing a context", async () => {

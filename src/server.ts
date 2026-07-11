@@ -3942,6 +3942,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolveSurfaceWorkspace(target.surface_id),
         observeSurfaceWriteLiveness: (target) =>
           surfaceWriteLiveness.observe(target.surface_id),
+        resolveCollapsedMonitors: (ownerSeats) => {
+          if (!opts?.monitorRegistryPath) return [];
+          const owners = new Set(ownerSeats);
+          return readMonitorRegistry(monitorRegistryOptions()).monitors
+            .filter(
+              (monitor) =>
+                monitor.state === "collapsed" &&
+                owners.has(monitor.owner_seat),
+            )
+            .map((monitor) => ({
+              monitor_id: monitor.monitor_id,
+              reason: monitor.collapsed_reason ?? "unknown",
+            }));
+        },
       },
       overrides,
     );

@@ -436,10 +436,18 @@ describe("monitor registry deadman core", () => {
       ownerAlive: async () => true,
       rearm,
     });
+    const notify = vi.fn();
+    const swept = await sweepMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 64_000,
+      notify,
+    });
 
     expect(first.rearmed).toEqual(["stale-live-owner"]);
     expect(second.rearmed).toEqual([]);
     expect(rearm).toHaveBeenCalledTimes(1);
+    expect(swept.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
     expect(rearm).toHaveBeenCalledWith(
       expect.objectContaining({
         monitor_id: "stale-live-owner",
@@ -589,5 +597,39 @@ describe("monitor registry deadman core", () => {
     expect(failed.failed).toEqual(["rearm-retry"]);
     expect(retried.rearmed).toEqual(["rearm-retry"]);
     expect(rearm).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a rearming monitor to alive when the restored watcher signals", async () => {
+    const watchedFile = join(TEST_DIR, "restored.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "restored-monitor",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => true,
+      rearm: vi.fn(),
+    });
+
+    const signaled = await signalMonitor("restored-monitor", {
+      registryPath: registryPath(),
+      now: () => 63_000,
+    });
+
+    expect(signaled).toMatchObject({
+      monitor_id: "restored-monitor",
+      state: "alive",
+      last_signal_at: iso(63_000),
+    });
+    expect(signaled).not.toHaveProperty("rearm_claimed_at");
   });
 });
