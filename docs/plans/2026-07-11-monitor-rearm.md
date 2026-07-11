@@ -87,4 +87,3 @@
 5. Open a non-draft PR titled `feat(monitors): durable auto-re-arm across daemon and app restarts`.
 6. Read CI and review feedback, fix actionable findings with fresh verification, and complete the authorized PR loop unless repository policy or the task owner reserves merge authority.
 7. Store the design decision, verification evidence, and PR milestone in BrainLayer.
-

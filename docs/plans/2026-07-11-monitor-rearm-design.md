@@ -52,4 +52,3 @@ This adds another lifecycle and violates the established socket ancestry constra
 - A failure/retry test proves claim rollback without duplicate stable inbox ids.
 - Daemon tests prove an immediate boot pass, periodic passes without overlap, timer cleanup, and restart idempotency against the same registry file.
 - MCP and health tests prove registration round-trips `rearm_command`, `list_monitors` surfaces collapse metadata, and the owning agent receives `monitor_collapsed`.
-
