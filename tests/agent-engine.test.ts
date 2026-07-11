@@ -4500,26 +4500,33 @@ To continue this session, run codex resume ${sessionId}`,
     });
 
     it("detects state change via sweep", async () => {
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "agent-boot",
-          state: "booting",
-          surface_id: "surface:42",
-        }),
-      );
-      liveSurfaces = [makeSurface("surface:42")];
-      await engine.getRegistry().reconstitute();
+      vi.useFakeTimers();
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-boot",
+            state: "booting",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
 
-      // Simulate another process transitioning the state after 200ms
-      setTimeout(() => {
-        stateMgr.transition("agent-boot", "ready");
-      }, 200);
+        // Simulate another process transitioning the state after 200ms.
+        const pending = engine.waitFor("agent-boot", "ready", 5000);
+        setTimeout(() => {
+          stateMgr.transition("agent-boot", "ready");
+        }, 200);
 
-      const result = await engine.waitFor("agent-boot", "ready", 5000);
-      expect(result.matched).toBe(true);
-      expect(result.source).toBe("sweep");
-      expect(result.agent?.agent_id).toBe("agent-boot");
-      expect(result.agent?.state).toBe("ready");
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("sweep");
+        expect(result.agent?.agent_id).toBe("agent-boot");
+        expect(result.agent?.state).toBe("ready");
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("promotes booting agents to ready when their CLI prompt appears", async () => {
