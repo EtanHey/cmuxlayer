@@ -1,10 +1,5 @@
-import { spawn } from "node:child_process";
 import net from "node:net";
-import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Readable, Writable } from "node:stream";
-import type { ChildProcess } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CreateServerOptions } from "./server.js";
 import {
@@ -13,18 +8,17 @@ import {
   type CmuxLayerProxyOptions,
 } from "./proxy.js";
 import { defaultDaemonSocketPath as resolveDefaultDaemonSocketPath } from "./daemon-socket-path.js";
+import {
+  spawnDaemonProcess,
+  type SpawnDaemonOptions,
+} from "./daemon-spawn.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
 
 export { resolveDefaultDaemonSocketPath as defaultDaemonSocketPath };
 
-export interface SpawnDaemonOptions {
-  socketPath: string;
-  env: NodeJS.ProcessEnv;
-  daemonScriptPath?: string;
-  logger: Pick<Console, "error">;
-}
+export { spawnDaemonProcess, type SpawnDaemonOptions } from "./daemon-spawn.js";
 
 export interface StartInProcessOptions {
   fallbackWarnings?: string[];
@@ -84,10 +78,6 @@ function terminateSpawnedDaemon(
   }
 }
 
-function defaultDaemonScriptPath(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "daemon.js");
-}
-
 async function defaultSleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -110,31 +100,6 @@ export async function probeDaemonSocket(socketPath: string): Promise<boolean> {
     socket.once("connect", () => settle(true));
     socket.once("error", () => settle(false));
   });
-}
-
-export async function spawnDaemonProcess(
-  opts: SpawnDaemonOptions,
-): Promise<ChildProcess> {
-  await mkdir(dirname(opts.socketPath), { recursive: true });
-  const daemonScriptPath = opts.daemonScriptPath ?? defaultDaemonScriptPath();
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...opts.env,
-    CMUXLAYER_DAEMON_SOCKET: opts.socketPath,
-  };
-  const nodeOptions = env.NODE_OPTIONS ?? "";
-  if (!/(^|\s)--max-old-space-size(=|\s)/.test(nodeOptions)) {
-    env.NODE_OPTIONS = `${nodeOptions} --max-old-space-size=${
-      env.CMUXLAYER_NODE_MAX_OLD_SPACE_MB ?? "1536"
-    }`.trim();
-  }
-  const child = spawn(process.execPath, [daemonScriptPath], {
-    detached: true,
-    env,
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-  child.unref();
-  return child;
 }
 
 async function waitForDaemon(

@@ -1,6 +1,7 @@
 import net from "node:net";
-import { EventEmitter } from "node:events";
-import { rmSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +13,11 @@ import type {
   JSONRPCMessage,
   JSONRPCRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CmuxLayerProxy, computeReconnectDelay } from "../src/proxy.js";
+import {
+  CmuxLayerProxy,
+  computeReconnectDelay,
+  VersionBumpReconnectGuard,
+} from "../src/proxy.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-proxy-test");
 
@@ -40,6 +45,26 @@ function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
     };
     tick();
   });
+}
+
+async function leaveRefusedUnixSocket(path: string): Promise<void> {
+  rmSync(path, { force: true });
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `require("node:net").createServer(() => {}).listen(${JSON.stringify(path)})`,
+    ],
+    { stdio: "ignore" },
+  );
+  try {
+    await waitFor(() => existsSync(path));
+  } catch (error) {
+    child.kill("SIGKILL");
+    throw error;
+  }
+  child.kill("SIGKILL");
+  await once(child, "exit");
 }
 
 function createCollector(stream: NodeJS.ReadableStream) {
@@ -198,7 +223,7 @@ class FakeDaemon {
     });
   }
 
-  async stop(): Promise<void> {
+  async stop(opts: { leaveStaleSocket?: boolean } = {}): Promise<void> {
     for (const socket of this.sockets) {
       socket.destroy();
     }
@@ -210,7 +235,11 @@ class FakeDaemon {
       this.server.close(() => resolve());
     });
     this.server = null;
-    rmSync(this.path, { force: true });
+    if (opts.leaveStaleSocket) {
+      await leaveRefusedUnixSocket(this.path);
+    } else {
+      rmSync(this.path, { force: true });
+    }
   }
 
   releaseHeld(method: string): void {
@@ -787,6 +816,255 @@ describe("CmuxLayerProxy", () => {
     expect(
       delays.every((delay, index) => index === 0 || delay > delays[index - 1]),
     ).toBe(true);
+  });
+
+  it("spawns the installed daemon after the second refused reconnect attempt", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn");
+    const logger = { error: vi.fn() };
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue({ pid: 4242 });
+    const attempts: number[] = [];
+    const { proxy } = createProxy(path, {
+      initialBackoffMs: 10,
+      maxBackoffMs: 10,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      logger,
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      reconnectLogIntervalMs: 0,
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => spawnDaemonForVersionBump.mock.calls.length === 1);
+    await proxy.stop();
+
+    expect(attempts.slice(0, 2)).toEqual([0, 1]);
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledWith(
+      expect.objectContaining({
+        daemonScriptPath: "/opt/cmuxlayer/dist/daemon.js",
+        socketPath: path,
+      }),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/reconnect attempt 0 failed \(ENOENT\)/),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon spawn skipped (reason=gate, attempt=0)",
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon spawn fired (script=/opt/cmuxlayer/dist/daemon.js, pid=4242)",
+    );
+  });
+
+  it("caps reconnect-driven daemon spawns within the guard window", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn-guard");
+    const spawnDaemonForVersionBump = vi.fn().mockResolvedValue(undefined);
+    const attempts: number[] = [];
+    createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+      reconnectDaemonSpawnGuard: new VersionBumpReconnectGuard({
+        maxAttempts: 2,
+        windowMs: 60_000,
+      }),
+      spawnDaemonForVersionBump,
+    });
+
+    await waitFor(() => attempts.length >= 6);
+
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays queued requests after reconnect autostart brings up the daemon", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-spawn-replay");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    const spawnDaemonForVersionBump = vi.fn(async () => daemon.start());
+    const { input, collector } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 10,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      requestTimeoutMs: 1_000,
+      spawnDaemonForVersionBump,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(
+      daemon.connections[0].messages
+        .filter((message) => "method" in message)
+        .map((message) => message.method),
+    ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
+  });
+
+  it("autostarts within two reconnect attempts after a connected daemon leaves a stale socket", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("connected-stale-restart");
+    const firstDaemon = new FakeDaemon(path, {
+      holdMethods: new Set(["tools/list"]),
+    });
+    daemons.push(firstDaemon);
+    await firstDaemon.start();
+
+    const secondDaemon = new FakeDaemon(path);
+    daemons.push(secondDaemon);
+    const reconnectAttempts: number[] = [];
+    const logger = { error: vi.fn() };
+    const spawnDaemonForVersionBump = vi.fn(async () => secondDaemon.start());
+    const { input, collector } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      reconnectJitterRatio: 0,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      logger,
+      requestTimeoutMs: 1_000,
+      onReconnectDelay: (_delayMs, attempt) =>
+        reconnectAttempts.push(attempt),
+      spawnDaemonForVersionBump,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await collector.waitForMessage(isResponseFor(1));
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(2, "tools/list"));
+    await firstDaemon.waitForMessage(
+      0,
+      (message) => "method" in message && message.method === "tools/list",
+    );
+
+    await firstDaemon.stop({ leaveStaleSocket: true });
+    daemons.splice(daemons.indexOf(firstDaemon), 1);
+
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({
+      id: 2,
+      result: { tools: expect.any(Array) },
+    });
+    expect(spawnDaemonForVersionBump).toHaveBeenCalledTimes(1);
+    expect(reconnectAttempts.slice(0, 2)).toEqual([0, 1]);
+    expect(logger.error).toHaveBeenCalledWith(
+      "[cmuxlayer-proxy] daemon drop detected; reconnecting",
+    );
+    expect(
+      secondDaemon.connections[0].messages
+        .filter((message) => "method" in message)
+        .map((message) => message.method),
+    ).toEqual(["initialize", "notifications/initialized", "tools/list"]);
+  });
+
+  it("does not resolve or spawn a daemon during reconnect when no callback is set", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("reconnect-no-spawn");
+    const attempts: number[] = [];
+    const installedDaemonScriptPath = vi.fn(() => {
+      throw new Error("should not resolve without a spawn callback");
+    });
+    const { proxy } = createProxy(path, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath,
+      onReconnectDelay: (_delayMs, attempt) => attempts.push(attempt),
+    });
+
+    await waitFor(() => attempts.length >= 3);
+
+    expect(installedDaemonScriptPath).not.toHaveBeenCalled();
+    expect(proxy.isRunning()).toBe(true);
+  });
+
+  it("logs no-script and guard reasons when reconnect autostart is skipped", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const noScriptPath = socketPath("reconnect-no-script");
+    const noScriptLogger = { error: vi.fn() };
+    const spawnDaemon = vi.fn();
+    const noScript = createProxy(noScriptPath, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => null,
+      logger: noScriptLogger,
+      reconnectLogIntervalMs: 0,
+      spawnDaemonForVersionBump: spawnDaemon,
+    });
+    await waitFor(() =>
+      noScriptLogger.error.mock.calls.some(([message]) =>
+        String(message).includes("reason=no-script"),
+      ),
+    );
+    await noScript.proxy.stop();
+
+    const guardPath = socketPath("reconnect-blocked-guard");
+    const guardLogger = { error: vi.fn() };
+    const guard = createProxy(guardPath, {
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      logger: guardLogger,
+      reconnectDaemonSpawnGuard: new VersionBumpReconnectGuard({
+        maxAttempts: 0,
+      }),
+      reconnectLogIntervalMs: 0,
+      spawnDaemonForVersionBump: spawnDaemon,
+    });
+    await waitFor(() =>
+      guardLogger.error.mock.calls.some(([message]) =>
+        String(message).includes("reason=guard"),
+      ),
+    );
+    await guard.proxy.stop();
+
+    expect(spawnDaemon).not.toHaveBeenCalled();
+  });
+
+  it("fails buffered requests within the outage bound and accepts new work after recovery", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("bounded-outage");
+    const { input, collector } = createProxy(path, {
+      bufferedRequestTimeoutMs: 30,
+      initialBackoffMs: 5,
+      maxBackoffMs: 5,
+      requestTimeoutMs: 1_000,
+    });
+
+    writeFrame(input, request(1, "initialize", { capabilities: {} }));
+    await expect(
+      collector.waitForMessage(isResponseFor(1), 300),
+    ).resolves.toMatchObject({
+      id: 1,
+      error: expect.objectContaining({
+        code: -32001,
+        message: expect.stringMatching(/daemon unavailable.*reconnect/i),
+      }),
+    });
+
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+    writeFrame(input, request(2, "initialize", { capabilities: {} }));
+    await expect(
+      collector.waitForMessage(isResponseFor(2), 1_000),
+    ).resolves.toMatchObject({ id: 2, result: expect.any(Object) });
+    writeFrame(input, notification("notifications/initialized"));
+    writeFrame(input, request(3, "tools/list"));
+    await expect(
+      collector.waitForMessage(isResponseFor(3), 1_000),
+    ).resolves.toMatchObject({
+      id: 3,
+      result: { tools: expect.any(Array) },
+    });
   });
 
   it("returns a JSON-RPC error when buffered requests exceed the cap", async () => {

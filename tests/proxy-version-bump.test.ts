@@ -243,6 +243,49 @@ describe("proxy version-bump auto-reconnect", () => {
     expect(detectStaleBuild).toHaveBeenCalled();
   });
 
+  it("resumes connecting when a version bump cancels a daemon-drop backoff", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("drop-bump-race");
+    const daemon = new FakeDaemon(path);
+    daemons.push(daemon);
+    await daemon.start();
+
+    let stale = false;
+    const logger = { error: vi.fn() };
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input: new PassThrough(),
+      output: new PassThrough(),
+      logger,
+      initialBackoffMs: 1_000,
+      maxBackoffMs: 1_000,
+      reconnectJitterRatio: 0,
+      reconnectLogIntervalMs: 0,
+      staleRecheckIntervalMs: 10,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.33", installed: "0.3.34" }
+          : { stale: false, running: "0.3.33", installed: "0.3.33" },
+      spawnDaemonForVersionBump: vi.fn().mockResolvedValue({ pid: 4242 }),
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+    });
+    proxies.push(proxy);
+    proxy.start();
+    await waitFor(() => daemon.connections.length > 0);
+
+    stale = true;
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+
+    await waitFor(
+      () =>
+        logger.error.mock.calls.some(([message]) =>
+          String(message).includes("reconnect attempt"),
+        ),
+      500,
+    );
+  });
+
   it("trips the reconnect-storm guard after repeated version-bump attempts", () => {
     const guard = new VersionBumpReconnectGuard({
       maxAttempts: 2,
