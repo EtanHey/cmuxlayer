@@ -4,7 +4,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, __submitEvidenceTestHooks } from "../src/server.js";
+import {
+  createServer as createServerImpl,
+  __submitEvidenceTestHooks,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -22,6 +25,30 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
     deliveredChunkCounts: number[];
   }>;
 };
+
+const openServers = new Set<ReturnType<typeof createServerImpl>>();
+
+function createServer(
+  ...args: Parameters<typeof createServerImpl>
+): ReturnType<typeof createServerImpl> {
+  const server = createServerImpl(...args);
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try {
+      await close();
+    } finally {
+      openServers.delete(server);
+    }
+  };
+  openServers.add(server);
+  return server;
+}
+
+afterEach(async () => {
+  for (const server of [...openServers]) {
+    await server.close();
+  }
+});
 
 async function loadInputDeliveryTestModule(): Promise<InputDeliveryTestModule> {
   return (await import("../src/server.js")) as InputDeliveryTestModule;
@@ -122,6 +149,32 @@ async function advanceTimers(ms: number): Promise<void> {
   }
   vi.advanceTimersByTime(0);
   await flush();
+}
+
+async function runWithFakeTimers<T>(
+  run: () => Promise<T>,
+  advanceMs: number,
+): Promise<T> {
+  vi.useFakeTimers();
+  const resultPromise = run();
+  let settled = false;
+  void resultPromise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let elapsed = 0; elapsed < advanceMs && !settled; elapsed += 50) {
+    // Tool handlers cross several async boundaries before scheduling their
+    // first poll. Flush those jobs before advancing the next clock slice.
+    for (let flush = 0; flush < 8; flush += 1) {
+      await Promise.resolve();
+    }
+    await advanceTimers(50);
+  }
+  return resultPromise;
 }
 
 function setFakeSystemTime(now: Date): void {
@@ -753,20 +806,29 @@ describe("tool handler integration", () => {
     });
     const tool = (server as any)._registeredTools["spawn_in_workspace"];
 
-    const result = await tool.handler(
-      {
-        workspace_title: "red-team",
-        agents: [
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
           {
-            repo: "brainlayer",
-            model: "sonnet",
-            cli: "claude",
-            role: "orchestrator",
+            workspace_title: "red-team",
+            agents: [
+              {
+                repo: "brainlayer",
+                model: "sonnet",
+                cli: "claude",
+                role: "orchestrator",
+              },
+              {
+                repo: "cmuxlayer",
+                model: "gpt-5.4",
+                cli: "codex",
+                role: "worker",
+              },
+            ],
           },
-          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
-        ],
-      },
-      {} as any,
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -782,6 +844,7 @@ describe("tool handler integration", () => {
     ]);
     expect(calls).toContain("spawn:workspace:grid:surface:2");
 
+    await server.close();
     rmSync(stateDir, { recursive: true, force: true });
   });
 
@@ -2542,13 +2605,17 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerCodex -s",
-        boot_prompt_path: promptPath,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerCodex -s",
+            boot_prompt_path: promptPath,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -2614,13 +2681,17 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerCodex -s",
-        boot_prompt_path: promptPath,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerCodex -s",
+            boot_prompt_path: promptPath,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -2663,14 +2734,18 @@ describe("tool handler integration", () => {
     const registeredTools = (server as any)._registeredTools;
     const tool = registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerClaude -s",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 700,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerClaude -s",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 700,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -2759,14 +2834,18 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerClaude -s",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 700,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerClaude -s",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 700,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -2869,14 +2948,18 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerClaude -s",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 700,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerClaude -s",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 700,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -2916,14 +2999,18 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["send_command"];
 
-    const result = await tool.handler(
-      {
-        surface: "surface:1",
-        command: "brainlayerClaude -s",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 700,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:1",
+            command: "brainlayerClaude -s",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 700,
+          },
+          {} as any,
+        ),
+      1_000,
     );
 
     const parsed =
@@ -7666,7 +7753,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("new_split fails loudly when a short boot prompt stays pending without retrying Return", async () => {
-    vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-short-dropped-return.md");
     const prompt = "short boot prompt";
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -7714,12 +7800,16 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["new_split"];
 
-    const result = await tool.handler(
-      {
-        direction: "right",
-        boot_prompt_path: promptPath,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            direction: "right",
+            boot_prompt_path: promptPath,
+          },
+          {} as any,
+        ),
+      6_000,
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
