@@ -376,6 +376,51 @@ describe("control health", () => {
     });
   });
 
+  it("accepts the public registry API's legacy top-level array shape", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-array-registry");
+    const tmp = join(TEST_ROOT, "tmp-array-registry");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-array.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(
+      monitorRegistryPath,
+      JSON.stringify([
+        {
+          monitor_id: "monitor-collapsed-array",
+          owner_seat: "seat-array",
+          watch_targets: ["/tmp/array-target"],
+          mechanism: "event",
+          deadman_timeout_s: 60,
+          armed_at: "2026-07-11T11:55:00.000Z",
+          last_signal_at: "2026-07-11T11:57:00.000Z",
+          state: "collapsed",
+          collapsed_reason: "watch-target-missing",
+        },
+      ]),
+    );
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toMatchObject({
+      available: true,
+      total: 1,
+      collapsed: 1,
+      collapsed_monitors: [
+        {
+          monitor_id: "monitor-collapsed-array",
+          reason: "watch-target-missing",
+        },
+      ],
+    });
+  });
+
   it("reports structurally invalid monitor records as unavailable", async () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-invalid-monitor-record");

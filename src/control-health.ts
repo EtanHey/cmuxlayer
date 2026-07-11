@@ -188,9 +188,10 @@ export function collectSelfHealHealth(opts: {
       }
       const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as unknown;
       if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        !Array.isArray((parsed as { monitors?: unknown }).monitors)
+        !Array.isArray(parsed) &&
+        (typeof parsed !== "object" ||
+          parsed === null ||
+          !Array.isArray((parsed as { monitors?: unknown }).monitors))
       ) {
         throw new Error("monitor registry JSON has invalid shape");
       }
