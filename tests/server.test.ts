@@ -2234,17 +2234,24 @@ describe("tool handler integration", () => {
   });
 
   it("send_input pastes short multiline text and presses return once", async () => {
+    const events: Array<{ type: "paste" | "key"; value: string }> = [];
     const mockClient = {
       send: vi.fn().mockResolvedValue(undefined),
-      pasteText: vi.fn().mockResolvedValue(undefined),
-      sendKey: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockImplementation((_surface, text) => {
+        events.push({ type: "paste", value: text });
+        return Promise.resolve();
+      }),
+      sendKey: vi.fn().mockImplementation((_surface, key) => {
+        events.push({ type: "key", value: key });
+        return Promise.resolve();
+      }),
     };
     const server = createServer({
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_input"];
-    const text = "first line\nsecond line";
+    const text = "Objective\n\nConstraints\n\nAcceptance criteria";
 
     const result = await tool.handler(
       { surface: "surface:1", text, press_enter: true },
@@ -2267,6 +2274,66 @@ describe("tool handler integration", () => {
       "return",
       expect.any(Object),
     );
+    expect(events).toEqual([
+      { type: "paste", value: text },
+      { type: "key", value: "return" },
+    ]);
+  });
+
+  it("send_input refuses multi-paragraph inline text for a tracked Codex unless explicitly allowed", async () => {
+    const stateDir = join(tmpdir(), "cmuxlayer-multiline-codex-guard");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    new StateManager(stateDir).writeState({
+      agent_id: "codex-guard",
+      surface_id: "surface:codex-guard",
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "gpt-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "Codex guard",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-11T00:00:00Z",
+      updated_at: "2026-07-11T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi.fn().mockResolvedValue(undefined),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:codex-guard",
+        text: "Objective\n\nConstraints\n\nAcceptance criteria",
+        press_enter: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("multi-paragraph inline");
+    expect(parsed.error).toContain("allow_long_inline:true");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(mockClient.pasteText).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("send_command sends text and return to the same surface", async () => {
@@ -2576,10 +2643,12 @@ describe("tool handler integration", () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 
-  it("send_command sends boot_prompt_path contents after launcher readiness", async () => {
+  it("send_command delivers boot_prompt_path as one safe file pointer after launcher readiness", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
-    const bootPrompt = "boot prompt line one\nboot prompt line two";
+    const bootPrompt =
+      "Objective\n\nConstraints\n\nAcceptance criteria";
+    const pointer = `Read and follow ${promptPath}`;
     writeFileSync(promptPath, bootPrompt, "utf8");
     let promptSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -2596,7 +2665,7 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("paste-buffer")) {
+      if (args.includes("send") && args.at(-1) === pointer) {
         promptSent = true;
       }
       return { stdout: "{}", stderr: "" };
@@ -2632,11 +2701,11 @@ describe("tool handler integration", () => {
     );
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["set-buffer", bootPrompt]),
+      expect.arrayContaining(["send", "--surface", "surface:1", pointer]),
     );
-    expect(mockExec).toHaveBeenCalledWith(
+    expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["paste-buffer", "--surface", "surface:1"]),
+      expect.arrayContaining(["set-buffer", bootPrompt]),
     );
     const rawBootPromptSends = mockExec.mock.calls.filter(
       ([, args]) =>
@@ -2654,10 +2723,10 @@ describe("tool handler integration", () => {
     expect(returnPresses).toHaveLength(2);
   });
 
-  it("send_command warns when boot_prompt_path contents exceed the pointer threshold", async () => {
+  it("send_command warns when a long single-paragraph boot_prompt_path remains inline", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "long-mandate.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
-    writeFileSync(promptPath, `${"long boot prompt ".repeat(40)}\n`, "utf8");
+    writeFileSync(promptPath, "long boot prompt ".repeat(40), "utf8");
     let promptSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
@@ -3068,10 +3137,11 @@ describe("tool handler integration", () => {
     expect(promptSent).toBe(true);
   }, 10_000);
 
-  it("send_command rejects a pending prompt whose payload ends with a bare blockquote marker", async () => {
+  it("send_command rejects a pending file pointer for multiline blockquote content", async () => {
     const promptPath = join(CHANNEL_TEST_DIR, "blockquote-pending.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "Review this\n>", "utf8");
+    const pointer = `Read and follow ${promptPath}`;
     let promptSent = false;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("read-screen")) {
@@ -3079,7 +3149,7 @@ describe("tool handler integration", () => {
           stdout: JSON.stringify({
             surface: "surface:1",
             text: promptSent
-              ? "Claude Code\nWhat can I help you with?\n❯ Review this\n>"
+              ? `Claude Code\nWhat can I help you with?\n❯ ${pointer}`
               : "Claude Code\nWhat can I help you with?\n❯",
             lines: 20,
             scrollback_used: false,
@@ -3089,13 +3159,7 @@ describe("tool handler integration", () => {
       }
       if (
         args.includes("send") &&
-        String(args.at(-1) ?? "") === "Review this\n>"
-      ) {
-        promptSent = true;
-      }
-      if (
-        args.includes("set-buffer") &&
-        String(args.at(-1) ?? "") === "Review this\n>"
+        String(args.at(-1) ?? "") === pointer
       ) {
         promptSent = true;
       }
@@ -3677,6 +3741,40 @@ describe("tool handler integration", () => {
     expect(parsed.error).toContain("paste delivery is required");
     expect(mockClient.pasteText).toHaveBeenCalled();
     expect(mockClient.send).not.toHaveBeenCalled();
+  });
+
+  it("send_input paste failure never submits and returns file-pointer guidance", async () => {
+    const mockClient = {
+      send: vi.fn().mockResolvedValue(undefined),
+      pasteText: vi
+        .fn()
+        .mockRejectedValue(new Error("Surface is not a terminal")),
+      sendKey: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      {
+        surface: "surface:1",
+        text: "Objective\n\nConstraints\n\nAcceptance criteria",
+        press_enter: true,
+        allow_long_inline: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("Surface is not a terminal");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(parsed.error).toContain("boot_prompt_path");
+    expect(mockClient.send).not.toHaveBeenCalled();
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
   });
 
   it("send_input fails instead of falling back to send when pasteText is absent", async () => {
