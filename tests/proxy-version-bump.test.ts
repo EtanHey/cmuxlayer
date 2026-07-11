@@ -63,13 +63,18 @@ function createCollector(stream: NodeJS.ReadableStream) {
 class FakeDaemon {
   private server: net.Server | null = null;
   readonly connections: net.Socket[] = [];
+  readonly messages: JSONRPCMessage[][] = [];
 
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly opts: { holdFirstToolsList?: boolean } = {},
+  ) {}
 
   async start(): Promise<void> {
     rmSync(this.path, { force: true });
     this.server = net.createServer((socket) => {
-      this.connections.push(socket);
+      const connectionIndex = this.connections.push(socket) - 1;
+      const messages = (this.messages[connectionIndex] = []);
       let buffer = "";
       socket.on("data", (chunk) => {
         buffer += chunk.toString("utf8");
@@ -78,7 +83,11 @@ class FakeDaemon {
           const line = buffer.slice(0, newlineIndex);
           buffer = buffer.slice(newlineIndex + 1);
           if (!line.trim()) continue;
-          const req = JSON.parse(line);
+          const req = JSON.parse(line) as JSONRPCMessage & {
+            id?: string | number;
+            method?: string;
+          };
+          messages.push(req);
           if (req.method === "initialize") {
             socket.write(
               serializeMessage({
@@ -94,6 +103,9 @@ class FakeDaemon {
             return;
           }
           if (req.method === "tools/list") {
+            if (this.opts.holdFirstToolsList && connectionIndex === 0) {
+              continue;
+            }
             socket.write(
               serializeMessage({
                 jsonrpc: "2.0",
@@ -210,6 +222,83 @@ describe("proxy version-bump auto-reconnect", () => {
     );
   });
 
+  it("requeues an in-flight request across a version-bump reconnect", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("in-flight-bump");
+    const daemon = new FakeDaemon(path, { holdFirstToolsList: true });
+    daemons.push(daemon);
+    await daemon.start();
+
+    let stale = false;
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const collector = createCollector(output);
+    const proxy = new CmuxLayerProxy({
+      socketPath: path,
+      input,
+      output,
+      initialBackoffMs: 5,
+      maxBackoffMs: 20,
+      reconnectJitterRatio: 0,
+      requestTimeoutMs: 500,
+      staleRecheckIntervalMs: 10,
+      detectStaleBuild: () =>
+        stale
+          ? { stale: true, running: "0.3.33", installed: "0.3.34" }
+          : { stale: false, running: "0.3.33", installed: "0.3.33" },
+      spawnDaemonForVersionBump: vi.fn().mockResolvedValue(undefined),
+      installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {} },
+    });
+    await waitFor(() =>
+      collector.messages.some((message) => "id" in message && message.id === 1),
+    );
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    writeFrame(input, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    await waitFor(() =>
+      daemon.messages[0]?.some(
+        (message) => "method" in message && message.method === "tools/list",
+      ),
+    );
+
+    stale = true;
+
+    await waitFor(() => daemon.connections.length >= 2, 1_000);
+    await waitFor(
+      () =>
+        collector.messages.some(
+          (message) =>
+            "id" in message &&
+            message.id === 2 &&
+            "result" in message,
+        ),
+      1_000,
+    );
+    expect(
+      daemon.messages[1].filter((message) => "method" in message),
+    ).toEqual([
+      expect.objectContaining({ method: "initialize" }),
+      expect.objectContaining({ method: "notifications/initialized" }),
+      expect.objectContaining({ id: 2, method: "tools/list" }),
+    ]);
+  });
+
   it("reconnects an idle proxy after a version bump with zero agent requests", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("idle-bump");
@@ -284,6 +373,38 @@ describe("proxy version-bump auto-reconnect", () => {
         ),
       500,
     );
+  });
+
+  it("does not start a second reconnect loop while the first socket open is pending", async () => {
+    const sockets: net.Socket[] = [];
+    const connect = vi.fn(() => {
+      const socket = new net.Socket();
+      sockets.push(socket);
+      return socket;
+    });
+    const proxy = new CmuxLayerProxy({
+      input: new PassThrough(),
+      output: new PassThrough(),
+      connect,
+      staleRecheckIntervalMs: 60_000,
+      detectStaleBuild: () => ({
+        stale: true,
+        running: "0.3.33",
+        installed: "0.3.34",
+      }),
+      installedDaemonScriptPath: () => null,
+      logger: { error: vi.fn() },
+    });
+    proxies.push(proxy);
+    proxy.start();
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    await (
+      proxy as unknown as { checkVersionBumpReconnect(): Promise<void> }
+    ).checkVersionBumpReconnect();
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    for (const socket of sockets) socket.destroy();
   });
 
   it("trips the reconnect-storm guard after repeated version-bump attempts", () => {

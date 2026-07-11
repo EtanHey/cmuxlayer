@@ -15,7 +15,8 @@
  *       `brew trust etanhey/layers`; cmuxlayer is a formula, not gated.
  *   (c) CMUX_SOCKET_PATH if set, else "unset (auto-discover)";
  *   (d) read-only `.mcp.json` drift detection for stale `cmux` keys or entries
- *       that bypass `~/.golems/bin/cmuxlayer-mcp`.
+ *       that bypass `~/.golems/bin/cmuxlayer-mcp`, plus existence, symlink-target,
+ *       and executable-bit checks for every referenced launcher.
  *
  * Non-interactivity invariants (§ headline / conformance checks):
  *   - exit 0 when healthy; runs cleanly under `</dev/null` with NONINTERACTIVE=1;
@@ -24,8 +25,16 @@
  */
 
 import { execFile } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import net from "node:net";
-import { readdir, readFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  readdir,
+  readFile,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -81,8 +90,21 @@ export interface McpConfigDriftEntry {
 export interface McpConfigDriftReport {
   scanned: number;
   drifted: McpConfigDriftEntry[];
+  launcherOk: boolean;
+  launchers: McpLauncherProbeReport[];
   note: string;
 }
+
+export interface McpLauncherProbeReport {
+  path: string;
+  resolvedPath: string | null;
+  ok: boolean;
+  note: string;
+}
+
+export type McpLauncherProbe = (
+  path: string,
+) => Promise<McpLauncherProbeReport> | McpLauncherProbeReport;
 
 export type RuntimeMode = "dist" | "source" | "launcher" | "unknown";
 
@@ -117,6 +139,7 @@ export type McpConfigFileReader = (path: string) => Promise<string> | string;
 export interface CheckMcpConfigDriftOptions {
   listMcpConfigPaths?: McpConfigPathLister;
   readMcpConfigFile?: McpConfigFileReader;
+  probeLauncher?: McpLauncherProbe;
 }
 
 export interface DoctorReport {
@@ -663,6 +686,94 @@ function serverReferencesLauncher(server: unknown): boolean {
   return [command, ...args].some(isCmuxlayerMcpLauncher);
 }
 
+function serverLauncherReference(server: unknown): string | null {
+  if (!isRecord(server)) {
+    return null;
+  }
+  const command = typeof server.command === "string" ? server.command : "";
+  const args = Array.isArray(server.args)
+    ? server.args.filter((arg): arg is string => typeof arg === "string")
+    : [];
+  return [command, ...args].find(isCmuxlayerMcpLauncher) ?? null;
+}
+
+function resolveLauncherReference(reference: string): string {
+  if (reference === "cmuxlayer-mcp") {
+    return join(homedir(), ".golems", "bin", "cmuxlayer-mcp");
+  }
+  if (reference === "~/.golems/bin/cmuxlayer-mcp") {
+    return join(homedir(), ".golems", "bin", "cmuxlayer-mcp");
+  }
+  return reference;
+}
+
+async function realMcpLauncherProbe(
+  path: string,
+): Promise<McpLauncherProbeReport> {
+  let linkInfo: Awaited<ReturnType<typeof lstat>>;
+  try {
+    linkInfo = await lstat(path);
+  } catch {
+    return {
+      path,
+      resolvedPath: null,
+      ok: false,
+      note: `launcher missing at ${path}; reinstall cmuxlayer launcher`,
+    };
+  }
+
+  let resolvedPath = path;
+  if (linkInfo.isSymbolicLink()) {
+    try {
+      resolvedPath = await realpath(path);
+    } catch {
+      return {
+        path,
+        resolvedPath: null,
+        ok: false,
+        note: `launcher has a dangling symlink at ${path}; reinstall cmuxlayer launcher`,
+      };
+    }
+  }
+
+  try {
+    const target = await stat(resolvedPath);
+    if (!target.isFile()) {
+      return {
+        path,
+        resolvedPath,
+        ok: false,
+        note: `launcher target is not a file at ${resolvedPath}; reinstall cmuxlayer launcher`,
+      };
+    }
+  } catch {
+    return {
+      path,
+      resolvedPath,
+      ok: false,
+      note: `launcher target is missing at ${resolvedPath}; reinstall cmuxlayer launcher`,
+    };
+  }
+
+  try {
+    await access(path, fsConstants.X_OK);
+  } catch {
+    return {
+      path,
+      resolvedPath,
+      ok: false,
+      note: `launcher is not executable at ${path}; reinstall cmuxlayer launcher or restore its executable bit`,
+    };
+  }
+
+  return {
+    path,
+    resolvedPath,
+    ok: true,
+    note: `launcher resolves to executable file ${resolvedPath}`,
+  };
+}
+
 function driftReason(serverKey: string, server: unknown): string | null {
   const reasons: string[] = [];
 
@@ -684,6 +795,7 @@ export async function checkMcpConfigDrift(
     opts.listMcpConfigPaths ?? realMcpConfigPathLister;
   const readMcpConfigFile =
     opts.readMcpConfigFile ?? realMcpConfigFileReader;
+  const probeLauncher = opts.probeLauncher ?? realMcpLauncherProbe;
 
   let paths: string[];
   try {
@@ -693,6 +805,7 @@ export async function checkMcpConfigDrift(
   }
 
   const drifted: McpConfigDriftEntry[] = [];
+  const launcherProbes = new Map<string, McpLauncherProbeReport>();
   let scanned = 0;
 
   for (const path of paths) {
@@ -714,17 +827,35 @@ export async function checkMcpConfigDrift(
         continue;
       }
 
-      const reason = driftReason(serverKey, server);
+      const reasons = [driftReason(serverKey, server)].filter(
+        (reason): reason is string => reason !== null,
+      );
+      const launcherReference = serverLauncherReference(server);
+      if (launcherReference) {
+        const launcherPath = resolveLauncherReference(launcherReference);
+        let launcherProbe = launcherProbes.get(launcherPath);
+        if (!launcherProbe) {
+          launcherProbe = await probeLauncher(launcherPath);
+          launcherProbes.set(launcherPath, launcherProbe);
+        }
+        if (!launcherProbe.ok) {
+          reasons.push(launcherProbe.note);
+        }
+      }
+      const reason = reasons.length > 0 ? reasons.join("; ") : null;
       if (reason) {
         drifted.push({ path, serverKey, reason });
       }
     }
   }
 
+  const launchers = [...launcherProbes.values()];
   return {
     scanned,
     drifted,
-    note: "scanned ~/Gits/*/.mcp.json for cmux/cmuxlayer entries expected to reference launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
+    launcherOk: launchers.every((launcher) => launcher.ok),
+    launchers,
+    note: "scanned ~/Gits/*/.mcp.json for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
   };
 }
 
@@ -782,10 +913,9 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
   });
   const daemon = await checkDaemonIntegrity(opts, env);
 
-  // Health: only the version must resolve. Brew/tap gaps are reported but, per
-  // the standard's "brew best-effort" rule, must NOT make the doctor unhealthy
-  // (so it exits 0 on machines without brew or without the tap added yet).
-  const healthy = versionOk && daemon.ok;
+  // Brew/tap gaps stay best-effort, but an unusable referenced launcher is an
+  // operational failure: configs can look correct while every MCP launch fails.
+  const healthy = versionOk && daemon.ok && mcpConfigDrift.launcherOk;
 
   return {
     healthy,
@@ -860,6 +990,12 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(`│      ${report.runtimeProvenance.note}`);
 
   lines.push(`│ — MCP reconnect probe: ${report.mcpReconnectProcedure.note}`);
+
+  for (const launcher of report.mcpConfigDrift.launchers) {
+    lines.push(
+      `│ ${mark(launcher.ok)} launcher: ${launcher.path} — ${launcher.note}`,
+    );
+  }
 
   if (report.mcpConfigDrift.drifted.length === 0) {
     lines.push(

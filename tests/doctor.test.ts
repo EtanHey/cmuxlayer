@@ -1,5 +1,13 @@
 import net from "node:net";
-import { rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -113,6 +121,7 @@ const doctorServers: Array<{
   path: string;
   sockets: Set<net.Socket>;
 }> = [];
+const doctorTempDirs: string[] = [];
 
 afterEach(async () => {
   for (const { server, path, sockets } of doctorServers.splice(0)) {
@@ -120,7 +129,31 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(path, { force: true });
   }
+  for (const path of doctorTempDirs.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
 });
+
+function launcherFixture(
+  kind: "missing" | "dangling" | "non-executable" | "healthy",
+): string {
+  const root = mkdtempSync(join(tmpdir(), "cmuxlayer-doctor-launcher-"));
+  doctorTempDirs.push(root);
+  const binDir = join(root, ".golems", "bin");
+  mkdirSync(binDir, { recursive: true });
+  const launcherPath = join(binDir, "cmuxlayer-mcp");
+  if (kind === "missing") return launcherPath;
+  if (kind === "dangling") {
+    symlinkSync(join(root, "missing-target"), launcherPath);
+    return launcherPath;
+  }
+
+  const target = join(root, "cmuxlayer-mcp-target");
+  writeFileSync(target, "#!/bin/sh\nexit 0\n");
+  chmodSync(target, kind === "healthy" ? 0o755 : 0o644);
+  symlinkSync(target, launcherPath);
+  return launcherPath;
+}
 
 async function startDoctorDaemon(
   path: string,
@@ -547,6 +580,23 @@ describe("runDoctor — report shape", () => {
     ]);
   });
 
+  it("marks doctor unhealthy when a referenced launcher is unusable", async () => {
+    const launcherPath = launcherFixture("missing");
+    const report = await runDoctorForTest({
+      version: "0.3.0",
+      env: {},
+      brew: makeBrew({}),
+      ...fakeMcpConfigReaders({
+        "/Users/etanheyman/Gits/missing-launcher/.mcp.json": mcpConfig({
+          mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
+        }),
+      }),
+    });
+
+    expect(report.healthy).toBe(false);
+    expect(renderDoctorText(report)).toMatch(/✗ launcher:.*reinstall/i);
+  });
+
   it("reports the running dist entrypoint path as runtime provenance", async () => {
     const report = await runDoctorForTest({
       version: "0.3.1",
@@ -711,12 +761,13 @@ describe("parseSystemSleepPrevented", () => {
 
 describe("checkMcpConfigDrift", () => {
   it("treats a launcher-pointing cmuxlayer entry as clean", async () => {
+    const launcherPath = launcherFixture("healthy");
     const report = await checkMcpConfigDrift(
       fakeMcpConfigReaders({
         "/Users/etanheyman/Gits/clean/.mcp.json": mcpConfig({
           mcpServers: {
             cmuxlayer: {
-              command: "/Users/etanheyman/.golems/bin/cmuxlayer-mcp",
+              command: launcherPath,
               args: [],
             },
           },
@@ -726,7 +777,54 @@ describe("checkMcpConfigDrift", () => {
 
     expect(report.scanned).toBe(1);
     expect(report.drifted).toEqual([]);
+    expect(report.launcherOk).toBe(true);
+    expect(report.launchers).toEqual([
+      expect.objectContaining({ path: launcherPath, ok: true }),
+    ]);
     expect(report.note).toMatch(/launcher/i);
+  });
+
+  it("flags a referenced launcher that is missing", async () => {
+    const launcherPath = launcherFixture("missing");
+    const report = await checkMcpConfigDrift(
+      fakeMcpConfigReaders({
+        "/Users/etanheyman/Gits/missing-launcher/.mcp.json": mcpConfig({
+          mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
+        }),
+      }),
+    );
+
+    expect(report.launcherOk).toBe(false);
+    expect(report.drifted[0]?.reason).toMatch(/launcher.*missing/i);
+    expect(report.drifted[0]?.reason).toMatch(/reinstall/i);
+  });
+
+  it("flags a referenced launcher with a dangling symlink", async () => {
+    const launcherPath = launcherFixture("dangling");
+    const report = await checkMcpConfigDrift(
+      fakeMcpConfigReaders({
+        "/Users/etanheyman/Gits/dangling-launcher/.mcp.json": mcpConfig({
+          mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
+        }),
+      }),
+    );
+
+    expect(report.launcherOk).toBe(false);
+    expect(report.drifted[0]?.reason).toMatch(/dangling symlink/i);
+  });
+
+  it("flags a referenced launcher that is not executable", async () => {
+    const launcherPath = launcherFixture("non-executable");
+    const report = await checkMcpConfigDrift(
+      fakeMcpConfigReaders({
+        "/Users/etanheyman/Gits/non-executable-launcher/.mcp.json": mcpConfig({
+          mcpServers: { cmuxlayer: { command: launcherPath, args: [] } },
+        }),
+      }),
+    );
+
+    expect(report.launcherOk).toBe(false);
+    expect(report.drifted[0]?.reason).toMatch(/not executable/i);
   });
 
   it("flags a cmuxlayer entry that bypasses the launcher via node dist/index.js", async () => {
@@ -876,6 +974,8 @@ describe("renderDoctorText", () => {
       mcpConfigDrift: {
         scanned: 0,
         drifted: [],
+        launcherOk: true,
+        launchers: [],
         note: "scanned ~/Gits/*/.mcp.json for cmuxlayer launcher drift",
       },
     };
@@ -927,6 +1027,8 @@ describe("renderDoctorText", () => {
       mcpConfigDrift: {
         scanned: 1,
         drifted: [],
+        launcherOk: true,
+        launchers: [],
         note: "scanned ~/Gits/*/.mcp.json for cmuxlayer launcher drift",
       },
     });
@@ -946,6 +1048,8 @@ describe("renderDoctorText", () => {
             reason: "does not reference launcher cmuxlayer-mcp",
           },
         ],
+        launcherOk: true,
+        launchers: [],
         note: "scanned ~/Gits/*/.mcp.json for cmuxlayer launcher drift",
       },
     });
@@ -1008,6 +1112,8 @@ describe("renderDoctorJson", () => {
             reason: "does not reference launcher cmuxlayer-mcp",
           },
         ],
+        launcherOk: true,
+        launchers: [],
         note: "scanned ~/Gits/*/.mcp.json for cmuxlayer launcher drift",
       },
     };
