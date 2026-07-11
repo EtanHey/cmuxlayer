@@ -37,6 +37,8 @@ const DEFAULT_STALE_RECHECK_INTERVAL_MS = 30_000;
 const DEFAULT_VERSION_BUMP_MAX_ATTEMPTS = 5;
 const DEFAULT_VERSION_BUMP_WINDOW_MS = 60_000;
 const DEFAULT_RECONNECT_DAEMON_SPAWN_MAX_ATTEMPTS = 3;
+const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_RECONNECT_LOG_INTERVAL_MS = 5_000;
 const PROXY_ERROR_CODE = -32001;
 
 export interface ReconnectDelayOptions {
@@ -87,6 +89,7 @@ export interface CmuxLayerProxyOptions {
   reconnectJitterRatio?: number;
   random?: () => number;
   requestTimeoutMs?: number;
+  bufferedRequestTimeoutMs?: number;
   maxBufferedRequests?: number;
   onReconnectDelay?: (delayMs: number, attempt: number) => void;
   logger?: Pick<Console, "error">;
@@ -98,6 +101,8 @@ export interface CmuxLayerProxyOptions {
   ) => Promise<unknown> | unknown;
   versionBumpReconnectGuard?: VersionBumpReconnectGuard;
   reconnectDaemonSpawnGuard?: VersionBumpReconnectGuard;
+  reconnectLogIntervalMs?: number;
+  reconnectLogNow?: () => number;
 }
 
 type JsonRpcRequest = JSONRPCMessage & {
@@ -221,6 +226,7 @@ export class CmuxLayerProxy {
   private readonly reconnectJitterRatio: number;
   private readonly random: () => number;
   private readonly requestTimeoutMs: number;
+  private readonly bufferedRequestTimeoutMs: number;
   private readonly maxBufferedRequests: number;
   private readonly onReconnectDelay?: (
     delayMs: number,
@@ -237,6 +243,8 @@ export class CmuxLayerProxy {
   ) => Promise<unknown> | unknown;
   private readonly versionBumpReconnectGuard: VersionBumpReconnectGuard;
   private readonly reconnectDaemonSpawnGuard: VersionBumpReconnectGuard;
+  private readonly reconnectLogIntervalMs: number;
+  private readonly reconnectLogNow: () => number;
 
   private readonly agentReadBuffer = new JsonRpcLineBuffer();
   private daemonReadBuffer: JsonRpcLineBuffer | null = null;
@@ -255,6 +263,8 @@ export class CmuxLayerProxy {
   private reconnectTimerResolve: (() => void) | null = null;
   private versionBumpTimer: NodeJS.Timeout | null = null;
   private versionBumpReconnecting = false;
+  private bufferedRequestTimer: NodeJS.Timeout | null = null;
+  private readonly reconnectLogTimes = new Map<string, number>();
   private readonly queue: QueuedMessage[] = [];
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly expiredRequestKeys = new Set<string>();
@@ -279,6 +289,8 @@ export class CmuxLayerProxy {
       opts.reconnectJitterRatio ?? DEFAULT_RECONNECT_JITTER_RATIO;
     this.random = opts.random ?? Math.random;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.bufferedRequestTimeoutMs =
+      opts.bufferedRequestTimeoutMs ?? DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS;
     this.maxBufferedRequests =
       opts.maxBufferedRequests ?? DEFAULT_MAX_BUFFERED_REQUESTS;
     this.onReconnectDelay = opts.onReconnectDelay;
@@ -297,6 +309,9 @@ export class CmuxLayerProxy {
         maxAttempts: DEFAULT_RECONNECT_DAEMON_SPAWN_MAX_ATTEMPTS,
         windowMs: DEFAULT_VERSION_BUMP_WINDOW_MS,
       });
+    this.reconnectLogIntervalMs =
+      opts.reconnectLogIntervalMs ?? DEFAULT_RECONNECT_LOG_INTERVAL_MS;
+    this.reconnectLogNow = opts.reconnectLogNow ?? Date.now;
   }
 
   start(): void {
@@ -320,6 +335,7 @@ export class CmuxLayerProxy {
     this.agentReadBuffer.clear();
     this.clearReconnectTimer();
     this.clearVersionBumpTimer();
+    this.clearBufferedRequestTimer();
     this.disconnectDaemon();
     for (const pending of this.pendingRequests.values()) {
       clearTimeout(pending.timeout);
@@ -414,6 +430,9 @@ export class CmuxLayerProxy {
     };
     this.pendingRequests.set(key, pending);
     this.queue.push(pending);
+    if (!this.daemonReady) {
+      this.startBufferedRequestTimer();
+    }
     this.kickConnectionIfIdle();
     void this.flushQueue();
   }
@@ -453,9 +472,20 @@ export class CmuxLayerProxy {
         this.connecting = false;
         this.attachDaemonSocket(socket);
         return;
-      } catch {
+      } catch (error) {
         const attempt = this.reconnectAttempt++;
+        const message = error instanceof Error ? error.message : String(error);
+        const errorClass =
+          error && typeof error === "object" && "code" in error
+            ? String((error as { code: unknown }).code)
+            : /\b(?:ENOENT|ECONNREFUSED|ECONNRESET|EPIPE)\b/i.exec(message)?.[0] ??
+              (error instanceof Error ? error.name : "Error");
+        this.logReconnect(
+          "attempt-failed",
+          `[cmuxlayer-proxy] reconnect attempt ${attempt} failed (${errorClass}): ${message}`,
+        );
         await this.spawnInstalledDaemonAfterReconnectFailure(attempt);
+        this.startBufferedRequestTimer();
         const delayMs = computeReconnectDelay(attempt, {
           initialBackoffMs: this.initialBackoffMs,
           maxBackoffMs: this.maxBackoffMs,
@@ -500,24 +530,46 @@ export class CmuxLayerProxy {
   private async spawnInstalledDaemonAfterReconnectFailure(
     attempt: number,
   ): Promise<void> {
-    if (
-      attempt < 1 ||
-      !this.spawnDaemonForVersionBump ||
-      !this.reconnectDaemonSpawnGuard.allow()
-    ) {
+    if (attempt < 1 || !this.spawnDaemonForVersionBump) {
+      this.logReconnect(
+        "spawn-gate",
+        `[cmuxlayer-proxy] daemon spawn skipped (reason=gate, attempt=${attempt})`,
+      );
       return;
     }
     try {
       const daemonScriptPath = this.installedDaemonScriptPath();
       if (!daemonScriptPath) {
+        this.logReconnect(
+          "spawn-no-script",
+          `[cmuxlayer-proxy] daemon spawn skipped (reason=no-script, attempt=${attempt})`,
+        );
         return;
       }
-      await this.spawnDaemonForVersionBump({
+      if (!this.reconnectDaemonSpawnGuard.allow()) {
+        this.logReconnect(
+          "spawn-guard",
+          `[cmuxlayer-proxy] daemon spawn skipped (reason=guard, attempt=${attempt})`,
+        );
+        return;
+      }
+      const spawned = await this.spawnDaemonForVersionBump({
         socketPath: this.socketPath,
         env: process.env,
         logger: this.logger,
         daemonScriptPath,
       });
+      const pid =
+        spawned &&
+        typeof spawned === "object" &&
+        "pid" in spawned &&
+        typeof spawned.pid === "number"
+          ? spawned.pid
+          : "unknown";
+      this.logReconnect(
+        "spawn-fired",
+        `[cmuxlayer-proxy] daemon spawn fired (script=${daemonScriptPath}, pid=${pid})`,
+      );
     } catch (error) {
       this.logger.error(
         "[cmuxlayer-proxy] failed to spawn installed daemon after reconnect failure",
@@ -683,6 +735,7 @@ export class CmuxLayerProxy {
       }
     }
     this.daemonReady = true;
+    this.clearBufferedRequestTimer();
     this.reconnectAttempt = 0;
     await this.flushQueue();
   }
@@ -746,6 +799,10 @@ export class CmuxLayerProxy {
   }
 
   private handleDaemonDrop(): void {
+    this.logReconnect(
+      "daemon-drop",
+      "[cmuxlayer-proxy] daemon drop detected; reconnecting",
+    );
     if (!this.daemonSocket && !this.daemonReadBuffer) {
       this.reconnectAfterDelay();
       return;
@@ -842,6 +899,39 @@ export class CmuxLayerProxy {
     }
   }
 
+  private startBufferedRequestTimer(): void {
+    if (this.bufferedRequestTimer || this.bufferedRequestTimeoutMs < 0) {
+      return;
+    }
+    this.bufferedRequestTimer = setTimeout(() => {
+      this.bufferedRequestTimer = null;
+      this.failAllPendingRequests(
+        "cmuxlayer daemon unavailable after reconnect attempt",
+      );
+    }, this.bufferedRequestTimeoutMs);
+    this.bufferedRequestTimer.unref?.();
+  }
+
+  private clearBufferedRequestTimer(): void {
+    if (this.bufferedRequestTimer) {
+      clearTimeout(this.bufferedRequestTimer);
+      this.bufferedRequestTimer = null;
+    }
+  }
+
+  private logReconnect(key: string, message: string): void {
+    const now = this.reconnectLogNow();
+    const last = this.reconnectLogTimes.get(key);
+    if (
+      last !== undefined &&
+      now - last < this.reconnectLogIntervalMs
+    ) {
+      return;
+    }
+    this.reconnectLogTimes.set(key, now);
+    this.logger.error(message);
+  }
+
   private sendAgentError(id: RequestId, message: string): Promise<void> {
     return this.writeAgent({
       jsonrpc: "2.0",
@@ -926,12 +1016,23 @@ export class CmuxLayerProxy {
       const daemonScriptPath = this.installedDaemonScriptPath();
       if (daemonScriptPath && this.spawnDaemonForVersionBump) {
         try {
-          await this.spawnDaemonForVersionBump({
+          const spawned = await this.spawnDaemonForVersionBump({
             socketPath: this.socketPath,
             env: process.env,
             logger: this.logger,
             daemonScriptPath,
           });
+          const pid =
+            spawned &&
+            typeof spawned === "object" &&
+            "pid" in spawned &&
+            typeof spawned.pid === "number"
+              ? spawned.pid
+              : "unknown";
+          this.logReconnect(
+            "spawn-fired-version-bump",
+            `[cmuxlayer-proxy] daemon spawn fired (script=${daemonScriptPath}, pid=${pid})`,
+          );
         } catch (error) {
           this.logger.error(
             "[cmuxlayer-proxy] failed to spawn installed daemon for version bump",
@@ -939,10 +1040,14 @@ export class CmuxLayerProxy {
           );
         }
       }
+      const reconnectLoopWillResume = this.reconnectTimerResolve !== null;
       this.clearReconnectTimer();
       this.disconnectDaemon();
       this.daemonReady = false;
       this.reconnectAttempt = 0;
+      if (!reconnectLoopWillResume) {
+        this.connecting = false;
+      }
       this.ensureConnecting();
     } finally {
       this.versionBumpReconnecting = false;

@@ -342,6 +342,12 @@ function probeSocket(path: string): Promise<"live" | "missing" | "stale"> {
   });
 }
 
+function positiveEnvMs(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export class CmuxLayerDaemon {
   private server: net.Server | null = null;
   private context: CmuxServerContext | null;
@@ -371,7 +377,9 @@ export class CmuxLayerDaemon {
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     this.detectStaleBuildFn = opts.detectStaleBuild ?? detectStaleBuild;
     this.staleCheckIntervalMs =
-      opts.staleCheckIntervalMs ?? DEFAULT_STALE_CHECK_INTERVAL_MS;
+      opts.staleCheckIntervalMs ??
+      positiveEnvMs(process.env.CMUXLAYER_STALE_CHECK_INTERVAL_MS) ??
+      DEFAULT_STALE_CHECK_INTERVAL_MS;
     this.logger = opts.logger ?? console;
   }
 

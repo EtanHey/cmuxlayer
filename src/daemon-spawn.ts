@@ -35,6 +35,16 @@ export async function spawnDaemonProcess(
     env,
     stdio: ["ignore", "ignore", "inherit"],
   });
+  child.once("error", (error) => {
+    opts.logger.error(
+      `[cmuxlayer-proxy] spawned daemon failed (pid=${child.pid ?? "unknown"}): ${error.message}`,
+    );
+  });
+  child.once("exit", (code, signal) => {
+    opts.logger.error(
+      `[cmuxlayer-proxy] spawned daemon exited (pid=${child.pid ?? "unknown"}, code=${code ?? "none"}, signal=${signal ?? "none"})`,
+    );
+  });
   child.unref();
   return child;
 }

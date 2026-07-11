@@ -4,7 +4,18 @@ import {
   createStaleBuildWarner,
   detectStaleBuild,
   readVersion,
+  resolveInstalledDaemonScript,
 } from "../src/version.js";
+
+describe("resolveInstalledDaemonScript", () => {
+  it("resolves the daemon beside the formula libexec package.json", () => {
+    expect(
+      resolveInstalledDaemonScript(
+        "/opt/homebrew/opt/cmuxlayer/libexec/package.json",
+      ),
+    ).toBe("/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js");
+  });
+});
 
 describe("assertBuildVersion", () => {
   it("returns ok when the running build matches expected", () => {
