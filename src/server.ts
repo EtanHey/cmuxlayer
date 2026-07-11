@@ -234,6 +234,10 @@ const RegisterMonitorArgsSchema = {
     .positive()
     .describe("Required deadman timeout in seconds"),
   addressee: z.string().optional().describe("Owner to notify on deadman fire"),
+  rearm_command: z
+    .string()
+    .optional()
+    .describe("Exact command the owner must use to recreate the watcher"),
 } as const;
 
 const MonitorIdArgsSchema = {
@@ -2251,6 +2255,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (args.addressee !== undefined && !addressee) {
       return monitorRegistryError("invalid-addressee", monitorId);
     }
+    const rearmCommand = nonEmptyString(args.rearm_command);
+    if (args.rearm_command !== undefined && !rearmCommand) {
+      return monitorRegistryError("invalid-rearm-command", monitorId);
+    }
 
     return {
       monitor_id: monitorId,
@@ -2263,6 +2271,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ...(watermarkKey ? { watermark_key: watermarkKey } : {}),
       ...(dedupe ? { dedupe } : {}),
       ...(addressee ? { addressee } : {}),
+      ...(rearmCommand ? { rearm_command: rearmCommand } : {}),
       deadman_timeout_s: args.deadman_timeout_s,
     };
   };

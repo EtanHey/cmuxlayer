@@ -12,11 +12,19 @@ import { httpDeliver } from "./outbox-drainer.js";
 
 export type MonitorMechanism = "event" | "offset-poll";
 export type MonitorDedupe = "offset" | "seen-set" | "header-keyed";
-export type MonitorState = "alive" | "firing" | "deadman-fired" | "dead";
+export type MonitorState =
+  | "alive"
+  | "rearming"
+  | "collapsed"
+  | "firing"
+  | "deadman-fired"
+  | "dead";
 export type MonitorRegistryGate = "gate-9" | "gate-10";
 export type MonitorRegistryLiveness =
   | "alive"
   | "lapsed"
+  | "rearming"
+  | "collapsed"
   | "firing"
   | "deadman-fired"
   | "dead"
@@ -35,6 +43,9 @@ export interface MonitorRegistryRecord {
   armed_at: string;
   last_signal_at: string;
   state: MonitorState;
+  rearm_command?: string;
+  rearm_claimed_at?: string;
+  collapsed_reason?: MonitorCollapseReason;
   firing_claimed_by_agent_id?: string;
   firing_claimed_at?: string;
 }
@@ -54,6 +65,7 @@ export interface RegisterMonitorInput {
   dedupe?: MonitorDedupe;
   addressee?: string;
   deadman_timeout_s: number;
+  rearm_command?: string;
 }
 
 export interface MonitorRegistryOptions {
@@ -98,6 +110,23 @@ export interface MonitorRegistrySweepOptions extends MonitorRegistryOptions {
   sweeperAgentId?: string;
 }
 
+export type MonitorCollapseReason =
+  | "owner-not-alive"
+  | "watch-target-missing"
+  | "rearm-command-missing";
+
+export interface MonitorRegistryReconcileOptions extends MonitorRegistryOptions {
+  ownerAlive: (ownerSeat: string) => Promise<boolean> | boolean;
+  watchTargetExists?: (target: string) => boolean;
+  rearm: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
+}
+
+export interface MonitorRegistryReconcileResult {
+  rearmed: string[];
+  collapsed: Array<{ monitor_id: string; reason: MonitorCollapseReason }>;
+  failed: string[];
+}
+
 export interface MonitorRegistryGateViolation {
   gate: MonitorRegistryGate;
   monitor_id: string;
@@ -117,6 +146,9 @@ export interface MonitorRegistryGateRecord {
   armed_at?: string;
   last_signal_at?: string;
   state?: MonitorState;
+  rearm_command?: string;
+  rearm_claimed_at?: string;
+  collapsed_reason?: MonitorCollapseReason;
   liveness: MonitorRegistryLiveness;
 }
 
@@ -224,6 +256,8 @@ function isDedupe(value: unknown): value is MonitorDedupe {
 function isState(value: unknown): value is MonitorState {
   return (
     value === "alive" ||
+    value === "rearming" ||
+    value === "collapsed" ||
     value === "firing" ||
     value === "deadman-fired" ||
     value === "dead"
@@ -308,6 +342,11 @@ function toValidRecord(record: RawMonitorRecord): MonitorRegistryRecord | null {
   const lastSignalAt = cleanString(record.last_signal_at);
   const watermarkKey = cleanWatermarkKey(record.watermark_key);
   const addressee = deriveAddressee(record);
+  const rearmCommand = cleanString(record.rearm_command);
+  const rearmClaimedAt = cleanString(record.rearm_claimed_at);
+  const collapsedReason = isMonitorCollapseReason(record.collapsed_reason)
+    ? record.collapsed_reason
+    : undefined;
   if (
     !monitorId ||
     !ownerSeat ||
@@ -334,6 +373,9 @@ function toValidRecord(record: RawMonitorRecord): MonitorRegistryRecord | null {
     armed_at: armedAt,
     last_signal_at: lastSignalAt,
     state: record.state,
+    ...(rearmCommand ? { rearm_command: rearmCommand } : {}),
+    ...(rearmClaimedAt ? { rearm_claimed_at: rearmClaimedAt } : {}),
+    ...(collapsedReason ? { collapsed_reason: collapsedReason } : {}),
     ...(cleanString(record.firing_claimed_by_agent_id)
       ? {
           firing_claimed_by_agent_id: cleanString(
@@ -369,6 +411,14 @@ function monitorIdForInvalid(record: RawMonitorRecord): string {
   return cleanString(record.monitor_id) ?? "<missing-monitor-id>";
 }
 
+function isMonitorCollapseReason(value: unknown): value is MonitorCollapseReason {
+  return (
+    value === "owner-not-alive" ||
+    value === "watch-target-missing" ||
+    value === "rearm-command-missing"
+  );
+}
+
 function assertRegisterInput(input: RegisterMonitorInput): void {
   if (!cleanString(input.monitor_id)) throw new Error("monitor_id is required");
   if (isUnknownOwnerSeat(cleanString(input.owner_seat))) {
@@ -378,6 +428,12 @@ function assertRegisterInput(input: RegisterMonitorInput): void {
     throw new Error("watch_targets must be strings");
   }
   if (!isMechanism(input.mechanism)) throw new Error("mechanism is invalid");
+  if (
+    input.rearm_command !== undefined &&
+    cleanString(input.rearm_command) === null
+  ) {
+    throw new Error("rearm_command must be a non-empty string when provided");
+  }
   if (
     input.watermark_key !== undefined &&
     cleanWatermarkKey(input.watermark_key) === null
@@ -438,6 +494,11 @@ function toGateRecord(
   const armedAt = cleanString(record.armed_at);
   const lastSignalAt = cleanString(record.last_signal_at);
   const addressee = deriveAddressee(record);
+  const rearmCommand = cleanString(record.rearm_command);
+  const rearmClaimedAt = cleanString(record.rearm_claimed_at);
+  const collapsedReason = isMonitorCollapseReason(record.collapsed_reason)
+    ? record.collapsed_reason
+    : undefined;
   return {
     monitor_id: monitorIdForInvalid(record),
     ...(ownerSeat ? { owner_seat: ownerSeat } : {}),
@@ -451,6 +512,9 @@ function toGateRecord(
     ...(armedAt ? { armed_at: armedAt } : {}),
     ...(lastSignalAt ? { last_signal_at: lastSignalAt } : {}),
     ...(isState(record.state) ? { state: record.state } : {}),
+    ...(rearmCommand ? { rearm_command: rearmCommand } : {}),
+    ...(rearmClaimedAt ? { rearm_claimed_at: rearmClaimedAt } : {}),
+    ...(collapsedReason ? { collapsed_reason: collapsedReason } : {}),
     liveness: gateRecordLiveness(record, nowMs),
   };
 }
@@ -606,6 +670,9 @@ export async function registerMonitor(
         : {}),
       ...(input.dedupe ? { dedupe: input.dedupe } : {}),
       ...(deriveAddressee(input) ? { addressee: deriveAddressee(input)! } : {}),
+      ...(cleanString(input.rearm_command)
+        ? { rearm_command: cleanString(input.rearm_command)! }
+        : {}),
       deadman_timeout_s: input.deadman_timeout_s,
       armed_at: stamp,
       last_signal_at: stamp,
@@ -701,6 +768,107 @@ export function latestMonitorForOwnerSeats(
     return Date.parse(b.last_signal_at) - Date.parse(a.last_signal_at);
   });
   return matches[0] ?? null;
+}
+
+function isMonitorStale(record: MonitorRegistryRecord, nowMs: number): boolean {
+  const lastSignalAtMs = parseTimeMs(record.last_signal_at);
+  return (
+    lastSignalAtMs !== null &&
+    nowMs - lastSignalAtMs > record.deadman_timeout_s * 1000
+  );
+}
+
+export async function reconcileMonitorRegistry(
+  opts: MonitorRegistryReconcileOptions,
+): Promise<MonitorRegistryReconcileResult> {
+  const path = registryPathFor(opts);
+  const nowMs = (opts.now ?? Date.now)();
+  const claimedAt = new Date(nowMs).toISOString();
+  const watchTargetExists = opts.watchTargetExists ?? existsSync;
+  const rearmed: string[] = [];
+  const collapsed: Array<{
+    monitor_id: string;
+    reason: MonitorCollapseReason;
+  }> = [];
+  const failed: string[] = [];
+  const candidates = readMonitorRegistry({ registryPath: path }).monitors.filter(
+    (record) => record.state === "alive" && isMonitorStale(record, nowMs),
+  );
+
+  for (const candidate of candidates) {
+    let collapseReason: MonitorCollapseReason | null = null;
+    if (candidate.watch_targets.some((target) => !watchTargetExists(target))) {
+      collapseReason = "watch-target-missing";
+    } else if (!(await opts.ownerAlive(candidate.owner_seat))) {
+      collapseReason = "owner-not-alive";
+    } else if (!candidate.rearm_command) {
+      collapseReason = "rearm-command-missing";
+    }
+
+    let claimed: MonitorRegistryRecord | null = null;
+    withRegistryWriteLock(path, () => {
+      const registry = readRawRegistry(path);
+      const monitors = registry.monitors.map((raw) => {
+        const current = toValidRecord(raw);
+        if (
+          !current ||
+          current.monitor_id !== candidate.monitor_id ||
+          current.state !== "alive" ||
+          !isMonitorStale(current, nowMs)
+        ) {
+          return raw;
+        }
+        claimed = collapseReason
+          ? {
+              ...current,
+              state: "collapsed",
+              collapsed_reason: collapseReason,
+            }
+          : {
+              ...current,
+              state: "rearming",
+              rearm_claimed_at: claimedAt,
+            };
+        return claimed;
+      });
+      if (claimed) writeRawRegistry(path, monitors);
+    });
+
+    if (!claimed) continue;
+    if (collapseReason) {
+      collapsed.push({ monitor_id: candidate.monitor_id, reason: collapseReason });
+      continue;
+    }
+
+    try {
+      await opts.rearm(claimed);
+      rearmed.push(candidate.monitor_id);
+    } catch {
+      failed.push(candidate.monitor_id);
+      withRegistryWriteLock(path, () => {
+        const registry = readRawRegistry(path);
+        const monitors = registry.monitors.map((raw) => {
+          const current = toValidRecord(raw);
+          if (
+            current?.monitor_id !== candidate.monitor_id ||
+            current.state !== "rearming" ||
+            current.rearm_claimed_at !== claimedAt
+          ) {
+            return raw;
+          }
+          const {
+            rearm_claimed_at: _rearmClaimedAt,
+            collapsed_reason: _collapsedReason,
+            ...rest
+          } = current;
+          return { ...rest, state: "alive" };
+        });
+        writeRawRegistry(path, monitors);
+      });
+    }
+  }
+
+  return { rearmed, collapsed, failed };
 }
 
 const noopNotify: MonitorDeadmanNotify = async () => {};

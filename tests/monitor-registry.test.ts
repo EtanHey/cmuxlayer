@@ -7,6 +7,7 @@ import {
   deregisterMonitor,
   queryMonitorRegistryForGates,
   readMonitorRegistry,
+  reconcileMonitorRegistry,
   registerMonitor,
   signalMonitor,
   sweepMonitorRegistry,
@@ -405,5 +406,188 @@ describe("monitor registry deadman core", () => {
         },
       ],
     });
+  });
+
+  it("claims one re-arm for a stale monitor with a live owner", async () => {
+    const watchedFile = join(TEST_DIR, "collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "stale-live-owner",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn().mockResolvedValue(undefined);
+
+    const first = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async (ownerSeat) => ownerSeat === "worker-a",
+      rearm,
+    });
+    const second = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 63_000,
+      ownerAlive: async () => true,
+      rearm,
+    });
+
+    expect(first.rearmed).toEqual(["stale-live-owner"]);
+    expect(second.rearmed).toEqual([]);
+    expect(rearm).toHaveBeenCalledTimes(1);
+    expect(rearm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        monitor_id: "stale-live-owner",
+        owner_seat: "worker-a",
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+        state: "rearming",
+      }),
+    );
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      monitor_id: "stale-live-owner",
+      state: "rearming",
+      rearm_claimed_at: iso(62_000),
+    });
+  });
+
+  it("collapses a stale monitor whose owner is gone without firing deadman", async () => {
+    const watchedFile = join(TEST_DIR, "owner-gone.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "owner-gone",
+        owner_seat: "worker-gone",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn();
+    const notify = vi.fn();
+
+    const reconciled = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => false,
+      rearm,
+    });
+    const swept = await sweepMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 63_000,
+      notify,
+    });
+
+    expect(reconciled.collapsed).toEqual([
+      { monitor_id: "owner-gone", reason: "owner-not-alive" },
+    ]);
+    expect(rearm).not.toHaveBeenCalled();
+    expect(swept.fired).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-not-alive",
+    });
+  });
+
+  it("collapses a stale monitor when its watched file is missing", async () => {
+    const missingFile = join(TEST_DIR, "missing.md");
+    await registerMonitor(
+      {
+        monitor_id: "target-missing",
+        owner_seat: "worker-a",
+        watch_targets: [missingFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${missingFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn();
+
+    const reconciled = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => true,
+      rearm,
+    });
+
+    expect(reconciled.collapsed).toEqual([
+      { monitor_id: "target-missing", reason: "watch-target-missing" },
+    ]);
+    expect(rearm).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "watch-target-missing",
+    });
+  });
+
+  it("surfaces legacy stale monitors without an exact re-arm command", async () => {
+    const watchedFile = join(TEST_DIR, "legacy.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "legacy-no-command",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    const reconciled = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => true,
+      rearm: vi.fn(),
+    });
+
+    expect(reconciled.collapsed).toEqual([
+      { monitor_id: "legacy-no-command", reason: "rearm-command-missing" },
+    ]);
+  });
+
+  it("releases a failed re-arm claim so a later sweep can retry", async () => {
+    const watchedFile = join(TEST_DIR, "retry.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "rearm-retry",
+        owner_seat: "worker-a",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("inbox unavailable"))
+      .mockResolvedValueOnce(undefined);
+
+    const failed = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => true,
+      rearm,
+    });
+    const retried = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 63_000,
+      ownerAlive: async () => true,
+      rearm,
+    });
+
+    expect(failed.failed).toEqual(["rearm-retry"]);
+    expect(retried.rearmed).toEqual(["rearm-retry"]);
+    expect(rearm).toHaveBeenCalledTimes(2);
   });
 });
