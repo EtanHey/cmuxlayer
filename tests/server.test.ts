@@ -4,7 +4,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, __submitEvidenceTestHooks } from "../src/server.js";
+import {
+  createServer as createServerImpl,
+  __submitEvidenceTestHooks,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
@@ -22,6 +25,30 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
     deliveredChunkCounts: number[];
   }>;
 };
+
+const openServers = new Set<ReturnType<typeof createServerImpl>>();
+
+function createServer(
+  ...args: Parameters<typeof createServerImpl>
+): ReturnType<typeof createServerImpl> {
+  const server = createServerImpl(...args);
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try {
+      await close();
+    } finally {
+      openServers.delete(server);
+    }
+  };
+  openServers.add(server);
+  return server;
+}
+
+afterEach(async () => {
+  for (const server of [...openServers]) {
+    await server.close();
+  }
+});
 
 async function loadInputDeliveryTestModule(): Promise<InputDeliveryTestModule> {
   return (await import("../src/server.js")) as InputDeliveryTestModule;
