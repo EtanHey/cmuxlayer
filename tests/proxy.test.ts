@@ -818,6 +818,23 @@ describe("CmuxLayerProxy", () => {
     ).toBe(true);
   });
 
+  it("destroys a stray socket instead of replacing an attached daemon socket", async () => {
+    const attached = new net.Socket();
+    const { proxy } = createProxy(socketPath("duplicate-attach"), {
+      connect: () => attached,
+    });
+    attached.emit("connect");
+    await waitFor(() => attached.listenerCount("data") > 0);
+
+    const stray = new net.Socket();
+    (
+      proxy as unknown as { attachDaemonSocket(socket: net.Socket): void }
+    ).attachDaemonSocket(stray);
+
+    expect(stray.destroyed).toBe(true);
+    expect(attached.destroyed).toBe(false);
+  });
+
   it("spawns the installed daemon after the second refused reconnect attempt", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("reconnect-spawn");

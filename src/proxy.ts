@@ -251,6 +251,7 @@ export class CmuxLayerProxy {
   private daemonSocket: net.Socket | null = null;
   private running = false;
   private connecting = false;
+  private reconnectLoopActive = false;
   private daemonReady = false;
   private flushing = false;
   private replayingInitialize = false;
@@ -442,10 +443,16 @@ export class CmuxLayerProxy {
   }
 
   private ensureConnecting(): void {
-    if (!this.running || this.connecting || this.daemonSocket) {
+    if (
+      !this.running ||
+      this.connecting ||
+      this.reconnectLoopActive ||
+      this.daemonSocket
+    ) {
       return;
     }
     this.connecting = true;
+    this.reconnectLoopActive = true;
     void this.reconnectLoop();
   }
 
@@ -466,37 +473,42 @@ export class CmuxLayerProxy {
   }
 
   private async reconnectLoop(): Promise<void> {
-    while (this.running && !this.daemonSocket) {
-      try {
-        const socket = await this.openDaemonSocket();
+    try {
+      while (this.running && !this.daemonSocket) {
+        try {
+          const socket = await this.openDaemonSocket();
+          this.attachDaemonSocket(socket);
+          return;
+        } catch (error) {
+          const attempt = this.reconnectAttempt++;
+          const message = error instanceof Error ? error.message : String(error);
+          const errorClass =
+            error && typeof error === "object" && "code" in error
+              ? String((error as { code: unknown }).code)
+              : /\b(?:ENOENT|ECONNREFUSED|ECONNRESET|EPIPE)\b/i.exec(message)?.[0] ??
+                (error instanceof Error ? error.name : "Error");
+          this.logReconnect(
+            "attempt-failed",
+            `[cmuxlayer-proxy] reconnect attempt ${attempt} failed (${errorClass}): ${message}`,
+          );
+          await this.spawnInstalledDaemonAfterReconnectFailure(attempt);
+          this.startBufferedRequestTimer();
+          const delayMs = computeReconnectDelay(attempt, {
+            initialBackoffMs: this.initialBackoffMs,
+            maxBackoffMs: this.maxBackoffMs,
+            jitterRatio: this.reconnectJitterRatio,
+            random: this.random,
+          });
+          this.onReconnectDelay?.(delayMs, attempt);
+          await this.delay(delayMs);
+        }
+      }
+    } finally {
+      this.reconnectLoopActive = false;
+      if (!this.reconnectTimer) {
         this.connecting = false;
-        this.attachDaemonSocket(socket);
-        return;
-      } catch (error) {
-        const attempt = this.reconnectAttempt++;
-        const message = error instanceof Error ? error.message : String(error);
-        const errorClass =
-          error && typeof error === "object" && "code" in error
-            ? String((error as { code: unknown }).code)
-            : /\b(?:ENOENT|ECONNREFUSED|ECONNRESET|EPIPE)\b/i.exec(message)?.[0] ??
-              (error instanceof Error ? error.name : "Error");
-        this.logReconnect(
-          "attempt-failed",
-          `[cmuxlayer-proxy] reconnect attempt ${attempt} failed (${errorClass}): ${message}`,
-        );
-        await this.spawnInstalledDaemonAfterReconnectFailure(attempt);
-        this.startBufferedRequestTimer();
-        const delayMs = computeReconnectDelay(attempt, {
-          initialBackoffMs: this.initialBackoffMs,
-          maxBackoffMs: this.maxBackoffMs,
-          jitterRatio: this.reconnectJitterRatio,
-          random: this.random,
-        });
-        this.onReconnectDelay?.(delayMs, attempt);
-        await this.delay(delayMs);
       }
     }
-    this.connecting = false;
   }
 
   private openDaemonSocket(): Promise<net.Socket> {
@@ -581,6 +593,12 @@ export class CmuxLayerProxy {
   private attachDaemonSocket(socket: net.Socket): void {
     if (!this.running) {
       socket.destroy();
+      return;
+    }
+    if (this.daemonSocket) {
+      if (this.daemonSocket !== socket) {
+        socket.destroy();
+      }
       return;
     }
     this.daemonSocket = socket;
@@ -1040,12 +1058,12 @@ export class CmuxLayerProxy {
           );
         }
       }
-      const reconnectLoopWillResume = this.reconnectTimerResolve !== null;
+      const reconnectLoopWillResume = this.reconnectLoopActive;
       this.clearReconnectTimer();
-      this.disconnectDaemon();
-      this.daemonReady = false;
+      this.handleDaemonDrop();
       this.reconnectAttempt = 0;
       if (!reconnectLoopWillResume) {
+        this.clearReconnectTimer();
         this.connecting = false;
       }
       this.ensureConnecting();
