@@ -207,8 +207,18 @@ export function collectSelfHealHealth(opts: {
       monitors = readMonitorRegistry(opts.monitorRegistry).monitors;
       monitorRegistryAvailable = true;
     } catch (error) {
-      monitorRegistryError =
-        error instanceof Error ? error.message : String(error);
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        monitors = readMonitorRegistry(opts.monitorRegistry).monitors;
+        monitorRegistryAvailable = true;
+      } else {
+        monitorRegistryError =
+          error instanceof Error ? error.message : String(error);
+      }
     }
   } else {
     monitorRegistryError = "monitor registry path is not configured";

@@ -350,6 +350,32 @@ describe("control health", () => {
     expect(formatControlHealth(health)).toMatch(/monitor registry: unavailable/i);
   });
 
+  it("treats an absent monitor registry as an empty healthy registry", async () => {
+    rmSync(TEST_ROOT, { recursive: true, force: true });
+    const home = join(TEST_ROOT, "home-absent-registry");
+    const tmp = join(TEST_ROOT, "tmp-absent-registry");
+    const monitorRegistryPath = join(TEST_ROOT, "monitor-registry-absent.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(tmp, { recursive: true });
+
+    const health = await collectControlHealth({
+      homeDir: home,
+      tmpDir: tmp,
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      monitorRegistryPath,
+    });
+
+    expect(health.self_heal.monitor_registry).toEqual({
+      available: true,
+      total: 0,
+      rearming: 0,
+      collapsed: 0,
+      collapsed_monitors: [],
+      truncated: false,
+    });
+  });
+
   it("reports structurally invalid monitor records as unavailable", async () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
     const home = join(TEST_ROOT, "home-invalid-monitor-record");
