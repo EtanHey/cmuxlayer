@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createServer as createServerImpl,
+  createServerContext,
   __submitEvidenceTestHooks,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -83,8 +84,12 @@ const EXPECTED_TOOLS = [
   "query_monitor_registry",
 ] as const;
 
-const CHANNEL_TEST_DIR = join(tmpdir(), "cmuxlayer-channels-server-test");
+const TEST_PROCESS_SCOPE = `${process.pid}-${process.env.VITEST_WORKER_ID ?? "0"}`;
+const processScopedTmpDir = (name: string): string =>
+  join(tmpdir(), `${name}-${TEST_PROCESS_SCOPE}`);
+const CHANNEL_TEST_DIR = processScopedTmpDir("cmuxlayer-channels-server-test");
 const BOOT_PROMPT_READY_POLL_MS_FOR_TESTS = 250;
+const REAL_SET_IMMEDIATE = setImmediate;
 const REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN = [
   "✻ Cogitated for 15s",
   "                                                                                51784 tokens",
@@ -155,7 +160,10 @@ async function runWithFakeTimers<T>(
   run: () => Promise<T>,
   advanceMs: number,
 ): Promise<T> {
-  vi.useFakeTimers();
+  if (!vi.isFakeTimers()) {
+    vi.useFakeTimers();
+  }
+  const baselineTimerCount = vi.getTimerCount();
   const resultPromise = run();
   let settled = false;
   void resultPromise.then(
@@ -166,16 +174,65 @@ async function runWithFakeTimers<T>(
       settled = true;
     },
   );
-  for (let elapsed = 0; elapsed < advanceMs && !settled; elapsed += 50) {
-    // Tool handlers cross several async boundaries before scheduling their
-    // first poll. Flush those jobs before advancing the next clock slice.
+  let elapsed = 0;
+  let idleTurns = 0;
+  const maxIdleTurns = 10_000;
+  while (!settled && elapsed < advanceMs && idleTurns < maxIdleTurns) {
+    // A handler can cross real I/O/event-loop boundaries before scheduling its
+    // next poll. Do not spend its fake-time budget until that timer exists.
+    await new Promise<void>((resolve) => REAL_SET_IMMEDIATE(resolve));
     for (let flush = 0; flush < 8; flush += 1) {
       await Promise.resolve();
     }
-    await advanceTimers(50);
+    if (settled) break;
+    if (vi.getTimerCount() <= baselineTimerCount) {
+      idleTurns += 1;
+      continue;
+    }
+    const step = Math.min(50, advanceMs - elapsed);
+    await advanceTimers(step);
+    elapsed += step;
+    idleTurns = 0;
+  }
+  if (!settled) {
+    throw new Error(
+      `fake timer operation did not settle after ${elapsed}ms and ${idleTurns} idle turns`,
+    );
   }
   return resultPromise;
 }
+
+describe("fake timer harness", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("waits for non-timer async progress before advancing the fake deadline", async () => {
+    vi.useFakeTimers();
+    const unrelatedTimer = setInterval(() => {}, 10);
+    let turns = 0;
+
+    try {
+      const result = await runWithFakeTimers(async () => {
+        while (turns < 30) {
+          await new Promise<void>((resolve) => {
+            REAL_SET_IMMEDIATE(() => {
+              turns += 1;
+              resolve();
+            });
+          });
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        return "settled";
+      }, 200);
+
+      expect(result).toBe("settled");
+      expect(turns).toBe(30);
+    } finally {
+      clearInterval(unrelatedTimer);
+    }
+  }, 1_000);
+});
 
 function setFakeSystemTime(now: Date): void {
   const setSystemTime = (
@@ -1735,7 +1792,9 @@ describe("tool handler integration", () => {
   });
 
   it("read_screen parsed_only includes the tab title and recovers model context from agent state", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-read-screen-parser-fallback");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-read-screen-parser-fallback",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -1937,7 +1996,9 @@ describe("tool handler integration", () => {
 
     // Use an isolated stateDir so enrichParsedScreen doesn't pick up live
     // agent state from the default state directory and overwrite model/cost.
-    const isolatedStateDir = join(tmpdir(), "cmux-read-screen-isolation-test");
+    const isolatedStateDir = processScopedTmpDir(
+      "cmux-read-screen-isolation-test",
+    );
     rmSync(isolatedStateDir, { recursive: true, force: true });
     mkdirSync(isolatedStateDir, { recursive: true });
     const server = createServer({
@@ -2344,7 +2405,9 @@ describe("tool handler integration", () => {
   });
 
   it("send_input background reads 'delivering' (not FAILED) while in flight (F8)", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input-background");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-f8-send-input-background",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
@@ -2406,7 +2469,7 @@ describe("tool handler integration", () => {
   });
 
   it("send_input returns delivered + cheap target identity from the state cache (F8)", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-input");
+    const stateDir = processScopedTmpDir("cmuxlayer-f8-send-input");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -2472,7 +2535,7 @@ describe("tool handler integration", () => {
   });
 
   it("send_command returns delivered + identity + submit_verified (F8)", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-f8-send-command");
+    const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -3926,7 +3989,9 @@ describe("tool handler integration", () => {
 
   it("send_input background press_enter verifies a cleared agent composer", async () => {
     vi.useFakeTimers();
-    const stateDir = join(tmpdir(), "cmuxlayer-background-submit-verify");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-background-submit-verify",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -4012,7 +4077,9 @@ describe("tool handler integration", () => {
 
   it("send_input does not retry Return for a Cursor queued composer that still shows the prompt", async () => {
     vi.useFakeTimers();
-    const stateDir = join(tmpdir(), "cmuxlayer-cursor-queued-submit-verify");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-cursor-queued-submit-verify",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -4097,7 +4164,9 @@ describe("tool handler integration", () => {
 
   it("send_input verifies a fast-cleared Codex composer without a retry", async () => {
     vi.useFakeTimers();
-    const stateDir = join(tmpdir(), "cmuxlayer-codex-cleared-submit-verify");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-codex-cleared-submit-verify",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -4180,7 +4249,9 @@ describe("tool handler integration", () => {
 
   it("send_input does not retry Return for a non-Cursor idle composer that may have queued input", async () => {
     vi.useFakeTimers();
-    const stateDir = join(tmpdir(), "cmuxlayer-codex-dropped-submit-retry");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-codex-dropped-submit-retry",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     const stateMgr = new StateManager(stateDir);
@@ -6352,7 +6423,6 @@ describe("tool handler integration", () => {
   });
 
   it("spawn_agent waits out a Codex auto-update, relaunches after bare shell, then delivers the boot prompt", async () => {
-    vi.useRealTimers();
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-relaunch-state");
@@ -6464,15 +6534,19 @@ describe("tool handler integration", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     try {
-      const result = await tool.handler(
-        {
-          repo: "cmuxlayer",
-          model: "gpt-5.5",
-          cli: "codex",
-          boot_prompt_path: promptPath,
-          boot_prompt_timeout_ms: 2_000,
-        },
-        {} as any,
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "cmuxlayer",
+              model: "gpt-5.5",
+              cli: "codex",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 2_000,
+            },
+            {} as any,
+          ),
+        5_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -6495,7 +6569,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("spawn_agent skips the interactive Codex update menu before delivering the boot prompt", async () => {
-    vi.useRealTimers();
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
@@ -6632,15 +6705,19 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
-      const result = await tool.handler(
-        {
-          repo: "cmuxlayer",
-          model: "gpt-5.5",
-          cli: "codex",
-          boot_prompt_path: promptPath,
-          boot_prompt_timeout_ms: 500,
-        },
-        {},
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "cmuxlayer",
+              model: "gpt-5.5",
+              cli: "codex",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 500,
+            },
+            {},
+          ),
+        3_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -6660,7 +6737,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("spawn_agent keeps polling after a slow Codex update menu dismissal", async () => {
-    vi.useRealTimers();
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-slow-state");
@@ -6792,15 +6868,19 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
-      const result = await tool.handler(
-        {
-          repo: "cmuxlayer",
-          model: "gpt-5.5",
-          cli: "codex",
-          boot_prompt_path: promptPath,
-          boot_prompt_timeout_ms: 500,
-        },
-        {},
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "cmuxlayer",
+              model: "gpt-5.5",
+              cli: "codex",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 500,
+            },
+            {},
+          ),
+        3_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -6820,7 +6900,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after dismissal", async () => {
-    vi.useRealTimers();
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
@@ -6930,15 +7009,19 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
-      const result = await tool.handler(
-        {
-          repo: "cmuxlayer",
-          model: "gpt-5.5",
-          cli: "codex",
-          boot_prompt_path: promptPath,
-          boot_prompt_timeout_ms: 500,
-        },
-        {},
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "cmuxlayer",
+              model: "gpt-5.5",
+              cli: "codex",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 500,
+            },
+            {},
+          ),
+        3_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -7128,7 +7211,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("new_split relaunches a launcher-title terminal after update drops to shell", async () => {
-    vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-update-relaunch.md");
     const prompt = "boot after update";
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -7237,14 +7319,18 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["new_split"];
 
-    const result = await tool.handler(
-      {
-        direction: "right",
-        title: "cmuxlayerCodex",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 50,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            direction: "right",
+            title: "cmuxlayerCodex",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 50,
+          },
+          {} as any,
+        ),
+      2_000,
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -7256,7 +7342,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("new_split preserves enough post-update time for low-confidence ready prompts", async () => {
-    vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-update-gemini.md");
     const prompt = "boot after gemini update";
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -7366,14 +7451,18 @@ describe("tool handler integration", () => {
     const tool = (server as any)._registeredTools["new_split"];
 
     try {
-      const result = await tool.handler(
-        {
-          direction: "right",
-          title: "cmuxlayerGemini",
-          boot_prompt_path: promptPath,
-          boot_prompt_timeout_ms: 50,
-        },
-        {} as any,
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              direction: "right",
+              title: "cmuxlayerGemini",
+              boot_prompt_path: promptPath,
+              boot_prompt_timeout_ms: 50,
+            },
+            {} as any,
+          ),
+        2_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -7388,7 +7477,6 @@ describe("tool handler integration", () => {
   }, 10_000);
 
   it("new_surface relaunches a launcher-title terminal after update drops to shell", async () => {
-    vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "surface-update-relaunch.md");
     const prompt = "boot after update";
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
@@ -7451,14 +7539,18 @@ describe("tool handler integration", () => {
     const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools["new_surface"];
 
-    const result = await tool.handler(
-      {
-        pane: "pane:1",
-        title: "cmuxlayerCodex",
-        boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 50,
-      },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            pane: "pane:1",
+            title: "cmuxlayerCodex",
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 50,
+          },
+          {} as any,
+        ),
+      2_000,
     );
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -8353,7 +8445,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface handler calls cmux close-surface", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-basic");
+    const stateDir = processScopedTmpDir("cmuxlayer-close-surface-basic");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
     mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
@@ -8376,7 +8468,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface reports pane collapse when closing the last dedicated worker tab", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-layout");
+    const stateDir = processScopedTmpDir("cmuxlayer-close-surface-layout");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8483,7 +8575,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface refuses a live agent without force and returns a pane read", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-guard");
+    const stateDir = processScopedTmpDir("cmuxlayer-close-surface-guard");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8551,7 +8643,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface logs a durable close entry with caller, force, and target", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-eventlog");
+    const stateDir = processScopedTmpDir("cmuxlayer-close-surface-eventlog");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8620,7 +8712,9 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface logs the attempt when a live-agent close is refused", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-refuse-eventlog");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-refuse-eventlog",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8694,7 +8788,9 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface consolidates stale live registry when pane shows TASK_DONE", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-done-consolidate");
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-done-consolidate",
+    );
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8768,8 +8864,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface refuses stale DONE consolidation when pane shows an active Codex marker", async () => {
-    const stateDir = join(
-      tmpdir(),
+    const stateDir = processScopedTmpDir(
       "cmuxlayer-close-surface-done-active-refuse",
     );
     rmSync(stateDir, { recursive: true, force: true });
@@ -8847,7 +8942,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface guard is fail-safe when a stale terminal record shares the surface with a live one", async () => {
-    const stateDir = join(tmpdir(), "cmuxlayer-close-surface-collision");
+    const stateDir = processScopedTmpDir("cmuxlayer-close-surface-collision");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
 
@@ -8907,8 +9002,7 @@ describe("tool handler integration", () => {
   });
 
   it("close_surface refuses after stale DONE consolidation when another live agent shares the surface", async () => {
-    const stateDir = join(
-      tmpdir(),
+    const stateDir = processScopedTmpDir(
       "cmuxlayer-close-surface-post-consolidation-live",
     );
     rmSync(stateDir, { recursive: true, force: true });
@@ -9276,14 +9370,16 @@ describe("tool handler integration", () => {
       closeSurface: vi.fn(),
       selectWorkspace: vi.fn(),
     };
-    const server = createServer({
+    const context = createServerContext({
       client: mockClient as any,
       stateDir,
       controlHealthIntervalMs: 0,
     });
+    const server = createServer({ context });
     const tool = (server as any)._registeredTools["list_agents"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await tool.handler({}, {} as any);
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
