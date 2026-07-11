@@ -34,6 +34,25 @@ describe("pre-PR script ladder", () => {
     expect(scripts["pre-pr:live"]).toBe("bun run live:harness");
   });
 
+  it("exposes the real-cmux contract lane without adding it to default tests", () => {
+    const scripts = packageScripts();
+
+    expect(scripts["test:contract"]).toBe(
+      "bun run build && tsx scripts/run-real-cmux-contract.ts",
+    );
+    expect(scripts.test).toBe("vitest run");
+    expect(scripts.test).not.toContain("contract");
+  });
+
+  it("runs the opt-in contract lane from the release preflight", () => {
+    const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
+    const hermeticGate = release.indexOf('run "bun run test"');
+    const contractGate = release.indexOf('run "bun run test:contract"');
+
+    expect(hermeticGate).toBeGreaterThan(-1);
+    expect(contractGate).toBeGreaterThan(hermeticGate);
+  });
+
   it("refuses the live harness unless CMUX_LIVE_HARNESS=1 is set", () => {
     const result = spawnSync(
       process.execPath,
