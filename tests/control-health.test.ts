@@ -237,7 +237,7 @@ describe("control health", () => {
             armed_at: "2026-07-11T11:55:00.000Z",
             last_signal_at: "2026-07-11T11:57:00.000Z",
             state: "collapsed",
-            collapsed_reason: "watch-target-missing",
+            collapsed_reason: "owner-wedged",
           },
         ],
       }),
@@ -276,7 +276,7 @@ describe("control health", () => {
       collapsed_monitors: [
         {
           monitor_id: "monitor-collapsed",
-          reason: "watch-target-missing",
+          reason: "owner-wedged",
         },
       ],
       truncated: false,
@@ -285,7 +285,7 @@ describe("control health", () => {
       /pane_pty_dead: 1.*surface:pty-dead.*2026-07-11T12:00:01.000Z/s,
     );
     expect(formatControlHealth(health)).toMatch(
-      /monitor registry: total=3 rearming=1 collapsed=1.*monitor-collapsed: watch-target-missing/s,
+      /monitor registry: total=3 rearming=1 collapsed=1.*monitor-collapsed: owner-wedged/s,
     );
   });
 

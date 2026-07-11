@@ -75,6 +75,7 @@ export interface MonitorRegistryOptions {
 
 export interface MonitorDeadmanEvent {
   monitor_id: string;
+  dedupe_key: string;
   owner_seat: string;
   watch_targets: string[];
   mechanism: MonitorMechanism;
@@ -113,6 +114,7 @@ export interface MonitorRegistrySweepOptions extends MonitorRegistryOptions {
 export type MonitorCollapseReason =
   | "owner-not-alive"
   | "owner-pty-dead"
+  | "owner-wedged"
   | "watch-target-missing"
   | "rearm-command-missing";
 
@@ -121,14 +123,26 @@ export interface MonitorRegistryReconcileOptions extends MonitorRegistryOptions 
   ownerPtyDead?: (ownerSeat: string) => Promise<boolean> | boolean;
   watchTargetExists?: (target: string) => boolean;
   rearmClaimTimeoutMs?: number;
+  rearmAckTimeoutMs?: number;
+  reapAfterMs?: number;
   monitorIds?: readonly string[];
+  ownerProgressedSince?: (
+    record: MonitorRegistryRecord,
+  ) => Promise<boolean> | boolean;
+  ownerIndependent?: (
+    record: MonitorRegistryRecord,
+  ) => Promise<boolean> | boolean;
   rearm: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
+  fallbackRearm?: (
+    record: MonitorRegistryRecord,
+  ) => Promise<unknown> | unknown;
   escalate?: (record: MonitorRegistryRecord) => Promise<unknown> | unknown;
 }
 
 export interface MonitorRegistryReconcileResult {
   rearmed: string[];
   collapsed: Array<{ monitor_id: string; reason: MonitorCollapseReason }>;
+  reaped: string[];
   failed: string[];
 }
 
@@ -175,6 +189,7 @@ const STATE_VERSION = 1;
 const DEFAULT_NOTIFY_URL = "http://127.0.0.1:3847/notify";
 const DEFAULT_NOTIFY_SOURCE = "cmuxlayer-monitor-registry";
 const DEFAULT_SWEEPER_ID = "agent-engine";
+const DEFAULT_REAP_AFTER_MS = 24 * 60 * 60 * 1_000;
 
 export function defaultMonitorRegistryPath(): string {
   return join(homedir(), ".golems-zikaron", "monitor-registry.json");
@@ -433,6 +448,7 @@ function isMonitorCollapseReason(value: unknown): value is MonitorCollapseReason
   return (
     value === "owner-not-alive" ||
     value === "owner-pty-dead" ||
+    value === "owner-wedged" ||
     value === "watch-target-missing" ||
     value === "rearm-command-missing"
   );
@@ -743,7 +759,12 @@ export async function signalMonitor(
       const valid = toValidRecord(record);
       if (
         !valid ||
-        (valid.state !== "alive" && valid.state !== "rearming")
+        (valid.state !== "alive" &&
+          valid.state !== "rearming" &&
+          !(
+            valid.state === "collapsed" &&
+            valid.collapsed_reason === "owner-wedged"
+          ))
       ) {
         return record;
       }
@@ -823,6 +844,17 @@ function isRearmClaimExpired(
   return claimedAtMs !== null && nowMs - claimedAtMs >= timeoutMs;
 }
 
+function isMonitorAncient(
+  record: MonitorRegistryRecord,
+  nowMs: number,
+  reapAfterMs: number,
+): boolean {
+  const armedAtMs = parseTimeMs(record.armed_at);
+  const lastSignalAtMs = parseTimeMs(record.last_signal_at);
+  if (armedAtMs === null || lastSignalAtMs === null) return false;
+  return nowMs - Math.max(armedAtMs, lastSignalAtMs) >= reapAfterMs;
+}
+
 export async function reconcileMonitorRegistry(
   opts: MonitorRegistryReconcileOptions,
 ): Promise<MonitorRegistryReconcileResult> {
@@ -830,14 +862,48 @@ export async function reconcileMonitorRegistry(
   const nowMs = (opts.now ?? Date.now)();
   const claimedAt = new Date(nowMs).toISOString();
   const watchTargetExists = opts.watchTargetExists ?? existsSync;
-  const rearmClaimTimeoutMs = opts.rearmClaimTimeoutMs ?? 60_000;
+  const rearmAckTimeoutMs = opts.rearmAckTimeoutMs ?? 60_000;
+  const reapAfterMs = opts.reapAfterMs ?? DEFAULT_REAP_AFTER_MS;
+  const rearmClaimTimeoutMs =
+    opts.rearmClaimTimeoutMs ?? opts.rearmAckTimeoutMs ?? 60_000;
   const monitorIds = opts.monitorIds ? new Set(opts.monitorIds) : null;
   const rearmed: string[] = [];
   const collapsed: Array<{
     monitor_id: string;
     reason: MonitorCollapseReason;
   }> = [];
+  const reaped: string[] = [];
   const failed: string[] = [];
+  const reapCandidates = readMonitorRegistry({ registryPath: path }).monitors.filter(
+    (record) =>
+      (!monitorIds || monitorIds.has(record.monitor_id)) &&
+      record.state !== "dead" &&
+      isMonitorAncient(record, nowMs, reapAfterMs),
+  );
+
+  for (const candidate of reapCandidates) {
+    if (await opts.ownerAlive(candidate.owner_seat)) continue;
+    let claimed = false;
+    withRegistryWriteLock(path, () => {
+      const registry = readRawRegistry(path);
+      const monitors = registry.monitors.map((raw) => {
+        const current = toValidRecord(raw);
+        if (
+          !current ||
+          current.monitor_id !== candidate.monitor_id ||
+          current.state === "dead" ||
+          !isMonitorAncient(current, nowMs, reapAfterMs)
+        ) {
+          return raw;
+        }
+        claimed = true;
+        return { ...current, state: "dead" as const };
+      });
+      if (claimed) writeRawRegistry(path, monitors);
+    });
+    if (claimed) reaped.push(candidate.monitor_id);
+  }
+
   const candidates = readMonitorRegistry({ registryPath: path }).monitors.filter(
     (record) =>
       (!monitorIds || monitorIds.has(record.monitor_id)) &&
@@ -848,6 +914,25 @@ export async function reconcileMonitorRegistry(
 
   for (const candidate of candidates) {
     let collapseReason: MonitorCollapseReason | null = null;
+    const rearmClaimAgeMs = candidate.rearm_claimed_at
+      ? nowMs - (parseTimeMs(candidate.rearm_claimed_at) ?? nowMs)
+      : 0;
+    const acknowledgementExpired =
+      candidate.state === "rearming" &&
+      !!candidate.rearm_claimed_at &&
+      rearmClaimAgeMs >= rearmAckTimeoutMs;
+    const ownerProgressed =
+      acknowledgementExpired && opts.ownerProgressedSince
+        ? await opts.ownerProgressedSince(candidate)
+        : false;
+    const ownerWedged =
+      acknowledgementExpired &&
+      !!opts.ownerProgressedSince &&
+      !ownerProgressed;
+    const useFallback =
+      ownerWedged &&
+      !!opts.fallbackRearm &&
+      (await opts.ownerIndependent?.(candidate));
     if (!candidate.rearm_command) {
       collapseReason = "rearm-command-missing";
     } else if (
@@ -858,6 +943,8 @@ export async function reconcileMonitorRegistry(
       collapseReason = "owner-pty-dead";
     } else if (!(await opts.ownerAlive(candidate.owner_seat))) {
       collapseReason = "owner-not-alive";
+    } else if (ownerWedged && !useFallback) {
+      collapseReason = "owner-wedged";
     }
 
     let claimed: MonitorRegistryRecord | null = null;
@@ -903,19 +990,56 @@ export async function reconcileMonitorRegistry(
         } catch {
           // The durable collapsed state is canonical; notification is best-effort.
         }
+      } else if (collapseReason === "owner-wedged") {
+        try {
+          await opts.escalate?.(claimed);
+        } catch {
+          // The durable collapsed state is canonical; notification is best-effort.
+        }
       }
       continue;
     }
 
     try {
-      await opts.rearm(claimed);
+      if (useFallback) {
+        await opts.fallbackRearm!(claimed);
+        withRegistryWriteLock(path, () => {
+          const registry = readRawRegistry(path);
+          let completed = false;
+          const monitors = registry.monitors.map((raw) => {
+            const current = toValidRecord(raw);
+            if (
+              !current ||
+              current.monitor_id !== claimed!.monitor_id ||
+              current.state !== "rearming" ||
+              current.rearm_claimed_at !== claimed!.rearm_claimed_at
+            ) {
+              return raw;
+            }
+            const {
+              rearm_claimed_at: _rearmClaimedAt,
+              collapsed_reason: _collapsedReason,
+              ...rest
+            } = current;
+            completed = true;
+            return {
+              ...rest,
+              state: "alive" as const,
+              last_signal_at: claimedAt,
+            };
+          });
+          if (completed) writeRawRegistry(path, monitors);
+        });
+      } else {
+        await opts.rearm(claimed);
+      }
       rearmed.push(candidate.monitor_id);
     } catch {
       failed.push(candidate.monitor_id);
     }
   }
 
-  return { rearmed, collapsed, failed };
+  return { rearmed, collapsed, reaped, failed };
 }
 
 const noopNotify: MonitorDeadmanNotify = async () => {};
@@ -949,6 +1073,7 @@ export async function sweepMonitorRegistry(
       const firedAt = new Date(nowMs).toISOString();
       fired.push({
         monitor_id: valid.monitor_id,
+        dedupe_key: `${valid.monitor_id}:deadman-fired`,
         owner_seat: valid.owner_seat,
         watch_targets: valid.watch_targets,
         mechanism: valid.mechanism,
@@ -1017,6 +1142,7 @@ export async function httpNotifyMonitorDeadman(
       )}s; watch_targets=${event.watch_targets.join(", ")}`,
       source: DEFAULT_NOTIFY_SOURCE,
       priority: "high",
+      dedupe_key: event.dedupe_key,
     },
     notifyUrl,
   );
