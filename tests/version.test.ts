@@ -15,6 +15,7 @@ import {
   detectStaleBuild,
   readVersion,
   resolveInstalledDaemonScript,
+  resolveInstalledEntryScript,
 } from "../src/version.js";
 
 describe("resolveInstalledDaemonScript", () => {
@@ -40,6 +41,27 @@ describe("resolveInstalledDaemonScript", () => {
       expect(
         resolveInstalledDaemonScript(join(opt, "libexec", "package.json")),
       ).toBe(realpathSync(join(cellar, "dist", "daemon.js")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveInstalledEntryScript", () => {
+  it("returns the real Cellar MCP entrypoint when the opt tree is a symlink", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-entry-realpath-"));
+    try {
+      const cellar = join(root, "Cellar", "cmuxlayer", "1.2.3", "libexec");
+      const opt = join(root, "opt", "cmuxlayer");
+      mkdirSync(join(cellar, "dist"), { recursive: true });
+      mkdirSync(join(root, "opt"), { recursive: true });
+      writeFileSync(join(cellar, "package.json"), "{}");
+      writeFileSync(join(cellar, "dist", "index.js"), "");
+      symlinkSync(join(root, "Cellar", "cmuxlayer", "1.2.3"), opt, "dir");
+
+      expect(
+        resolveInstalledEntryScript(join(opt, "libexec", "package.json")),
+      ).toBe(realpathSync(join(cellar, "dist", "index.js")));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

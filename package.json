@@ -33,7 +33,7 @@
     "orchestration"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.15"
   },
   "files": [
     "dist",

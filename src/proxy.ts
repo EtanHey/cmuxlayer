@@ -25,8 +25,9 @@ import {
   type DetectStaleBuildDeps,
   type StaleBuildResult,
   resolveInstalledDaemonScript,
+  resolveInstalledEntryScript,
 } from "./version.js";
-import { isMainModule } from "./is-main.js";
+import { canonicalPath, isMainModule } from "./is-main.js";
 
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 5_000;
@@ -41,6 +42,23 @@ const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_RECONNECT_LOG_INTERVAL_MS = 5_000;
 const PROXY_ERROR_CODE = -32001;
 const SUSPICIOUS_DAEMON_EXIT_MS = 5_000;
+const DEFAULT_SELF_REEXEC_DRAIN_TIMEOUT_MS = 15_000;
+const MAX_SELF_REEXEC_HANDOFF_BYTES = 32 * 1024;
+const SELF_REEXEC_MARKER_ENV = "CMUXLAYER_SELF_REEXECED";
+const SELF_REEXEC_HANDOFF_ENV = "CMUXLAYER_SELF_REEXEC_HANDOFF";
+const BREW_ENTRYPOINT_PATTERN =
+  /\/(?:Cellar|cellar)\/cmuxlayer\/[^/]+\/(?:libexec\/)?dist\/index\.js$/;
+
+type ExecveFn = (
+  file: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) => void;
+
+interface SelfReexecHandoff {
+  initializeRequest: JsonRpcRequest | null;
+  initializedNotification: JsonRpcNotification | null;
+}
 
 function instrumentSpawnedDaemon(
   spawned: unknown,
@@ -123,9 +141,15 @@ export interface CmuxLayerProxyOptions {
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
   versionBumpReconnectGuard?: VersionBumpReconnectGuard;
+  selfReexecGuard?: VersionBumpReconnectGuard;
   reconnectDaemonSpawnGuard?: VersionBumpReconnectGuard;
   reconnectLogIntervalMs?: number;
   reconnectLogNow?: () => number;
+  env?: NodeJS.ProcessEnv;
+  runningEntryScriptPath?: string;
+  installedEntryScriptPath?: () => string | null;
+  execve?: ExecveFn;
+  selfReexecDrainTimeoutMs?: number;
 }
 
 type JsonRpcRequest = JSONRPCMessage & {
@@ -265,9 +289,15 @@ export class CmuxLayerProxy {
     opts: SpawnDaemonOptions,
   ) => Promise<unknown> | unknown;
   private readonly versionBumpReconnectGuard: VersionBumpReconnectGuard;
+  private readonly selfReexecGuard: VersionBumpReconnectGuard;
   private readonly reconnectDaemonSpawnGuard: VersionBumpReconnectGuard;
   private readonly reconnectLogIntervalMs: number;
   private readonly reconnectLogNow: () => number;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly runningEntryScriptPath: string;
+  private readonly installedEntryScriptPath: () => string | null;
+  private readonly execveFn: ExecveFn | null;
+  private readonly selfReexecDrainTimeoutMs: number;
 
   private readonly agentReadBuffer = new JsonRpcLineBuffer();
   private daemonReadBuffer: JsonRpcLineBuffer | null = null;
@@ -287,6 +317,11 @@ export class CmuxLayerProxy {
   private reconnectTimerResolve: (() => void) | null = null;
   private versionBumpTimer: NodeJS.Timeout | null = null;
   private versionBumpReconnecting = false;
+  private selfRemediationStarted = false;
+  private selfRemediationDraining = false;
+  private pendingDrainResolve: (() => void) | null = null;
+  private readonly remediationErrorWrites = new Set<Promise<void>>();
+  private readonly agentOutputWrites = new Set<Promise<void>>();
   private bufferedRequestTimer: NodeJS.Timeout | null = null;
   private readonly reconnectLogTimes = new Map<string, number>();
   private readonly queue: QueuedMessage[] = [];
@@ -303,7 +338,8 @@ export class CmuxLayerProxy {
   };
 
   constructor(opts: CmuxLayerProxyOptions = {}) {
-    this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
+    this.env = opts.env ?? process.env;
+    this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(this.env);
     this.input = opts.input ?? process.stdin;
     this.output = opts.output ?? process.stdout;
     this.connect = opts.connect ?? ((path) => net.createConnection(path));
@@ -327,6 +363,8 @@ export class CmuxLayerProxy {
     this.spawnDaemonForVersionBump = opts.spawnDaemonForVersionBump;
     this.versionBumpReconnectGuard =
       opts.versionBumpReconnectGuard ?? new VersionBumpReconnectGuard();
+    this.selfReexecGuard =
+      opts.selfReexecGuard ?? new VersionBumpReconnectGuard();
     this.reconnectDaemonSpawnGuard =
       opts.reconnectDaemonSpawnGuard ??
       new VersionBumpReconnectGuard({
@@ -336,6 +374,19 @@ export class CmuxLayerProxy {
     this.reconnectLogIntervalMs =
       opts.reconnectLogIntervalMs ?? DEFAULT_RECONNECT_LOG_INTERVAL_MS;
     this.reconnectLogNow = opts.reconnectLogNow ?? Date.now;
+    this.runningEntryScriptPath = canonicalPath(
+      opts.runningEntryScriptPath ?? process.argv[1] ?? "",
+    );
+    this.installedEntryScriptPath =
+      opts.installedEntryScriptPath ?? resolveInstalledEntryScript;
+    this.execveFn =
+      opts.execve ??
+      (process.execve
+        ? (file, args, env) => process.execve?.(file, args, env)
+        : null);
+    this.selfReexecDrainTimeoutMs =
+      opts.selfReexecDrainTimeoutMs ?? DEFAULT_SELF_REEXEC_DRAIN_TIMEOUT_MS;
+    this.hydrateSelfReexecHandoff();
   }
 
   start(): void {
@@ -391,6 +442,15 @@ export class CmuxLayerProxy {
 
   private handleAgentMessage(message: JSONRPCMessage): void {
     if (isJsonRpcRequest(message)) {
+      if (this.selfRemediationDraining) {
+        this.trackRemediationErrorWrite(
+          this.sendAgentError(
+            message.id,
+            "cmuxlayer is refreshing stale MCP child; retry this request",
+          ),
+        );
+        return;
+      }
       if (message.method === "initialize") {
         this.initializeRequest = cloneMessage(message);
       }
@@ -726,13 +786,15 @@ export class CmuxLayerProxy {
       clearTimeout(pending.timeout);
       this.pendingRequests.delete(key);
       this.expiredRequestKeys.delete(key);
-      if (
+      const deliversInitialize =
         this.initializeRequest &&
-        key === requestKey(this.initializeRequest.id)
-      ) {
-        this.initializeResultDelivered = true;
-      }
-      void this.writeAgentFrame(frame);
+        key === requestKey(this.initializeRequest.id) &&
+        !metadata.hasError;
+      void this.writeAgentFrame(frame, (delivered) => {
+        if (delivered && deliversInitialize) {
+          this.initializeResultDelivered = true;
+        }
+      });
       return;
     }
 
@@ -919,6 +981,7 @@ export class CmuxLayerProxy {
       this.queue.splice(index, 1);
     }
     void this.sendAgentError(pending.id, message);
+    this.signalPendingDrainIfComplete();
   }
 
   private enforceBufferCap(): void {
@@ -987,18 +1050,35 @@ export class CmuxLayerProxy {
   }
 
   private async writeAgent(message: JSONRPCMessage): Promise<void> {
+    const write = writeMessage(this.output, message);
+    this.agentOutputWrites.add(write);
     try {
-      await writeMessage(this.output, message);
+      await write;
     } catch (error) {
       this.logger.error("[cmuxlayer-proxy] failed to write agent frame", error);
+    } finally {
+      this.agentOutputWrites.delete(write);
+      this.signalPendingDrainIfComplete();
     }
   }
 
-  private async writeAgentFrame(frame: Buffer): Promise<void> {
+  private async writeAgentFrame(
+    frame: Buffer,
+    onFlushed?: (delivered: boolean) => void,
+  ): Promise<void> {
+    let delivered = false;
+    const write = writeFrame(this.output, frame).then(() => {
+      delivered = true;
+    });
+    this.agentOutputWrites.add(write);
     try {
-      await writeFrame(this.output, frame);
+      await write;
     } catch (error) {
       this.logger.error("[cmuxlayer-proxy] failed to write agent frame", error);
+    } finally {
+      onFlushed?.(delivered);
+      this.agentOutputWrites.delete(write);
+      this.signalPendingDrainIfComplete();
     }
   }
 
@@ -1036,12 +1116,234 @@ export class CmuxLayerProxy {
     }
   }
 
+  private hydrateSelfReexecHandoff(): void {
+    const serialized = this.env[SELF_REEXEC_HANDOFF_ENV];
+    if (!serialized) {
+      return;
+    }
+    delete this.env[SELF_REEXEC_HANDOFF_ENV];
+    try {
+      const handoff = JSON.parse(serialized) as SelfReexecHandoff;
+      if (
+        handoff.initializeRequest &&
+        isJsonRpcRequest(handoff.initializeRequest) &&
+        handoff.initializeRequest.method === "initialize"
+      ) {
+        this.initializeRequest = cloneMessage(handoff.initializeRequest);
+        this.initializeResultDelivered = true;
+      }
+      if (
+        handoff.initializedNotification &&
+        isJsonRpcNotification(handoff.initializedNotification) &&
+        handoff.initializedNotification.method === "notifications/initialized"
+      ) {
+        this.initializedNotification = cloneMessage(
+          handoff.initializedNotification,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        "[cmuxlayer-proxy] invalid self-reexec handshake handoff ignored",
+        error,
+      );
+    }
+  }
+
+  private selfRemediationStatus(
+    stale: StaleBuildResult,
+    installedEntry: string | null,
+  ): "eligible" | "already-attempted" | "ineligible" {
+    const transition = `${stale.running}->${stale.installed}`;
+    if (
+      this.selfRemediationStarted ||
+      this.env[SELF_REEXEC_MARKER_ENV] === transition
+    ) {
+      return "already-attempted";
+    }
+    if (
+      this.env.CMUXLAYER_DEV === "1" ||
+      !BREW_ENTRYPOINT_PATTERN.test(this.runningEntryScriptPath) ||
+      !installedEntry ||
+      !this.execveFn
+    ) {
+      return "ineligible";
+    }
+    return "eligible";
+  }
+
+  private trackRemediationErrorWrite(write: Promise<void>): void {
+    this.remediationErrorWrites.add(write);
+    void write.finally(() => this.remediationErrorWrites.delete(write));
+  }
+
+  private signalPendingDrainIfComplete(): void {
+    if (
+      this.pendingRequests.size !== 0 ||
+      this.agentOutputWrites.size !== 0
+    ) {
+      return;
+    }
+    const resolve = this.pendingDrainResolve;
+    this.pendingDrainResolve = null;
+    resolve?.();
+  }
+
+  private async waitForPendingDrain(): Promise<boolean> {
+    if (
+      this.pendingRequests.size === 0 &&
+      this.agentOutputWrites.size === 0
+    ) {
+      return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (drained: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.pendingDrainResolve === onDrained) {
+          this.pendingDrainResolve = null;
+        }
+        resolve(drained);
+      };
+      const onDrained = () => finish(true);
+      this.pendingDrainResolve = onDrained;
+      const timer = setTimeout(
+        () => finish(false),
+        this.selfReexecDrainTimeoutMs,
+      );
+    });
+  }
+
+  private async rejectPendingForSelfRemediation(): Promise<void> {
+    const writes: Promise<void>[] = [];
+    for (const [key, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout);
+      this.pendingRequests.delete(key);
+      this.expiredRequestKeys.add(key);
+      const index = this.queue.findIndex((queued) => queued.requestKey === key);
+      if (index >= 0) this.queue.splice(index, 1);
+      writes.push(
+        this.sendAgentError(
+          pending.id,
+          "cmuxlayer is refreshing stale MCP child after drain deadline; retry this request",
+        ),
+      );
+    }
+    this.signalPendingDrainIfComplete();
+    await Promise.all(writes);
+  }
+
+  private resumeSelfRemediationChecks(): void {
+    this.selfRemediationStarted = false;
+    this.selfRemediationDraining = false;
+    if (this.running && !this.versionBumpTimer) {
+      this.startVersionBumpWatcher();
+    }
+  }
+
+  private async remediateStaleSelf(
+    stale: StaleBuildResult,
+    installedEntry: string,
+  ): Promise<void> {
+    this.selfRemediationStarted = true;
+    this.selfRemediationDraining = true;
+    this.clearVersionBumpTimer();
+    this.logger.error(
+      `[cmuxlayer-proxy] stale MCP child detected (running v${stale.running}, installed v${stale.installed}); draining before in-place re-exec`,
+    );
+
+    const drained = await this.waitForPendingDrain();
+    if (!drained) {
+      await this.rejectPendingForSelfRemediation();
+      if (this.agentOutputWrites.size > 0) {
+        this.logger.error(
+          "[cmuxlayer-proxy] client output transport still flushing at self-reexec deadline; keeping current session alive to avoid a dropped or duplicate frame",
+        );
+        this.resumeSelfRemediationChecks();
+        return;
+      }
+    }
+    await Promise.all([...this.remediationErrorWrites]);
+
+    const handoff: SelfReexecHandoff = {
+      initializeRequest: this.initializeResultDelivered
+        ? this.initializeRequest
+        : null,
+      initializedNotification: this.initializeResultDelivered
+        ? this.initializedNotification
+        : null,
+    };
+    const serializedHandoff = JSON.stringify(handoff);
+    const handoffBytes = Buffer.byteLength(serializedHandoff);
+    if (handoffBytes > MAX_SELF_REEXEC_HANDOFF_BYTES) {
+      this.logger.error(
+        `[cmuxlayer-proxy] self-reexec handshake handoff exceeds ${MAX_SELF_REEXEC_HANDOFF_BYTES} bytes (${handoffBytes}); keeping current session alive`,
+      );
+      this.resumeSelfRemediationChecks();
+      return;
+    }
+    const execEnv: NodeJS.ProcessEnv = {
+      ...this.env,
+      [SELF_REEXEC_MARKER_ENV]: `${stale.running}->${stale.installed}`,
+      [SELF_REEXEC_HANDOFF_ENV]: serializedHandoff,
+    };
+
+    try {
+      this.logger.error(
+        `[cmuxlayer-proxy] re-execing installed MCP entrypoint ${installedEntry}`,
+      );
+      this.execveFn?.(
+        process.execPath,
+        [process.execPath, installedEntry],
+        execEnv,
+      );
+      this.logger.error(
+        "[cmuxlayer-proxy] in-place stale-child re-exec returned unexpectedly; continuing current process",
+      );
+    } catch (error) {
+      this.logger.error(
+        "[cmuxlayer-proxy] in-place stale-child re-exec failed; continuing current process",
+        error,
+      );
+    } finally {
+      // Production execve never returns. This restores service only for a
+      // failed/unsupported exec (and for injected test doubles).
+      this.resumeSelfRemediationChecks();
+    }
+  }
+
   private async checkVersionBumpReconnect(): Promise<void> {
-    if (!this.running || this.versionBumpReconnecting) {
+    if (
+      !this.running ||
+      this.versionBumpReconnecting ||
+      this.selfRemediationStarted
+    ) {
       return;
     }
     const stale = this.detectStaleBuildFn();
     if (!stale?.stale) {
+      return;
+    }
+    const installedEntry = this.installedEntryScriptPath();
+    const selfRemediationStatus = this.selfRemediationStatus(
+      stale,
+      installedEntry,
+    );
+    if (selfRemediationStatus === "eligible" && installedEntry) {
+      if (!this.selfReexecGuard.allow()) {
+        this.logger.error(
+          "[cmuxlayer-proxy] stale-child self-reexec storm guard tripped; backing off",
+        );
+        return;
+      }
+      await this.remediateStaleSelf(stale, installedEntry);
+      return;
+    }
+    if (selfRemediationStatus === "already-attempted") {
+      this.logger.error(
+        "[cmuxlayer-proxy] stale MCP child remains after one self-reexec attempt; storm guard blocking another",
+      );
       return;
     }
     if (!this.versionBumpReconnectGuard.allow()) {
@@ -1085,12 +1387,19 @@ export class CmuxLayerProxy {
           );
         }
       }
-      const reconnectLoopWillResume = this.reconnectLoopActive;
       this.clearReconnectTimer();
       this.handleDaemonDrop();
       this.reconnectAttempt = 0;
-      if (!reconnectLoopWillResume) {
-        this.clearReconnectTimer();
+      // A version check can race the final microtask of the initial connect
+      // loop: the socket is attached, but reconnectLoopActive has not cleared.
+      // Let that loop settle before ensuring a replacement connection, or the
+      // drop can be left with neither a timer nor an active connector.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (
+        !this.reconnectLoopActive &&
+        !this.daemonSocket &&
+        !this.reconnectTimer
+      ) {
         this.connecting = false;
       }
       this.ensureConnecting();
