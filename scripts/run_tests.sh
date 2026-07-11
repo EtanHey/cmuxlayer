@@ -7,6 +7,10 @@ EXPECTED_RENDER="| Waveform: [|=--]"
 export FIXTURE_PATH
 export EXPECTED_RENDER
 
+if ! bash scripts/tests/nightly-contract-run.test.sh; then
+  ((EXIT_STATUS |= 16))
+fi
+
 node --input-type=module - <<'NODE'
 import { readFileSync } from "node:fs";
 import TransformTTY from "transform-tty";
