@@ -51,6 +51,8 @@ fi
 echo "release: gating on typecheck + tests…"
 run "bun run typecheck"
 run "bun run test"
+echo "release: gating on real-cmux contracts (warn-only skip when no live CMUX_SOCKET_PATH is reachable)…"
+run "bun run test:contract"
 
 CURRENT="$(grep -E '^  "version":' package.json | head -1 | sed -E 's/.*"version": "([^"]+)".*/\1/')"
 echo "release: $CURRENT → $VERSION"
