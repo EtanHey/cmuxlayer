@@ -317,6 +317,10 @@ describe("control health", () => {
     expect(health.self_heal.pane_pty_dead.surfaces).toEqual([
       expect.objectContaining({ surface_id: "surface:100" }),
     ]);
+    expect(formatControlHealth(health)).toContain(
+      "surface:100 since 2026-07-11T12:00:00.000Z",
+    );
+    expect(formatControlHealth(health)).not.toContain("since undefined");
   });
 
   it("reports a malformed monitor registry as unavailable", async () => {

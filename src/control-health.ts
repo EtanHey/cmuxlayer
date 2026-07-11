@@ -734,7 +734,8 @@ export function formatControlHealth(health: ControlHealth): string {
     ...formatInstance(health.cmux_instances.nightly),
     `pane_pty_dead: ${health.self_heal.pane_pty_dead.count}`,
     ...health.self_heal.pane_pty_dead.surfaces.map(
-      (surface) => `  ${surface.surface_id} since ${surface.since_at}`,
+      (surface) =>
+        `  ${surface.surface_id} since ${surface.since_at ?? surface.last_attempt_at}`,
     ),
     ...(health.self_heal.monitor_registry.available
       ? [
