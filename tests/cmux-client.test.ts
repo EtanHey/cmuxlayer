@@ -804,6 +804,70 @@ describe("CmuxClient.setStatus", () => {
   });
 });
 
+describe("CmuxClient.setStatuses", () => {
+  it("fans CLI updates out through set-status and returns true", async () => {
+    const { client, exec } = mockClient({});
+
+    const result = await client.setStatuses([
+      {
+        key: "agent-a",
+        value: "working",
+        icon: "bolt.fill",
+        workspace: "workspace:1",
+      },
+      {
+        key: "agent-b",
+        value: "done",
+        color: "#00ff00",
+        workspace: "workspace:1",
+      },
+    ]);
+
+    expect(result).toBe(true);
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
+      "--json",
+      "set-status",
+      "agent-a",
+      "working",
+      "--icon",
+      "bolt.fill",
+      "--workspace",
+      "workspace:1",
+    ]);
+    expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
+      "--json",
+      "set-status",
+      "agent-b",
+      "done",
+      "--color",
+      "#00ff00",
+      "--workspace",
+      "workspace:1",
+    ]);
+  });
+
+  it("attempts every update and throws an error naming all failed keys", async () => {
+    const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+      const key = args[2];
+      if (key === "agent-a" || key === "agent-c") {
+        throw new Error(`rejected ${key}`);
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const client = new CmuxClient({ exec, existsSync: () => false });
+
+    const result = client.setStatuses([
+      { key: "agent-a", value: "working" },
+      { key: "agent-b", value: "done" },
+      { key: "agent-c", value: "error" },
+    ]);
+
+    await expect(result).rejects.toThrow(/agent-a.*agent-c/);
+    expect(exec).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("CmuxClient.clearStatus", () => {
   it("calls cmux clear-status with key", async () => {
     const { client, exec } = mockClient({});
