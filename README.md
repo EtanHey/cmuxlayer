@@ -47,6 +47,13 @@ command = "cmuxlayer"
 }
 ```
 
+To keep only a per-session resident subset of tools, set
+`CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
+`list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
+which makes every deferred tool available for the rest of that MCP session.
+Unset or blank values preserve the full tool list; unknown names are warned and
+ignored while valid names still load.
+
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
 ## What You Can Do

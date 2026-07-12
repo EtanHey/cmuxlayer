@@ -186,4 +186,23 @@ describe("daemon-first MCP entry", () => {
       expect.stringContaining("CMUXLAYER_FORCE_INPROCESS=1"),
     );
   });
+
+  it("keeps a nonblank default palette isolated from a shared daemon", async () => {
+    const logger = { error: vi.fn() };
+    const opts = createEntryOptions({
+      env: {
+        CMUXLAYER_DEFAULT_PALETTE:
+          "list_surfaces,control_health,read_screen",
+      },
+      logger,
+    });
+
+    const result = await runDaemonFirstEntry(opts);
+
+    expect(result.mode).toBe("in-process");
+    expect(opts.probeDaemon).not.toHaveBeenCalled();
+    expect(opts.spawnDaemon).not.toHaveBeenCalled();
+    expect(opts.runProxy).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
 });

@@ -266,6 +266,16 @@ export async function runDaemonFirstEntry(
     };
   };
 
+  if (env.CMUXLAYER_DEFAULT_PALETTE?.trim()) {
+    // A shared daemon cannot observe a child MCP process's environment. Keep
+    // palette selection in this process so it remains session-local.
+    return {
+      mode: "in-process",
+      server: await startInProcess({}),
+      fallbackWarnings: [],
+    };
+  }
+
   if (isEnabled(env.CMUXLAYER_FORCE_INPROCESS)) {
     return fallback(
       "CMUXLAYER_FORCE_INPROCESS=1; using heavy in-process runtime instead of daemon proxy",
