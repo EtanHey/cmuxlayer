@@ -1673,7 +1673,7 @@ describe("AgentEngine", () => {
       }
     });
 
-    it("does not rewrite TASK_DONE candidates during the confirmation window", async () => {
+    it("does not rewrite TASK_DONE candidate metadata while the sweep stamps liveness", async () => {
       vi.useFakeTimers();
       try {
         const candidateAt = new Date("2026-05-25T12:00:00.000Z");
@@ -1702,8 +1702,13 @@ describe("AgentEngine", () => {
         await engine.runSweep();
 
         const after = stateMgr.readState("worker-task-done-candidate");
-        expect(after?.version).toBe(before?.version);
-        expect(after?.updated_at).toBe(before?.updated_at);
+        expect(after?.task_done_candidate_at).toBe(
+          before?.task_done_candidate_at,
+        );
+        expect(after?.version).toBe((before?.version ?? 0) + 1);
+        expect(after?.updated_at).toBe(
+          new Date(candidateAt.getTime() + 1_000).toISOString(),
+        );
       } finally {
         vi.useRealTimers();
       }
@@ -5060,7 +5065,7 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
-    it("marks stale pending boot prompt agents as errored", async () => {
+    it("RC5: keeps a stale pending boot prompt agent reachable while its surface is alive", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-boot",
@@ -5077,9 +5082,9 @@ To continue this session, run codex resume ${sessionId}`,
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-boot")).toMatchObject({
-        state: "error",
+        state: "ready",
         boot_prompt_pending: false,
-        error: "Boot prompt delivery interrupted before completion",
+        error: null,
       });
     });
 
@@ -5266,6 +5271,27 @@ To continue this session, run codex resume ${sessionId}`,
 
     afterEach(() => {
       vi.useRealTimers();
+    });
+
+    it("RC1: stamps updated_at when a live idle agent is observed by a sweep", async () => {
+      const sweepAt = new Date("2026-07-12T09:30:00.000Z");
+      vi.setSystemTime(sweepAt);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-idle-heartbeat",
+          state: "idle",
+          surface_id: "surface:idle-heartbeat",
+          updated_at: "2026-07-12T09:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:idle-heartbeat")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-idle-heartbeat")?.updated_at).toBe(
+        sweepAt.toISOString(),
+      );
     });
 
     it("backs off to the idle interval after unchanged sweeps", async () => {

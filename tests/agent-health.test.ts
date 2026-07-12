@@ -95,7 +95,7 @@ describe("agent lifecycle health", () => {
     });
   });
 
-  it("escalates an absent inbox monitor after the boot grace window", () => {
+  it("RC2: keeps an absent inbox monitor messaging-only without reconciling agent state to error", () => {
     const createdAt = "2026-06-26T20:00:00.000Z";
     const withinGrace = evaluateAgentHealth(
       makeRecord({
@@ -128,6 +128,7 @@ describe("agent lifecycle health", () => {
       "degraded",
     );
     expect(pastGrace.status).toBe("degraded");
+    expect(pastGrace.reconciled_state).toBeUndefined();
   });
 
   it("marks auto-discovered agents as info if they look ready", () => {

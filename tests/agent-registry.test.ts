@@ -643,7 +643,7 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("auto-claude-surface-121")).toBeNull();
     });
 
-    it("deduplicates M1 mimir pending ghosts to one row per launcher seat", async () => {
+    it("RC4: preserves live pending sibling seats on different surfaces during repair", async () => {
       const discovered = [
         makeDiscovered({
           surface_id: "surface:101",
@@ -745,8 +745,12 @@ describe("AgentRegistry", () => {
         expect.arrayContaining([
           "auto-claude-surface-101",
           "auto-claude-surface-102",
-          "mimirClaude-pending-1710000000-abcd",
           "mimirCodex-pending-1710000000-cafe",
+        ]),
+      );
+      expect(result.evicted).not.toEqual(
+        expect.arrayContaining([
+          "mimirClaude-pending-1710000000-abcd",
           "mimirCodex-pending-1710000000-dead",
         ]),
       );
@@ -755,7 +759,12 @@ describe("AgentRegistry", () => {
         .list()
         .map((record) => record.agent_id)
         .sort();
-      expect(liveRows).toEqual(["mimirClaude", "mimirCodex"]);
+      expect(liveRows).toEqual([
+        "mimirClaude",
+        "mimirClaude-pending-1710000000-abcd",
+        "mimirCodex",
+        "mimirCodex-pending-1710000000-dead",
+      ]);
       expect(stateMgr.readState("mimirClaude")).toMatchObject({
         agent_id: "mimirClaude",
         surface_id: "surface:101",
@@ -773,24 +782,40 @@ describe("AgentRegistry", () => {
       expect(
         stateMgr
           .listStates()
-          .filter(
-            (record) =>
-              record.agent_id.startsWith("auto-") ||
-              record.agent_id.includes("-pending-"),
-          ),
-      ).toEqual([]);
+          .filter((record) => record.agent_id.includes("-pending-"))
+          .map((record) => record.agent_id)
+          .sort(),
+      ).toEqual([
+        "mimirClaude-pending-1710000000-abcd",
+        "mimirCodex-pending-1710000000-dead",
+      ]);
 
       const merged = await registry.listMerged({
         scan: vi.fn().mockResolvedValue(discovered),
       } as any);
       expect(merged.map((record) => record.agent_id).sort()).toEqual([
         "mimirClaude",
+        "mimirClaude-pending-1710000000-abcd",
         "mimirCodex",
+        "mimirCodex-pending-1710000000-dead",
       ]);
     });
   });
 
   describe("hasLiveSurface", () => {
+    it("RC1: treats a confirmed dead PTY as not alive even when its surface is enumerable", async () => {
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:dead-pty"),
+      ]);
+
+      await expect(
+        registry.isSurfaceAlive(
+          { surface_id: "surface:dead-pty" },
+          { ptyDead: true },
+        ),
+      ).resolves.toBe(false);
+    });
+
     it("treats empty surface enumeration as inconclusive", async () => {
       const registry = new AgentRegistry(
         stateMgr,
