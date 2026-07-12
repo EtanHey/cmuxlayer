@@ -86,7 +86,14 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         ok: true,
         expanded: true,
       });
-      expect((await fixture.client.listTools()).tools).toHaveLength(26);
+      const expandedTools = (await fixture.client.listTools()).tools;
+      expect(expandedTools).toHaveLength(27);
+      expect(
+        expandedTools.find((tool) => tool.name === "delete_workspace")?._meta,
+      ).toMatchObject({
+        defer_loading: true,
+        "cmuxlayer/interim": true,
+      });
       expect(fixture.listChanged).toHaveBeenCalledTimes(1);
 
       const notificationCount = fixture.listChanged.mock.calls.length;
@@ -99,7 +106,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         expanded: false,
         already_expanded: true,
       });
-      expect((await fixture.client.listTools()).tools).toHaveLength(26);
+      expect((await fixture.client.listTools()).tools).toHaveLength(27);
       expect(fixture.listChanged).toHaveBeenCalledTimes(notificationCount);
     } finally {
       await closePaletteServer(fixture);
@@ -107,7 +114,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
   });
 
   it.each([undefined, "", "   \t  "])(
-    "preserves the full 42-tool surface when the env is %s",
+    "preserves the full tool surface when the env is %s",
     async (value) => {
       if (value === undefined) {
         delete process.env[ENV_KEY];
@@ -120,7 +127,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
           (server as unknown as { _registeredTools: Record<string, unknown> })
             ._registeredTools,
         );
-        expect(names).toHaveLength(42);
+        expect(names).toHaveLength(43);
         expect(names).not.toContain("expand_palette");
       } finally {
         await server.close();

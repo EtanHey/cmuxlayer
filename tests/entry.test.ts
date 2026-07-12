@@ -203,6 +203,9 @@ describe("daemon-first MCP entry", () => {
     expect(opts.probeDaemon).not.toHaveBeenCalled();
     expect(opts.spawnDaemon).not.toHaveBeenCalled();
     expect(opts.runProxy).not.toHaveBeenCalled();
+    expect(opts.startInProcess).toHaveBeenCalledWith({
+      env: opts.env,
+    });
     expect(logger.error).not.toHaveBeenCalled();
   });
 });

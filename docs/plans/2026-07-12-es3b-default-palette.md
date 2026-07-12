@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a per-session `CMUXLAYER_DEFAULT_PALETTE` environment seam that boots only named tools plus `expand_palette`, while preserving the unset 42-tool surface exactly.
+**Goal:** Add a per-session `CMUXLAYER_DEFAULT_PALETTE` environment seam that boots only named tools plus `expand_palette`, while preserving the current unset full-tool surface exactly.
 
 **Architecture:** Parse the environment once per `createServer()` call in a small `src/palette.ts` controller. The existing `server.tool` registration wrapper remains the single seam: selected tools register immediately, non-selected tools retain their original registration arguments for runtime expansion, and lifecycle-gated registrations are never seen when `skipAgentLifecycle` wins. Palette-bearing MCP children use the existing in-process entry path so their environment cannot leak through a shared daemon; expansion suppresses the SDK's per-tool notifications and emits one explicit `notifications/tools/list_changed` after the batch.
 
@@ -18,7 +18,7 @@
 1. Add an environment restore helper and an in-memory server/client fixture.
 2. Test a three-name palette lists exactly those tools plus `expand_palette`.
 3. Test expansion restores the full lifecycle-gated set, emits `notifications/tools/list_changed`, and is idempotent.
-4. Test unset and whitespace-only values preserve the existing 42-tool surface without `expand_palette`.
+4. Test unset and whitespace-only values preserve the current full-tool surface without `expand_palette`.
 5. Test unknown names warn to stderr while valid names remain resident.
 6. Test a deferred tool call fails with the standard MCP unknown-tool error before expansion.
 7. Run `bunx vitest run tests/default-palette.test.ts` and verify failures are caused by the missing palette feature.

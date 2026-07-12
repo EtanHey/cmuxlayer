@@ -11,6 +11,7 @@ export const REGISTERED_TOOL_NAMES = [
   "query_monitor_registry",
   "select_workspace",
   "create_workspace",
+  "delete_workspace",
   "new_split",
   "new_surface",
   "move_surface",
@@ -56,7 +57,7 @@ export interface PaletteExpansion {
 
 export interface DefaultToolPalette {
   shouldRegister(toolName: string): boolean;
-  defer(toolName: string, args: unknown[]): void;
+  defer(toolName: string, args: unknown[]): unknown;
   warnAboutUnknownTools(): void;
   expand(register: ToolRegistrar): PaletteExpansion;
 }
@@ -76,7 +77,10 @@ export function createDefaultToolPalette(
       .filter(Boolean),
   );
   const known = new Set<string>(REGISTERED_TOOL_NAMES);
-  const deferred = new Map<string, unknown[]>();
+  const deferred = new Map<
+    string,
+    { args: unknown[]; updates: Array<Record<string, unknown>> }
+  >();
   let expanded = false;
 
   return {
@@ -84,7 +88,16 @@ export function createDefaultToolPalette(
       return requested.has(toolName);
     },
     defer(toolName, args) {
-      deferred.set(toolName, args);
+      const registration = {
+        args,
+        updates: [] as Array<Record<string, unknown>>,
+      };
+      deferred.set(toolName, registration);
+      return {
+        update(update: Record<string, unknown>) {
+          registration.updates.push(update);
+        },
+      };
     },
     warnAboutUnknownTools() {
       const unknown = [...requested].filter((name) => !known.has(name));
@@ -105,8 +118,18 @@ export function createDefaultToolPalette(
 
       expanded = true;
       const registeredTools = [...deferred.keys()];
-      for (const args of deferred.values()) {
-        register(...args);
+      for (const registration of deferred.values()) {
+        const registered = register(...registration.args) as {
+          update?: (update: Record<string, unknown>) => void;
+        };
+        for (const update of registration.updates) {
+          if (typeof registered?.update !== "function") {
+            throw new Error(
+              "Deferred tool registration did not return an update handle",
+            );
+          }
+          registered.update(update);
+        }
       }
       deferred.clear();
       return {

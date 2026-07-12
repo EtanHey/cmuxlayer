@@ -1810,6 +1810,8 @@ export interface CreateServerOptions {
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
+  /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
+  defaultPalette?: string;
   /** Opt into Claude Code channel notifications for lifecycle events */
   enableClaudeChannels?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
@@ -2495,7 +2497,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   );
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
   const palette = createDefaultToolPalette(
-    process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
+    opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
   );
   (
     server as unknown as { tool: (...args: unknown[]) => unknown }
@@ -2512,8 +2514,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       typeof toolName === "string" &&
       !palette.shouldRegister(toolName)
     ) {
-      palette.defer(toolName, args);
-      return undefined;
+      return palette.defer(toolName, args);
     }
     return rawTool(...args);
   };
