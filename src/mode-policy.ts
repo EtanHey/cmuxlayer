@@ -19,7 +19,6 @@ const MUTATING_TOOLS = new Set([
   "new_split",
   "new_surface",
   "move_surface",
-  "reorder_surface",
   "send_input",
   "send_command",
   "send_key",

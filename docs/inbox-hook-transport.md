@@ -2,7 +2,7 @@
 
 > Transport for the metacommlayer WRITE channel that does **not** depend on cmux
 > agent state. Born from the 2026-06-05 incident: a poisoned (error) registry
-> record killed the send_input fallback and a GO dispatch sat unread in
+> record killed the raw-surface send fallback and a GO dispatch sat unread in
 > `inbox.jsonl`.
 
 ## Two layers shipped in this PR
@@ -55,7 +55,7 @@ project's `.claude/settings.json` (or `settings.local.json`):
 
 - Hooks cannot wake a **fully idle** session (no timer events; `FileChanged`
   and `Stop` fire only around session activity). For truly idle agents the
-  `dispatch_to_agent` nudge (layer 1) or a manual `send_input` remains the
+  `dispatch_to_agent` nudge (layer 1) or manual `send_to(mode:"surface")` remains the
   wake of last resort. The durable queue is always the inbox file.
 - Codex/Cursor have no hook system — they keep the poll-on-turn convention
   (`replayUndelivered()` at turn start; see `recommendedCodexWatch`).
