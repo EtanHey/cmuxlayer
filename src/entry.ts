@@ -22,6 +22,7 @@ export { spawnDaemonProcess, type SpawnDaemonOptions } from "./daemon-spawn.js";
 
 export interface StartInProcessOptions {
   fallbackWarnings?: string[];
+  env?: NodeJS.ProcessEnv;
 }
 
 export type ExitFn = (code: number) => void;
@@ -155,6 +156,7 @@ export async function startInProcessRuntime(
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
     enableCloseForensics: true,
+    defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(opts.fallbackWarnings
       ? { controlHealthWarnings: opts.fallbackWarnings }
       : {}),
@@ -265,6 +267,16 @@ export async function runDaemonFirstEntry(
       fallbackWarnings: [warning],
     };
   };
+
+  if (env.CMUXLAYER_DEFAULT_PALETTE?.trim()) {
+    // A shared daemon cannot observe a child MCP process's environment. Keep
+    // palette selection in this process so it remains session-local.
+    return {
+      mode: "in-process",
+      server: await startInProcess({ env }),
+      fallbackWarnings: [],
+    };
+  }
 
   if (isEnabled(env.CMUXLAYER_FORCE_INPROCESS)) {
     return fallback(

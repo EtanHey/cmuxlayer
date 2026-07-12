@@ -10,6 +10,10 @@ import { access, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
+import {
+  CMUXLAYER_DEFAULT_PALETTE_ENV,
+  createDefaultToolPalette,
+} from "./palette.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import {
   createFileSystemSeatManifestWriter,
@@ -1806,6 +1810,8 @@ export interface CreateServerOptions {
   stateDir?: string;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
+  /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
+  defaultPalette?: string;
   /** Opt into Claude Code channel notifications for lifecycle events */
   enableClaudeChannels?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
@@ -2490,14 +2496,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined,
   );
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  const palette = createDefaultToolPalette(
+    opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
+  );
   (
     server as unknown as { tool: (...args: unknown[]) => unknown }
   ).tool = (...args: unknown[]): unknown => {
+    const toolName = args[0];
     const handlerIndex = args.length - 1;
     const handler = args[handlerIndex];
     if (typeof handler === "function") {
       args[handlerIndex] = (...handlerArgs: unknown[]) =>
         withTransportRetryTracking(() => handler(...handlerArgs));
+    }
+    if (
+      palette &&
+      typeof toolName === "string" &&
+      !palette.shouldRegister(toolName)
+    ) {
+      return palette.defer(toolName, args);
     }
     return rawTool(...args);
   };
@@ -8939,7 +8956,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // Expose engine on the tool for test access
-    (server as any)._registeredTools["interact"]._engine = engine;
+    const registeredInteract = (server as any)._registeredTools["interact"];
+    if (registeredInteract) {
+      registeredInteract._engine = engine;
+    }
 
     // 20. kill
     server.tool(
@@ -9144,6 +9164,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     );
   } // end skipAgentLifecycle guard
+
+  if (palette) {
+    palette.warnAboutUnknownTools();
+    rawTool(
+      "expand_palette",
+      "Register the tools deferred by CMUXLAYER_DEFAULT_PALETTE for this MCP session",
+      {},
+      ANNOTATIONS.idempotentMutating,
+      async () =>
+        withTransportRetryTracking(async () => {
+          const sendToolListChanged = server.sendToolListChanged;
+          server.sendToolListChanged = () => {};
+          let expansion;
+          try {
+            expansion = palette.expand(rawTool);
+          } finally {
+            server.sendToolListChanged = sendToolListChanged;
+          }
+          if (expansion.expanded) {
+            server.sendToolListChanged();
+          }
+          return ok({ ...expansion });
+        }),
+    );
+  }
 
   return server;
 }
