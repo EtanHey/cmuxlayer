@@ -291,7 +291,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
-  it("signals irrecoverable transport only after repeated socket and CLI denial failures", async () => {
+  it("signals irrecoverable transport after repeated upstream denial failures", async () => {
     const socketPath = join(tmpdir(), `cmux-irrecoverable-${process.pid}.sock`);
     const onIrrecoverableTransport = vi.fn();
     const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
@@ -326,6 +326,133 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("signals retirement after repeated upstream connection failures", async () => {
+    const socketPath = join(
+      tmpdir(),
+      `cmux-upstream-dead-${process.pid}.sock`,
+    );
+    let probeCountAtRetirement: number | undefined;
+    const probeSocketHealth = vi.fn().mockResolvedValue({
+      usable: false,
+      socketPath,
+      error: "connect ECONNREFUSED",
+    });
+    const onIrrecoverableTransport = vi.fn(() => {
+      probeCountAtRetirement = probeSocketHealth.mock.calls.length;
+    });
+    const client = wrapCliWithSelfHeal(new CmuxClient(), {
+      socketPath,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+      irrecoverableMinFailures: 3,
+      irrecoverableMinDurationMs: 0,
+      onIrrecoverableTransport,
+    });
+
+    await waitForExpectation(
+      async () => expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+
+    expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1);
+    expect(probeCountAtRetirement).toBe(3);
+    client.stop();
+  });
+
+  it("signals retirement when an idle active upstream socket dies", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-idle-upstream-death-"));
+    const socketPath = join(stateDir, "cmux.sock");
+    const { server } = await startPingServer(socketPath);
+    const onIrrecoverableTransport = vi.fn();
+    const client = await createCmuxClient({
+      socketPath,
+      pingRetryAttempts: 1,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      irrecoverableMinFailures: 3,
+      irrecoverableMinDurationMs: 0,
+      onIrrecoverableTransport,
+    });
+
+    await stopPingServer(server, socketPath);
+    await waitForExpectation(
+      async () => expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+
+    expect(getTransportHealth(client)).toMatchObject({
+      mode: "cli",
+      degraded: true,
+    });
+    if ("stop" in client && typeof client.stop === "function") {
+      client.stop();
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("does not downgrade an active socket when a request starts during its health probe", async () => {
+    const socketPath = join(tmpdir(), `cmux-probe-race-${process.pid}.sock`);
+    let resolveProbe!: (result: {
+      usable: boolean;
+      socketPath: string;
+      error?: string;
+    }) => void;
+    const probeSocketHealth = vi.fn(
+      () =>
+        new Promise<{
+          usable: boolean;
+          socketPath: string;
+          error?: string;
+        }>((resolve) => {
+          resolveProbe = resolve;
+        }),
+    );
+    let resolveRequest!: (value: { workspaces: [] }) => void;
+    const request = new Promise<{ workspaces: [] }>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      listWorkspaces: vi.fn(() => request),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, new CmuxClient(), {
+      socketPath,
+      reprobeIntervalMs: 5,
+      reprobeCapMs: 5,
+      random: () => 0,
+      probeSocketHealth,
+    });
+
+    await waitForExpectation(
+      async () => expect(probeSocketHealth).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    const requestPromise = client.listWorkspaces();
+    await waitForExpectation(
+      async () => expect(socket.listWorkspaces).toHaveBeenCalledTimes(1),
+      { timeout: 1_000, interval: 5 },
+    );
+    resolveProbe({
+      usable: false,
+      socketPath,
+      error: "connect ECONNREFUSED",
+    });
+    await waitForExpectation(
+      async () => expect((client as any).upgrading).toBe(false),
+      { timeout: 1_000, interval: 5 },
+    );
+
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    expect(getTransportHealth(client)?.mode).toBe("socket");
+    resolveRequest({ workspaces: [] });
+    await expect(requestPromise).resolves.toEqual({ workspaces: [] });
+    client.stop();
+  });
+
   it("preserves the transport error when the irrecoverable callback throws", async () => {
     const socketPath = join(tmpdir(), `cmux-callback-throw-${process.pid}.sock`);
     const logger = { error: vi.fn() };
@@ -353,7 +480,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     await waitForExpectation(
       async () =>
         expect(
-          (client as any).denialProbeFailures,
+          (client as any).upstreamProbeFailures,
         ).toBeGreaterThanOrEqual(1),
       { timeout: 1_000, interval: 5 },
     );
@@ -435,7 +562,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
-  it("preserves denial evidence across non-denial failures until a usable socket probe", () => {
+  it("counts upstream probe failures until a usable socket probe resets them", () => {
     const client = wrapCliWithSelfHeal(new CmuxClient(), {
       socketPath: "/tmp/cmux-preserve-denial.sock",
       reprobeIntervalMs: 60_000,
@@ -457,7 +584,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     internals.recordProbeFailure(new Error("probe timeout"));
     internals.recordCliFailure(new Error("connect ENOENT"));
 
-    expect(internals.denialProbeFailures).toBe(1);
+    expect(internals.upstreamProbeFailures).toBe(3);
     expect(internals.cliDenialFailures).toBe(1);
 
     internals.recordProbeResult({
@@ -465,13 +592,13 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       socketPath: "/tmp/cmux-preserve-denial.sock",
     });
 
-    expect(internals.denialProbeFailures).toBe(0);
-    expect(internals.denialProbeStartedAt).toBeNull();
+    expect(internals.upstreamProbeFailures).toBe(0);
+    expect(internals.upstreamProbeStartedAt).toBeNull();
     expect(internals.cliDenialFailures).toBe(0);
     client.stop();
   });
 
-  it("rate-limits denial evidence progress logs", () => {
+  it("rate-limits upstream failure progress logs", () => {
     let now = 1_000;
     const logger = { error: vi.fn() };
     const client = wrapCliWithSelfHeal(new CmuxClient(), {
@@ -485,9 +612,9 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     const internals = client as any;
     logger.error.mockClear();
 
-    internals.recordProbeDenial();
+    internals.recordUpstreamProbeFailure();
     expect(logger.error).toHaveBeenCalledWith(
-      "[cmuxlayer] denial evidence 1/3 probes, 0/3 cli, 0s",
+      "[cmuxlayer] upstream failure evidence 1/3 probes, 0 cli denials, 0s",
     );
 
     now += 1_000;
@@ -497,7 +624,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     now += 29_000;
     internals.recordCliFailure(new Error("write EPIPE"));
     expect(logger.error).toHaveBeenLastCalledWith(
-      "[cmuxlayer] denial evidence 1/3 probes, 2/3 cli, 30s",
+      "[cmuxlayer] upstream failure evidence 1/3 probes, 2 cli denials, 30s",
     );
     client.stop();
   });
@@ -541,7 +668,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
-  it("does not signal irrecoverable transport when the cmux app is down", async () => {
+  it("signals irrecoverable transport when the cmux app remains down", async () => {
     const socketPath = join(tmpdir(), `cmux-app-down-${process.pid}.sock`);
     const onIrrecoverableTransport = vi.fn();
     const exec = vi.fn().mockRejectedValue(new Error("Broken pipe (errno 32)"));
@@ -569,7 +696,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     await expect(client.listWorkspaces()).rejects.toThrow(/errno 32/i);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(onIrrecoverableTransport).not.toHaveBeenCalled();
+    expect(onIrrecoverableTransport).toHaveBeenCalledTimes(1);
     client.stop();
   });
 

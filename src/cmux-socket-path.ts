@@ -21,6 +21,10 @@ export function lastSocketPathFile(stateDir = defaultStateDir()): string {
   return join(stateDir, "last-socket-path");
 }
 
+export function nightlyLastSocketPathFile(stateDir = defaultStateDir()): string {
+  return join(stateDir, "nightly-last-socket-path");
+}
+
 export interface CmuxSocketPathCandidateOptions {
   env?: NodeJS.ProcessEnv;
   stateDir?: string;
@@ -33,6 +37,33 @@ export function readLastSocketPath(stateDir = defaultStateDir()): string | null 
   } catch {
     return null;
   }
+}
+
+export function readNightlyLastSocketPath(
+  stateDir = defaultStateDir(),
+): string | null {
+  try {
+    const value = fs
+      .readFileSync(nightlyLastSocketPathFile(stateDir), "utf-8")
+      .trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function nightlySocketPathCandidates(
+  opts: CmuxSocketPathCandidateOptions = {},
+): string[] {
+  const env = opts.env ?? process.env;
+  const stateDir = opts.stateDir ?? defaultStateDir();
+  const candidates = [
+    env.CMUX_SOCKET_PATH,
+    readNightlyLastSocketPath(stateDir),
+    join("/tmp", "cmux-nightly.sock"),
+  ].filter((path): path is string => Boolean(path));
+
+  return [...new Set(candidates)];
 }
 
 export function cmuxSocketPathCandidates(
