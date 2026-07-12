@@ -528,6 +528,10 @@ export class CmuxClient {
     };
   }
 
+  async deleteWorkspace(workspace: string): Promise<void> {
+    await this.run(["workspace", "close", workspace]);
+  }
+
   async readScreen(
     surface: string,
     opts?: {

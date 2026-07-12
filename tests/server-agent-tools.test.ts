@@ -679,11 +679,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 42", () => {
+  it("total tool count is 43", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(42);
+    expect(Object.keys(registeredTools)).toHaveLength(43);
   });
 });
 

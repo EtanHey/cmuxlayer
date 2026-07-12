@@ -18,7 +18,8 @@
 // Usage:
 //   CMUX_LIVE_HARNESS=1 node scripts/acceptance-registry-liveness.mjs \
 //     --server node --server-arg /abs/path/to/dist/index.js \
-//     --workspace <ref> [--count 3] [--repo cmuxlayer] [--wait-timeout-ms 180000]
+//     (--workspace <ref> | --create-workspace <title>) \
+//     [--count 3] [--repo cmuxlayer] [--wait-timeout-ms 180000]
 //
 // Exit 0 + both "GREEN_DEADCHILD" and "GREEN_REGISTRY_LIVENESS" on pass.
 // If process discovery/state forcing is unavailable, the probe prints an
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     workspace: "",
     waitTimeoutMs: 180_000,
     selfTestDeadChild: false,
+    createWorkspace: "",
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -56,6 +58,7 @@ function parseArgs(argv) {
     else if (a === "--workspace") o.workspace = next();
     else if (a === "--wait-timeout-ms") o.waitTimeoutMs = Number(next());
     else if (a === "--self-test-dead-child") o.selfTestDeadChild = true;
+    else if (a === "--create-workspace") o.createWorkspace = next();
     else if (a === "--help" || a === "-h") {
       process.stdout.write("see header of this file for usage\n");
       process.exit(0);
@@ -602,13 +605,33 @@ async function main() {
     process.stderr.write("Refusing: set CMUX_LIVE_HARNESS=1 to opt in (needs a pane-descended shell).\n");
     process.exit(2);
   }
-  // Refuse before MCP startup/spawn: role:all must never escape the test workspace.
-  const workspace = scopedRoleAllBroadcast(opt.workspace, {}).workspace;
+  // Refuse before MCP startup/spawn unless the scoped workspace will be minted
+  // by this harness after MCP initialization.
+  let workspace = opt.createWorkspace
+    ? ""
+    : scopedRoleAllBroadcast(opt.workspace, {}).workspace;
   process.stdout.write(`=== registry-liveness §7 acceptance (N=${opt.count}, cli=${opt.cli}) ===\n`);
   const mcp = new Mcp(opt.server, opt.serverArgs);
   const spawned = [];
   try {
     await mcp.init();
+    if (opt.createWorkspace) {
+      const created = await mcp.call(
+        "create_workspace",
+        { title: opt.createWorkspace },
+        30_000,
+      );
+      workspace = created.workspace || created.ref;
+      if (!workspace) {
+        throw new Error(
+          `create_workspace returned no ref: ${JSON.stringify(created)}`,
+        );
+      }
+      scopedRoleAllBroadcast(workspace, {});
+      process.stdout.write(
+        `  created scoped workspace ${workspace} ("${opt.createWorkspace}")\n`,
+      );
+    }
 
     // 1. spawn N agents into a scoped workspace
     for (let i = 0; i < opt.count; i += 1) {
@@ -697,6 +720,13 @@ async function main() {
       if (!a.surface_id) continue;
       try {
         await mcp.call("close_surface", { surface: a.surface_id, force: true }, 30_000);
+      } catch {
+        /* best effort */
+      }
+    }
+    if (opt.createWorkspace && workspace) {
+      try {
+        await mcp.call("delete_workspace", { workspace, force: true }, 30_000);
       } catch {
         /* best effort */
       }

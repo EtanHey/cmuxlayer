@@ -83,6 +83,7 @@ const FORWARDED_ASYNC_METHODS = [
   "sendKey",
   "selectWorkspace",
   "createWorkspace",
+  "deleteWorkspace",
   "readScreen",
   "renameTab",
   "notify",

@@ -4634,6 +4634,113 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
+  // Deferred layout/UI tool: keep beside create_workspace so the thin-core
+  // palette classifies both workspace-management tools together off-default.
+  const deleteWorkspaceTool = server.tool(
+    "delete_workspace",
+    "Delete a whole workspace tab and all of its panes/surfaces. SAFETY: refuses a workspace that backs a live agent, or the caller's own workspace, unless force:true. Refusals include the current surfaces and agents for verification.",
+    {
+      workspace: z.string().describe("Target workspace ref"),
+      force: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Delete even when the workspace backs a live agent or is the caller's workspace.",
+        ),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        await assertWorkspaceMutationAllowed(
+          "delete_workspace",
+          args.workspace,
+        );
+
+        const [{ workspaces }, panes] = await Promise.all([
+          client.listWorkspaces(),
+          client.listPanes({ workspace: args.workspace }),
+        ]);
+        const paneGroups = await Promise.all(
+          panes.panes.map((pane) =>
+            client.listPaneSurfaces({
+              workspace: args.workspace,
+              pane: pane.ref,
+            }),
+          ),
+        );
+        const surfaces = paneGroups
+          .flatMap((group) => group.surfaces)
+          .filter(
+            (surface, index, all) =>
+              all.findIndex((candidate) => candidate.ref === surface.ref) ===
+              index,
+          );
+        const surfaceRefs = new Set(surfaces.map((surface) => surface.ref));
+        const agents = stateMgr
+          .listStates()
+          .filter(
+            (agent) =>
+              surfaceRefs.has(agent.surface_id) ||
+              agent.workspace_id === args.workspace,
+          );
+        const liveAgents = agents.filter(
+          (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
+        );
+        const callerWorkspace = await currentCallerWorkspace();
+        const deletingCallerWorkspace = callerWorkspace === args.workspace;
+
+        if (
+          !args.force &&
+          (deletingCallerWorkspace || liveAgents.length > 0)
+        ) {
+          const reasons = [
+            ...(deletingCallerWorkspace ? ["it is the caller workspace"] : []),
+            ...(liveAgents.length > 0
+              ? [`it backs ${liveAgents.length} live agent(s)`]
+              : []),
+          ];
+          return err(
+            new Error(
+              `Refused to delete ${args.workspace}: ${reasons.join(" and ")}. Pass force:true to delete anyway.`,
+            ),
+            {
+              refused: true,
+              workspace: args.workspace,
+              caller_workspace: deletingCallerWorkspace,
+              surfaces,
+              agents,
+              live_agents: liveAgents,
+            },
+          );
+        }
+
+        await client.deleteWorkspace(args.workspace);
+        const removedWorkspace =
+          workspaces.find((workspace) => workspace.ref === args.workspace) ?? {
+            ref: args.workspace,
+          };
+        const data = {
+          workspace: args.workspace,
+          force: args.force ?? false,
+          removed: {
+            workspaces: [removedWorkspace],
+            surfaces,
+          },
+        };
+        return okFormatted(formatOk("delete_workspace", data), data);
+      } catch (e) {
+        return err(e);
+      }
+    },
+  );
+  deleteWorkspaceTool.update({
+    _meta: {
+      defer_loading: true,
+      "cmuxlayer/interim": true,
+    },
+  });
+
   // 2. new_split
   server.tool(
     "new_split",
