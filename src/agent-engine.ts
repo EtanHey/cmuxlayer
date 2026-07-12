@@ -2780,7 +2780,8 @@ export class AgentEngine {
       }
 
       if (
-        !(state === "booting" && agent.boot_prompt_pending) &&
+        state !== "booting" &&
+        !TERMINAL_STATES.has(state) &&
         (await this.registry.isSurfaceAlive(agent))
       ) {
         const heartbeat = this.stateMgr.updateRecord(agentId, {});

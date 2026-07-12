@@ -5294,6 +5294,55 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
+    it("§c: evicts an agentless booting ghost after the timeout despite intervening sweeps", async () => {
+      const startedAt = new Date("2026-07-12T09:30:00.000Z");
+      vi.setSystemTime(startedAt);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-booting-ghost",
+          state: "booting",
+          surface_id: "surface:booting-ghost",
+          boot_prompt_pending: false,
+          created_at: startedAt.toISOString(),
+          updated_at: startedAt.toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:booting-ghost")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:booting-ghost",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      vi.setSystemTime(new Date(startedAt.getTime() + 5_000));
+      await engine.runSweep();
+      vi.setSystemTime(new Date(startedAt.getTime() + 31_000));
+      await engine.getRegistry().listMerged(
+        {
+          scan: vi.fn().mockResolvedValue([
+            {
+              surface_id: "surface:booting-ghost",
+              surface_title: "shell",
+              workspace_id: "workspace:1",
+              cli: "unknown",
+              parsed_status: "unknown",
+              model: null,
+              token_count: null,
+              context_pct: null,
+              has_agent: false,
+              read_error: false,
+            },
+          ]),
+        } as any,
+        { force: true },
+      );
+
+      expect(engine.getAgentState("agent-booting-ghost")).toBeNull();
+      expect(stateMgr.readState("agent-booting-ghost")).toBeNull();
+    });
+
     it("backs off to the idle interval after unchanged sweeps", async () => {
       const sweep = vi.spyOn(engine, "runSweep").mockResolvedValue(undefined);
 
