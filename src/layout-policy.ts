@@ -464,19 +464,22 @@ export function chooseAgentSpawnPlacement(
       : { kind: "split", direction: "left" };
   }
 
-  const hasLeadColumn =
-    layouts.some(isLeadMajorityPane) ||
-    context.parentRole === "orchestrator" ||
-    context.parentRole === "ic";
-  // A worker from a lead-owned single-column workspace has no classified
-  // destination surface yet. Seed the right worker column without anchoring the
-  // split to the lead pane.
-  if (
-    role === "worker" &&
-    columnCount < 2 &&
-    hasLeadColumn
-  ) {
-    return { kind: "split", direction: "right" };
+  // Column 0 is reserved for leads. A worker in any single-column workspace
+  // must seed the right worker column, even when the existing pane is already
+  // worker-owned or role classification is sparse. Docking into that pane would
+  // make the bad placement fill-dependent and permanent.
+  if (role === "worker" && columnCount < 2) {
+    const hasLeadColumn =
+      layouts.some(isLeadMajorityPane) ||
+      context.parentRole === "orchestrator" ||
+      context.parentRole === "ic";
+    return hasLeadColumn
+      ? { kind: "split", direction: "right" }
+      : {
+          kind: "split",
+          direction: "right",
+          pane: rightmostByColumn(layouts)?.pane.ref,
+        };
   }
 
   const workerPanes = layouts.filter(isDedicatedWorkerPane);

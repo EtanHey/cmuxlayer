@@ -8044,7 +8044,92 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfacelessEvicted = await registry.evictSurfaceless();
           engine.evictDeadProcessAgents();
           discovery.invalidate();
-          const after = await registry.listMerged(discovery, { force: true });
+          let after = await registry.listMerged(discovery, { force: true });
+          const topologyBeforeReflow = await collectSurfaceTopology();
+          const reflowed: Array<{
+            agent_id: string;
+            surface_id: string;
+            from_column: number;
+            to_column: number;
+            pane: string;
+          }> = [];
+
+          if (topologyBeforeReflow) {
+            const panesByWorkspace = new Map<
+              string,
+              Awaited<ReturnType<typeof client.listPanes>>
+            >();
+
+            for (const agent of after) {
+              if (inferRecordRoleOrNull(agent) !== "worker") continue;
+              const current = topologyBeforeReflow.topologyBySurface.get(
+                agent.surface_id,
+              );
+              if (current?.column !== 0 || (current.column_count ?? 0) < 2) {
+                continue;
+              }
+
+              const workspace =
+                topologyBeforeReflow.workspaceBySurface.get(agent.surface_id) ??
+                agent.workspace_id;
+              if (!workspace) {
+                throw new Error(
+                  `Cannot reflow worker ${agent.agent_id}: live workspace is unknown`,
+                );
+              }
+
+              let panes = panesByWorkspace.get(workspace);
+              if (!panes) {
+                panes = await client.listPanes({ workspace });
+                panesByWorkspace.set(workspace, panes);
+              }
+              const columns = deriveColumnIndex(panes.panes);
+              const target = [...panes.panes]
+                .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
+                .sort((a, b) => {
+                  const columnDelta =
+                    (columns.get(a.ref) ?? 0) - (columns.get(b.ref) ?? 0);
+                  return columnDelta || a.index - b.index;
+                })
+                .at(-1);
+              if (!target) {
+                throw new Error(
+                  `Cannot reflow worker ${agent.agent_id}: no non-leftmost pane exists in ${workspace}`,
+                );
+              }
+
+              await client.moveSurface({
+                surface: agent.surface_id,
+                pane: target.ref,
+                workspace,
+                focus: false,
+              });
+              reflowed.push({
+                agent_id: agent.agent_id,
+                surface_id: agent.surface_id,
+                from_column: current.column,
+                to_column: columns.get(target.ref) ?? 1,
+                pane: target.ref,
+              });
+            }
+          }
+
+          if (reflowed.length > 0) {
+            const topologyAfterReflow = await collectSurfaceTopology();
+            for (const repair of reflowed) {
+              const actual = topologyAfterReflow?.topologyBySurface.get(
+                repair.surface_id,
+              );
+              if (actual?.column === 0 || actual?.column == null) {
+                throw new Error(
+                  `Worker placement repair failed for ${repair.agent_id}: surface ${repair.surface_id} remains in column ${actual?.column ?? "unknown"}`,
+                );
+              }
+              repair.to_column = actual.column;
+            }
+            discovery.invalidate();
+            after = await registry.listMerged(discovery, { force: true });
+          }
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
           const managedSurfaceIds = new Set(
@@ -8070,6 +8155,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             added: [...afterIds].filter((id) => !beforeIds.has(id)),
             evicted,
             repaired: repair.repaired,
+            reflowed,
             mismatches: after
               .filter((agent) => agent.parsed_cli_mismatch)
               .map((agent) => agent.agent_id),

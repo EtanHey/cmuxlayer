@@ -552,7 +552,7 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "split", direction: "left" });
   });
 
-  it("docks workers into launcher-title Codex panes without registry state", () => {
+  it("keeps a worker spawn out of column 0 when the only pane is worker-owned", () => {
     const panes = [makePane("pane:worker", 0, ["surface:cmuxlayer-worker"])];
     const paneSurfaces = [
       makeTitledPaneSurfaces("pane:worker", [
@@ -574,7 +574,20 @@ describe("layout policy", () => {
       { role: "worker" },
     );
 
-    expect(placement).toEqual({ kind: "surface", pane: "pane:worker" });
+    const columns = deriveColumnIndex(panes);
+    const resolvedColumn =
+      placement.kind === "surface"
+        ? columns.get(placement.pane)
+        : placement.direction === "right"
+          ? 1
+          : columns.get(placement.pane ?? "pane:worker");
+
+    expect(resolvedColumn).not.toBe(0);
+    expect(placement).toEqual({
+      kind: "split",
+      direction: "right",
+      pane: "pane:worker",
+    });
   });
 
   it("places the first IC in the right column above existing workers", () => {

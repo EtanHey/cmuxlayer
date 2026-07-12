@@ -282,13 +282,15 @@ export function formatResync(diff: {
   added: string[];
   evicted: string[];
   repaired?: unknown[];
+  reflowed?: unknown[];
   mismatches: string[];
   orphaned?: string[];
 }): string {
   const added = diff.added.length;
   const evicted = diff.evicted.length;
   const repaired = diff.repaired?.length ?? 0;
+  const reflowed = diff.reflowed?.length ?? 0;
   const mismatches = diff.mismatches.length;
   const orphaned = diff.orphaned?.length ?? 0;
-  return `✔ resync_agents — added: ${added}  repaired: ${repaired}  evicted: ${evicted}  mismatches: ${mismatches}  orphaned: ${orphaned}`;
+  return `✔ resync_agents — added: ${added}  repaired: ${repaired}  reflowed: ${reflowed}  evicted: ${evicted}  mismatches: ${mismatches}  orphaned: ${orphaned}`;
 }

@@ -1151,7 +1151,7 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
-    it("rehydrates persisted role surfaces before placing after reconnect", async () => {
+    it("does not reuse a persisted worker surface in column 0 after reconnect", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "existing-worker",
@@ -1191,12 +1191,12 @@ describe("AgentEngine", () => {
         workspace: "ws:1",
       });
 
-      expect(mockClient.newSurface).toHaveBeenCalledWith({
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
         pane: "pane:worker",
         type: "terminal",
         workspace: "ws:1",
       });
-      expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
     it("partitions unfiltered surface lists by pane membership when placing spawned agents", async () => {
