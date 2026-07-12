@@ -749,7 +749,9 @@ const REGISTRY_REPAIR_SEATS: SeatRegistry = {
   },
 };
 
-function makeRegistryRepairExec(): ExecFn {
+function makeRegistryRepairExec(
+  opts: { liveBrainSibling?: boolean } = {},
+): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
       return {
@@ -787,8 +789,10 @@ function makeRegistryRepairExec(): ExecFn {
               ref: "pane:right",
               index: 1,
               focused: false,
-              surface_count: 1,
-              surface_refs: ["surface:27"],
+              surface_count: opts.liveBrainSibling ? 2 : 1,
+              surface_refs: opts.liveBrainSibling
+                ? ["surface:27", "surface:28"]
+                : ["surface:27"],
               selected_surface_ref: "surface:27",
               pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
             },
@@ -833,6 +837,17 @@ function makeRegistryRepairExec(): ExecFn {
                     index: 0,
                     selected: true,
                   },
+                  ...(opts.liveBrainSibling
+                    ? [
+                        {
+                          ref: "surface:28",
+                          title: "brainlayerClaude",
+                          type: "terminal",
+                          index: 1,
+                          selected: false,
+                        },
+                      ]
+                    : []),
                 ],
         }),
         stderr: "",
@@ -1625,6 +1640,57 @@ describe("resync_agents tool", () => {
       role: "orchestrator",
       launcher_name: "brainlayerClaude",
       seat_id: "brainClaude",
+    });
+  });
+
+  it("RC4: resync_agents keeps a live pending sibling registered and addressable", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const siblingId = "brainlayerClaude-pending-1710000000-sibling";
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: siblingId,
+        surface_id: "surface:28",
+        workspace_id: "workspace:1",
+        repo: "brainlayer",
+        cli: "claude",
+        role: "orchestrator",
+        launcher_name: "brainlayerClaude",
+        state: "error",
+      }),
+    );
+    const exec = makeRegistryRepairExec({ liveBrainSibling: true });
+    const server = createServer({
+      exec,
+      stateDir: TEST_DIR,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain(siblingId);
+    expect(parsed.diff.orphaned).not.toContain("surface:28");
+    expect(stateMgr.readState(siblingId)).toMatchObject({
+      agent_id: siblingId,
+      surface_id: "surface:28",
+    });
+
+    const sendResult = await (server as any)._registeredTools["send_to"].handler(
+      {
+        agent_id: siblingId,
+        text: "still addressable",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    expect(sendResult.isError).toBeFalsy();
+    expect(parseResult(sendResult)).toMatchObject({
+      ok: true,
+      agent_id: siblingId,
     });
   });
 

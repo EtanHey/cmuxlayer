@@ -509,7 +509,14 @@ export class AgentRegistry {
     return results;
   }
 
-  async hasLiveSurface(surfaceId: string): Promise<boolean> {
+  async isSurfaceAlive(
+    agent: Pick<AgentRecord, "surface_id">,
+    opts: { ptyDead?: boolean } = {},
+  ): Promise<boolean> {
+    if (opts.ptyDead === true) {
+      return false;
+    }
+
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
@@ -521,7 +528,11 @@ export class AgentRegistry {
       // Empty enumeration is inconclusive until a non-empty scan proves absence.
       return true;
     }
-    return surfaces.some((surface) => surface.ref === surfaceId);
+    return surfaces.some((surface) => surface.ref === agent.surface_id);
+  }
+
+  async hasLiveSurface(surfaceId: string): Promise<boolean> {
+    return this.isSurfaceAlive({ surface_id: surfaceId });
   }
 
   async listMerged(
@@ -1047,14 +1058,10 @@ export class AgentRegistry {
       return [];
     }
 
-    const managedIdentityKeys = new Set(
-      [...this.agents.values()]
-        .filter(
-          (candidate) =>
-            !isPendingAgentId(candidate.agent_id) &&
-            !isAutoAgentId(candidate.agent_id),
-        )
-        .flatMap((candidate) => recordIdentityKeys(candidate)),
+    const managedRecords = [...this.agents.values()].filter(
+      (candidate) =>
+        !isPendingAgentId(candidate.agent_id) &&
+        !isAutoAgentId(candidate.agent_id),
     );
     const evicted: string[] = [];
     for (const [id, agent] of [...this.agents.entries()]) {
@@ -1063,8 +1070,13 @@ export class AgentRegistry {
       }
 
       const liveBackingSurface = liveSurfaceRefs.has(agent.surface_id);
-      const supersededByManagedSeat = recordIdentityKeys(agent).some((key) =>
-        managedIdentityKeys.has(key),
+      const supersededByManagedSeat = managedRecords.some(
+        (candidate) =>
+          candidate.surface_id === agent.surface_id &&
+          identityKeysOverlap(
+            recordIdentityKeys(agent),
+            recordIdentityKeys(candidate),
+          ),
       );
       const supersededByRealRecord = [...this.agents.values()].some(
         (candidate) =>
@@ -1153,8 +1165,19 @@ export class AgentRegistry {
         : null;
     }
 
+    const existingSeatRecord = this.stateMgr.readState(candidate.agentId);
+    const seatIsManagedOnAnotherLiveSurface = Boolean(
+      existingSeatRecord &&
+        existingSeatRecord.surface_id !== discovered.surface_id &&
+        liveSurfaceRefs.has(existingSeatRecord.surface_id),
+    );
+
     for (const record of recordsForSurface) {
-      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
+      if (
+        isAutoAgentId(record.agent_id) ||
+        (isPendingAgentId(record.agent_id) &&
+          !seatIsManagedOnAnotherLiveSurface)
+      ) {
         const removedAgentId = this.evict(record.agent_id);
         if (removedAgentId) {
           evicted.add(removedAgentId);
@@ -1162,7 +1185,6 @@ export class AgentRegistry {
       }
     }
 
-    const existingSeatRecord = this.stateMgr.readState(candidate.agentId);
     if (existingSeatRecord) {
       if (
         existingSeatRecord.surface_id !== discovered.surface_id &&

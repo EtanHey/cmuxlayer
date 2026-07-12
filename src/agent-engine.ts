@@ -1999,11 +1999,14 @@ export class AgentEngine {
         this.stateMgr.updateRecord(agent.agent_id, {
           boot_prompt_pending: false,
         });
-        const failed = this.stateMgr.transition(agent.agent_id, "error", {
-          error: "Boot prompt delivery interrupted before completion",
-        });
-        this.registry.set(agent.agent_id, failed);
-        return failed;
+        const surfaceAlive = await this.registry.isSurfaceAlive(agent);
+        const reconciled = surfaceAlive
+          ? this.stateMgr.transition(agent.agent_id, "ready", { error: null })
+          : this.stateMgr.transition(agent.agent_id, "error", {
+              error: "Boot prompt delivery interrupted before completion",
+            });
+        this.registry.set(agent.agent_id, reconciled);
+        return reconciled;
       } catch {
         return agent;
       }
@@ -2774,6 +2777,15 @@ export class AgentEngine {
         } catch {
           // readScreen failures are non-fatal — next sweep will retry
         }
+      }
+
+      if (
+        state !== "booting" &&
+        !TERMINAL_STATES.has(state) &&
+        (await this.registry.isSurfaceAlive(agent))
+      ) {
+        const heartbeat = this.stateMgr.updateRecord(agentId, {});
+        this.registry.set(agentId, heartbeat);
       }
     }
 

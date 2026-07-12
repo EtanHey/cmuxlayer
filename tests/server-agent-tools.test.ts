@@ -2565,13 +2565,13 @@ describe("agent lifecycle tool handlers", () => {
         expect.arrayContaining([
           expect.objectContaining({
             agent_id: "ic-target",
-            seat: "ic lane",
+            seat: "surface:ic",
             delivered: true,
             submit_verified: true,
           }),
           expect.objectContaining({
             agent_id: "orc-target",
-            seat: "orchestrator lane",
+            seat: "surface:orc",
             delivered: true,
             submit_verified: true,
           }),
@@ -2711,6 +2711,37 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
+  it("RC6: broadcast receipt seat labels never contain the full boot prompt", async () => {
+    const bootPrompt = "Implement the registry liveness brief. ".repeat(40);
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "worker-long-prompt",
+        surface_id: "surface:short-label",
+        state: "ready",
+        role: "worker",
+        seat_id: null,
+        task_summary: bootPrompt,
+      }),
+    ];
+    const { server } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Status", role: "workers", press_enter: false },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.receipts).toEqual([
+      expect.objectContaining({
+        agent_id: "worker-long-prompt",
+        seat: "surface:short-label",
+        delivered: true,
+      }),
+    ]);
+    expect(JSON.stringify(parsed.receipts)).not.toContain(bootPrompt);
+  });
+
   it("broadcast refuses over-cap text with file-pointer guidance before delivery", async () => {
     const outboxPath = join(TEST_DIR, "mock-outbox.md");
     writeFileSync(outboxPath, "not touched by broadcast\n", "utf8");
@@ -2771,7 +2802,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendKeyCalls).toHaveLength(0);
   });
 
-  it("broadcast records dead and non-interactive lead targets as skipped", async () => {
+  it("broadcast records done and non-interactive lead targets as skipped", async () => {
     const records = [
       makeServerAgentRecord({
         agent_id: "ic-ready",
@@ -2786,11 +2817,11 @@ describe("agent lifecycle tool handlers", () => {
         role: "ic",
       }),
       makeServerAgentRecord({
-        agent_id: "orc-error",
+        agent_id: "orc-done",
         surface_id: "surface:error",
-        state: "error",
+        state: "done",
         role: "orchestrator",
-        error: "pane died",
+        error: null,
       }),
     ];
     const { server, sendCalls } = await createBroadcastServer(records);
@@ -2826,11 +2857,62 @@ describe("agent lifecycle tool handlers", () => {
           skipped: "not_interactive:working",
         }),
         expect.objectContaining({
-          agent_id: "orc-error",
+          agent_id: "orc-done",
           delivered: false,
           submit_verified: null,
-          skipped: "dead:error",
+          skipped: "dead:done",
         }),
+      ]),
+    );
+  });
+
+  it("RC3: broadcast delivers to an error-state agent whose surface is alive", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "orc-live-error",
+        surface_id: "surface:live-error",
+        state: "error",
+        role: "orchestrator",
+        error: "Boot prompt delivery interrupted before completion",
+      }),
+      makeServerAgentRecord({
+        agent_id: "worker-live-error",
+        surface_id: "surface:second-live-error",
+        state: "error",
+        role: "worker",
+        error: "stale registry classification",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "Recover live seat", role: "all", press_enter: false },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      target_count: 2,
+      delivered_count: 2,
+      failed_count: 0,
+      skipped_count: 0,
+      receipts: expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "orc-live-error",
+          delivered: true,
+        }),
+        expect.objectContaining({
+          agent_id: "worker-live-error",
+          delivered: true,
+        }),
+      ]),
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual(
+      expect.arrayContaining([
+        "surface:live-error",
+        "surface:second-live-error",
       ]),
     );
   });
@@ -3920,6 +4002,48 @@ codex>
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/not in an interactive state/);
   });
+
+  it.each(["send_to", "send_to_agent"] as const)(
+    "RC3: %s delivers to an error-state agent whose surface is alive",
+    async (toolName) => {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const sendTo = (server as any)._registeredTools[toolName];
+      const spawnResult = await spawn.handler(
+        { repo: "test", model: "sonnet", cli: "claude" },
+        {} as any,
+      );
+      const agentId = parseToolResult(spawnResult).agent_id as string;
+      const engine = (server as any)._registeredTools["interact"]._engine;
+      const registry = engine.getRegistry();
+      const liveError = engine.stateMgr.updateRecord(agentId, {
+        state: "error",
+        error: "Boot prompt delivery interrupted before completion",
+      });
+      registry.set(agentId, liveError);
+      mockExec.mockClear();
+
+      const result = await sendTo.handler(
+        { agent_id: agentId, text: "recover", press_enter: false },
+        {} as any,
+      );
+
+      expect(result.isError).toBeFalsy();
+      expect(parseToolResult(result)).toMatchObject({
+        ok: true,
+        agent_id: agentId,
+      });
+      expect(mockExec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining([
+          "send",
+          "--surface",
+          "surface:new",
+          "recover",
+        ]),
+      );
+    },
+  );
 
   it("send_to with allow_busy=true delivers to agents in working state", async () => {
     const server = createLifecycleServer(mockExec);

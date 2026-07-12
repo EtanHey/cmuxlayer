@@ -6688,7 +6688,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
         }
       }
-      if (!args.allow_busy && !INTERACTIVE_AGENT_STATES.has(route.state)) {
+      const routeSurfaceAlive =
+        route.state === "error" &&
+        (await registry.isSurfaceAlive(route, {
+          ptyDead:
+            surfaceWriteLiveness.observe(route.surface_id)?.pty_dead === true,
+        }));
+      if (
+        !args.allow_busy &&
+        !INTERACTIVE_AGENT_STATES.has(route.state) &&
+        !routeSurfaceAlive
+      ) {
         throw new Error(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
             `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}. ` +
@@ -7851,7 +7861,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return refs;
     };
 
-    const broadcastSkipReason = (agent: AgentRecord): string | null => {
+    const broadcastSkipReason = async (
+      agent: AgentRecord,
+    ): Promise<string | null> => {
+      if (
+        agent.state === "error" &&
+        (await registry.isSurfaceAlive(agent, {
+          ptyDead:
+            surfaceWriteLiveness.observe(agent.surface_id)?.pty_dead === true,
+        }))
+      ) {
+        return null;
+      }
       if (TERMINAL_AGENT_STATES.has(agent.state)) {
         return `dead:${agent.state}`;
       }
@@ -7863,7 +7884,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const agentSeatLabel = (agent: AgentRecord): string =>
       agent.seat_id?.trim() ||
-      agent.task_summary?.trim() ||
       agent.surface_id ||
       agent.agent_id;
 
@@ -7934,7 +7954,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const receipts: BroadcastReceipt[] = [];
           for (const agent of targets) {
-            const skipped = broadcastSkipReason(agent);
+            const skipped = await broadcastSkipReason(agent);
             if (skipped) {
               receipts.push({
                 agent_id: agent.agent_id,
