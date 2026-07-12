@@ -44,6 +44,7 @@ function parseArgs(argv) {
     workspace: "",
     waitTimeoutMs: 180_000,
     selfTestDeadChild: false,
+    createWorkspace: "",
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     else if (a === "--workspace") o.workspace = next();
     else if (a === "--wait-timeout-ms") o.waitTimeoutMs = Number(next());
     else if (a === "--self-test-dead-child") o.selfTestDeadChild = true;
+    else if (a === "--create-workspace") o.createWorkspace = next();
     else if (a === "--help" || a === "-h") {
       process.stdout.write("see header of this file for usage\n");
       process.exit(0);
@@ -603,17 +605,28 @@ async function main() {
     process.exit(2);
   }
   // Refuse before MCP startup/spawn: role:all must never escape the test workspace.
-  const workspace = scopedRoleAllBroadcast(opt.workspace, {}).workspace;
+  // With --create-workspace the ref is minted after init, so defer validation.
+  let workspace = opt.createWorkspace
+    ? ""
+    : scopedRoleAllBroadcast(opt.workspace, {}).workspace;
   process.stdout.write(`=== registry-liveness §7 acceptance (N=${opt.count}, cli=${opt.cli}) ===\n`);
   const mcp = new Mcp(opt.server, opt.serverArgs);
   const spawned = [];
   try {
     await mcp.init();
+    if (opt.createWorkspace) {
+      const ws = await mcp.call("create_workspace", { title: opt.createWorkspace }, 30_000);
+      workspace = ws.workspace || ws.ref;
+      if (!workspace) throw new Error(`create_workspace returned no ref: ${JSON.stringify(ws)}`);
+      // Validate scope now that we have a real ref (empty surfaces auto-clean the ws on close).
+      scopedRoleAllBroadcast(workspace, {});
+      process.stdout.write(`  created scoped workspace ${workspace} ("${opt.createWorkspace}")\n`);
+    }
 
     // 1. spawn N agents into a scoped workspace
     for (let i = 0; i < opt.count; i += 1) {
-      const args = { repo: opt.repo, cli: opt.cli, workspace };
-      const r = await mcp.call("spawn_agent", args, 90_000);
+      const args = { repo: opt.repo, cli: opt.cli, workspace, boot_prompt_timeout_ms: 120_000 };
+      const r = await mcp.call("spawn_agent", args, 150_000);
       if (!r.agent_id) throw new Error(`spawn_agent ${i} returned no agent_id: ${JSON.stringify(r)}`);
       spawned.push({ agent_id: r.agent_id, surface_id: r.surface_id, workspace_id: r.workspace_id });
       process.stdout.write(`  spawned ${r.agent_id} (${r.surface_id})\n`);
