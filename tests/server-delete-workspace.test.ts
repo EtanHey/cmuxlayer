@@ -143,6 +143,35 @@ describe("delete_workspace", () => {
     await server.close();
   });
 
+  it.each(["ws:7", "7", "scratch"])(
+    "refuses a live-agent workspace referenced by alias %s",
+    async (workspaceAlias) => {
+      const root = stateDir(`live-alias-${workspaceAlias.replace(/\W/g, "-")}`);
+      writeLiveAgent(root);
+      const { client } = mockClient();
+      const server = createServer({
+        client: client as any,
+        stateDir: root,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools.delete_workspace;
+
+      const result = await tool.handler(
+        { workspace: workspaceAlias },
+        {} as any,
+      );
+
+      expect(client.deleteWorkspace).not.toHaveBeenCalled();
+      expect(client.listPanes).toHaveBeenCalledWith({ workspace: "workspace:7" });
+      expect(result.structuredContent).toMatchObject({
+        refused: true,
+        workspace: "workspace:7",
+        live_agents: [expect.objectContaining({ agent_id: "worker-live" })],
+      });
+      await server.close();
+    },
+  );
+
   it("force-removes a workspace with a live agent", async () => {
     const root = stateDir("force");
     writeLiveAgent(root);
@@ -180,4 +209,30 @@ describe("delete_workspace", () => {
     });
     await server.close();
   });
+
+  it.each(["ws:7", "7", "scratch"])(
+    "refuses the caller workspace referenced by alias %s",
+    async (workspaceAlias) => {
+      const { client } = mockClient({ callerTarget: true });
+      const server = createServer({
+        client: client as any,
+        skipAgentLifecycle: true,
+      });
+      const tool = (server as any)._registeredTools.delete_workspace;
+
+      const result = await tool.handler(
+        { workspace: workspaceAlias },
+        {} as any,
+      );
+
+      expect(client.deleteWorkspace).not.toHaveBeenCalled();
+      expect(client.listPanes).toHaveBeenCalledWith({ workspace: "workspace:7" });
+      expect(result.structuredContent).toMatchObject({
+        refused: true,
+        workspace: "workspace:7",
+        caller_workspace: true,
+      });
+      await server.close();
+    },
+  );
 });

@@ -3804,9 +3804,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!candidate) return undefined;
     try {
       const { workspaces } = await client.listWorkspaces();
+      const normalized = candidate.trim();
       return (
-        workspaces.find((workspace) => envWorkspaceMatches(workspace, candidate))
-          ?.ref ?? candidate
+        workspaces.find(
+          (workspace) =>
+            envWorkspaceMatches(workspace, candidate) ||
+            workspace.title === normalized,
+        )?.ref ?? candidate
       );
     } catch {
       return candidate;
@@ -4652,19 +4656,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const targetWorkspace =
+          (await canonicalWorkspaceRef(args.workspace)) ?? args.workspace;
         await assertWorkspaceMutationAllowed(
           "delete_workspace",
-          args.workspace,
+          targetWorkspace,
         );
 
         const [{ workspaces }, panes] = await Promise.all([
           client.listWorkspaces(),
-          client.listPanes({ workspace: args.workspace }),
+          client.listPanes({ workspace: targetWorkspace }),
         ]);
         const paneGroups = await Promise.all(
           panes.panes.map((pane) =>
             client.listPaneSurfaces({
-              workspace: args.workspace,
+              workspace: targetWorkspace,
               pane: pane.ref,
             }),
           ),
@@ -4682,13 +4688,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .filter(
             (agent) =>
               surfaceRefs.has(agent.surface_id) ||
-              agent.workspace_id === args.workspace,
+              agent.workspace_id === targetWorkspace,
           );
         const liveAgents = agents.filter(
           (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
         );
         const callerWorkspace = await currentCallerWorkspace();
-        const deletingCallerWorkspace = callerWorkspace === args.workspace;
+        const deletingCallerWorkspace = callerWorkspace === targetWorkspace;
 
         if (
           !args.force &&
@@ -4702,11 +4708,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ];
           return err(
             new Error(
-              `Refused to delete ${args.workspace}: ${reasons.join(" and ")}. Pass force:true to delete anyway.`,
+              `Refused to delete ${targetWorkspace}: ${reasons.join(" and ")}. Pass force:true to delete anyway.`,
             ),
             {
               refused: true,
-              workspace: args.workspace,
+              workspace: targetWorkspace,
               caller_workspace: deletingCallerWorkspace,
               surfaces,
               agents,
@@ -4715,13 +4721,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
-        await client.deleteWorkspace(args.workspace);
+        await client.deleteWorkspace(targetWorkspace);
         const removedWorkspace =
-          workspaces.find((workspace) => workspace.ref === args.workspace) ?? {
-            ref: args.workspace,
+          workspaces.find((workspace) => workspace.ref === targetWorkspace) ?? {
+            ref: targetWorkspace,
           };
         const data = {
-          workspace: args.workspace,
+          workspace: targetWorkspace,
           force: args.force ?? false,
           removed: {
             workspaces: [removedWorkspace],
