@@ -279,7 +279,7 @@ function startEngineServer(
 }
 
 describe("Phase 10 painpoint e2e replay", () => {
-  it("sidebar-scale sweeps skip degraded-CLI status bursts", async () => {
+  it("sidebar-scale CLI sweeps fan out once and persist snapshots", async () => {
     const dir = tempDir("sidebar-scale");
     const stateMgr = new StateManager(dir);
     const agentCount = 25;
@@ -309,7 +309,10 @@ describe("Phase 10 painpoint e2e replay", () => {
 
       await engine.runSweep();
 
-      expect(statusCalls).toEqual([]);
+      expect(statusCalls).toHaveLength(agentCount);
+      expect(statusCalls.map(({ key }) => key)).toEqual(
+        expect.arrayContaining(agentIds),
+      );
 
       statusCalls.length = 0;
       await engine.runSweep();

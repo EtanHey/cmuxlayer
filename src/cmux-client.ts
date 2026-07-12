@@ -604,11 +604,27 @@ export class CmuxClient {
   }
 
   async setStatuses(updates: CmuxStatusUpdate[]): Promise<boolean> {
-    if (updates.length === 0) return true;
-    console.error(
-      `[cmuxlayer] skipped ${updates.length} sidebar status pushes while socket batching is unavailable`,
-    );
-    return false;
+    const failures: Array<{ key: string; error: Error }> = [];
+    for (const update of updates) {
+      try {
+        await this.setStatus(update.key, update.value, update);
+      } catch (error) {
+        failures.push({
+          key: update.key,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
+    if (failures.length > 0) {
+      const failedKeys = failures.map(({ key }) => key).join(", ");
+      const details = failures
+        .map(({ key, error }) => `${key}: ${error.message}`)
+        .join("; ");
+      throw new Error(
+        `cmux set-status failed for keys [${failedKeys}]: ${details}`,
+      );
+    }
+    return true;
   }
 
   async clearStatus(key: string, opts?: { workspace?: string }): Promise<void> {
