@@ -16,6 +16,7 @@ import {
 import {
   DEFAULT_PING_RETRY_ATTEMPTS,
   DEFAULT_PING_RETRY_BACKOFF_MS,
+  cliEnvForSocketPath,
   wrapCliWithSelfHeal,
   wrapSocketWithSelfHeal,
 } from "./cmux-transport-self-heal.js";
@@ -91,10 +92,15 @@ export async function createCmuxClient(
   opts?: CreateCmuxClientOptions,
 ): Promise<CmuxClient | CmuxSocketClient> {
   const logger = opts?.logger ?? console;
-  const cliFallback = new CmuxClient({ exec: opts?.exec, bin: opts?.bin });
+  const pin = instancePin(opts);
+  const cliFallback = new CmuxClient({
+    exec: opts?.exec,
+    bin: opts?.bin,
+    ...(pin ? { env: cliEnvForSocketPath(pin) } : {}),
+  });
 
   const candidates = candidateSocketPathsForOpts(opts);
-  const pinned = instancePin(opts) !== undefined;
+  const pinned = pin !== undefined;
 
   const usable: string[] = [];
   const denied: SocketProbeResult[] = [];

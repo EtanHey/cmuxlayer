@@ -810,6 +810,59 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("uses the same CLI env shape at boot and after socket re-degradation", async () => {
+    const socketPath = join(tmpdir(), `cmux-env-parity-${process.pid}.sock`);
+    const bootExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workspaces: [] }),
+      stderr: "",
+    });
+    const bootClient = await createCmuxClient({
+      socketPath,
+      exec: bootExec,
+      bin: "cmux",
+      pingRetryAttempts: 1,
+      reprobeIntervalMs: 60_000,
+    });
+    await bootClient.listWorkspaces();
+    const bootEnv = bootExec.mock.calls[0]?.[2];
+    if ("stop" in bootClient && typeof bootClient.stop === "function") {
+      bootClient.stop();
+    }
+
+    const recoveryExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ workspaces: [] }),
+      stderr: "",
+    });
+    const recoveryCli = new CmuxClient({ exec: recoveryExec, bin: "cmux" });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      ping: vi
+        .fn()
+        .mockRejectedValue(
+          new CmuxSocketError("Socket error: write EPIPE", "connection_error"),
+        ),
+    } as unknown as CmuxSocketClient;
+    const recoveryClient = wrapSocketWithSelfHeal(socket, recoveryCli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+      factoryOpts: { socketPath },
+    });
+
+    await expect(recoveryClient.ping()).rejects.toThrow(/EPIPE/);
+    await recoveryClient.listWorkspaces();
+
+    const recoveryEnv = recoveryExec.mock.calls[0]?.[2];
+    expect(bootEnv).toBeDefined();
+    expect(recoveryEnv).toBeDefined();
+    expect(Object.keys(bootEnv ?? {}).sort()).toEqual(
+      Object.keys(recoveryEnv ?? {}).sort(),
+    );
+    expect(bootEnv?.CMUX_SOCKET_PATH).toBe(socketPath);
+    expect(recoveryEnv?.CMUX_SOCKET_PATH).toBe(socketPath);
+    recoveryClient.stop();
+  });
+
   it("queues and flushes a failed socket payload through CLI after EPIPE", async () => {
     const socketPath = join(tmpdir(), `cmux-queue-${process.pid}.sock`);
     const logger = { error: vi.fn() };
