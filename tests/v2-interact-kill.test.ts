@@ -285,14 +285,14 @@ describe("V2 tool registration", () => {
     expect(tools).toContain("broadcast");
   });
 
-  it("total tool count is 42", () => {
+  it("total tool count is 43", () => {
     const mockExec: ExecFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workspaces: [] }),
       stderr: "",
     });
     const server = createV2Server(mockExec);
     const count = Object.keys((server as any)._registeredTools).length;
-    expect(count).toBe(42);
+    expect(count).toBe(43);
   });
 });
 

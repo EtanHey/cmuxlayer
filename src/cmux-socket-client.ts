@@ -283,6 +283,17 @@ export class CmuxSocketClient {
     }
   }
 
+  async deleteWorkspace(workspace: string): Promise<void> {
+    try {
+      await this.call("workspace.close", { workspace_id: workspace });
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallbackPinned()!.deleteWorkspace(workspace);
+      }
+      throw e;
+    }
+  }
+
   async listPaneSurfaces(opts?: {
     workspace?: string;
     pane?: string;

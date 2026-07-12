@@ -955,6 +955,28 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("forwards deleteWorkspace through the self-healing transport", async () => {
+    const socketPath = join(tmpdir(), `cmux-delete-workspace-${process.pid}.sock`);
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      deleteWorkspace: vi.fn().mockResolvedValue(undefined),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+    });
+
+    await (client as unknown as CmuxClient).deleteWorkspace("workspace:7");
+
+    expect(socket.deleteWorkspace).toHaveBeenCalledWith("workspace:7");
+    client.stop();
+  });
+
   it("flushes queued failed payloads sequentially", async () => {
     const socketPath = join(tmpdir(), `cmux-queue-seq-${process.pid}.sock`);
     let activeFlushes = 0;

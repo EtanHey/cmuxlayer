@@ -104,6 +104,7 @@ async function main(): Promise<void> {
   let cleanupSink: { pane: string; workspace: string } | null = null;
   let setupClient: Client | null = null;
   let callerClient: Client | null = null;
+  let scratchWorkspace: string | null = null;
   let receipt: Record<string, unknown> | null = null;
   try {
     setupClient = await connect(entry);
@@ -153,6 +154,7 @@ async function main(): Promise<void> {
             })
           ).workspace,
         );
+    scratchWorkspace = workspace;
     let initial = surfacesIn(
       await call(setupClient, "list_surfaces", {}),
       workspace,
@@ -283,6 +285,21 @@ async function main(): Promise<void> {
             console.error("fallback cleanup failed", target, fallbackError);
             process.exitCode = 1;
           }
+        }
+      }
+      if (scratchWorkspace) {
+        try {
+          await call(cleanupClient, "delete_workspace", {
+            workspace: scratchWorkspace,
+            force: true,
+          });
+        } catch (deleteError) {
+          console.error(
+            "workspace cleanup failed",
+            scratchWorkspace,
+            deleteError,
+          );
+          process.exitCode = 1;
         }
       }
       await cleanupClient.close().catch((error) => {

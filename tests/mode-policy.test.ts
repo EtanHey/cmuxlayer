@@ -45,6 +45,10 @@ describe("isMutatingTool", () => {
     expect(isMutatingTool("close_surface")).toBe(true);
   });
 
+  it("returns true for delete_workspace", () => {
+    expect(isMutatingTool("delete_workspace")).toBe(true);
+  });
+
   it("returns true for browser_surface", () => {
     expect(isMutatingTool("browser_surface")).toBe(true);
   });
