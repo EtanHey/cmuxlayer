@@ -65,7 +65,6 @@ const EXPECTED_TOOLS = [
   "new_split",
   "new_surface",
   "move_surface",
-  "reorder_surface",
   "send_input",
   "send_command",
   "send_key",
@@ -8466,42 +8465,6 @@ describe("tool handler integration", () => {
       workspace: "workspace:source",
     });
     expect(mockClient.moveSurface).not.toHaveBeenCalled();
-  });
-
-  it("reorder_surface handler calls cmux reorder-surface", async () => {
-    mockExec = vi.fn().mockResolvedValue({
-      stdout: JSON.stringify({
-        ok: true,
-        surface: "surface:3",
-      }),
-      stderr: "",
-    });
-
-    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
-    const registeredTools = (server as any)._registeredTools;
-    const tool = registeredTools["reorder_surface"];
-
-    const result = await tool.handler(
-      { surface: "surface:3", after: "surface:4" },
-      {} as any,
-    );
-
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "reorder-surface",
-        "--surface",
-        "surface:3",
-        "--after",
-        "surface:4",
-      ]),
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed).toMatchObject({
-      ok: true,
-      surface: "surface:3",
-    });
   });
 
   it("set_status handler calls cmux set-status", async () => {

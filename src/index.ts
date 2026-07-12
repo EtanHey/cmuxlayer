@@ -3,23 +3,15 @@
 /**
  * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * 41 MCP tools across four categories (keep in sync with server.ts and the
- * "total tool count" assertion in tests/server-agent-tools.test.ts):
- *   Core (18): list_surfaces, control_health, select_workspace,
- *              create_workspace, new_split, new_surface, move_surface,
- *              reorder_surface, send_input, send_command, send_key,
- *              read_screen, rename_tab, notify, set_status, set_progress,
- *              close_surface, browser_surface
- *   Metacommlayer write channel (2): dispatch_to_agent, inbox_check
- *   Monitor registry (5): register_monitor, signal_monitor,
- *                         deregister_monitor, list_monitors,
- *                         query_monitor_registry
- *   Agent lifecycle (16): spawn_agent, new_worktree_split, spawn_in_workspace,
- *                         resync_agents,
- *                         send_to (canonical), send_to_agent (deprecated alias),
- *                         supersede_agent_goal, read_agent_output,
- *                         get_agent_state, list_agents, my_agents, wait_for,
- *                         wait_for_all, stop_agent, kill, interact
+ * 42 registered MCP tools with a 12-tool default palette (keep in sync with
+ * server.ts and the total-tool-count assertion):
+ *   Default (12): spawn_agent, send_to, wait_for, read_screen, my_agents,
+ *                 list_agents, broadcast, close_surface, dispatch_to_agent,
+ *                 list_surfaces, control_health, stop_agent
+ *   Remaining tools are INTERIM ToolSearch-deferred and remain callable;
+ *   reorder_surface is the single approved deletion.
+ *   Legacy aliases retire next release; the broader deferral is deliberately
+ *   reversible pending the MCP-vs-CLI/programmatic architecture rethink.
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";

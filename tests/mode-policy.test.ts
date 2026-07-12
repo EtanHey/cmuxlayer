@@ -56,7 +56,6 @@ describe("isMutatingTool", () => {
   it("returns true for lifecycle and tab mutation tools", () => {
     expect(isMutatingTool("rename_tab")).toBe(true);
     expect(isMutatingTool("move_surface")).toBe(true);
-    expect(isMutatingTool("reorder_surface")).toBe(true);
     expect(isMutatingTool("send_to")).toBe(true);
     expect(isMutatingTool("send_to_agent")).toBe(true);
     expect(isMutatingTool("stop_agent")).toBe(true);

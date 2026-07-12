@@ -679,11 +679,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total tool count is 43", () => {
+  it("total registered tool count is 42 after deleting reorder_surface", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(43);
+    expect(Object.keys(registeredTools)).toHaveLength(42);
   });
 });
 
@@ -739,6 +739,22 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.auto_archive_on_done).toBe(false);
+  });
+
+  it("spawn_agent accepts placement as the canonical role-placement argument", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        cli: "claude",
+        placement: "worker",
+      },
+      {} as any,
+    );
+
+    expect(parseToolResult(result)).toMatchObject({ ok: true, role: "worker" });
   });
 
   it("spawn_agent refuses a manual-mode caller workspace before spawning", async () => {

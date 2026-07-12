@@ -52,7 +52,6 @@ describe("B1: ToolAnnotations on all tools", () => {
     "new_split",
     "new_surface",
     "move_surface",
-    "reorder_surface",
     "send_input",
     "send_command",
     "send_key",
@@ -92,9 +91,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 43 tools have annotations", () => {
+  it("all 42 registered tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(43);
+    expect(toolNames.length).toBe(42);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,
