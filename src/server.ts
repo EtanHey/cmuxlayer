@@ -8065,68 +8065,85 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const current = topologyBeforeReflow.topologyBySurface.get(
                 agent.surface_id,
               );
-              if (current?.column !== 0 || (current.column_count ?? 0) < 2) {
+              if (current?.column !== 0) continue;
+
+              let seededSurface: string | null = null;
+              let workspace: string | null = null;
+              try {
+                workspace =
+                  topologyBeforeReflow.workspaceBySurface.get(
+                    agent.surface_id,
+                  ) ?? agent.workspace_id ?? null;
+                if (!workspace) continue;
+
+                let targetPane: string | null = null;
+                if ((current.column_count ?? 0) < 2) {
+                  const seed = await client.newSplit("right", {
+                    workspace,
+                    surface: agent.surface_id,
+                    type: "terminal",
+                  });
+                  targetPane = seed.pane;
+                  seededSurface = seed.surface;
+                  panesByWorkspace.delete(workspace);
+                } else {
+                  let panes = panesByWorkspace.get(workspace);
+                  if (!panes) {
+                    panes = await client.listPanes({ workspace });
+                    panesByWorkspace.set(workspace, panes);
+                  }
+                  const columns = deriveColumnIndex(panes.panes);
+                  targetPane = [...panes.panes]
+                    .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
+                    .sort((a, b) => {
+                      const columnDelta =
+                        (columns.get(a.ref) ?? 0) -
+                        (columns.get(b.ref) ?? 0);
+                      return columnDelta || a.index - b.index;
+                    })
+                    .at(-1)?.ref ?? null;
+                }
+                if (!targetPane) continue;
+
+                await client.moveSurface({
+                  surface: agent.surface_id,
+                  pane: targetPane,
+                  workspace,
+                  focus: false,
+                });
+
+                const topologyAfterMove = await collectSurfaceTopology(workspace);
+                const actual = topologyAfterMove?.topologyBySurface.get(
+                  agent.surface_id,
+                );
+                if (actual?.column == null || actual.column === 0) continue;
+
+                reflowed.push({
+                  agent_id: agent.agent_id,
+                  surface_id: agent.surface_id,
+                  from_column: current.column,
+                  to_column: actual.column,
+                  pane: targetPane,
+                });
+              } catch {
+                // Reflow is self-healing best effort. One stale workspace, pane,
+                // or topology read must not abort the registry-wide resync.
                 continue;
+              } finally {
+                if (seededSurface) {
+                  try {
+                    await client.closeSurface(seededSurface, {
+                      ...(workspace ? { workspace } : {}),
+                    });
+                  } catch {
+                    // A seed cleanup race is isolated to this worker as well.
+                  }
+                }
               }
-
-              const workspace =
-                topologyBeforeReflow.workspaceBySurface.get(agent.surface_id) ??
-                agent.workspace_id;
-              if (!workspace) {
-                throw new Error(
-                  `Cannot reflow worker ${agent.agent_id}: live workspace is unknown`,
-                );
-              }
-
-              let panes = panesByWorkspace.get(workspace);
-              if (!panes) {
-                panes = await client.listPanes({ workspace });
-                panesByWorkspace.set(workspace, panes);
-              }
-              const columns = deriveColumnIndex(panes.panes);
-              const target = [...panes.panes]
-                .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
-                .sort((a, b) => {
-                  const columnDelta =
-                    (columns.get(a.ref) ?? 0) - (columns.get(b.ref) ?? 0);
-                  return columnDelta || a.index - b.index;
-                })
-                .at(-1);
-              if (!target) {
-                throw new Error(
-                  `Cannot reflow worker ${agent.agent_id}: no non-leftmost pane exists in ${workspace}`,
-                );
-              }
-
-              await client.moveSurface({
-                surface: agent.surface_id,
-                pane: target.ref,
-                workspace,
-                focus: false,
-              });
-              reflowed.push({
-                agent_id: agent.agent_id,
-                surface_id: agent.surface_id,
-                from_column: current.column,
-                to_column: columns.get(target.ref) ?? 1,
-                pane: target.ref,
-              });
             }
           }
 
           if (reflowed.length > 0) {
-            const topologyAfterReflow = await collectSurfaceTopology();
-            for (const repair of reflowed) {
-              const actual = topologyAfterReflow?.topologyBySurface.get(
-                repair.surface_id,
-              );
-              if (actual?.column === 0 || actual?.column == null) {
-                throw new Error(
-                  `Worker placement repair failed for ${repair.agent_id}: surface ${repair.surface_id} remains in column ${actual?.column ?? "unknown"}`,
-                );
-              }
-              repair.to_column = actual.column;
-            }
             discovery.invalidate();
             after = await registry.listMerged(discovery, { force: true });
           }

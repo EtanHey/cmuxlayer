@@ -877,10 +877,33 @@ function makeRegistryRepairExec(
   });
 }
 
-function makeLeftColumnWorkerExec(): ExecFn {
+function makeLeftColumnWorkerExec(
+  opts: {
+    singleColumn?: boolean;
+    failPostMoveTopologyOnce?: boolean;
+  } = {},
+): ExecFn {
   let workerPane = "pane:left";
+  let rightPaneExists = !opts.singleColumn;
+  let seedSurfaceOpen = false;
+  let postMoveTopologyFailed = false;
 
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split")) {
+      rightPaneExists = true;
+      seedSurfaceOpen = true;
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          pane: "pane:right",
+          surface: "surface:worker-column-seed",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    }
+
     if (args.includes("move-surface")) {
       workerPane = String(args[args.indexOf("--pane") + 1]);
       return {
@@ -891,6 +914,11 @@ function makeLeftColumnWorkerExec(): ExecFn {
         }),
         stderr: "",
       };
+    }
+
+    if (args.includes("close-surface")) {
+      seedSurfaceOpen = false;
+      return { stdout: JSON.stringify({ ok: true }), stderr: "" };
     }
 
     if (args.includes("list-workspaces")) {
@@ -911,6 +939,14 @@ function makeLeftColumnWorkerExec(): ExecFn {
     }
 
     if (args.includes("list-panes")) {
+      if (
+        opts.failPostMoveTopologyOnce &&
+        workerPane === "pane:right" &&
+        !postMoveTopologyFailed
+      ) {
+        postMoveTopologyFailed = true;
+        throw new Error("transient pane topology failure");
+      }
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
@@ -928,18 +964,36 @@ function makeLeftColumnWorkerExec(): ExecFn {
               selected_surface_ref: "surface:lead",
               pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
             },
-            {
-              ref: "pane:right",
-              index: 1,
-              focused: false,
-              surface_count: workerPane === "pane:right" ? 2 : 1,
-              surface_refs:
-                workerPane === "pane:right"
-                  ? ["surface:shell", "surface:worker-left"]
-                  : ["surface:shell"],
-              selected_surface_ref: "surface:shell",
-              pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
-            },
+            ...(rightPaneExists
+              ? [
+                  {
+                    ref: "pane:right",
+                    index: 1,
+                    focused: false,
+                    surface_count:
+                      Number(seedSurfaceOpen) +
+                      Number(workerPane === "pane:right") ||
+                      1,
+                    surface_refs: [
+                      ...(seedSurfaceOpen
+                        ? ["surface:worker-column-seed"]
+                        : []),
+                      ...(workerPane === "pane:right"
+                        ? ["surface:worker-left"]
+                        : []),
+                      ...(!seedSurfaceOpen && workerPane !== "pane:right"
+                        ? ["surface:shell"]
+                        : []),
+                    ],
+                    selected_surface_ref: seedSurfaceOpen
+                      ? "surface:worker-column-seed"
+                      : workerPane === "pane:right"
+                        ? "surface:worker-left"
+                        : "surface:shell",
+                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+                  },
+                ]
+              : []),
           ],
         }),
         stderr: "",
@@ -960,13 +1014,28 @@ function makeLeftColumnWorkerExec(): ExecFn {
               },
             ]
           : [
-              {
-                ref: "surface:shell",
-                title: "notes",
-                type: "terminal",
-                index: 0,
-                selected: true,
-              },
+              ...(seedSurfaceOpen
+                ? [
+                    {
+                      ref: "surface:worker-column-seed",
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : []),
+              ...(!seedSurfaceOpen && workerPane !== "pane:right"
+                ? [
+                    {
+                      ref: "surface:shell",
+                      title: "notes",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : []),
             ];
       return {
         stdout: JSON.stringify({
@@ -1110,6 +1179,67 @@ describe("resync_agents tool", () => {
         to_column: 1,
       }),
     ]);
+  });
+
+  it("resync_agents seeds a right column for a single-column auto-discovered worker", async () => {
+    const exec = makeLeftColumnWorkerExec({ singleColumn: true });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "new-split",
+        "right",
+        "--surface",
+        "surface:worker-left",
+      ]),
+    );
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:worker-left",
+        "--pane",
+        "pane:right",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:worker-left",
+        from_column: 0,
+        to_column: 1,
+      }),
+    ]);
+  });
+
+  it("resync_agents keeps its normal diff when post-move topology is transiently unavailable", async () => {
+    const exec = makeLeftColumnWorkerExec({ failPostMoveTopologyOnce: true });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff).toEqual(
+      expect.objectContaining({
+        added: expect.any(Array),
+        evicted: expect.any(Array),
+        repaired: expect.any(Array),
+        orphaned: expect.any(Array),
+        reflowed: [],
+      }),
+    );
   });
 
   it("list_agents persists live state updates for existing auto-discovered agents", async () => {
