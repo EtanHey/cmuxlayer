@@ -322,11 +322,29 @@ export class CmuxSocketClient {
     workspace?: string;
     pane: string;
   }): Promise<string | undefined> {
-    const paneSurfaces = await this.listPaneSurfaces({
-      workspace: opts.workspace,
-      pane: opts.pane,
-    });
-    const surfaces = paneSurfaces.surfaces ?? [];
+    const [paneList, paneSurfaces] = await Promise.all([
+      this.listPanes({ workspace: opts.workspace }),
+      this.listPaneSurfaces({
+        workspace: opts.workspace,
+        pane: opts.pane,
+      }),
+    ]);
+    const targetPane = paneList.panes.find(
+      (pane) => pane.ref === opts.pane || pane.id === opts.pane,
+    );
+    if (!targetPane) return undefined;
+
+    // The socket's surface.list response is workspace-wide even when pane_id
+    // is supplied. Filter it through pane.list membership before choosing the
+    // selected tab, otherwise a focused lead surface can anchor a worker split
+    // in the left column despite placement naming a right-column pane.
+    const surfaceRefs = new Set(targetPane.surface_refs ?? []);
+    const surfaceIds = new Set(targetPane.surface_ids ?? []);
+    const surfaces = (paneSurfaces.surfaces ?? []).filter(
+      (surface) =>
+        surfaceRefs.has(surface.ref) ||
+        (surface.id !== undefined && surfaceIds.has(surface.id)),
+    );
     return (
       surfaces.find((surface) => surface.selected)?.ref ?? surfaces[0]?.ref
     );
