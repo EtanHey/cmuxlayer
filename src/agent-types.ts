@@ -33,6 +33,8 @@ export interface AgentRecord {
   cli_session_id: string | null;
   cli_session_path?: string | null;
   launcher_name?: string | null;
+  /** Deliberately pinned tab title used by the resume-integrity manifest. */
+  tab_name?: string | null;
   seat_id?: string | null;
   seat_lane?: string | null;
   seat_role?: string | null;

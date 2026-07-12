@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   createServer,
   createServerContext,
@@ -27,6 +28,7 @@ import {
 import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
+import type { SeatManifest } from "../src/seat-manifest.js";
 import {
   reconcileMonitorRegistry,
   registerMonitor,
@@ -216,6 +218,66 @@ function createLifecycleServer(exec: ExecFn) {
 }
 
 describe("lean spawn tool responses", () => {
+  it("spawn_agent publishes the exact expected-state manifest through the injected writer", async () => {
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: makeLifecycleExec(),
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => {
+        manifests.push(manifest);
+      },
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(manifests).toEqual([
+      {
+        surface_id: "surface:new",
+        agent_id: parsed.agent_id,
+        tab_name: "cmuxlayerClaude [surface:new]",
+        session_name: null,
+        model: "fable-5",
+        permission_mode: "skip-permissions",
+        cwd: join(homedir(), "Gits", "cmuxlayer"),
+        repo: "cmuxlayer",
+        cli: "claude",
+        updated_at: "2026-07-12T12:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: makeLifecycleExec(),
+      stateDir: TEST_DIR,
+      spawnPreflight: async () => ({ launcherName: "registeredClaude" }),
+      sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    await spawn.handler(
+      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      {} as any,
+    );
+
+    expect(manifests[0]?.tab_name).toBe(
+      "registeredClaude [surface:new]",
+    );
+  });
+
   it("spawn_agent defaults to the lean payload in text and structured content", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -1545,6 +1607,186 @@ describe("agent lifecycle tool handlers", () => {
         `CMUXLAYER_MCP_PROFILE=sterile cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
+  });
+
+  it("new_worktree_split publishes its worktree cwd through the injected manifest writer", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+    const worktreePath = join(gitsDir, "cmuxlayer.wt", "manifest-worker");
+    const worktreeExec = vi.fn().mockImplementation(async () => {
+      mkdirSync(worktreePath, { recursive: true });
+      return { stdout: "", stderr: "" };
+    });
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        worktree: { name: "manifest worker" },
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(manifests).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:new",
+        agent_id: parsed.agent_id,
+        tab_name: "cmuxlayerCodex [surface:new]",
+        model: "codex",
+        permission_mode: "skip-permissions",
+        cwd: worktreePath,
+        repo: "cmuxlayer",
+        cli: "codex",
+      }),
+    ]);
+  });
+
+  it("interact model refreshes the manifest with the deliberate model pin", async () => {
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const interact = (server as any)._registeredTools["interact"];
+    const spawnResult = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        model: "sonnet",
+        cli: "claude",
+        prompt: "start model-pin test",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    manifests.length = 0;
+
+    await interact.handler(
+      { agent: agentId, action: "model", model: "fable-5" },
+      {} as any,
+    );
+
+    expect(manifests).toEqual([
+      expect.objectContaining({
+        agent_id: agentId,
+        tab_name: "cmuxlayerClaude [surface:new]",
+        model: "fable-5",
+      }),
+    ]);
+  });
+
+  it("rename_tab refreshes the manifest with the deliberate tab title", async () => {
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const rename = (server as any)._registeredTools["rename_tab"];
+    const spawnResult = await spawn.handler(
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    manifests.length = 0;
+
+    await rename.handler(
+      { surface: "surface:new", title: "cmuxlayerClaude [review-seat]" },
+      {} as any,
+    );
+
+    expect(manifests).toEqual([
+      expect.objectContaining({
+        agent_id: agentId,
+        tab_name: "cmuxlayerClaude [review-seat]",
+        model: "sonnet",
+      }),
+    ]);
+  });
+
+  it("send_input rename_to_task refreshes the manifest after the task rename", async () => {
+    const manifests: SeatManifest[] = [];
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      seatManifestWriter: async (manifest) => manifests.push(manifest),
+      seatManifestNow: () => "2026-07-12T12:00:00.000Z",
+    });
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendInput = (server as any)._registeredTools["send_input"];
+    await spawn.handler(
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      {} as any,
+    );
+    manifests.length = 0;
+
+    await sendInput.handler(
+      {
+        surface: "surface:new",
+        text: "status",
+        press_enter: false,
+        rename_to_task: "audit",
+      },
+      {} as any,
+    );
+
+    expect(manifests).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:new",
+        tab_name: "agent-pane: audit",
+      }),
+    ]);
+  });
+
+  it("a bare Vitest server never writes to the real or overridden manifest directory", async () => {
+    const manifestDir = join(TEST_DIR, "must-stay-absent");
+    const previous = process.env.CMUXLAYER_SEAT_MANIFEST_DIR;
+    process.env.CMUXLAYER_SEAT_MANIFEST_DIR = manifestDir;
+    try {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      await spawn.handler(
+        { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+        {} as any,
+      );
+
+      expect(existsSync(manifestDir)).toBe(false);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.CMUXLAYER_SEAT_MANIFEST_DIR;
+      } else {
+        process.env.CMUXLAYER_SEAT_MANIFEST_DIR = previous;
+      }
+    }
   });
 
   it("new_worktree_split defaults to the caller workspace instead of the selected workspace", async () => {

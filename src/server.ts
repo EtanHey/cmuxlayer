@@ -11,6 +11,10 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
+import {
+  createFileSystemSeatManifestWriter,
+  type SeatManifestWriter,
+} from "./seat-manifest.js";
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
@@ -1853,6 +1857,13 @@ export interface CreateServerOptions {
   enableCloseForensics?: boolean;
   /** Override per-surface PTY write-liveness tracking (primarily for tests). */
   surfaceWriteLiveness?: SurfaceWriteLivenessTracker;
+  /**
+   * Publish deliberate per-seat expected state. Tests inject a recorder/no-op;
+   * production defaults to the orchestrator-backed filesystem writer.
+   */
+  seatManifestWriter?: SeatManifestWriter;
+  /** Override the manifest timestamp source for deterministic tests. */
+  seatManifestNow?: () => string;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -2099,6 +2110,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const surfaceWriteLivenessCandidates =
     context.surfaceWriteLivenessCandidates;
   const surfacePtyDeadSince = context.surfacePtyDeadSince;
+  const seatManifestWriter: SeatManifestWriter =
+    opts?.seatManifestWriter ??
+    (process.env.VITEST === "true"
+      ? async () => {}
+      : createFileSystemSeatManifestWriter());
+  const seatManifestNow =
+    opts?.seatManifestNow ?? (() => new Date().toISOString());
   const enableClaudeChannels =
     opts?.enableClaudeChannels ?? context.enableClaudeChannels;
   const skipAgentLifecycle =
@@ -2150,6 +2168,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
   let lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null = null;
+  let lifecycleSeatManifestPublisher: (input: {
+    agentId?: string;
+    surfaceId?: string;
+    tabName?: string;
+    model?: string;
+  }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleRefreshManagedMetadata:
     | ((agentId?: string) => Promise<void>)
@@ -2959,6 +2983,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const newTitle = replaceTaskSuffix(currentTitle, opts.rename_to_task);
     await client.renameTab(opts.surface, newTitle, {
       workspace: opts.workspace,
+    });
+    await lifecycleSeatManifestPublisher({
+      surfaceId: opts.surface,
+      tabName: newTitle,
     });
   };
 
@@ -5629,6 +5657,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: args.workspace,
           });
         }, { toolName: "rename_tab", workspace: args.workspace });
+        await lifecycleSeatManifestPublisher({
+          surfaceId: args.surface,
+          tabName: finalTitle,
+        });
         const data = { surface: args.surface, title: finalTitle };
         return okFormatted(formatOk("rename_tab", data), data);
       } catch (e) {
@@ -6476,6 +6508,52 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           seatRegistryPath: opts?.seatRegistryPath,
         },
       );
+    lifecycleSeatManifestPublisher = async (input) => {
+      try {
+        const existing = input.agentId
+          ? engine.getAgentState(input.agentId)
+          : registry.list().find(
+              (record) => record.surface_id === input.surfaceId,
+            ) ?? null;
+        if (!existing) return;
+
+        const updated =
+          input.tabName !== undefined || input.model !== undefined
+            ? stateMgr.updateRecord(existing.agent_id, {
+                ...(input.tabName !== undefined
+                  ? { tab_name: input.tabName }
+                  : {}),
+                ...(input.model !== undefined ? { model: input.model } : {}),
+              })
+            : existing;
+        if (updated !== existing) {
+          registry.set(updated.agent_id, updated);
+        }
+
+        const tabName =
+          updated.tab_name ??
+          `${updated.launcher_name ?? launcherNameForCli(updated.repo, updated.cli)} [${updated.surface_id}]`;
+        await seatManifestWriter({
+          surface_id: updated.surface_id,
+          agent_id: updated.agent_id,
+          tab_name: tabName,
+          session_name: updated.cli_session_id,
+          model: updated.model,
+          permission_mode:
+            updated.cli === "kiro" ? "default" : "skip-permissions",
+          cwd:
+            updated.launch_cwd ?? join(homedir(), "Gits", updated.repo),
+          repo: updated.repo,
+          cli: updated.cli,
+          updated_at: seatManifestNow(),
+        });
+      } catch (error) {
+        console.error(
+          "[cmuxlayer] seat manifest publish failed:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
 
@@ -7098,6 +7176,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           await refreshManagedMetadataBestEffort(result.agent_id);
+          await lifecycleSeatManifestPublisher({
+            agentId: result.agent_id,
+          });
           const currentAgent = engine.getAgentState(result.agent_id);
           const role =
             currentAgent?.role ??
@@ -7294,6 +7375,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             spawnDeliveryWorkspace(result, mutationWorkspace),
           );
           await refreshManagedMetadataBestEffort(result.agent_id);
+          await lifecycleSeatManifestPublisher({
+            agentId: result.agent_id,
+          });
           const currentAgent = engine.getAgentState(result.agent_id);
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
@@ -8661,6 +8745,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 text: modelCmd,
                 press_enter: true,
                 source_event: "interact",
+              });
+              await lifecycleSeatManifestPublisher({
+                agentId: args.agent,
+                model: args.model,
               });
               const d = {
                 agent_id: args.agent,
