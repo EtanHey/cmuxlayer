@@ -523,6 +523,74 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(lastV2Request?.params).not.toHaveProperty("pane_id");
   });
 
+  it("anchors a pane-targeted split inside that pane when surface.list ignores pane_id", async () => {
+    const savedPaneList = MOCK_RESPONSES["pane.list"];
+    const savedSurfaceList = MOCK_RESPONSES["surface.list"];
+    MOCK_RESPONSES["pane.list"] = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:left",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:lead"],
+        },
+        {
+          ref: "pane:right",
+          index: 1,
+          focused: false,
+          surface_count: 1,
+          surface_refs: ["surface:right"],
+        },
+      ],
+    };
+    // Production surface.list is workspace-wide even when pane_id is passed.
+    // The globally selected lead surface must not override the requested pane.
+    MOCK_RESPONSES["surface.list"] = {
+      workspace_ref: "workspace:1",
+      window_ref: "window:1",
+      surfaces: [
+        {
+          ref: "surface:lead",
+          title: "orcClaude",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+        {
+          ref: "surface:right",
+          title: "driverBuddy",
+          type: "terminal",
+          index: 1,
+          selected: false,
+        },
+      ],
+    };
+
+    try {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+      await client.newSplit("down", {
+        workspace: "workspace:1",
+        pane: "pane:right",
+      });
+
+      expect(lastV2Request).toEqual({
+        method: "surface.split",
+        params: {
+          direction: "down",
+          workspace_id: "workspace:1",
+          surface_id: "surface:right",
+        },
+      });
+    } finally {
+      MOCK_RESPONSES["pane.list"] = savedPaneList;
+      MOCK_RESPONSES["surface.list"] = savedSurfaceList;
+    }
+  });
+
   it("newSplit omits the pane anchor when the pane has no surfaces", async () => {
     const saved = MOCK_RESPONSES["surface.list"];
     MOCK_RESPONSES["surface.list"] = {
