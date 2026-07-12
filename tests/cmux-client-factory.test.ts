@@ -93,6 +93,81 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       servers.push({ server, path });
     }
 
+    it("pins the first degraded CLI call from an explicit socketPath", async () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      delete process.env.CMUX_SOCKET_PATH;
+      const socketPath = join(tmpdir(), `cmux-explicit-down-${process.pid}.sock`);
+      const exec = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+
+      const client = await createCmuxClient({
+        socketPath,
+        exec,
+        bin: "cmux",
+        pingRetryAttempts: 1,
+        reprobeIntervalMs: 60_000,
+      });
+
+      await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        ["--json", "list-workspaces"],
+        expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
+      );
+      if ("stop" in client && typeof client.stop === "function") client.stop();
+    });
+
+    it("pins the first degraded CLI call from CMUX_SOCKET_PATH", async () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      const socketPath = join(tmpdir(), `cmux-env-down-${process.pid}.sock`);
+      process.env.CMUX_SOCKET_PATH = socketPath;
+      const exec = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+
+      const client = await createCmuxClient({
+        exec,
+        bin: "cmux",
+        pingRetryAttempts: 1,
+        reprobeIntervalMs: 60_000,
+      });
+
+      await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        ["--json", "list-workspaces"],
+        expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
+      );
+      if ("stop" in client && typeof client.stop === "function") client.stop();
+    });
+
+    it("preserves ambient env inheritance when no instance pin exists", async () => {
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      delete process.env.CMUX_SOCKET_PATH;
+      const stateDir = mkdtempSync(join(tmpdir(), "cmux-unpinned-down-"));
+      const exec = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      });
+
+      const client = await createCmuxClient({
+        socketStateDir: stateDir,
+        exec,
+        bin: "cmux",
+        pingRetryAttempts: 1,
+        reprobeIntervalMs: 60_000,
+      });
+
+      await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
+      expect(exec).toHaveBeenCalledWith("cmux", ["--json", "list-workspaces"]);
+      expect(exec.mock.calls[0]).toHaveLength(2);
+      if ("stop" in client && typeof client.stop === "function") client.stop();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
     it("pins to CMUX_SOCKET_PATH and never falls through to another live instance", async () => {
       const stateDir = mkdtempSync(join(tmpdir(), "cmux-factory-"));
       const otherInstance = join(stateDir, "cmux-other.sock");
