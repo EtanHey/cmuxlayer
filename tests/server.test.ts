@@ -6272,7 +6272,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("new_split with role=worker rejects focus=false when placement becomes a tab", async () => {
+  it("new_split with role=worker rejects focus=false while seeding the worker column", async () => {
     const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-focus-state");
     rmSync(stateDir, { recursive: true, force: true });
     const stateMgr = new StateManager(stateDir);
@@ -6378,7 +6378,7 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("focus=false");
+    expect(parsed.error).toContain("unfocused splits");
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["new-surface"]),

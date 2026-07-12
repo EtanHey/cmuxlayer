@@ -877,6 +877,209 @@ function makeRegistryRepairExec(
   });
 }
 
+function makeLeftColumnWorkerExec(
+  opts: {
+    singleColumn?: boolean;
+    failPostMoveTopologyOnce?: boolean;
+  } = {},
+): ExecFn {
+  let workerPane = "pane:left";
+  let rightPaneExists = !opts.singleColumn;
+  let seedSurfaceOpen = false;
+  let postMoveTopologyFailed = false;
+
+  return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split")) {
+      rightPaneExists = true;
+      seedSurfaceOpen = true;
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          pane: "pane:right",
+          surface: "surface:worker-column-seed",
+          title: "",
+          type: "terminal",
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("move-surface")) {
+      workerPane = String(args[args.indexOf("--pane") + 1]);
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          pane: workerPane,
+          surface: "surface:worker-left",
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("close-surface")) {
+      seedSurfaceOpen = false;
+      return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+    }
+
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Active",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      if (
+        opts.failPostMoveTopologyOnce &&
+        workerPane === "pane:right" &&
+        !postMoveTopologyFailed
+      ) {
+        postMoveTopologyFailed = true;
+        throw new Error("transient pane topology failure");
+      }
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: true,
+              surface_count: workerPane === "pane:left" ? 2 : 1,
+              surface_refs:
+                workerPane === "pane:left"
+                  ? ["surface:lead", "surface:worker-left"]
+                  : ["surface:lead"],
+              selected_surface_ref: "surface:lead",
+              pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+            },
+            ...(rightPaneExists
+              ? [
+                  {
+                    ref: "pane:right",
+                    index: 1,
+                    focused: false,
+                    surface_count:
+                      Number(seedSurfaceOpen) +
+                      Number(workerPane === "pane:right") ||
+                      1,
+                    surface_refs: [
+                      ...(seedSurfaceOpen
+                        ? ["surface:worker-column-seed"]
+                        : []),
+                      ...(workerPane === "pane:right"
+                        ? ["surface:worker-left"]
+                        : []),
+                      ...(!seedSurfaceOpen && workerPane !== "pane:right"
+                        ? ["surface:shell"]
+                        : []),
+                    ],
+                    selected_surface_ref: seedSurfaceOpen
+                      ? "surface:worker-column-seed"
+                      : workerPane === "pane:right"
+                        ? "surface:worker-left"
+                        : "surface:shell",
+                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+                  },
+                ]
+              : []),
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      const pane = String(args[args.indexOf("--pane") + 1]);
+      const base =
+        pane === "pane:left"
+          ? [
+              {
+                ref: "surface:lead",
+                title: "cmuxlayerClaude-LEAD",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ]
+          : [
+              ...(seedSurfaceOpen
+                ? [
+                    {
+                      ref: "surface:worker-column-seed",
+                      title: "",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : []),
+              ...(!seedSurfaceOpen && workerPane !== "pane:right"
+                ? [
+                    {
+                      ref: "surface:shell",
+                      title: "notes",
+                      type: "terminal",
+                      index: 0,
+                      selected: true,
+                    },
+                  ]
+                : []),
+            ];
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane,
+          surfaces:
+            workerPane === pane
+              ? [
+                  ...base,
+                  {
+                    ref: "surface:worker-left",
+                    title: "stalkerCodex",
+                    type: "terminal",
+                    index: 1,
+                    selected: false,
+                  },
+                ]
+              : base,
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      const surface = String(args[args.indexOf("--surface") + 1]);
+      return {
+        stdout: JSON.stringify({
+          surface,
+          text:
+            surface === "surface:worker-left"
+              ? "gpt-5.5 · Working (1m 03s • esc to interrupt)"
+              : "Claude Code\n✻ Working…\n🤖 Opus 4.8",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return { stdout: JSON.stringify({}), stderr: "" };
+  });
+}
+
 describe("resync_agents tool", () => {
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -947,6 +1150,96 @@ describe("resync_agents tool", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.added).toHaveLength(1);
     expect(parsed.count).toBe(1);
+  });
+
+  it("resync_agents moves an auto-discovered worker out of the leftmost lead column", async () => {
+    const exec = makeLeftColumnWorkerExec();
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:worker-left",
+        "--pane",
+        "pane:right",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:worker-left",
+        from_column: 0,
+        to_column: 1,
+      }),
+    ]);
+  });
+
+  it("resync_agents seeds a right column for a single-column auto-discovered worker", async () => {
+    const exec = makeLeftColumnWorkerExec({ singleColumn: true });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "new-split",
+        "right",
+        "--surface",
+        "surface:worker-left",
+      ]),
+    );
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:worker-left",
+        "--pane",
+        "pane:right",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([
+      expect.objectContaining({
+        surface_id: "surface:worker-left",
+        from_column: 0,
+        to_column: 1,
+      }),
+    ]);
+  });
+
+  it("resync_agents keeps its normal diff when post-move topology is transiently unavailable", async () => {
+    const exec = makeLeftColumnWorkerExec({ failPostMoveTopologyOnce: true });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff).toEqual(
+      expect.objectContaining({
+        added: expect.any(Array),
+        evicted: expect.any(Array),
+        repaired: expect.any(Array),
+        orphaned: expect.any(Array),
+        reflowed: [],
+      }),
+    );
   });
 
   it("list_agents persists live state updates for existing auto-discovered agents", async () => {

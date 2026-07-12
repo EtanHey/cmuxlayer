@@ -8044,7 +8044,109 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfacelessEvicted = await registry.evictSurfaceless();
           engine.evictDeadProcessAgents();
           discovery.invalidate();
-          const after = await registry.listMerged(discovery, { force: true });
+          let after = await registry.listMerged(discovery, { force: true });
+          const topologyBeforeReflow = await collectSurfaceTopology();
+          const reflowed: Array<{
+            agent_id: string;
+            surface_id: string;
+            from_column: number;
+            to_column: number;
+            pane: string;
+          }> = [];
+
+          if (topologyBeforeReflow) {
+            const panesByWorkspace = new Map<
+              string,
+              Awaited<ReturnType<typeof client.listPanes>>
+            >();
+
+            for (const agent of after) {
+              if (inferRecordRoleOrNull(agent) !== "worker") continue;
+              const current = topologyBeforeReflow.topologyBySurface.get(
+                agent.surface_id,
+              );
+              if (current?.column !== 0) continue;
+
+              let seededSurface: string | null = null;
+              let workspace: string | null = null;
+              try {
+                workspace =
+                  topologyBeforeReflow.workspaceBySurface.get(
+                    agent.surface_id,
+                  ) ?? agent.workspace_id ?? null;
+                if (!workspace) continue;
+
+                let targetPane: string | null = null;
+                if ((current.column_count ?? 0) < 2) {
+                  const seed = await client.newSplit("right", {
+                    workspace,
+                    surface: agent.surface_id,
+                    type: "terminal",
+                  });
+                  targetPane = seed.pane;
+                  seededSurface = seed.surface;
+                  panesByWorkspace.delete(workspace);
+                } else {
+                  let panes = panesByWorkspace.get(workspace);
+                  if (!panes) {
+                    panes = await client.listPanes({ workspace });
+                    panesByWorkspace.set(workspace, panes);
+                  }
+                  const columns = deriveColumnIndex(panes.panes);
+                  targetPane = [...panes.panes]
+                    .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
+                    .sort((a, b) => {
+                      const columnDelta =
+                        (columns.get(a.ref) ?? 0) -
+                        (columns.get(b.ref) ?? 0);
+                      return columnDelta || a.index - b.index;
+                    })
+                    .at(-1)?.ref ?? null;
+                }
+                if (!targetPane) continue;
+
+                await client.moveSurface({
+                  surface: agent.surface_id,
+                  pane: targetPane,
+                  workspace,
+                  focus: false,
+                });
+
+                const topologyAfterMove = await collectSurfaceTopology(workspace);
+                const actual = topologyAfterMove?.topologyBySurface.get(
+                  agent.surface_id,
+                );
+                if (actual?.column == null || actual.column === 0) continue;
+
+                reflowed.push({
+                  agent_id: agent.agent_id,
+                  surface_id: agent.surface_id,
+                  from_column: current.column,
+                  to_column: actual.column,
+                  pane: targetPane,
+                });
+              } catch {
+                // Reflow is self-healing best effort. One stale workspace, pane,
+                // or topology read must not abort the registry-wide resync.
+                continue;
+              } finally {
+                if (seededSurface) {
+                  try {
+                    await client.closeSurface(seededSurface, {
+                      ...(workspace ? { workspace } : {}),
+                    });
+                  } catch {
+                    // A seed cleanup race is isolated to this worker as well.
+                  }
+                }
+              }
+            }
+          }
+
+          if (reflowed.length > 0) {
+            discovery.invalidate();
+            after = await registry.listMerged(discovery, { force: true });
+          }
           const discovered = await discovery.scan();
           const afterIds = new Set(after.map((agent) => agent.agent_id));
           const managedSurfaceIds = new Set(
@@ -8070,6 +8172,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             added: [...afterIds].filter((id) => !beforeIds.has(id)),
             evicted,
             repaired: repair.repaired,
+            reflowed,
             mismatches: after
               .filter((agent) => agent.parsed_cli_mismatch)
               .map((agent) => agent.agent_id),
