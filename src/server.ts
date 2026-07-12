@@ -367,12 +367,59 @@ const READY_PATTERN_CLIS: CliType[] = [
   "cursor",
 ];
 const SendToArgsSchema = z.object({
-  agent_id: z.string(),
-  text: z.string(),
+  mode: z
+    .enum(["agent", "surface", "command", "key"])
+    .optional()
+    .default("agent"),
+  target: z.string().optional(),
+  agent_id: z.string().optional(),
+  surface: z.string().optional(),
+  text: z.string().optional(),
+  command: z.string().optional(),
+  key: z.string().optional(),
+  workspace: z.string().optional(),
+  chunk_size: z.number().int().min(1).optional().default(200),
+  background: z.boolean().optional().default(false),
+  rename_to_task: z.string().optional(),
+  boot_prompt_path: z.string().nullable().optional(),
+  boot_prompt_timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .default(BOOT_PROMPT_TIMEOUT_MS),
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
   allow_long_inline: z.boolean().optional().default(false),
 });
+
+export const THIN_CORE_TOOL_NAMES = new Set([
+  "spawn_agent",
+  "send_to",
+  "wait_for",
+  "read_screen",
+  "my_agents",
+  "list_agents",
+  "broadcast",
+  "close_surface",
+  "dispatch_to_agent",
+  "list_surfaces",
+  "control_health",
+  "stop_agent",
+]);
+
+// DRIFT: retire next release. The signed-off prose says 9 legacy names, while
+// its exhaustive mapping names these 8; do not invent an unnamed alias.
+export const THIN_CORE_LEGACY_REPLACEMENTS: Readonly<Record<string, string>> = {
+  send_to_agent: "send_to(mode=agent)",
+  send_input: "send_to(mode=surface)",
+  send_command: "send_to(mode=command)",
+  send_key: "send_to(mode=key)",
+  new_worktree_split: "spawn_agent(worktree=true, role=worker)",
+  spawn_in_workspace: "spawn_agent(workspace=...)",
+  new_split: "spawn_agent(role=...)",
+  wait_for_all: "wait_for(ids=[...])",
+};
 
 const BroadcastRoleSchema = z.enum(["leads", "workers", "all"]);
 const BroadcastArgsSchema = z.object({
@@ -611,6 +658,22 @@ function okFormatted(
   return {
     content: [{ type: "text", text: formattedText }],
     structuredContent: payload,
+  };
+}
+
+function withDeprecationWarning(
+  result: ToolReturn,
+  legacyName: string,
+  replacement: string,
+): ToolReturn {
+  const warning = `${legacyName} is deprecated for one release; use ${replacement}`;
+  console.warn(`[cmuxlayer] ${warning}`);
+  return {
+    ...result,
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      deprecation_warning: warning,
+    },
   };
 }
 
@@ -2496,6 +2559,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined,
   );
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  const toolHandlersByName = new Map<
+    string,
+    (
+      args: Record<string, unknown>,
+      extra: unknown,
+    ) => Promise<ToolReturn>
+  >();
   const palette = createDefaultToolPalette(
     opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
   );
@@ -2506,8 +2576,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const handlerIndex = args.length - 1;
     const handler = args[handlerIndex];
     if (typeof handler === "function") {
-      args[handlerIndex] = (...handlerArgs: unknown[]) =>
+      const trackedHandler = (...handlerArgs: unknown[]) =>
         withTransportRetryTracking(() => handler(...handlerArgs));
+      args[handlerIndex] = trackedHandler;
+      if (typeof toolName === "string") {
+        toolHandlersByName.set(
+          toolName,
+          trackedHandler as (
+            args: Record<string, unknown>,
+            extra: unknown,
+          ) => Promise<ToolReturn>,
+        );
+      }
     }
     if (
       palette &&
@@ -5212,40 +5292,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
-  // 5. reorder_surface
-  server.tool(
-    "reorder_surface",
-    "Reorder a surface (tab) within its current pane",
-    {
-      surface: z.string().describe("Surface ref to reorder"),
-      index: z.number().int().optional().describe("Move to this tab index"),
-      before: z.string().optional().describe("Insert before this surface ref"),
-      after: z.string().optional().describe("Insert after this surface ref"),
-    },
-    ANNOTATIONS.mutating,
-    async (args) => {
-      try {
-        await assertSurfaceMutationAllowed("reorder_surface", args.surface);
-        const result = await client.reorderSurface({
-          surface: args.surface,
-          index: args.index,
-          before: args.before,
-          after: args.after,
-        });
-        const data = { ...result };
-        return okFormatted(
-          formatOk("reorder_surface", {
-            surface: result.surface,
-          }),
-          data,
-        );
-      } catch (e) {
-        return err(e);
-      }
-    },
-  );
-
-  // 6. send_input
+  // 5. send_input
   server.tool(
     "send_input",
     `Low-level surface tool: send text input to a terminal surface. For tracked agents, prefer send_to(agent_id) so cmuxlayer resolves the current backing surface. WARNING — DO NOT include a bare \`@word\` (e.g. \`@narration-lead\`) in text destined for an interactive agent composer (Claude Code / Codex / Cursor TUIs): the receiving composer treats \`@\` as its file-reference trigger and pops a file-picker overlay, swallowing the rest of your message — silent delivery corruption that the ok:true result will NOT report. Use the bare name (\`narration-lead:\`) for pane-to-pane addressing; reserve \`@<name>\` for collab-file posts where monitors match it. If a literal \`@\` is unavoidable, deliver via a file the agent cat-reads, not live keystrokes. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default (CMUXLAYER_MAX_INLINE_CHARS, positive integer >= ${SEND_INPUT_CHUNK_THRESHOLD}); tracked Codex/Claude/Cursor/Gemini agents also refuse multi-paragraph inline text by default. Write the payload to a file and send one line: "Read and follow <path>". Pass allow_long_inline:true only for deliberate raw sends. Text over ${SEND_INPUT_CHUNK_THRESHOLD} characters that is allowed is automatically chunked into line-aligned batches before delivery, and each chunk waits for cmux acknowledgment before the next is sent. Chunked or multiline text is pasted into the composer so embedded newlines do not submit partial messages; press_enter=true presses return once after the final chunk. Paste failure returns an error without pressing Return. Set background=true to return immediately with a delivery_id while chunking continues in the background. For full commands, prefer send_command so text and return land on the same surface atomically.`,
@@ -7046,6 +7093,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "Optional placement role. Defaults from launcher: *Claude=orchestrator, *Codex/*Cursor=worker.",
           ),
+        placement: z
+          .enum(["orchestrator", "ic", "worker"])
+          .optional()
+          .describe(
+            "Canonical role-driven placement. role remains accepted as a compatibility spelling.",
+          ),
         auto_archive_on_done: z
           .boolean()
           .optional()
@@ -7127,8 +7180,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.worktree,
             args.mcp_profile as McpProfile | undefined,
           );
+          const effectiveRole = args.placement ?? args.role;
           const requestedRole = inferAgentRole({
-            role: args.role,
+            role: effectiveRole,
             cli: args.cli,
             launcherName: launcherNameForCli(args.repo, args.cli),
           });
@@ -7186,7 +7240,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             mcp_profile_label: worktree.mcpProfileLabel,
             worktree_branch: worktree.prepared?.branch,
             parent_agent_id: args.parent_agent_id,
-            role: args.role,
+            role: effectiveRole,
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
@@ -7313,7 +7367,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const role =
             currentAgent?.role ??
             inferAgentRole({
-              role: args.role,
+              role: effectiveRole,
               cli: args.cli,
               launcherName: launcherNameForCli(args.repo, args.cli),
             });
@@ -7802,9 +7856,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 12. wait_for
     server.tool(
       "wait_for",
-      "Block until an agent reaches a target registry state and return health. Defaults to waiting for completion (`done`) so GUI clients can wait on an agent without knowing lifecycle choreography. When the agent has a file-backed goal contract, returned health includes artifact-backed harvestability by reading the referenced report and DONE marker.",
+      "Block until one agent_id or every agent in ids reaches a target registry state and return health. Defaults to waiting for completion (`done`).",
       {
-        agent_id: z.string().describe("Agent ID from spawn_agent"),
+        agent_id: z.string().optional().describe("Single agent ID from spawn_agent"),
+        ids: z
+          .array(z.string())
+          .min(1)
+          .optional()
+          .describe("Agent IDs to wait for together"),
         target_state: z
           .enum(["ready", "working", "idle", "done", "error"])
           .optional()
@@ -7822,6 +7881,50 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           const targetState = args.target_state ?? "done";
+          if (args.ids) {
+            const results = await engine.waitForAll(
+              args.ids,
+              targetState,
+              args.timeout_ms,
+            );
+            await Promise.all(
+              results
+                .map((result) => result.agent?.agent_id)
+                .filter((agentId): agentId is string => Boolean(agentId))
+                .map((agentId) => refreshManagedMetadataBestEffort(agentId)),
+            );
+            const topology = await collectSurfaceTopology();
+            const enrichedResults = await Promise.all(
+              results.map(async (result) => {
+                const resultAgent = result.agent
+                  ? engine.getAgentState(result.agent.agent_id)
+                  : null;
+                const health = resultAgent
+                  ? await evaluateServerAgentHealth(resultAgent, {
+                      ...healthTopologyOverrides(resultAgent, topology),
+                    })
+                  : undefined;
+                return {
+                  ...result,
+                  health,
+                  agent:
+                    result.agent && health
+                      ? { ...result.agent, health }
+                      : result.agent,
+                };
+              }),
+            );
+            return okFormatted(
+              formatOk("wait_for", {
+                count: results.length,
+                target: targetState,
+              }),
+              { results: enrichedResults },
+            );
+          }
+          if (!args.agent_id) {
+            throw new Error("wait_for requires agent_id or ids");
+          }
           const result = await engine.waitFor(
             args.agent_id,
             targetState,
@@ -8454,7 +8557,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      `Preferred path for sending text to a tracked agent by agent_id. Resolves the current backing surface internally so clients do not need pane or surface references, and should be used instead of send_input whenever an agent_id is available. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default, and multi-paragraph inline text is refused for Codex/Claude/Cursor/Gemini agents; write the payload to a file and send one line: "Read and follow <path>". For collab supersession, send a short \`/goal Read and follow <absolute goal file>\` reference rather than a long lossy paste. For launcher boot prompts, put the full prompt in a file and pass boot_prompt_path through spawn_agent/send_command instead of routing raw long text through the agent composer. Pass allow_long_inline:true only for deliberate raw sends. Returns submission evidence plus registry state, parsed screen status, state_conflict, and health; submit_verified means the input was submitted/cleared, not that the agent accepted, started, or completed the task.`,
+      `Unified send path. mode=agent (default) routes by agent_id without exposing surface details; mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends.`,
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -8481,6 +8584,72 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const args = parsedArgs.data;
+          const mode = args.mode ?? "agent";
+          if (mode !== "agent") {
+            const surface = args.surface ?? args.target;
+            if (!surface) {
+              throw new Error(
+                `send_to mode=${mode} requires target or surface`,
+              );
+            }
+            const legacyHandler = (name: string) => {
+              const handler = toolHandlersByName.get(name);
+              if (!handler) {
+                throw new Error(`Internal tool handler unavailable: ${name}`);
+              }
+              return handler;
+            };
+            if (mode === "surface") {
+              if (args.text === undefined) {
+                throw new Error("send_to mode=surface requires text");
+              }
+              return legacyHandler("send_input")(
+                {
+                  surface,
+                  workspace: args.workspace,
+                  text: args.text,
+                  chunk_size: args.chunk_size,
+                  background: args.background,
+                  press_enter: args.press_enter,
+                  rename_to_task: args.rename_to_task,
+                  allow_long_inline: args.allow_long_inline,
+                },
+                {},
+              );
+            }
+            if (mode === "command") {
+              const command = args.command ?? args.text;
+              if (command === undefined) {
+                throw new Error("send_to mode=command requires command or text");
+              }
+              return legacyHandler("send_command")(
+                {
+                  surface,
+                  workspace: args.workspace,
+                  command,
+                  boot_prompt_path: args.boot_prompt_path,
+                  boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
+                  allow_long_inline: args.allow_long_inline,
+                },
+                {},
+              );
+            }
+            if (!args.key) {
+              throw new Error("send_to mode=key requires key");
+            }
+            return legacyHandler("send_key")(
+              { surface, workspace: args.workspace, key: args.key },
+              {},
+            );
+          }
+
+          const agentId = args.agent_id ?? args.target;
+          if (!agentId) {
+            throw new Error("send_to mode=agent requires agent_id or target");
+          }
+          if (args.text === undefined) {
+            throw new Error("send_to mode=agent requires text");
+          }
           assertInlineInputAllowed({
             tool: "send_to",
             arg: "text",
@@ -8488,7 +8657,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allowLongInline: args.allow_long_inline,
           });
           const targetAgent =
-            engine.getAgentState(args.agent_id) ?? registry.get(args.agent_id);
+            engine.getAgentState(agentId) ?? registry.get(agentId);
           assertInteractiveMultilineInputAllowed({
             tool: "send_to",
             value: args.text,
@@ -8496,15 +8665,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allowLongInline: args.allow_long_inline,
           });
           const delivery = await deliverAgentInput({
-            agent_id: args.agent_id,
+            agent_id: agentId,
             text: args.text,
             press_enter: args.press_enter,
             allow_busy: args.allow_busy,
             source_event: "send_to",
           });
-          const evidence = await collectDeliveryEvidence(args.agent_id);
+          const evidence = await collectDeliveryEvidence(agentId);
           const data = {
-            agent_id: args.agent_id,
+            agent_id: agentId,
             retry_count: delivery.retry_count,
             submit_verified: delivery.submit_verified,
             ...evidence,
@@ -8561,6 +8730,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           const args = parsedArgs.data;
+          const agentId = args.agent_id ?? args.target;
+          if (!agentId || args.text === undefined) {
+            throw new Error("send_to_agent requires agent_id and text");
+          }
           assertInlineInputAllowed({
             tool: "send_to_agent",
             arg: "text",
@@ -8568,7 +8741,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allowLongInline: args.allow_long_inline,
           });
           const targetAgent =
-            engine.getAgentState(args.agent_id) ?? registry.get(args.agent_id);
+            engine.getAgentState(agentId) ?? registry.get(agentId);
           assertInteractiveMultilineInputAllowed({
             tool: "send_to_agent",
             value: args.text,
@@ -8576,15 +8749,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allowLongInline: args.allow_long_inline,
           });
           const delivery = await deliverAgentInput({
-            agent_id: args.agent_id,
+            agent_id: agentId,
             text: args.text,
             press_enter: args.press_enter,
             allow_busy: args.allow_busy,
             source_event: "send_to_agent",
           });
-          const evidence = await collectDeliveryEvidence(args.agent_id);
+          const evidence = await collectDeliveryEvidence(agentId);
           const data = {
-            agent_id: args.agent_id,
+            agent_id: agentId,
             retry_count: delivery.retry_count,
             submit_verified: delivery.submit_verified,
             ...evidence,
@@ -9188,6 +9361,61 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return ok({ ...expansion });
         }),
     );
+  } else {
+    // The hardcoded thin-core cut is the default. A configured per-session
+    // palette supersedes it above and controls residency until expansion.
+    const registeredTools = (server as any)._registeredTools as Record<
+      string,
+      {
+        _meta?: Record<string, unknown>;
+        handler: (
+          args: Record<string, unknown>,
+          extra: unknown,
+        ) => Promise<ToolReturn>;
+        _cmuxlayerOriginalHandler?: (
+          args: Record<string, unknown>,
+          extra: unknown,
+        ) => Promise<ToolReturn>;
+        update: (updates: {
+          _meta?: Record<string, unknown>;
+          callback?: (
+            args: Record<string, unknown>,
+            extra: unknown,
+          ) => Promise<ToolReturn>;
+        }) => void;
+      }
+    >;
+    for (const [name, tool] of Object.entries(registeredTools)) {
+      if (THIN_CORE_TOOL_NAMES.has(name)) continue;
+      const replacement = THIN_CORE_LEGACY_REPLACEMENTS[name];
+      const originalHandler = tool.handler;
+      if (replacement) {
+        tool._cmuxlayerOriginalHandler = originalHandler;
+      }
+      tool.update({
+        _meta: {
+          ...(tool._meta ?? {}),
+          defer_loading: true,
+          "cmuxlayer/interim": true,
+          ...(replacement
+            ? { deprecated: true, "cmuxlayer/replacement": replacement }
+            : {}),
+        },
+        ...(replacement
+          ? {
+              callback: async (
+                args: Record<string, unknown>,
+                extra: unknown,
+              ) =>
+                withDeprecationWarning(
+                  await originalHandler(args, extra),
+                  name,
+                  replacement,
+                ),
+            }
+          : {}),
+      });
+    }
   }
 
   return server;

@@ -15,7 +15,6 @@ export const REGISTERED_TOOL_NAMES = [
   "new_split",
   "new_surface",
   "move_surface",
-  "reorder_surface",
   "send_input",
   "send_command",
   "send_key",

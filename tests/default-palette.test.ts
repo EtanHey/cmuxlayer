@@ -7,6 +7,20 @@ import { REGISTERED_TOOL_NAMES } from "../src/palette.js";
 
 const ENV_KEY = "CMUXLAYER_DEFAULT_PALETTE";
 const originalEnv = process.env[ENV_KEY];
+const THIN_CORE_TOOL_NAMES = [
+  "spawn_agent",
+  "send_to",
+  "wait_for",
+  "read_screen",
+  "my_agents",
+  "list_agents",
+  "broadcast",
+  "close_surface",
+  "dispatch_to_agent",
+  "list_surfaces",
+  "control_health",
+  "stop_agent",
+] as const;
 
 afterEach(() => {
   if (originalEnv === undefined) {
@@ -54,18 +68,22 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
     }
   });
 
-  it("registers only the requested tools plus expand_palette", async () => {
+  it("lets the env palette override thin-core residency", async () => {
     const fixture = await connectPaletteServer(
-      "list_surfaces,control_health,read_screen",
+      "select_workspace,control_health,read_screen",
     );
     try {
       const listed = await fixture.client.listTools();
       expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
         "control_health",
         "expand_palette",
-        "list_surfaces",
         "read_screen",
+        "select_workspace",
       ]);
+      expect(
+        listed.tools.find((tool) => tool.name === "select_workspace")?._meta
+          ?.defer_loading,
+      ).not.toBe(true);
     } finally {
       await closePaletteServer(fixture);
     }
@@ -87,7 +105,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         expanded: true,
       });
       const expandedTools = (await fixture.client.listTools()).tools;
-      expect(expandedTools).toHaveLength(27);
+      expect(expandedTools).toHaveLength(26);
       expect(
         expandedTools.find((tool) => tool.name === "delete_workspace")?._meta,
       ).toMatchObject({
@@ -106,7 +124,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         expanded: false,
         already_expanded: true,
       });
-      expect((await fixture.client.listTools()).tools).toHaveLength(27);
+      expect((await fixture.client.listTools()).tools).toHaveLength(26);
       expect(fixture.listChanged).toHaveBeenCalledTimes(notificationCount);
     } finally {
       await closePaletteServer(fixture);
@@ -114,7 +132,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
   });
 
   it.each([undefined, "", "   \t  "])(
-    "preserves the full tool surface when the env is %s",
+    "uses thin-core defaults when the env is %s",
     async (value) => {
       if (value === undefined) {
         delete process.env[ENV_KEY];
@@ -127,8 +145,21 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
           (server as unknown as { _registeredTools: Record<string, unknown> })
             ._registeredTools,
         );
-        expect(names).toHaveLength(43);
+        expect(names).toHaveLength(42);
         expect(names).not.toContain("expand_palette");
+        const tools = (
+          server as unknown as {
+            _registeredTools: Record<
+              string,
+              { _meta?: Record<string, unknown> }
+            >;
+          }
+        )._registeredTools;
+        const resident = Object.entries(tools)
+          .filter(([, tool]) => tool._meta?.defer_loading !== true)
+          .map(([name]) => name)
+          .sort();
+        expect(resident).toEqual([...THIN_CORE_TOOL_NAMES].sort());
       } finally {
         await server.close();
       }

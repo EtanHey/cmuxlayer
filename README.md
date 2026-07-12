@@ -51,8 +51,9 @@ To keep only a per-session resident subset of tools, set
 `CMUXLAYER_DEFAULT_PALETTE` to comma-separated bare tool names, for example
 `list_surfaces,spawn_agent,send_to`. The server also exposes `expand_palette`,
 which makes every deferred tool available for the rest of that MCP session.
-Unset or blank values preserve the full tool list; unknown names are warned and
-ignored while valid names still load.
+When unset or blank, the signed 12-tool thin-core default applies. When set, the
+environment value overrides that default for the session. Unknown names are
+warned and ignored while valid names still load.
 
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
 
@@ -66,30 +67,36 @@ Tell your AI agent things like:
 - *"Wait for all agents to finish, then read their output"*
 - *"Set the sidebar status to show our deploy progress"*
 
-Under the hood, cmuxLayer exposes 35 MCP tools for terminal control, screen reading, layout management, and multi-agent orchestration. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
+Under the hood, cmuxLayer keeps 42 MCP tools callable for terminal control, screen reading, layout management, and multi-agent orchestration. The default palette is intentionally limited to 12; the remaining tools are loaded through ToolSearch. `reorder_surface` is the single approved deletion. `read_screen` parses agent metadata (status, model, tokens, context %) for Claude Code, Codex, Gemini, and Cursor.
 
 ## Agent Routing Workflow
 
-For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. Raw surface tools such as `send_input`, `send_command`, and `send_key` are still available for shells, launch/resume commands, stuck-pane recovery, and explicit terminal UI operations.
+For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. `send_to` also preserves the registry-independent escape hatch: use `mode:"surface"`, `mode:"command"`, or `mode:"key"` with a raw surface ref for shells, launch/resume commands, and stuck-pane recovery.
 
 See [Agent Routing and Handling Workflow](docs/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
-## MCP Tools (35)
+## MCP Tools (42 registered, 12 default)
 
 All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specification/2025-03-26/server/tools#annotations) for automatic safety policy enforcement.
 
-**Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `new_split` `new_surface` `move_surface` `reorder_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+**Default palette** — `spawn_agent` `send_to` `wait_for` `read_screen` `my_agents` `list_agents` `broadcast` `close_surface` `dispatch_to_agent` `list_surfaces` `control_health` `stop_agent`
 
-**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill`
+The other 30 definitions, including `interact`, are interim ToolSearch-deferred and remain callable. This metadata split is deliberately reversible while the project decides which low-frequency operations belong in MCP versus CLI/programmatic surfaces.
+
+**Terminal control** — `list_surfaces` `control_health` `select_workspace` `create_workspace` `delete_workspace` `new_split` `new_surface` `move_surface` `send_input` `send_command` `send_key` `read_screen` `rename_tab` `close_surface` `browser_surface`
+
+**Agent lifecycle** — `spawn_agent` `new_worktree_split` `spawn_in_workspace` `resync_agents` `send_to` `send_to_agent` `wait_for` `wait_for_all` `interact` `stop_agent` `kill` `supersede_agent_goal` `broadcast`
 
 **Metacomm (agent inbox)** — `dispatch_to_agent` `inbox_check`
 
 **Workspace state** — `list_agents` `my_agents` `get_agent_state` `read_agent_output` `notify` `set_status` `set_progress`
 
-<details>
-<summary>Full tool reference (35 tools)</summary>
+**Monitor registry** — `register_monitor` `signal_monitor` `deregister_monitor` `list_monitors` `query_monitor_registry`
 
-### Read-only (8)
+<details>
+<summary>Full tool reference</summary>
+
+### Read-only (10)
 
 | Tool | What it does |
 |------|-------------|
@@ -101,35 +108,42 @@ All tools ship with [ToolAnnotations](https://modelcontextprotocol.io/specificat
 | `my_agents` | Children of a parent agent with live screen status |
 | `read_agent_output` | Structured output between delimiter markers |
 | `inbox_check` | Inspect an agent's inbox channel: pending messages, monitor liveness, stale dispatches |
+| `list_monitors` | List shared monitor-registry records |
+| `query_monitor_registry` | Query monitor gates and liveness metadata |
 
-### Mutating (24)
+### Mutating (29)
 
 | Tool | What it does |
 |------|-------------|
 | `select_workspace` | Switch the active workspace |
 | `create_workspace` | Create a new named workspace |
-| `new_split` | Create a terminal or browser split pane |
+| `delete_workspace` | Delete a workspace after live-agent and caller-workspace safety checks |
+| `new_split` | Deprecated one-release alias; use `spawn_agent(placement:...)` for managed agents |
 | `new_surface` | Create a tab in an existing pane |
 | `move_surface` | Move a surface to another pane or position |
-| `reorder_surface` | Reorder tabs within a pane |
-| `send_input` | Send text to a raw surface; use `send_to` for tracked agents |
-| `send_command` | Atomically send a command and press return on the same surface |
-| `send_key` | Send key press (return, escape, ctrl-c, etc.) to a raw surface |
+| `send_input` | Deprecated one-release alias for `send_to(mode:"surface")` |
+| `send_command` | Deprecated one-release alias for `send_to(mode:"command")` |
+| `send_key` | Deprecated one-release alias for `send_to(mode:"key")` |
 | `rename_tab` | Rename a surface tab |
 | `notify` | Show a cmux notification banner |
 | `set_status` | Set sidebar status key-value pair |
 | `set_progress` | Set progress indicator (0.0-1.0) |
 | `browser_surface` | Interact with browser surfaces |
 | `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
-| `new_worktree_split` | Create or reuse a git worktree and spawn a worker there |
-| `spawn_in_workspace` | Create a workspace and spawn a multi-agent team into a clean grid |
+| `new_worktree_split` | Deprecated one-release alias; use `spawn_agent(worktree:true, placement:"worker")` |
+| `spawn_in_workspace` | Deprecated one-release alias; create/reuse a workspace and call `spawn_agent` for each managed agent |
 | `resync_agents` | Re-sync the agent registry from live surfaces |
 | `dispatch_to_agent` | Append a task to an agent's inbox file (deterministic write channel) |
-| `send_to` | Preferred path for sending text to a tracked agent by `agent_id` |
-| `send_to_agent` | Legacy/internal agent send path; prefer `send_to` |
-| `wait_for` | Block until agent reaches a target state (defaults to `done`) |
-| `wait_for_all` | Block until multiple agents finish |
+| `send_to` | Send by agent ID or raw surface using `mode:"agent"|"surface"|"command"|"key"` |
+| `send_to_agent` | Deprecated one-release alias for `send_to(mode:"agent")` |
+| `wait_for` | Wait for one `agent_id` or several `ids` (defaults to `done`) |
+| `wait_for_all` | Deprecated one-release alias for `wait_for(ids:[...])` |
 | `interact` | Send interactive input (confirm, cancel, resume) |
+| `broadcast` | Fan out a guarded message to agents by role |
+| `supersede_agent_goal` | Replace a managed agent's active file-backed goal |
+| `register_monitor` | Register or re-arm a monitor deadman record |
+| `signal_monitor` | Refresh a monitor heartbeat |
+| `deregister_monitor` | Mark a monitor intentionally stopped |
 
 ### Destructive (3)
 

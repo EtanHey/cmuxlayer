@@ -1,11 +1,11 @@
 # metacommlayer WRITE channel — inbox dispatch (operations)
 
-> Sterile, deterministic dispatch that replaces `send_input`/TUI typing. Pairs with the READ
+> Sterile, deterministic dispatch that replaces raw `send_to(mode:"surface")`/TUI typing. Pairs with the READ
 > channel (`harness-session.ts`). Library: `src/inbox.ts`. MCP tools: `dispatch_to_agent`,
 > `inbox_check`. Spike proof: `orchestrator/docs.local/handoffs/2026-06-04/metacommlayer-write-channel-SPIKE-findings.md`.
 >
-> **`send_input` is KEPT as the fallback** — this channel is additive (belt-and-suspenders) until
-> proven in production. Fall back to `send_input` whenever `inbox_check` shows a wedged monitor.
+> **Raw-surface `send_to` is KEPT as the fallback** — this channel is additive (belt-and-suspenders) until
+> proven in production. Fall back to `send_to(mode:"surface")` whenever `inbox_check` shows a wedged monitor.
 
 ## Files (per agent, EPHEMERAL plumbing — NOT BrainLayer)
 - `~/.cmux/agents/<agent-id>/inbox.jsonl` — append-only dispatches.
@@ -21,7 +21,7 @@ Do NOT auto-ingest these into BrainLayer. Only messages with `persist:true` are 
 - **FM#4 — keep dispatch low-rate / batched** so the agent's Monitor doesn't trip its flood auto-stop.
 - **FM#3 — detect wedged agents:** `inbox_check { agent_id, ack_timeout_ms, heartbeat_max_age_ms }`
   → `{ monitor_alive, undelivered, stale }`. Non-empty `stale` (un-acked past the timeout) or
-  `monitor_alive:false` ⇒ the channel is down → **fall back to `send_input`** for that agent.
+  `monitor_alive:false` ⇒ the channel is down → **fall back to `send_to(mode:"surface")`** for that agent.
 - Triage: when an agent needs orc, it dispatches to `to:"orc"`; orc's own inbox monitor + its
   existing cron-tick loop catch it. No firehose, no separate buddy/local-model.
 
@@ -51,7 +51,7 @@ cadence — fine for coordination, not for sub-second control.
   act, `ack()`. This reuses the universal lib with zero Codex-specific code. `recommendedCodexWatch()`
   (bg-tail → `inbox.surfaced.log`) is OPTIONAL continuous capture only — it does NOT wake an idle
   Codex. **Residual:** a truly-idle, non-looping Codex still needs a turn trigger; that one case is
-  where `send_input` (the kept fallback) remains required. Deterministic dispatch for a *looping*
+  where raw-surface `send_to` (the kept fallback) remains required. Deterministic dispatch for a *looping*
   Codex is fully covered (latency = next tick).
 - **Cursor:** same as Codex — no native async Monitor; poll-on-turn via `replayUndelivered`. TBD which
   Cursor surface/loop drives the cadence.

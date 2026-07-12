@@ -24,13 +24,13 @@ can change after respawns, moves, reconnects, or stale terminal cleanup; an
 | Need | Use | Avoid |
 | --- | --- | --- |
 | Find available agents | `list_agents` | `list_surfaces` plus title guessing |
-| Send a prompt to a managed agent | `send_to` | `send_input` to a remembered surface |
+| Send a prompt to a managed agent | `send_to` | A remembered surface when an `agent_id` is healthy |
 | Wait for agent completion | `wait_for` | Polling `read_screen` only |
 | Inspect internal route/session data | `get_agent_state` | Adding topology fields to `list_agents` |
-| Start a new managed agent | `spawn_agent` or `spawn_in_workspace` | Raw `new_split` unless you need a shell |
-| Launch or resume with an exact shell command | `send_command` | Separate `send_input` then `send_key` |
-| Operate a raw terminal/shell | `send_input`, `send_command`, `send_key` | `send_to` without an agent |
-| Close or recover a stuck pane | `read_screen`, `close_surface`, `new_split` | Absorbing the worker task into the caller |
+| Start a new managed agent | `spawn_agent` with `placement`, `workspace`, or `worktree` | A raw split unless you need a shell |
+| Launch or resume with an exact shell command | `send_to(mode:"command")` | Separate text and key sends |
+| Operate a raw terminal/shell | `send_to(mode:"surface"|"command"|"key")` | Agent mode without an `agent_id` |
+| Close or recover a stuck pane | `read_screen`, `close_surface`, then `spawn_agent` for managed agents | Absorbing the worker task into the caller |
 
 ## Handling Existing Agents
 
@@ -39,7 +39,7 @@ When a user names a worker by role, tab, or short ref:
 1. Re-enumerate with `list_agents` and, if needed, `list_surfaces`.
 2. Match by stable facts: `agent_id`, repo, role, title, and current state.
 3. If there is a matching tracked agent, route through `send_to`.
-4. If only a raw terminal exists, use surface tools and keep the operation
+4. If only a raw terminal exists, use `send_to` with a raw-surface mode and keep the operation
    narrowly scoped to that terminal.
 5. After any respawn or close/open sequence, discard old surface refs and
    re-enumerate before sending more input.
@@ -94,7 +94,7 @@ starting the next. Do not batch menu keypresses across panes.
 
 ## When Surface Tools Are Correct
 
-Surface tools are still the right abstraction for:
+Raw-surface `send_to` modes are still the right abstraction for:
 
 - raw shells that are not tracked agents;
 - browser or terminal layout operations;
