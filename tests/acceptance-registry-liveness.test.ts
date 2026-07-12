@@ -18,14 +18,43 @@ describe("registry-liveness live acceptance harness", () => {
     expect(result.stdout).toContain("shell_false_green=PASS");
     expect(result.stdout).toContain("stale_identity_shell_false_green=PASS");
     expect(result.stdout).toContain("three_attempt_convergence=PASS");
+    expect(result.stdout).toContain("scoped_broadcast_workspace=PASS");
+    expect(result.stdout).toContain("unscoped_broadcast_refused=PASS");
+    expect(result.stdout).toContain("interactive_wait_ready=PASS");
+    expect(result.stdout).toContain("interactive_wait_timeout_loud=PASS");
+    expect(result.stdout).toContain("unavailable_dead_child_is_skipped=PASS");
     expect(result.stdout).toContain("GREEN_DEADCHILD_SELFTEST");
+  });
+
+  it("refuses an unscoped role:all run before spawning the MCP server", () => {
+    const script = resolve("scripts/acceptance-registry-liveness.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [script, "--server", "/definitely/missing/cmuxlayer-server", "--count", "1"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CMUX_LIVE_HARNESS: "1" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("Refusing unscoped role:all broadcast");
+    expect(result.stdout).not.toContain("MCP server exited");
   });
 
   it("reports a controlled RED result when the MCP server cannot spawn", () => {
     const script = resolve("scripts/acceptance-registry-liveness.mjs");
     const result = spawnSync(
       process.execPath,
-      [script, "--server", "/definitely/missing/cmuxlayer-server", "--count", "1"],
+      [
+        script,
+        "--server",
+        "/definitely/missing/cmuxlayer-server",
+        "--count",
+        "1",
+        "--workspace",
+        "workspace:test",
+      ],
       {
         encoding: "utf8",
         env: { ...process.env, CMUX_LIVE_HARNESS: "1" },
