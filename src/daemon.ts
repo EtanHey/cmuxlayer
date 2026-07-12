@@ -897,7 +897,7 @@ export class CmuxLayerDaemon {
       );
     } else {
       this.logger.error(
-        "[cmuxlayer-daemon] transport irrecoverably denied (orphaned ancestry); retiring so a pane-descended respawn can reconnect",
+        "[cmuxlayer-daemon] upstream cmux transport remained unreachable; retiring so a pane-descended respawn can reconnect",
       );
     }
     this.retirementPromise = this.shutdown(reason)

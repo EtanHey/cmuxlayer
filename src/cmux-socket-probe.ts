@@ -4,7 +4,10 @@
 
 import * as net from "node:net";
 import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
-import { cmuxSocketPathCandidates } from "./cmux-socket-path.js";
+import {
+  cmuxSocketPathCandidates,
+  nightlySocketPathCandidates,
+} from "./cmux-socket-path.js";
 
 export interface SocketProbeOptions {
   socketPath?: string;
@@ -74,6 +77,9 @@ export function candidateSocketPathsForOpts(
 ): string[] {
   const pinned = instancePin(opts);
   if (pinned) return [pinned];
+  if (/(?:^|\.)nightly$/i.test(process.env.CMUX_BUNDLE_ID?.trim() ?? "")) {
+    return nightlySocketPathCandidates({ stateDir: opts?.socketStateDir });
+  }
   return cmuxSocketPathCandidates({ stateDir: opts?.socketStateDir });
 }
 

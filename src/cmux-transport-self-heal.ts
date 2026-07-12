@@ -181,20 +181,20 @@ export class CmuxSelfHealingClient {
   private flushingFailedPayloadQueue: Promise<void> | null = null;
   private transportDenial: TransportDenialSignal | null = null;
   private completedRetryCount = 0;
-  private denialProbeFailures = 0;
-  private denialProbeStartedAt: number | null = null;
+  private upstreamProbeFailures = 0;
+  private upstreamProbeStartedAt: number | null = null;
   private cliDenialFailures = 0;
   private irrecoverableSignaled = false;
   private lastUpgradeFailureLogAt = Number.NEGATIVE_INFINITY;
-  private lastDenialProgressLogAt = Number.NEGATIVE_INFINITY;
+  private lastUpstreamFailureLogAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly opts: CmuxSelfHealingClientOptions) {
     this.socketClient = opts.socket ?? null;
     this.delegate = opts.socket ?? opts.cli;
     this.transportDenial = opts.initialDenial ?? null;
     if (opts.initialDenial) {
-      this.denialProbeFailures = 1;
-      this.denialProbeStartedAt = (opts.now ?? Date.now)();
+      this.upstreamProbeFailures = 1;
+      this.upstreamProbeStartedAt = (opts.now ?? Date.now)();
     }
     if (this.socketClient) {
       this.pinCliToSocket(this.socketClient);
@@ -207,8 +207,8 @@ export class CmuxSelfHealingClient {
       opts.logger?.error(
         "[cmuxlayer] transport degraded: cli (periodic socket re-probe active)",
       );
-      this.startReprobe();
     }
+    this.startReprobe();
   }
 
   getTransportHealth(): TransportHealthSignal {
@@ -342,15 +342,78 @@ export class CmuxSelfHealingClient {
   }
 
   private startReprobe(): void {
-    if (this.reprobeTimer || this.stopped || this.socketClient) {
+    if (this.reprobeTimer || this.stopped) {
       return;
     }
     const delayMs = this.nextReprobeDelayMs();
     this.reprobeTimer = setTimeout(() => {
       this.reprobeTimer = null;
-      void this.tryUpgrade();
+      void this.runReprobeCycle();
     }, delayMs);
     this.reprobeTimer.unref?.();
+  }
+
+  private async runReprobeCycle(): Promise<void> {
+    if (this.socketClient) {
+      await this.verifyActiveSocket();
+      return;
+    }
+    await this.tryUpgrade();
+  }
+
+  private async verifyActiveSocket(): Promise<void> {
+    if (this.stopped || this.upgrading) {
+      return;
+    }
+    if (this.inFlight > 0) {
+      this.startReprobe();
+      return;
+    }
+
+    const activeSocket = this.socketClient;
+    if (!activeSocket) {
+      this.startReprobe();
+      return;
+    }
+
+    this.upgrading = true;
+    try {
+      const socketPath = activeSocket.currentSocketPath();
+      const probeResult = await this.checkSocketHealth(
+        socketPath,
+        this.opts.factoryOpts,
+      );
+      if (this.socketClient !== activeSocket) {
+        return;
+      }
+      if (this.inFlight > 0) {
+        return;
+      }
+      const denialClass = this.recordProbeResult(probeResult);
+      if (denialClass) {
+        this.recordAccessControlDenial(probeResult);
+      }
+      if (!probeResult.usable) {
+        this.downgradeToCli();
+      }
+    } catch (error) {
+      if (this.inFlight > 0) {
+        return;
+      }
+      this.recordProbeFailure(error);
+      this.logUpgradeFailure(error);
+      if (
+        this.socketClient === activeSocket &&
+        this.isUpstreamUnreachableError(error)
+      ) {
+        this.downgradeToCli();
+      }
+    } finally {
+      this.upgrading = false;
+      if (!this.stopped) {
+        this.startReprobe();
+      }
+    }
   }
 
   private nextReprobeDelayMs(): number {
@@ -597,7 +660,7 @@ export class CmuxSelfHealingClient {
       // Stay on CLI until the next re-probe tick.
     } finally {
       this.upgrading = false;
-      if (!this.socketClient && !this.stopped) {
+      if (!this.stopped) {
         this.startReprobe();
       }
     }
@@ -635,42 +698,47 @@ export class CmuxSelfHealingClient {
     return /(?:\bEPIPE\b|broken pipe|errno\s*32|access denied)/i.test(message);
   }
 
+  private isUpstreamUnreachableError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /(?:\bEPIPE\b|\bECONNREFUSED\b|\bECONNRESET\b|\bENOENT\b|broken pipe|errno\s*32|access denied|timed?\s*out|timeout)/i.test(
+      message,
+    );
+  }
+
   private recordProbeResult(result: SocketProbeResult): boolean {
     const denialClass =
       result.denied_reason === "access-control" ||
       (typeof result.error === "string" &&
         this.isDenialClassError(result.error));
-    if (!denialClass) {
-      if (result.usable) {
-        this.resetDenialEvidence();
-      }
+    if (result.usable) {
+      this.resetUpstreamFailureEvidence();
       return false;
     }
-    this.recordProbeDenial();
-    return true;
+    this.recordUpstreamProbeFailure();
+    return denialClass;
   }
 
   private recordProbeFailure(error: unknown): void {
-    if (this.isDenialClassError(error)) {
-      this.recordProbeDenial();
+    if (this.isUpstreamUnreachableError(error)) {
+      this.recordUpstreamProbeFailure();
     }
   }
 
-  private recordProbeDenial(): void {
+  private recordUpstreamProbeFailure(): void {
     const now = (this.opts.now ?? Date.now)();
-    if (this.denialProbeFailures === 0) {
-      this.denialProbeStartedAt = now;
+    if (this.upstreamProbeFailures === 0) {
+      this.upstreamProbeStartedAt = now;
     }
-    this.denialProbeFailures += 1;
-    this.logDenialProgress(now);
+    this.upstreamProbeFailures += 1;
+    this.logUpstreamFailureProgress(now);
     this.maybeSignalIrrecoverable(now);
   }
 
-  private resetDenialEvidence(): void {
-    this.denialProbeFailures = 0;
-    this.denialProbeStartedAt = null;
+  private resetUpstreamFailureEvidence(): void {
+    this.upstreamProbeFailures = 0;
+    this.upstreamProbeStartedAt = null;
     this.cliDenialFailures = 0;
-    this.lastDenialProgressLogAt = Number.NEGATIVE_INFINITY;
+    this.lastUpstreamFailureLogAt = Number.NEGATIVE_INFINITY;
   }
 
   private recordCliFailure(error: unknown): void {
@@ -679,26 +747,26 @@ export class CmuxSelfHealingClient {
     }
     this.cliDenialFailures += 1;
     const now = (this.opts.now ?? Date.now)();
-    this.logDenialProgress(now);
+    this.logUpstreamFailureProgress(now);
     this.maybeSignalIrrecoverable(now);
   }
 
-  private logDenialProgress(now: number): void {
+  private logUpstreamFailureProgress(now: number): void {
     if (
-      now - this.lastDenialProgressLogAt <
+      now - this.lastUpstreamFailureLogAt <
       DENIAL_PROGRESS_LOG_INTERVAL_MS
     ) {
       return;
     }
-    this.lastDenialProgressLogAt = now;
+    this.lastUpstreamFailureLogAt = now;
     const minFailures =
       this.opts.irrecoverableMinFailures ?? DEFAULT_IRRECOVERABLE_MIN_FAILURES;
     const elapsedSeconds = Math.max(
       0,
-      Math.floor((now - (this.denialProbeStartedAt ?? now)) / 1_000),
+      Math.floor((now - (this.upstreamProbeStartedAt ?? now)) / 1_000),
     );
     this.opts.logger?.error(
-      `[cmuxlayer] denial evidence ${this.denialProbeFailures}/${minFailures} probes, ${this.cliDenialFailures}/${minFailures} cli, ${elapsedSeconds}s`,
+      `[cmuxlayer] upstream failure evidence ${this.upstreamProbeFailures}/${minFailures} probes, ${this.cliDenialFailures} cli denials, ${elapsedSeconds}s`,
     );
   }
 
@@ -712,10 +780,9 @@ export class CmuxSelfHealingClient {
       this.opts.irrecoverableMinDurationMs ??
       DEFAULT_IRRECOVERABLE_MIN_DURATION_MS;
     if (
-      this.denialProbeStartedAt === null ||
-      this.denialProbeFailures < minFailures ||
-      this.cliDenialFailures < minFailures ||
-      now - this.denialProbeStartedAt < minDurationMs
+      this.upstreamProbeStartedAt === null ||
+      this.upstreamProbeFailures < minFailures ||
+      now - this.upstreamProbeStartedAt < minDurationMs
     ) {
       return;
     }

@@ -68,6 +68,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
   "createCmuxClient instance selection",
   () => {
     let savedEnv: string | undefined;
+    let savedBundleEnv: string | undefined;
     const servers: Array<{ server: net.Server; path: string }> = [];
 
     afterEach(async () => {
@@ -77,6 +78,12 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
         process.env.CMUX_SOCKET_PATH = savedEnv;
       }
       savedEnv = undefined;
+      if (savedBundleEnv === undefined) {
+        delete process.env.CMUX_BUNDLE_ID;
+      } else {
+        process.env.CMUX_BUNDLE_ID = savedBundleEnv;
+      }
+      savedBundleEnv = undefined;
       for (const { server, path } of servers.splice(0)) {
         await stopPingServer(server, path);
       }
@@ -139,6 +146,40 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       expect(logger.error).not.toHaveBeenCalledWith(
         expect.stringContaining("live cmux sockets found"),
       );
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    it("uses the Nightly upstream marker for an unpinned Nightly bundle", async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), "cmux-factory-nightly-"));
+      const production = join(stateDir, "cmux-production.sock");
+      const nightly = join(stateDir, "cmux-nightly.sock");
+      fs.writeFileSync(
+        join(stateDir, "last-socket-path"),
+        `${production}\n`,
+        "utf-8",
+      );
+      fs.writeFileSync(
+        join(stateDir, "nightly-last-socket-path"),
+        `${nightly}\n`,
+        "utf-8",
+      );
+      track(await startPingServer(production), production);
+      track(await startPingServer(nightly), nightly);
+      savedEnv = process.env.CMUX_SOCKET_PATH;
+      savedBundleEnv = process.env.CMUX_BUNDLE_ID;
+      delete process.env.CMUX_SOCKET_PATH;
+      process.env.CMUX_BUNDLE_ID = "com.cmuxterm.app.nightly";
+
+      const client = await createCmuxClient({ socketStateDir: stateDir });
+
+      expect(getTransportHealth(client)).toMatchObject({
+        mode: "socket",
+        degraded: false,
+        current_socket_path: nightly,
+      });
+      if ("stop" in client && typeof client.stop === "function") {
+        client.stop();
+      }
       fs.rmSync(stateDir, { recursive: true, force: true });
     });
 

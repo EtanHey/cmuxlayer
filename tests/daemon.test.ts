@@ -532,7 +532,7 @@ describe("CmuxLayerDaemon", () => {
     await daemon.shutdown();
   });
 
-  it("retires exactly once when the self-healing client signals irrecoverable denial", async () => {
+  it("retires exactly once when the self-healing client signals an unreachable upstream", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("transport-retire");
     let signalIrrecoverable: (() => void) | undefined;
@@ -561,6 +561,7 @@ describe("CmuxLayerDaemon", () => {
       "irrecoverable-transport",
       expect.objectContaining({ forced: false }),
     );
+    expect(existsSync(path)).toBe(false);
   });
 
   it("clears the stale-build timer after shutdown", async () => {

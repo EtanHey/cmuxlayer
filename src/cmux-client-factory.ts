@@ -39,11 +39,11 @@ export interface CreateCmuxClientOptions extends SocketProbeOptions {
   reprobeCapMs?: number;
   /** Injectable random source for deterministic jitter tests */
   random?: () => number;
-  /** Called after sustained socket-denial and CLI-denial failures. */
+  /** Called after the upstream cmux socket remains unreachable past the threshold. */
   onIrrecoverableTransport?: () => void;
-  /** Consecutive denial failures required on both transports. */
+  /** Consecutive upstream socket failures required before signaling. */
   irrecoverableMinFailures?: number;
-  /** Minimum duration of sustained socket denial before signaling. */
+  /** Minimum duration of sustained upstream unreachability before signaling. */
   irrecoverableMinDurationMs?: number;
 }
 
