@@ -72,6 +72,21 @@ describe("CmuxClient.createWorkspace", () => {
   });
 });
 
+describe("CmuxClient.deleteWorkspace", () => {
+  it("uses the current workspace close CLI shape", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.deleteWorkspace("workspace:7");
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "workspace",
+      "close",
+      "workspace:7",
+    ]);
+  });
+});
+
 describe("CmuxClient.listPaneSurfaces", () => {
   it("calls with workspace flag when provided", async () => {
     const data = {

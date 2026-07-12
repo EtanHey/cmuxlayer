@@ -16,6 +16,7 @@ const READ_ONLY_TOOLS = new Set([
 const MUTATING_TOOLS = new Set([
   "select_workspace",
   "create_workspace",
+  "delete_workspace",
   "new_split",
   "new_surface",
   "move_surface",

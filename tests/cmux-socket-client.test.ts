@@ -56,6 +56,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
     ],
   },
   "workspace.select": {},
+  "workspace.close": {},
   "surface.list": {
     workspace_ref: "workspace:1",
     window_ref: "window:1",
@@ -437,6 +438,16 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
 
     expect(lastV2Request).not.toBeNull();
     expect(lastV2Request!.method).toBe("workspace.select");
+    expect(lastV2Request!.params).toEqual({ workspace_id: "workspace:1" });
+  });
+
+  it("deleteWorkspace sends a workspace.close request", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.deleteWorkspace("workspace:1");
+
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("workspace.close");
     expect(lastV2Request!.params).toEqual({ workspace_id: "workspace:1" });
   });
 

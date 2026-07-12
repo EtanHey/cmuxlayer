@@ -61,6 +61,7 @@ const EXPECTED_TOOLS = [
   "control_health",
   "select_workspace",
   "create_workspace",
+  "delete_workspace",
   "new_split",
   "new_surface",
   "move_surface",
@@ -395,7 +396,7 @@ describe("input delivery batching helpers", () => {
 });
 
 describe("tool registration", () => {
-  it("registers all 25 core tools", () => {
+  it("registers all 26 low-level tools", () => {
     const server = createServer({ skipAgentLifecycle: true });
     // Access internal registered tools via the server property
     const registeredTools = (server as any)._registeredTools;
