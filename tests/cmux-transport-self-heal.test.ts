@@ -100,17 +100,8 @@ function startAccessDeniedPingServer(
           const line = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 1);
           if (!line.trim()) continue;
-          const req = JSON.parse(line);
-          conn.write(
-            JSON.stringify({
-              id: req.id,
-              ok: false,
-              error: {
-                code: "access_denied",
-                message: ACCESS_CONTROL_DENIED_TEXT,
-              },
-            }) + "\n",
-          );
+          JSON.parse(line);
+          conn.write(`ERROR: ${ACCESS_CONTROL_DENIED_TEXT}\n`);
         }
       });
     });

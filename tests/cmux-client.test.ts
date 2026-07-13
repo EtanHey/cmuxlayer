@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
+import { CmuxSocketError } from "../src/cmux-socket-error.js";
 
 const STANDARD_BUNDLED_CMUX =
   "/Applications/cmux.app/Contents/Resources/bin/cmux";
@@ -979,6 +980,24 @@ describe("CmuxClient.closeSurface", () => {
 });
 
 describe("CmuxClient CLI error handling", () => {
+  it("classifies explicit cmux ancestry denial", async () => {
+    const denial =
+      "ERROR: Access denied — only processes started inside cmux can connect";
+    const exec: ExecFn = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Command failed"), {
+        code: 1,
+        stderr: denial,
+      }),
+    );
+    const client = new CmuxClient({ exec, existsSync: () => false });
+
+    const error = await client.listWorkspaces().catch((value) => value);
+
+    expect(error).toBeInstanceOf(CmuxSocketError);
+    expect(error).toMatchObject({ code: "access_denied" });
+    expect(error.message).toContain(denial);
+  });
+
   it("throws on non-zero exit code", async () => {
     const exec: ExecFn = vi.fn().mockRejectedValue(
       Object.assign(new Error("Command failed"), {

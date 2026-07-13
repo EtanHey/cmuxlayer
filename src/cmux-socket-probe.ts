@@ -3,6 +3,7 @@
  */
 
 import * as net from "node:net";
+import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
 import {
   cmuxSocketPathCandidates,
@@ -30,13 +31,7 @@ export interface SocketProbeResult {
  * hung instance. The probe only needs a liveness yes/no, so cap it short.
  */
 const PROBE_PING_TIMEOUT_MS = 2000;
-const ACCESS_CONTROL_DENIED_RE =
-  /Access denied\s*[—-]\s*only processes started inside cmux can connect/i;
-
-export function isCmuxAccessControlDenied(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return ACCESS_CONTROL_DENIED_RE.test(message);
-}
+export { isCmuxAccessControlDenied };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

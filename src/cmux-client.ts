@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
+import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 
 const execFileAsync = promisify(execFile);
 const STANDARD_BUNDLED_CMUX =
@@ -203,6 +204,11 @@ export class CmuxClient {
 
     const suffix = details.length > 0 ? ` (${details.join(", ")})` : "";
     const message = `cmux ${args[0]} failed: ${error.message}${suffix}`;
+    if (isCmuxAccessControlDenied(message)) {
+      return new CmuxSocketError(message, "access_denied", {
+        transportPhase: "response",
+      });
+    }
     if (/\b(?:EPIPE|ECONNRESET|broken pipe|errno\s*32)\b/i.test(message)) {
       const stdout =
         "stdout" in error && typeof error.stdout === "string"

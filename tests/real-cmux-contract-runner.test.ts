@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   mkdirSync,
@@ -24,6 +24,7 @@ import {
   daemonExitPidFromLog,
   daemonSpawnPidFromLog,
   extractStructuredContent,
+  formatContractFailure,
   isAncestryDenial,
   McpPeer,
   parseOrphanReceipt,
@@ -208,7 +209,42 @@ describe("real cmux contract runner helpers", () => {
     );
   });
 
+  it("preserves a raw access-control denial from system.ping", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmux-contract-denial-probe-"));
+    tempRoots.push(root);
+    const socketPath = join(root, "cmux.sock");
+    const denial =
+      "ERROR: Access denied — only processes started inside cmux can connect";
+    const server = net.createServer((socket) => {
+      socket.once("data", () => socket.end(`${denial}\n`));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    await expect(probeSystemPing(socketPath, 500)).resolves.toMatchObject({
+      ok: false,
+      code: "EPROTO",
+      message: expect.stringContaining(denial),
+    });
+  });
+
   it("recognizes the detached-orphan EPIPE ancestry contract", () => {
+    expect(
+      isAncestryDenial({
+        pid: 42,
+        ppid: 1,
+        ok: false,
+        code: "ERROR",
+        message:
+          "ERROR: Access denied — only processes started inside cmux can connect",
+      }),
+    ).toBe(true);
     expect(
       isAncestryDenial({
         pid: 42,
@@ -245,6 +281,85 @@ describe("real cmux contract runner helpers", () => {
         message: "connect refused",
       }),
     ).toBe(false);
+  });
+
+  it("formats a single-line failure marker with the active contract step", () => {
+    expect(
+      formatContractFailure(
+        "detached-orphan ancestry denial",
+        new Error("injected failure\nwith trailing detail"),
+      ),
+    ).toBe(
+      "[contract] FAIL: detached-orphan ancestry denial: injected failure with trailing detail",
+    );
+  });
+
+  it("emits the active step when the detached orphan is unexpectedly admitted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmux-contract-step-marker-"));
+    tempRoots.push(root);
+    const socketPath = join(root, "cmux.sock");
+    const server = net.createServer((socket) => {
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        const request = JSON.parse(buffer.slice(0, newline)) as { id: string };
+        socket.end(
+          `${JSON.stringify({ id: request.id, ok: true, result: { pong: true } })}\n`,
+        );
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const result = await new Promise<{
+      code: number | null;
+      stdout: string;
+      stderr: string;
+    }>((resolveResult, reject) => {
+      const child = spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          join(process.cwd(), "scripts", "run-real-cmux-contract.ts"),
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, CMUX_SOCKET_PATH: socketPath },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      child.stdout.on("data", (chunk: Buffer) =>
+        stdout.push(chunk.toString("utf8")),
+      );
+      child.stderr.on("data", (chunk: Buffer) =>
+        stderr.push(chunk.toString("utf8")),
+      );
+      child.once("error", reject);
+      child.once("exit", (code) =>
+        resolveResult({
+          code,
+          stdout: stdout.join(""),
+          stderr: stderr.join(""),
+        }),
+      );
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("[contract] PASS system.ping shape");
+    expect(result.stderr).toContain(
+      "[contract] FAIL: detached-orphan ancestry denial: detached-orphan probe was not denied by cmux ancestry access control",
+    );
   });
 
   it("parses a complete orphan receipt", () => {

@@ -14,6 +14,7 @@ import net from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isCmuxAccessControlDenied } from "../src/cmux-access-control.js";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ORPHAN_PARENT_MODE = "--orphan-parent";
@@ -114,7 +115,12 @@ export function probeSystemPing(
         }
         settle({ ok: true, result: response.result });
       } catch (error) {
-        settle(errorReceipt(error));
+        const detail = error instanceof Error ? error.message : String(error);
+        settle({
+          ok: false,
+          code: "EPROTO",
+          message: `system.ping returned non-JSON frame ${JSON.stringify(line)}: ${detail}`,
+        });
       }
     });
     socket.once("error", (error) => settle(errorReceipt(error)));
@@ -250,8 +256,26 @@ export function isAncestryDenial(receipt: OrphanProbeReceipt): boolean {
   return (
     receipt.code === "EPIPE" ||
     receipt.errno === 32 ||
-    /\b(?:EPIPE|broken pipe|errno\s*32)\b/i.test(receipt.message ?? "")
+    /\b(?:EPIPE|broken pipe|errno\s*32)\b/i.test(receipt.message ?? "") ||
+    isCmuxAccessControlDenied(receipt.message ?? "")
   );
+}
+
+export class ContractStepError extends Error {
+  constructor(
+    readonly step: string,
+    readonly underlying: unknown,
+  ) {
+    super(underlying instanceof Error ? underlying.message : String(underlying));
+    this.name = "ContractStepError";
+  }
+}
+
+export function formatContractFailure(step: string, error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/g, " ")
+    .trim();
+  return `[contract] FAIL: ${step}: ${message || "unknown error"}`;
 }
 
 function toolText(result: Record<string, unknown>): string {
@@ -863,7 +887,10 @@ async function addPidReceiptToSet(
   }
 }
 
-async function runContract(): Promise<void> {
+async function runContractSteps(
+  setActiveStep: (step: string) => void,
+): Promise<void> {
+  setActiveStep("system.ping preflight");
   const requestedSocket = process.env.CMUX_SOCKET_PATH;
   const requestedPin = requestedSocket?.trim();
   if (requestedPin) {
@@ -885,6 +912,7 @@ async function runContract(): Promise<void> {
   const cmuxSocket = classification.socketPath;
   console.log(`[contract] PASS system.ping shape on ${cmuxSocket}`);
 
+  setActiveStep("contract sandbox setup");
   const root = await mkdtemp(join(tmpdir(), "cmuxlayer-real-contract-"));
   const daemonSocket = join(root, "cmuxlayer-stated.sock");
   const daemonPidReceipt = join(root, "daemon-pids.txt");
@@ -894,16 +922,18 @@ async function runContract(): Promise<void> {
   assertOwnedDaemonSocket(root, daemonSocket);
 
   try {
+    setActiveStep("detached-orphan ancestry denial");
     const orphan = await runOrphanContract(root, cmuxSocket, recordedPids);
     if (!isAncestryDenial(orphan)) {
       throw new Error(
-        `detached-orphan probe was not denied with EPIPE ancestry contract: ${JSON.stringify(orphan)}`,
+        `detached-orphan probe was not denied by cmux ancestry access control: ${JSON.stringify(orphan)}`,
       );
     }
     console.log(
       `[contract] PASS detached orphan pid=${orphan.pid} denied with ${orphan.code ?? `errno ${orphan.errno}`}`,
     );
 
+    setActiveStep("isolated daemon artifact preflight");
     const distIndex = resolve("dist", "index.js");
     const distDaemon = resolve("dist", "daemon.js");
     await Promise.all([access(distIndex), access(distDaemon)]);
@@ -916,6 +946,7 @@ async function runContract(): Promise<void> {
       CMUXLAYER_NODE_MAX_OLD_SPACE_MB: "256",
     };
 
+    setActiveStep("isolated daemon startup");
     const initialDaemon = spawn(process.execPath, [distDaemon], {
       cwd: process.cwd(),
       env,
@@ -948,6 +979,7 @@ async function runContract(): Promise<void> {
       (pid) => recordedPids.delete(pid),
     );
 
+    setActiveStep("MCP initialization");
     await peer.request("initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
@@ -955,6 +987,7 @@ async function runContract(): Promise<void> {
     });
     peer.sendNotification("notifications/initialized");
 
+    setActiveStep("control_health baseline");
     const healthResponse = await peer.callTool("control_health", {}, 15_000);
     const health = extractStructuredContent(healthResponse);
     assertLiveHealth(health, cmuxSocket);
@@ -965,6 +998,7 @@ async function runContract(): Promise<void> {
       );
     }
 
+    setActiveStep("list_surfaces/read_screen");
     const listResponse = await peer.callTool("list_surfaces", {}, 20_000);
     const surfaces = extractStructuredContent(listResponse);
     const target = selectTerminalSurface(surfaces);
@@ -987,9 +1021,11 @@ async function runContract(): Promise<void> {
       `[contract] PASS list_surfaces/read_screen through dist daemon pid=${initialDaemonPid}`,
     );
 
+    setActiveStep("doctor health");
     await runDoctor(distIndex, env, cmuxSocket, daemonSocket, recordedPids);
     console.log("[contract] PASS doctor --json healthy on isolated live stack");
 
+    setActiveStep("graceful retire/autostart");
     assertOwnedDaemonSocket(root, daemonSocket);
     await terminateRecordedPid(initialDaemonPid, recordedPids);
 
@@ -1036,6 +1072,17 @@ async function runContract(): Promise<void> {
   }
 }
 
+async function runContract(): Promise<void> {
+  let activeStep = "contract setup";
+  try {
+    await runContractSteps((step) => {
+      activeStep = step;
+    });
+  } catch (error) {
+    throw new ContractStepError(activeStep, error);
+  }
+}
+
 async function main(): Promise<void> {
   const mode = process.argv[2];
   if (mode === ORPHAN_PARENT_MODE) {
@@ -1051,9 +1098,16 @@ async function main(): Promise<void> {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(SCRIPT_PATH)) {
   main().catch((error) => {
-    console.error(
-      `[contract] FAIL: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
-    );
+    if (error instanceof ContractStepError) {
+      console.error(formatContractFailure(error.step, error.underlying));
+      if (error.underlying instanceof Error && error.underlying.stack) {
+        console.error(error.underlying.stack);
+      }
+    } else {
+      console.error(
+        `[contract] FAIL: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+      );
+    }
     process.exitCode = 1;
   });
 }

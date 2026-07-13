@@ -6,6 +6,7 @@
  */
 
 import { CmuxClient } from "./cmux-client.js";
+import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketClient } from "./cmux-socket-client.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import type { CreateCmuxClientOptions } from "./cmux-client-factory.js";
@@ -451,10 +452,10 @@ export class CmuxSelfHealingClient {
       (error.code === "connection_error" ||
         error.code === "connection_closed");
     const message = error instanceof Error ? error.message : String(error);
-    const hasBrokenPipeSignal = /\b(?:EPIPE|ECONNRESET|broken pipe)\b/i.test(
-      message,
-    );
-    return isTransportError || hasBrokenPipeSignal;
+    const hasRecoverableSignal =
+      /\b(?:EPIPE|ECONNRESET|broken pipe)\b/i.test(message) ||
+      isCmuxAccessControlDenied(error);
+    return isTransportError || hasRecoverableSignal;
   }
 
   private recoverFailedPayload(
@@ -700,13 +701,18 @@ export class CmuxSelfHealingClient {
 
   private isDenialClassError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
-    return /(?:\bEPIPE\b|broken pipe|errno\s*32|access denied)/i.test(message);
+    return (
+      /(?:\bEPIPE\b|broken pipe|errno\s*32)/i.test(message) ||
+      isCmuxAccessControlDenied(error)
+    );
   }
 
   private isUpstreamUnreachableError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
-    return /(?:\bEPIPE\b|\bECONNREFUSED\b|\bECONNRESET\b|\bENOENT\b|broken pipe|errno\s*32|access denied|timed?\s*out|timeout)/i.test(
-      message,
+    return (
+      /(?:\bEPIPE\b|\bECONNREFUSED\b|\bECONNRESET\b|\bENOENT\b|broken pipe|errno\s*32|timed?\s*out|timeout)/i.test(
+        message,
+      ) || isCmuxAccessControlDenied(error)
     );
   }
 
