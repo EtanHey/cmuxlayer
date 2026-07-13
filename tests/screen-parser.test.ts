@@ -10,6 +10,22 @@ import {
 const readFixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 
+const codexAutoUpdateFixture = JSON.parse(
+  readFixture("spawn/codex-auto-update-restart.json"),
+) as {
+  screens: Record<
+    | "launcher"
+    | "interactive_update"
+    | "updating"
+    | "downloading"
+    | "installing"
+    | "update_complete"
+    | "ready"
+    | "working",
+    string
+  >;
+};
+
 describe("parseScreen", () => {
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
@@ -125,6 +141,45 @@ Select a model for the next worker:
     expect(parsed.status).toBe("frozen");
     expect(parsed.errors).toContain("interactive_prompt");
     expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes the current numbered Codex update-now menu as an interactive overlay", () => {
+    const parsed = parseScreen(
+      codexAutoUpdateFixture.screens.interactive_update,
+    );
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it.each(["updating", "downloading", "installing"] as const)(
+    "recognizes Codex CLI auto-update %s output as update progress",
+    (screenName) => {
+      const parsed = parseScreen(codexAutoUpdateFixture.screens[screenName]);
+
+      expect(parsed.cli_update_state).toBe("updating");
+    },
+  );
+
+  it("recognizes a completed Codex CLI auto-update even when the shell prompt is already visible", () => {
+    const parsed = parseScreen(codexAutoUpdateFixture.screens.update_complete);
+
+    expect(parsed.control_state).toBe("shell");
+    expect(parsed.cli_update_state).toBe("update_complete");
+  });
+
+  it("ignores stale Codex CLI auto-update output above a relaunched ready composer", () => {
+    const parsed = parseScreen(
+      [
+        codexAutoUpdateFixture.screens.updating,
+        codexAutoUpdateFixture.screens.update_complete,
+        codexAutoUpdateFixture.screens.ready,
+      ].join("\n"),
+    );
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.control_state).toBe("ready");
+    expect(parsed.cli_update_state).toBeUndefined();
   });
 
   it("recognizes a Codex update menu with a sparkle-prefixed update line", () => {

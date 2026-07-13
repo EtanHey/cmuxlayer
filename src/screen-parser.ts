@@ -1,4 +1,5 @@
 import type {
+  ParsedCliUpdateState,
   ParsedScreenAgentType,
   ParsedScreenResult,
   ParsedScreenStatus,
@@ -193,11 +194,19 @@ const CODEX_WORKING_RE =
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_UPDATE_MENU_RE =
-  /(?:^|\n)\s*(?:\u2728\s*)?Update available!\s*(?:\n|$)/i;
+  /(?:^|\n)\s*(?:[✨\u2728]\s*)?Update available!(?:\s+[^\n]+)?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_SKIP_RE =
-  /(?:^|\n)\s*(?:[>❯]\s*)?Skip until next version\s*(?:\n|$)/i;
+  /(?:^|\n)\s*(?:[>❯›]\s*)?(?:\d+\.\s*)?Skip until next version\s*(?:\n|$)/i;
+const CODEX_UPDATE_MENU_UPDATE_NOW_RE =
+  /(?:^|\n)\s*(?:[>❯›]\s*)?(?:\d+\.\s*)?Update now(?:\s+\(runs\s+`[^`]+`\))?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_RELEASE_NOTES_RE =
-  /(?:^|\n)\s*(?:See full release notes:|https:\/\/github\.com\/openai\/codex\/releases(?:\/latest)?)\s*(?:\n|$)/i;
+  /(?:^|\n)\s*(?:(?:See full release notes:|Release notes:)\s*)?https:\/\/github\.com\/openai\/codex\/releases(?:\/latest)?\s*(?:\n|$)/i;
+const CLI_UPDATE_COMPLETE_RE =
+  /\b(?:Update ran successfully|Please restart (?:Codex|Claude|Cursor|Gemini)(?: CLI)?)\b/i;
+const CLI_UPDATE_PROGRESS_RE =
+  /\bUpdating\s+(?:(?:Codex|Claude|Cursor|Gemini)(?: CLI)?\s+from\b|.+\s+via\s+.+)/i;
+const CLI_UPDATE_STEP_RE =
+  /^\s*(?:Downloading(?:\s+Codex CLI(?:\s+for\s+\S+)?)?|Installing(?:\s+standalone package(?:\s+to\s+.+)?)?)(?:\.{3}|…)?\s*$/i;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
@@ -259,7 +268,9 @@ function normalizeText(text: string): string {
 
 function hasCodexUpdateMenuMarkers(normalized: string): boolean {
   return (
-    (CODEX_BOOT_PANEL_RE.test(normalized) || CODEX_HEADER_RE.test(normalized)) &&
+    (CODEX_BOOT_PANEL_RE.test(normalized) ||
+      CODEX_HEADER_RE.test(normalized) ||
+      CODEX_UPDATE_MENU_UPDATE_NOW_RE.test(normalized)) &&
     CODEX_UPDATE_MENU_RE.test(normalized) &&
     CODEX_UPDATE_MENU_SKIP_RE.test(normalized) &&
     CODEX_UPDATE_MENU_RELEASE_NOTES_RE.test(normalized)
@@ -715,7 +726,65 @@ function hasShellPrompt(text: string): boolean {
     .filter(Boolean);
   const last = lines.at(-1);
   if (!last) return false;
-  return /^(?:>|❯|>>>|[$%#])$/.test(last) || /[$#]$/.test(last);
+  return /^(?:>|❯|>>>|[$%#])$/.test(last) || /(?:[$#]|\s%)$/.test(last);
+}
+
+function hasLaterAgentScreenEvidence(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): boolean {
+  switch (agentType) {
+    case "codex":
+      return (
+        CODEX_BOOT_PANEL_RE.test(text) ||
+        CODEX_HEADER_RE.test(text) ||
+        /(?:^|\n)\s*codex\s*>\s*$/im.test(text) ||
+        CODEX_WORKING_RE.test(text)
+      );
+    case "claude":
+      return /Claude Code|bypass permissions on|🤖\s*(?:Opus|Sonnet|Haiku)/i.test(
+        text,
+      );
+    case "gemini":
+      return /Gemini CLI|gemini-[0-9]/i.test(text);
+    case "cursor":
+      return CURSOR_AGENT_BANNER_RE.test(text) || CURSOR_MODE_BAR_RE.test(text);
+    default:
+      return false;
+  }
+}
+
+function parseCliUpdateState(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): ParsedCliUpdateState | undefined {
+  const lines = text.split("\n");
+  let markerIndex = -1;
+  let state: ParsedCliUpdateState | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (CLI_UPDATE_COMPLETE_RE.test(line)) {
+      markerIndex = index;
+      state = "update_complete";
+      continue;
+    }
+    if (CLI_UPDATE_PROGRESS_RE.test(line) || CLI_UPDATE_STEP_RE.test(line)) {
+      markerIndex = index;
+      state = "updating";
+    }
+  }
+
+  if (state === undefined) {
+    return undefined;
+  }
+
+  const laterText = lines.slice(markerIndex + 1).join("\n");
+  if (hasLaterAgentScreenEvidence(laterText, agentType)) {
+    return undefined;
+  }
+
+  return state;
 }
 
 function parseModelAndCost(
@@ -1035,6 +1104,7 @@ export function parseScreen(text: string): ParsedScreenResult {
   }
 
   const status = inferStatus(normalized, doneSignal, errors, agentType);
+  const cliUpdateState = parseCliUpdateState(normalized, agentType);
   const result: ParsedScreenResult = {
     agent_type: agentType,
     status,
@@ -1048,6 +1118,10 @@ export function parseScreen(text: string): ParsedScreenResult {
     model,
     cost,
   };
+
+  if (cliUpdateState !== undefined) {
+    result.cli_update_state = cliUpdateState;
+  }
 
   if (actions.length > 0) {
     result.actions = uniqueActions(actions);

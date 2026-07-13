@@ -6559,179 +6559,231 @@ describe("tool handler integration", () => {
     expect(parsed.last_10_lines).toContain("$ waiting");
   });
 
-  it("spawn_agent waits out a Codex auto-update, relaunches after bare shell, then delivers the boot prompt", async () => {
+  it.each(["launch-readiness", "boot-prompt-readiness"] as const)(
+    "spawn_agent handles the live Codex auto-update sequence during %s without a false timeout or error state",
+    async (updatePhase) => {
+      const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
+      process.env.REPOGOLEM_ALLOW_MODEL = "1";
+      const stateDir = join(
+        CHANNEL_TEST_DIR,
+        `spawn-update-relaunch-${updatePhase}-state`,
+      );
+      const promptPath = join(
+        CHANNEL_TEST_DIR,
+        `spawn-update-relaunch-${updatePhase}.md`,
+      );
+      const prompt = "boot after update";
+      rmSync(stateDir, { recursive: true, force: true });
+      mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+      writeFileSync(promptPath, prompt, "utf8");
+      const fixture = JSON.parse(
+        readFileSync(
+          new URL(
+            "./fixtures/spawn/codex-auto-update-restart.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as {
+        launcher_command: string;
+        screens: Record<
+          | "launcher"
+          | "updating"
+          | "downloading"
+          | "installing"
+          | "update_complete"
+          | "ready"
+          | "working",
+          string
+        >;
+      };
+
+      let launcherSends = 0;
+      let promptSent = false;
+      let returnPresses = 0;
+      let readsAfterFirstLaunch = 0;
+      const sentTexts: string[] = [];
+
+      mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("list-workspaces")) {
+          return {
+            stdout: JSON.stringify({
+              workspaces: [
+                {
+                  ref: "workspace:1",
+                  title: "cmuxlayer",
+                  index: 0,
+                  selected: true,
+                  pinned: false,
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-panes")) {
+          return {
+            stdout: JSON.stringify({
+              workspace_ref: "workspace:1",
+              window_ref: "window:1",
+              panes: [],
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("new-split")) {
+          return {
+            stdout: JSON.stringify({
+              workspace: "workspace:1",
+              surface: "surface:2",
+              pane: "pane:1",
+              title: "New",
+              type: "terminal",
+            }),
+            stderr: "",
+          };
+        }
+        if (args.includes("send-key") && args.includes("return")) {
+          returnPresses += 1;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("send")) {
+          const text = String(args.at(-1) ?? "");
+          sentTexts.push(text);
+          if (text.includes("cmuxlayerCodex")) {
+            if (launcherSends === 0) {
+              delete process.env.REPOGOLEM_ALLOW_MODEL;
+            }
+            launcherSends += 1;
+          } else if (text === prompt) {
+            promptSent = true;
+          }
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("read-screen")) {
+          let text = "$ ";
+          if (launcherSends === 1) {
+            readsAfterFirstLaunch += 1;
+            if (readsAfterFirstLaunch === 1) {
+              text =
+                updatePhase === "launch-readiness"
+                  ? fixture.screens.launcher
+                  : fixture.screens.ready;
+            } else if (readsAfterFirstLaunch === 2) {
+              text = fixture.screens.updating;
+            } else if (readsAfterFirstLaunch === 3) {
+              text = fixture.screens.downloading;
+            } else if (readsAfterFirstLaunch === 4) {
+              text = fixture.screens.installing;
+            } else {
+              text = fixture.screens.update_complete;
+            }
+          } else if (launcherSends >= 2 && !promptSent) {
+            text = fixture.screens.ready;
+          } else if (promptSent) {
+            text = fixture.screens.working;
+          }
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:2",
+              text,
+              lines: 80,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return { stdout: "{}", stderr: "" };
+      });
+
+      const server = createServer({
+        exec: mockExec,
+        stateDir,
+        disableSpawnPreflight: true,
+      });
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      try {
+        const result = await runWithFakeTimers(
+          () =>
+            tool.handler(
+              {
+                repo: "cmuxlayer",
+                model: "gpt-5.5",
+                cli: "codex",
+                boot_prompt_path: promptPath,
+                boot_prompt_timeout_ms: 2_000,
+              },
+              {} as any,
+            ),
+          5_000,
+        );
+        const parsed =
+          result.structuredContent ?? JSON.parse(result.content[0].text);
+        expect(parsed.ok).toBe(true);
+        expect(parsed.boot_prompt_delivered).toBe(true);
+        expect(launcherSends).toBe(2);
+        expect(
+          sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
+        ).toEqual([fixture.launcher_command, fixture.launcher_command]);
+        expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+        expect(returnPresses).toBeGreaterThanOrEqual(3);
+        expect(
+          new StateManager(stateDir).readState(parsed.agent_id),
+        ).toMatchObject({
+          state: "ready",
+          error: null,
+          boot_prompt_pending: false,
+        });
+      } finally {
+        if (previousAllowModel === undefined) {
+          delete process.env.REPOGOLEM_ALLOW_MODEL;
+        } else {
+          process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
+        }
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it("spawn_agent accepts the default interactive Codex update and never selects Skip", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
-    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-relaunch-state");
-    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-relaunch.md");
-    const prompt = "boot after update";
+    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
+    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu.md");
+    const prompt = "boot after accepting update";
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/codex-auto-update-restart.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      screens: Record<
+        | "interactive_update"
+        | "updating"
+        | "update_complete"
+        | "ready"
+        | "working",
+        string
+      >;
+    };
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
 
     let launcherSends = 0;
+    let updateAccepted = false;
     let promptSent = false;
-    let returnPresses = 0;
     let readsAfterFirstLaunch = 0;
-    const sentTexts: string[] = [];
-
-    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
-      if (args.includes("list-workspaces")) {
-        return {
-          stdout: JSON.stringify({
-            workspaces: [
-              {
-                ref: "workspace:1",
-                title: "cmuxlayer",
-                index: 0,
-                selected: true,
-                pinned: false,
-              },
-            ],
-          }),
-          stderr: "",
-        };
-      }
-      if (args.includes("list-panes")) {
-        return {
-          stdout: JSON.stringify({
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            panes: [],
-          }),
-          stderr: "",
-        };
-      }
-      if (args.includes("new-split")) {
-        return {
-          stdout: JSON.stringify({
-            workspace: "workspace:1",
-            surface: "surface:2",
-            pane: "pane:1",
-            title: "New",
-            type: "terminal",
-          }),
-          stderr: "",
-        };
-      }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
-        return { stdout: "{}", stderr: "" };
-      }
-      if (args.includes("send")) {
-        const text = String(args.at(-1) ?? "");
-        sentTexts.push(text);
-        if (text.includes("cmuxlayerCodex")) {
-          if (launcherSends === 0) {
-            delete process.env.REPOGOLEM_ALLOW_MODEL;
-          }
-          launcherSends += 1;
-        } else if (text === prompt) {
-          promptSent = true;
-        }
-        return { stdout: "{}", stderr: "" };
-      }
-      if (args.includes("read-screen")) {
-        let text = "$ ";
-        if (launcherSends === 1) {
-          readsAfterFirstLaunch += 1;
-          if (readsAfterFirstLaunch === 1) {
-            text = "codex> ";
-          } else if (readsAfterFirstLaunch === 2) {
-            text = "Updating Codex via bun install -g @openai/codex";
-          } else if (readsAfterFirstLaunch === 3) {
-            text = "🎉 Update ran successfully! Please restart Codex";
-          } else {
-            text = "etan@mac % ";
-          }
-        } else if (launcherSends >= 2 && !promptSent) {
-          text = "codex> ";
-        } else if (promptSent) {
-          text =
-            "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)";
-        }
-        return {
-          stdout: JSON.stringify({
-            surface: "surface:2",
-            text,
-            lines: 80,
-            scrollback_used: false,
-          }),
-          stderr: "",
-        };
-      }
-      return { stdout: "{}", stderr: "" };
-    });
-
-    const server = createServer({
-      exec: mockExec,
-      stateDir,
-      disableSpawnPreflight: true,
-    });
-    const tool = (server as any)._registeredTools["spawn_agent"];
-
-    try {
-      const result = await runWithFakeTimers(
-        () =>
-          tool.handler(
-            {
-              repo: "cmuxlayer",
-              model: "gpt-5.5",
-              cli: "codex",
-              boot_prompt_path: promptPath,
-              boot_prompt_timeout_ms: 2_000,
-            },
-            {} as any,
-          ),
-        5_000,
-      );
-      const parsed =
-        result.structuredContent ?? JSON.parse(result.content[0].text);
-      expect(parsed.ok).toBe(true);
-      expect(parsed.boot_prompt_delivered).toBe(true);
-      expect(launcherSends).toBe(2);
-      expect(
-        sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
-      ).toEqual(["cmuxlayerCodex -s -m gpt-5.5", "cmuxlayerCodex -s"]);
-      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
-      expect(returnPresses).toBeGreaterThanOrEqual(3);
-    } finally {
-      if (previousAllowModel === undefined) {
-        delete process.env.REPOGOLEM_ALLOW_MODEL;
-      } else {
-        process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
-      }
-      rmSync(stateDir, { recursive: true, force: true });
-    }
-  }, 10_000);
-
-  it("spawn_agent skips the interactive Codex update menu before delivering the boot prompt", async () => {
-    const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
-    process.env.REPOGOLEM_ALLOW_MODEL = "1";
-    const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-state");
-    const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu.md");
-    const prompt = "boot after skipping update menu";
-    const updateMenu = [
-      ">_ OpenAI Codex",
-      "",
-      "Update available!",
-      "See full release notes:",
-      "https://github.com/openai/codex/releases/latest",
-      "See https://github.com/openai/codex for installation options.",
-      "",
-      "> Release notes",
-      "  Skip until next version",
-    ].join("\n");
-    rmSync(stateDir, { recursive: true, force: true });
-    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
-    writeFileSync(promptPath, prompt, "utf8");
-
-    let launcherSent = false;
-    let updateMenuSkipped = false;
-    let promptSent = false;
-    let downAttempts = 0;
+    let updateReads = 0;
+    let updateMenuSeen = false;
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
+    const updateMenuKeys: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -6774,15 +6826,15 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send-key")) {
         const key = String(args.at(-1) ?? "");
-        if (key === "down") {
-          downAttempts += 1;
-          if (downAttempts === 1) {
-            throw new Error("socket timeout");
-          }
-        }
         sentKeys.push(key);
-        if (key === "return" && sentKeys.at(-2) === "down") {
-          updateMenuSkipped = true;
+        if (updateMenuSeen && !updateAccepted) {
+          updateMenuKeys.push(key);
+          if (
+            key === "return" &&
+            !updateMenuKeys.slice(0, -1).includes("down")
+          ) {
+            updateAccepted = true;
+          }
         }
         return { stdout: "{}", stderr: "" };
       }
@@ -6790,7 +6842,7 @@ describe("tool handler integration", () => {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
         if (text.includes("cmuxlayerCodex")) {
-          launcherSent = true;
+          launcherSends += 1;
         } else if (text === prompt) {
           promptSent = true;
         }
@@ -6798,13 +6850,24 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         let text = "$ ";
-        if (launcherSent && !updateMenuSkipped) {
-          text = updateMenu;
-        } else if (launcherSent && updateMenuSkipped && !promptSent) {
-          text = "codex> ";
-        } else if (promptSent) {
+        if (launcherSends === 1 && !updateAccepted) {
+          readsAfterFirstLaunch += 1;
+          if (readsAfterFirstLaunch === 1) {
+            text = fixture.screens.ready;
+          } else {
+            updateMenuSeen = true;
+            text = fixture.screens.interactive_update;
+          }
+        } else if (launcherSends === 1 && updateAccepted) {
+          updateReads += 1;
           text =
-            "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
+            updateReads === 1
+              ? fixture.screens.updating
+              : fixture.screens.update_complete;
+        } else if (launcherSends >= 2 && !promptSent) {
+          text = fixture.screens.ready;
+        } else if (promptSent) {
+          text = fixture.screens.working;
         }
         return {
           stdout: JSON.stringify({
@@ -6860,8 +6923,9 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
-      expect(downAttempts).toBe(2);
-      expect(sentKeys).toEqual(expect.arrayContaining(["down", "return"]));
+      expect(updateAccepted).toBe(true);
+      expect(updateMenuKeys).toEqual(["return"]);
+      expect(launcherSends).toBe(2);
       expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
     } finally {
       if (previousAllowModel === undefined) {
@@ -6873,29 +6937,28 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent keeps polling after a slow Codex update menu dismissal", async () => {
+  it("spawn_agent keeps polling after the accepted Codex update menu repaints once", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-slow-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu-slow.md");
     const prompt = "boot after a slow update menu repaint";
-    const updateMenu = [
-      ">_ OpenAI Codex",
-      "",
-      "Update available!",
-      "See full release notes:",
-      "https://github.com/openai/codex/releases/latest",
-      "See https://github.com/openai/codex for installation options.",
-      "",
-      "> Release notes",
-      "  Skip until next version",
-    ].join("\n");
+    const updateMenu = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/codex-auto-update-restart.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ).screens.interactive_update as string;
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, prompt, "utf8");
 
     let launcherSent = false;
-    let updateMenuSkipped = false;
+    let updateMenuAccepted = false;
+    let updateMenuSeen = false;
     let promptSent = false;
     let postDismissMenuReads = 0;
     const sentTexts: string[] = [];
@@ -6943,8 +7006,8 @@ describe("tool handler integration", () => {
       if (args.includes("send-key")) {
         const key = String(args.at(-1) ?? "");
         sentKeys.push(key);
-        if (key === "return" && sentKeys.at(-2) === "down") {
-          updateMenuSkipped = true;
+        if (key === "return" && updateMenuSeen) {
+          updateMenuAccepted = true;
         }
         return { stdout: "{}", stderr: "" };
       }
@@ -6960,9 +7023,10 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         let text = "$ ";
-        if (launcherSent && !updateMenuSkipped) {
+        if (launcherSent && !updateMenuAccepted) {
+          updateMenuSeen = true;
           text = updateMenu;
-        } else if (launcherSent && updateMenuSkipped && !promptSent) {
+        } else if (launcherSent && updateMenuAccepted && !promptSent) {
           postDismissMenuReads += 1;
           text = postDismissMenuReads === 1 ? updateMenu : "codex> ";
         } else if (promptSent) {
@@ -7024,7 +7088,8 @@ describe("tool handler integration", () => {
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
       expect(postDismissMenuReads).toBe(2);
-      expect(sentKeys).toEqual(expect.arrayContaining(["down", "return"]));
+      expect(sentKeys).not.toContain("down");
+      expect(sentKeys).toContain("return");
       expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
     } finally {
       if (previousAllowModel === undefined) {
@@ -7036,22 +7101,20 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after dismissal", async () => {
+  it("spawn_agent returns blocked_by_update_menu when the Codex update menu remains after acceptance", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
     const stateDir = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked-state");
     const promptPath = join(CHANNEL_TEST_DIR, "spawn-update-menu-blocked.md");
-    const updateMenu = [
-      ">_ OpenAI Codex",
-      "",
-      "Update available!",
-      "See full release notes:",
-      "https://github.com/openai/codex/releases/latest",
-      "See https://github.com/openai/codex for installation options.",
-      "",
-      "> Release notes",
-      "  Skip until next version",
-    ].join("\n");
+    const updateMenu = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/codex-auto-update-restart.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ).screens.interactive_update as string;
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot that should be blocked", "utf8");
@@ -7164,8 +7227,9 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(false);
       expect(parsed.error_code).toBe("blocked_by_update_menu");
-      expect(parsed.recovery).toContain("Skip until next version");
-      expect(sentKeys.slice(-2)).toEqual(["down", "return"]);
+      expect(parsed.recovery).toContain("Update now");
+      expect(sentKeys).not.toContain("down");
+      expect(sentKeys).toContain("return");
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;

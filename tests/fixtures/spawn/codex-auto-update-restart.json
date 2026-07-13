@@ -1,0 +1,13 @@
+{
+  "launcher_command": "cmuxlayerCodex -s -m gpt-5.5",
+  "screens": {
+    "launcher": "etan@mac % cmuxlayerCodex -s -m gpt-5.5",
+    "interactive_update": "  ✨ Update available! 0.142.5 -> 0.143.0\n\n  Release notes: https://github.com/openai/codex/releases/latest\n\n› 1. Update now (runs `npm install -g @openai/codex@latest`)\n  2. Skip\n  3. Skip until next version\n\n  Press enter to continue",
+    "updating": "Updating Codex CLI from 0.142.5 → 0.143.0 …",
+    "downloading": "Downloading Codex CLI for arm64-apple-darwin",
+    "installing": "Installing standalone package to /Users/etan/.local/bin/codex",
+    "update_complete": "🎉 Update ran successfully! Please restart Codex.\netan@mac % ",
+    "ready": ">_ OpenAI Codex\n\ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\ncodex> ",
+    "working": "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+  }
+}

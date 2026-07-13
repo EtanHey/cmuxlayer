@@ -127,6 +127,7 @@ export type ParsedScreenStatus =
   | "working"
   | "idle"
   | "done";
+export type ParsedCliUpdateState = "updating" | "update_complete";
 export type ParsedControlPlaneState =
   | "unknown"
   | "shell"
@@ -152,6 +153,7 @@ export interface ParsedScreenResult {
   errors: string[];
   model: string | null;
   cost: number | null;
+  cli_update_state?: ParsedCliUpdateState;
   actions?: string[];
 }
 
