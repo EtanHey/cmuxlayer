@@ -735,6 +735,9 @@ function hasAgentScreenEvidence(
   text: string,
   agentType: ParsedScreenAgentType,
 ): boolean {
+  if (/(?:^|\n)\s*codex\s*>\s*$/im.test(text)) {
+    return true;
+  }
   switch (agentType) {
     case "codex":
       return (
