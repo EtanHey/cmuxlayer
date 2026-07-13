@@ -1344,14 +1344,22 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
   return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
-function matchShellPromptLine(line: string): { input: string } | null {
+function isLauncherShellCommand(command: string): boolean {
+  return /(?:^|\s)[\w.-]+(?:Claude|Codex|Cursor|Gemini)(?=\s|$)/.test(command);
+}
+
+function matchShellPromptLine(
+  line: string,
+  opts?: { allowRootInput?: boolean },
+): { input: string } | null {
   const normalized = line.trimEnd();
   const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
   if (barePrompt) {
     return { input: barePrompt[2] ?? "" };
   }
-  if (/^\s*#\s*$/.test(normalized)) {
-    return { input: "" };
+  const rootPrompt = normalized.match(/^\s*#(?:\s+(.*))?$/);
+  if (rootPrompt && (!rootPrompt[1] || opts?.allowRootInput)) {
+    return { input: rootPrompt[1] ?? "" };
   }
 
   const prefixedPrompt = normalized.match(
@@ -1669,10 +1677,13 @@ export function screenShowsPendingShellInput(
   }
 
   const compactSubmitted = trimmed.replace(/\s+/g, "");
+  const promptOptions = {
+    allowRootInput: isLauncherShellCommand(trimmed),
+  };
   let activePromptIndex = -1;
   for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    const prompt = matchShellPromptLine(line);
+    const prompt = matchShellPromptLine(line, promptOptions);
     if (prompt) {
       activePromptIndex = index;
       break;
@@ -1682,7 +1693,10 @@ export function screenShowsPendingShellInput(
     return false;
   }
 
-  const prompt = matchShellPromptLine(lines[activePromptIndex] ?? "");
+  const prompt = matchShellPromptLine(
+    lines[activePromptIndex] ?? "",
+    promptOptions,
+  );
   const pending = [
     prompt?.input ?? "",
     ...lines.slice(activePromptIndex + 1, end),

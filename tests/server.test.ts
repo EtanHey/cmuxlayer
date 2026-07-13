@@ -437,7 +437,9 @@ describe("input delivery batching helpers", () => {
     ["bare", "$ cmuxlayerCodex -s"],
     ["host", "etan@mac % cmuxlayerCodex -s"],
     ["host and path", "etan@mac ~/repo5$ cmuxlayerCodex -s"],
+    ["host colon path", "alice@server:~/repo$ cmuxlayerCodex -s"],
     ["path", "/tmp/repo $ cmuxlayerCodex -s"],
+    ["root", "# cmuxlayerCodex -s"],
   ])("recognizes pending input at a %s shell prompt", async (_label, screen) => {
     const { screenShowsPendingShellInput } =
       await loadInputDeliveryTestModule();
