@@ -1,0 +1,21 @@
+▐▛███▜▌ Claude Code v2.1.207
+▝▜█████▛▘ Sonnet 5 with low effort · Claude Max
+  ▘▘ ▝▝   ~/Gits/cmuxlayer.wt/picker-blocked-delivery
+
+❯ Render the requested AskUserQuestion picker now.
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Delivery safety
+
+Where should this message go?
+
+❯ 1. Current pane
+     Send the message to the currently active pane.
+  2. Inbox file
+     Write the message to the inbox file instead of sending directly.
+  3. Cancel send
+     Do not send the message anywhere.
+  4. Type something.
+
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

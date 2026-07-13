@@ -3554,8 +3554,10 @@ describe("tool handler integration", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(readsWhenBootPromptSent).toBe(3);
-    expect(reads).toBe(4);
+    // Two readiness matches, launch-command preflight, boot-prompt preflight,
+    // then post-submit verification.
+    expect(readsWhenBootPromptSent).toBe(4);
+    expect(reads).toBe(5);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1", "boot prompt"]),
@@ -7403,7 +7405,9 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
-      expect(postDismissMenuReads).toBe(2);
+      // Poll the repaint, confirm readiness, then preflight once more at the
+      // shared text-delivery boundary before typing the boot prompt.
+      expect(postDismissMenuReads).toBe(3);
       expect(sentKeys).not.toContain("down");
       expect(sentKeys).toContain("return");
       expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);

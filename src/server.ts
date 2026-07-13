@@ -90,6 +90,7 @@ import {
   cleanScreenText,
   inferContextWindow,
   isCodexUpdateMenuScreen,
+  isPickerOrMenuScreen,
   parseScreen,
 } from "./screen-parser.js";
 import {
@@ -483,6 +484,7 @@ class SubmitVerificationError extends Error {
 }
 
 class DeliverySafetyGateError extends Error {
+  readonly delivered = false;
   readonly submit_verified = false;
 
   constructor(
@@ -494,7 +496,7 @@ class DeliverySafetyGateError extends Error {
     super(
       error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
-        : "delivery blocked by active interactive prompt",
+        : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
     this.name = "DeliverySafetyGateError";
   }
@@ -689,6 +691,15 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           control: error.control,
         }
       : {};
+  const deliverySafetyExtra =
+    error instanceof DeliverySafetyGateError
+      ? {
+          delivered: error.delivered,
+          error_code: error.error_code,
+          submit_verified: error.submit_verified,
+          screen: error.screen,
+        }
+      : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -713,6 +724,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error: message,
     ...retryMeta,
     ...modeExtra,
+    ...deliverySafetyExtra,
     ...extra,
   };
   return {
@@ -3133,6 +3145,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const assertDeliveryTargetIsSafe = async (
     surface: string,
     workspace?: string,
+    cli?: CliType,
   ): Promise<void> => {
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
@@ -3148,7 +3161,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
 
-    if (snapshot.parsed.control_state === "interactive_overlay") {
+    if (isPickerOrMenuScreen(snapshot.text, cli)) {
       throw new DeliverySafetyGateError(
         "blocked_by_interactive_prompt",
         snapshot.parsed,
@@ -3345,6 +3358,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     retry_count: number;
     submit_verified: boolean | null;
   }> => {
+    await assertDeliveryTargetIsSafe(opts.surface, opts.workspace);
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -4287,7 +4301,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const run = async () => {
       try {
-        await assertDeliveryTargetIsSafe(record.surface, record.workspace);
         const delivery = await deliverInputChunks({
           surface: record.surface,
           workspace: record.workspace,
@@ -5662,7 +5675,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         const delivery = await withSurfaceWrite(args.surface, async () => {
-          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
           return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -5789,7 +5801,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
         const delivery = await withSurfaceWrite(args.surface, async () => {
-          await assertDeliveryTargetIsSafe(args.surface, args.workspace);
           return deliverInputChunks({
             surface: args.surface,
             workspace: args.workspace,
@@ -7232,10 +7243,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return withSurfaceWrite(
         route.surface_id,
         async () => {
-          await assertDeliveryTargetIsSafe(
-            route.surface_id,
-            route.workspace_id ?? undefined,
-          );
           return deliverInputChunks({
             surface: route.surface_id,
             workspace: route.workspace_id ?? undefined,
@@ -8844,7 +8851,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior). Use to interject while an agent is working — e.g., to cancel, steer, or stack an instruction.",
+          "If true, bypass the lifecycle-state gate so a working agent can receive an interjection. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
