@@ -2586,6 +2586,9 @@ export class AgentEngine {
     const fleetCandidates: FleetSidebarCandidate[] = [];
 
     for (const originalAgent of agents) {
+      if (opts.firstConnect && TERMINAL_STATES.has(originalAgent.state)) {
+        continue;
+      }
       const sweepCtx: SweepAgentContext = {};
       const capturedAgent = await this.maybeCaptureBootSessionId(
         originalAgent,
@@ -2971,12 +2974,20 @@ export class AgentEngine {
     }
     await this.registry.reconstitute();
     this.enableStartupPurge();
-    const discovered = await discovery.scan(true);
-    await this.registry.listMerged(discovery, {
-      force: true,
-      discovered,
-      nonDestructive: true,
-    });
+    let discovered: Awaited<ReturnType<AgentDiscovery["scan"]>> | null = null;
+    try {
+      discovered = await discovery.scan(true);
+    } catch {
+      // Startup discovery is a monotonic hint, not an availability gate. Keep
+      // the reconstituted registry and publish unknown until a sweep recovers.
+    }
+    if (discovered !== null) {
+      await this.registry.listMerged(discovery, {
+        force: true,
+        discovered,
+        nonDestructive: true,
+      });
+    }
     await this.syncSidebar({ firstConnect: true });
   }
 

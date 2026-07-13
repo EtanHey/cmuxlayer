@@ -498,6 +498,14 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     if (this.disposed) return;
     const publication = this.normalizePublication(input);
     const currentSource = this.readCurrentSource();
+    if (
+      this.pendingSource !== null &&
+      !this.shouldPublish(publication, this.pendingBaselineSource)
+    ) {
+      this.clearPending();
+      this.clearTimer();
+      return;
+    }
     const previousSource = this.pendingSource ?? currentSource;
     if (!this.shouldPublish(publication, previousSource)) return;
     if (

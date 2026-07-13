@@ -644,6 +644,34 @@ describe("fleet sidebar atomic publisher", () => {
     publisher.dispose();
   });
 
+  it("cancels a pending decrease when a later observation sees the omitted seat live", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
   it("accepts a populated decrease after omitted seat surfaces disappear", async () => {
     const outputPath = tempOutputPath();
     const publisher = new FleetSidebarPublisher({ outputPath });

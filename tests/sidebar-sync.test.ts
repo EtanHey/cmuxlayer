@@ -322,6 +322,49 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
+  it("degrades a transient first-connect discovery failure to unknown", async () => {
+    mockClient.listWorkspaces.mockRejectedValue(
+      new Error("cmux socket unavailable"),
+    );
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => {
+        throw new Error("cmux socket unavailable");
+      },
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await expect(engine.initialize(discovery)).resolves.toBeUndefined();
+
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({ state: "discovering" }),
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: null,
+      }),
+    ]);
+  });
+
+  it("suppresses terminal lifecycle and status side effects on first connect", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "stale-done-agent",
+        surface_id: "surface:stale",
+        state: "done",
+      }),
+    );
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [],
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+
+    expect(mockClient.log).not.toHaveBeenCalled();
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+  });
+
   it("uses the discovered live occupant when a terminal record has the recycled surface ref", async () => {
     stateMgr.writeState(
       makeRecord({
