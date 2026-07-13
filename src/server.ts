@@ -3827,6 +3827,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
     await withSurfaceWrite(opts.surface, async () => {
+      const submitPendingLauncherCommand = async (): Promise<boolean> => {
+        try {
+          const screen = await client.readScreen(opts.surface, {
+            workspace: opts.workspace,
+            lines: 80,
+            scrollback: false,
+          });
+          if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
+            return false;
+          }
+          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+          return true;
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          return false;
+        }
+      };
       const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
         await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
         await waitForLaunchShellReady({
@@ -3836,6 +3855,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
       };
       if (opts.relaunch) {
+        if (await submitPendingLauncherCommand()) {
+          return;
+        }
         await clearAndVerifyFreshShellPrompt();
       }
       const relaunchOriginalCommand = async (): Promise<void> => {

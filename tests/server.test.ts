@@ -6794,6 +6794,7 @@ describe("tool handler integration", () => {
     let launcherSends = 0;
     let promptSent = false;
     let readsAfterLaunch = 0;
+    let launcherReturnPresses = 0;
     let composer = "";
     const submittedCommands: string[] = [];
 
@@ -6813,7 +6814,8 @@ describe("tool handler integration", () => {
         if (key === "ctrl-c") {
           composer = "";
         } else if (key === "return" && !promptSent) {
-          if (launcherSends >= 2) {
+          launcherReturnPresses += 1;
+          if (launcherReturnPresses >= 2) {
             submittedCommands.push(composer);
             composer = "";
           }
@@ -6831,8 +6833,10 @@ describe("tool handler integration", () => {
             text = "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›";
           } else if (readsAfterLaunch === 1) {
             text = "Updating Codex CLI from 0.144.2 to 0.144.3";
-          } else {
+          } else if (readsAfterLaunch === 2) {
             text = "Update ran successfully! Please restart Codex.\n$ ";
+          } else {
+            text = `Update ran successfully! Please restart Codex.\n$ ${composer}`;
           }
         }
         return {
@@ -6868,6 +6872,7 @@ describe("tool handler integration", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(launcherSends).toBe(1);
     expect(submittedCommands).toEqual([fixture.launcher_command]);
     expect(submittedCommands).not.toContain(fixture.corrupted_command);
   }, 10_000);
