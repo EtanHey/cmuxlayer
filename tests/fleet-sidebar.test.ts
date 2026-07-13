@@ -770,6 +770,29 @@ describe("fleet sidebar atomic publisher", () => {
     publisher.dispose();
   });
 
+  it("keeps a pending additive snapshot when the next publication is unknown", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+
+    publisher.publish(publication("unknown", [], null));
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    const published = readFileSync(outputPath, "utf8");
+    expect(published).toContain('"surfaceRef": "surface:1"');
+    expect(published).toContain('"surfaceRef": "surface:2"');
+    publisher.dispose();
+  });
+
   it("uses file mtime to rate-limit a second publisher instance", async () => {
     const outputPath = tempOutputPath();
     const first = new FleetSidebarPublisher({

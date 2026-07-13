@@ -502,8 +502,10 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       this.pendingSource !== null &&
       !this.shouldPublish(publication, this.pendingBaselineSource)
     ) {
-      this.clearPending();
-      this.clearTimer();
+      if (this.pendingIsInvalidatedByObservation(publication)) {
+        this.clearPending();
+        this.clearTimer();
+      }
       return;
     }
     const previousSource = this.pendingSource ?? currentSource;
@@ -675,6 +677,43 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       }
     }
     return this.shouldPublish(publication, newerSource);
+  }
+
+  private pendingIsInvalidatedByObservation(
+    publication: FleetSidebarPublication,
+  ): boolean {
+    if (
+      this.pendingPublication === null ||
+      publication.observedLiveSurfaceRefs === null
+    ) {
+      return false;
+    }
+    const baseline = inspectFleetSidebarSource(this.pendingBaselineSource);
+    if (baseline.state !== "populated") return false;
+
+    const pendingSurfaceRefs = new Set(
+      this.pendingPublication.snapshot.lanes.flatMap((lane) =>
+        lane.seats.map((seat) => seat.surfaceRef),
+      ),
+    );
+    const observedLiveSurfaceRefs = new Set(
+      publication.observedLiveSurfaceRefs,
+    );
+    if (baseline.surfaceRefs.size === 0) {
+      return (
+        this.pendingPublication.state === "empty" &&
+        observedLiveSurfaceRefs.size > 0
+      );
+    }
+    for (const baselineSurfaceRef of baseline.surfaceRefs) {
+      if (
+        !pendingSurfaceRefs.has(baselineSurfaceRef) &&
+        observedLiveSurfaceRefs.has(baselineSurfaceRef)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private atomicWrite(source: string): void {

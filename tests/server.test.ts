@@ -7203,11 +7203,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7226,6 +7227,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7254,6 +7256,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
@@ -7367,11 +7370,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7390,6 +7394,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7420,6 +7425,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
@@ -7509,11 +7515,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7532,6 +7539,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7559,6 +7567,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
