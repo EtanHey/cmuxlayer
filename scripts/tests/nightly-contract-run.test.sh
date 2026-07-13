@@ -45,6 +45,9 @@ case "$NIGHTLY_TEST_MODE" in
     printf '%s\n' '    at runContract (scripts/run-real-cmux-contract.ts:900:13)' >&2
     exit 9
     ;;
+  zero_fail)
+    printf '%s\n' 'contract output without a terminal marker' >&2
+    ;;
   *)
     exit 64
     ;;
@@ -92,12 +95,16 @@ run_case() {
   assert_eq "9.5.0-test" "$(json_field "$receipt" version)"
   assert_eq "$expected_result" "$(json_field "$receipt" result)"
   assert_eq "$expected_reason" "$(json_field "$receipt" reason)"
-  if [[ "$mode" == "fail" ]]; then
+  if [[ "$expected_result" == "fail" ]]; then
     assert_eq "yes" "$(json_has_field "$receipt" output_log)"
     output_log="$(json_field "$receipt" output_log)"
     [[ -f "$output_log" ]] || fail "missing output log: $output_log"
-    grep -F '[contract] FAIL: detached-orphan ancestry denial: injected contract failure' "$output_log" >/dev/null || fail "output log omits failure marker"
-    grep -F 'at runContract' "$output_log" >/dev/null || fail "output log omits stack"
+    if [[ "$mode" == "fail" ]]; then
+      grep -F '[contract] FAIL: detached-orphan ancestry denial: injected contract failure' "$output_log" >/dev/null || fail "output log omits failure marker"
+      grep -F 'at runContract' "$output_log" >/dev/null || fail "output log omits stack"
+    else
+      grep -F 'contract output without a terminal marker' "$output_log" >/dev/null || fail "output log omits zero-exit failure output"
+    fi
   else
     assert_eq "no" "$(json_has_field "$receipt" output_log)"
     timestamp="$(json_field "$receipt" timestamp)"
@@ -148,5 +155,6 @@ run_case pass pass 0 "real-cmux contract lane passed"
 run_case skip skip 0 "NIGHTLY socket is not reachable"
 run_case skip_controls skip 0 $'control ESC=\033 BS=\b FF=\f'
 run_case fail fail 9 "detached-orphan ancestry denial: injected contract failure"
+run_case zero_fail fail 1 "contract command exited zero without exactly one final PASS or SKIP marker"
 run_invalid_environment_cases
 printf 'PASS: nightly contract runner receipts and exits\n'

@@ -68,6 +68,9 @@ else
     reason="$last_nonempty_line"
   fi
   [[ -n "$reason" ]] || reason="contract command exited $command_exit"
+fi
+
+if [[ "$result" == "fail" ]]; then
   output_log="$state_dir/contract-nightly-$run_date.output.log"
   output_log_tmp="$(mktemp "$state_dir/.contract-nightly-$run_date.output.XXXXXX")"
   cp "$output_tmp" "$output_log_tmp"
