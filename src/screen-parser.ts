@@ -683,13 +683,12 @@ function hasPickerNavigationBlock(text: string): boolean {
 
     // A ready composer below copied/stale menu output means the picker is no
     // longer active. Terminal status chrome may still follow the live footer.
+    const afterFooter = lines.slice(footerIndex + 1);
     if (
-      lines
-        .slice(footerIndex + 1)
-        .some(
-          (line) =>
-            BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
-        )
+      afterFooter.some(
+        (line) =>
+          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+      ) || hasShellPrompt(afterFooter.join("\n"))
     ) {
       continue;
     }

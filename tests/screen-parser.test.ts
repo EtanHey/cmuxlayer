@@ -180,6 +180,21 @@ Select a model
     expect(isPickerOrMenuScreen(screen, "cursor")).toBe(false);
   });
 
+  it("treats a picker above a live shell prompt as stale", () => {
+    const screen = `
+Choose a runtime
+
+❯ Bun
+  Node
+
+↑↓ to navigate · Enter to confirm · Esc to cancel
+
+etanheyman@mac ~/repo$
+`;
+
+    expect(isPickerOrMenuScreen(screen)).toBe(false);
+  });
+
   it("recognizes generic active choice menus as interactive overlays", () => {
     const parsed = parseScreen(`
 Claude Code
