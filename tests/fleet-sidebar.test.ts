@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -802,6 +802,60 @@ describe("fleet sidebar atomic publisher", () => {
       cmuxlayer: true,
     });
   });
+
+  it.each(["set", "toggle"] as const)(
+    "preserves different lane updates across contending processes for %s",
+    async (action) => {
+      const outputPath = tempOutputPath();
+      const statePath = join(outputPath, "..", "fleet-collapse.json");
+      const lockPath = `${statePath}.lock`;
+      mkdirSync(lockPath, { recursive: true });
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          `const { rmSync, writeFileSync } = require("node:fs");
+setTimeout(() => {
+  writeFileSync(process.argv[1], JSON.stringify({ version: 1, lanes: { skillCreator: true } }));
+  rmSync(process.argv[2], { recursive: true, force: true });
+}, 100);`,
+          statePath,
+          lockPath,
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let childError = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        childError += chunk;
+      });
+      const childCompleted = new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code === 0) resolve();
+          else {
+            reject(
+              new Error(`contention fixture exited ${code}: ${childError}`),
+            );
+          }
+        });
+      });
+
+      const contendingStore = new FleetSidebarCollapseStore({ statePath });
+      if (action === "set") {
+        contendingStore.setLaneCollapsed("cmuxlayer", true);
+      } else {
+        expect(contendingStore.toggleLane("cmuxlayer", false)).toBe(true);
+      }
+      await childCompleted;
+
+      expect(new FleetSidebarCollapseStore({ statePath }).read()).toEqual({
+        skillCreator: true,
+        cmuxlayer: true,
+      });
+      expect(existsSync(lockPath)).toBe(false);
+    },
+  );
 
   it("applies persisted collapse state before publishing an unchanged snapshot", () => {
     const outputPath = tempOutputPath();

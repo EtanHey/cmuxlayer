@@ -108,6 +108,11 @@ const LANE_ORDER: FleetLaneKey[] = [
   "other",
 ];
 
+const COLLAPSE_LOCK_RETRY_MS = 10;
+const COLLAPSE_LOCK_STALE_MS = 2_000;
+const COLLAPSE_LOCK_TIMEOUT_MS = 5_000;
+const COLLAPSE_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
+
 const LANE_LABELS: Record<FleetLaneKey, string> = {
   orc: "orc",
   golems: "golems",
@@ -599,14 +604,65 @@ export class FleetSidebarCollapseStore {
   }
 
   setLaneCollapsed(key: FleetLaneKey, collapsed: boolean): void {
-    this.write({ ...this.read(), [key]: collapsed });
+    this.withMutationLock(() => {
+      this.write({ ...this.read(), [key]: collapsed });
+    });
   }
 
   toggleLane(key: FleetLaneKey, currentCollapsed?: boolean): boolean {
-    const state = this.read();
-    const collapsed = !(state[key] ?? currentCollapsed ?? false);
-    this.write({ ...state, [key]: collapsed });
-    return collapsed;
+    return this.withMutationLock(() => {
+      const state = this.read();
+      const collapsed = !(state[key] ?? currentCollapsed ?? false);
+      this.write({ ...state, [key]: collapsed });
+      return collapsed;
+    });
+  }
+
+  private withMutationLock<T>(mutate: () => T): T {
+    const lockPath = `${this.statePath}.lock`;
+    const startedAt = Date.now();
+    mkdirSync(dirname(this.statePath), { recursive: true });
+    while (true) {
+      try {
+        mkdirSync(lockPath);
+        break;
+      } catch (error) {
+        if (!isFileExistsError(error)) throw error;
+        this.clearStaleMutationLock(lockPath);
+        if (Date.now() - startedAt >= COLLAPSE_LOCK_TIMEOUT_MS) {
+          throw new Error(
+            `Timed out waiting for Fleet collapse state lock: ${lockPath}`,
+          );
+        }
+        Atomics.wait(
+          COLLAPSE_LOCK_SLEEP,
+          0,
+          0,
+          COLLAPSE_LOCK_RETRY_MS,
+        );
+      }
+    }
+
+    try {
+      return mutate();
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
+  }
+
+  private clearStaleMutationLock(lockPath: string): void {
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs < COLLAPSE_LOCK_STALE_MS) {
+        return;
+      }
+      const stalePath =
+        `${lockPath}.stale.${process.pid}.${Date.now()}.` +
+        Math.random().toString(16).slice(2);
+      renameSync(lockPath, stalePath);
+      rmSync(stalePath, { recursive: true, force: true });
+    } catch {
+      // Another process released, acquired, or quarantined the lock first.
+    }
   }
 
   private write(state: FleetSidebarCollapseState): void {
@@ -632,6 +688,14 @@ export class FleetSidebarCollapseStore {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "EEXIST"
+  );
 }
 
 export interface FleetSidebarPublisherLike {
