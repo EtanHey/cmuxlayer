@@ -3859,22 +3859,49 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
     await withSurfaceWrite(opts.surface, async () => {
       const submitPendingLauncherCommand = async (): Promise<boolean> => {
-        try {
-          const screen = await client.readScreen(opts.surface, {
+        const readLauncherScreen = () =>
+          client.readScreen(opts.surface, {
             workspace: opts.workspace,
             lines: 80,
             scrollback: false,
           });
-          if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
-            return false;
-          }
-          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
-          return true;
+
+        let screen;
+        try {
+          screen = await readLauncherScreen();
         } catch (error) {
           if (isSurfaceGoneReadFailure(error, opts.surface)) {
             throw new SurfaceGoneError(opts.surface, error);
           }
           return false;
+        }
+        if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
+          return false;
+        }
+
+        try {
+          // Return is a mutation: retrying after a lost acknowledgement can
+          // submit into the newly started CLI. Probe before any fallback.
+          await client.sendKey(opts.surface, "return", {
+            workspace: opts.workspace,
+          });
+          return true;
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          try {
+            const confirmation = await readLauncherScreen();
+            return !screenShowsPendingShellInput(
+              confirmation.text,
+              sanitizedCommand,
+            );
+          } catch (confirmationError) {
+            if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, confirmationError);
+            }
+            throw error;
+          }
         }
       };
       const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {

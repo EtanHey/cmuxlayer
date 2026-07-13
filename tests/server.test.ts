@@ -6817,7 +6817,12 @@ describe("tool handler integration", () => {
     10_000,
   );
 
-  it("does not double-type the real surface-489 launcher command when relaunch finds it unsubmitted", async () => {
+  it.each([
+    { label: "normal Return acknowledgement", loseAcknowledgement: false },
+    { label: "lost Return acknowledgement", loseAcknowledgement: true },
+  ])("does not double-type the real surface-489 launcher command with $label", async ({
+    loseAcknowledgement,
+  }) => {
     const promptPath = join(CHANNEL_TEST_DIR, "surface-489-relaunch.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot after stranded launcher", "utf8");
@@ -6859,8 +6864,13 @@ describe("tool handler integration", () => {
         } else if (key === "return" && !promptSent) {
           launcherReturnPresses += 1;
           if (launcherReturnPresses >= 2) {
-            submittedCommands.push(composer);
+            if (composer) {
+              submittedCommands.push(composer);
+            }
             composer = "";
+            if (loseAcknowledgement) {
+              throw new Error("socket closed before receiving response");
+            }
           }
         }
         return { stdout: "{}", stderr: "" };
