@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
+import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 
 const execFileAsync = promisify(execFile);
@@ -169,20 +170,11 @@ export class CmuxClient {
     }
 
     return trimmed.split(/\r?\n/).map((line) => {
-      const match = line.match(
-        /^([^=]+)=(.*?)(?:\s+icon=([^\s]+))?(?:\s+color=(#[0-9a-fA-F]{6}))?$/,
-      );
-      if (!match) {
+      const frame = parseCmuxStatusFrame(line);
+      if (!frame) {
         throw new Error(`cmux returned an unparseable status entry: ${line}`);
       }
-
-      const [, key, value, icon, color] = match;
-      return {
-        key,
-        value: value.trim(),
-        ...(icon ? { icon } : {}),
-        ...(color ? { color } : {}),
-      };
+      return frame;
     });
   }
 

@@ -1,12 +1,16 @@
 import net from "node:net";
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
 import { CmuxSocketError } from "../src/cmux-socket-error.js";
 
 const TEST_ROOT = join("/tmp", "cmux-persistent-socket-test");
+const INTERLEAVED_STATUS_FRAME = readFileSync(
+  new URL("./fixtures/cmux-interleaved-sidebar-status-frame.txt", import.meta.url),
+  "utf8",
+).trim();
 const servers: net.Server[] = [];
 
 function socketPath(name: string): string {
@@ -177,6 +181,58 @@ describe("CmuxPersistentSocket V1 demux", () => {
         }),
       ]);
       expect(received).toHaveLength(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("skips an interleaved sidebar status frame before a V2 response", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("interleaved-status-v2");
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      conn.write(`${INTERLEAVED_STATUS_FRAME}\n`);
+      conn.write("skill-creator=working icon=hammer color=#abcdef\n");
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: true,
+          result: { closed: true },
+        })}\n`,
+      );
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      await expect(
+        socket.call("surface.close", { surface_id: "surface:155" }),
+      ).resolves.toEqual({ closed: true });
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("still rejects a malformed non-status frame before a V2 response", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("unexpected-v2");
+    await startLineServer(path, (_line, conn) => {
+      conn.write("unexpected=frame\n");
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      await expect(socket.call("surface.close")).rejects.toMatchObject({
+        code: "protocol_error",
+        message: expect.stringContaining("Unexpected cmux socket frame"),
+      });
     } finally {
       socket.disconnect();
     }

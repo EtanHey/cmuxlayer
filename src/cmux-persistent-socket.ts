@@ -11,6 +11,7 @@ import * as crypto from "node:crypto";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
+import { isCmuxSidebarStatusFrame } from "./cmux-status-frame.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_IN_FLIGHT = 256;
@@ -256,6 +257,9 @@ export class CmuxPersistentSocket {
         } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
         } else if (this.pending.size > 0) {
+          if (isCmuxSidebarStatusFrame(line)) {
+            continue;
+          }
           this.rejectUnexpectedV2Frame(line);
         }
       }

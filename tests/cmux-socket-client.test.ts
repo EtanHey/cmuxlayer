@@ -18,7 +18,7 @@ import {
 } from "vitest";
 import * as net from "node:net";
 import * as fs from "node:fs";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CmuxSocketClient } from "../src/cmux-socket-client.js";
@@ -30,6 +30,10 @@ import { getTransportHealth } from "../src/cmux-transport-self-heal.js";
 
 const CAN_BIND_MOCK_SOCKET = process.env.CODEX_SANDBOX !== "seatbelt";
 const MOCK_SOCKET_PATH = "/tmp/cmux-test-mock.sock";
+const INTERLEAVED_STATUS_FRAME = readFileSync(
+  new URL("./fixtures/cmux-interleaved-sidebar-status-frame.txt", import.meta.url),
+  "utf8",
+).trim();
 const MOCK_WORKSPACE_ID = "8481D6A0-CE17-4B7C-8695-7A722D30FEE2";
 const MOCK_SECOND_WORKSPACE_ID = "7335E54B-6E88-4B19-BE8C-71C39F4E9D10";
 
@@ -272,6 +276,41 @@ function startSocketServer(socketPath: string): Promise<net.Server> {
               ok: true,
               result: { pong: true },
             }) + "\n",
+          );
+        }
+      });
+    });
+    helperServerConnections.set(server, connections);
+
+    server.listen(socketPath, () => resolve(server));
+  });
+}
+
+function startInterleavedStatusServer(socketPath: string): Promise<net.Server> {
+  return new Promise((resolve) => {
+    try {
+      fs.unlinkSync(socketPath);
+    } catch {
+      /* ignore */
+    }
+
+    const connections = new Set<net.Socket>();
+    const server = net.createServer((conn) => {
+      connections.add(conn);
+      conn.on("close", () => connections.delete(conn));
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk.toString("utf-8");
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          if (!line.trim()) continue;
+
+          const request = JSON.parse(line) as MockV2Request;
+          conn.write(`${INTERLEAVED_STATUS_FRAME}\n`);
+          conn.write(
+            `${JSON.stringify({ id: request.id, ok: true, result: {} })}\n`,
           );
         }
       });
@@ -1124,6 +1163,23 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
         collapse_pane: true,
       },
     });
+  });
+
+  it("closeSurface succeeds when a sidebar status frame precedes its response", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "cmux-close-status-"));
+    const socketPath = join(stateDir, "cmux.sock");
+    const server = await startInterleavedStatusServer(socketPath);
+    const client = new CmuxSocketClient({ socketPath, timeoutMs: 500 });
+
+    try {
+      await expect(
+        client.closeSurface("surface:155", { workspace: "workspace:1" }),
+      ).resolves.toBeUndefined();
+    } finally {
+      client.disconnect();
+      await stopSocketServer(server, socketPath);
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("newSurface uses CLI fallback", async () => {
