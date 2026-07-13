@@ -1,0 +1,14 @@
+{
+  "source": "Etan-captured cmuxlayer read_screen(raw=true), surface:530, 2026-07-13 21:48; the same pane and shell path produced a clean manual launch seconds later",
+  "connected_cmuxlayer_version": "0.4.5",
+  "codex_version": "0.144.3",
+  "launcher_command": "skillcreatorCodex -s",
+  "captured_corrupted_command": "skillcreatorCodex -sskillcreatorCodex -s",
+  "clean_manual_command": "skillcreatorCodex -s -E ultra",
+  "captured_failure": "the second launcher copy became the --sandbox value and Codex exited with status 2",
+  "replay": {
+    "transport_error": "socket closed before receiving response",
+    "stale_probe_screen": "etanheyman ~ $",
+    "pending_probe_screen": "etanheyman ~ $ skillcreatorCodex -s"
+  }
+}

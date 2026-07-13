@@ -2962,23 +2962,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
         if (avoidDuplicateOnAmbiguousRetry) {
-          try {
-            const snapshot = await readParsedSurface(
-              surface,
-              opts.workspace,
-              { throwOnSurfaceGone: true },
-            );
-            if (
-              snapshot &&
-              (screenShowsPendingInput(snapshot.text, chunk) ||
-                screenShowsPendingShellInput(snapshot.text, chunk))
-            ) {
-              return;
+          const observationStartedAt = Date.now();
+          while (
+            Date.now() - observationStartedAt <
+            SEND_INPUT_SAFE_RETRY_OBSERVE_MS
+          ) {
+            try {
+              const snapshot = await readParsedSurface(
+                surface,
+                opts.workspace,
+                { throwOnSurfaceGone: true },
+              );
+              if (
+                snapshot &&
+                (screenShowsPendingInput(snapshot.text, chunk) ||
+                  screenShowsPendingShellInput(snapshot.text, chunk))
+              ) {
+                return;
+              }
+            } catch (observeError) {
+              if (observeError instanceof SurfaceGoneError) {
+                throw observeError;
+              }
+              // Keep observing until the bounded deadline. Retrying the text
+              // mutation after an unreadable pane can concatenate launchers.
             }
-          } catch {
-            // The delivery error remains authoritative when the ambiguity
-            // probe cannot read the surface; continue the bounded retry.
+
+            const remainingMs =
+              SEND_INPUT_SAFE_RETRY_OBSERVE_MS -
+              (Date.now() - observationStartedAt);
+            if (remainingMs <= 0) break;
+            await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remainingMs));
           }
+
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw new DeliveryError(
+            `chunk ${chunkNumber}/${totalChunks} acknowledgement was ambiguous and launcher text was not retried: ${message}`,
+            chunkNumber,
+          );
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
@@ -7708,6 +7730,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               submit_verified: e.submit_verified,
               screen: e.screen,
             });
+          }
+          if (e instanceof SurfaceGoneError) {
+            return err(e, surfaceGonePayload(e));
           }
           return err(e);
         }

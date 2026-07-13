@@ -7065,6 +7065,193 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
+  it.each([
+    {
+      name: "does not replay the real surface-530 launcher when the ambiguity probe is one screen behind",
+      probe: "delayed-visible" as const,
+      expectedOk: true,
+      expectedErrorCode: undefined,
+      expectedError: undefined,
+    },
+    {
+      name: "fails closed without replaying the surface-530 launcher when ambiguity never resolves",
+      probe: "always-stale" as const,
+      expectedOk: false,
+      expectedErrorCode: undefined,
+      expectedError:
+        "acknowledgement was ambiguous and launcher text was not retried",
+    },
+    {
+      name: "preserves pane_died when the surface disappears during ambiguity observation",
+      probe: "surface-gone" as const,
+      expectedOk: false,
+      expectedErrorCode: "pane_died",
+      expectedError: "surface surface:530 disappeared - respawn",
+    },
+  ])("$name", async ({
+    probe,
+    expectedOk,
+    expectedErrorCode,
+    expectedError,
+  }) => {
+    const stateDir = join(
+      CHANNEL_TEST_DIR,
+      "surface-530-stale-probe-double-emit-state",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/surface-530-stale-probe-double-emit.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      launcher_command: string;
+      captured_corrupted_command: string;
+      replay: {
+        transport_error: string;
+        stale_probe_screen: string;
+        pending_probe_screen: string;
+      };
+    };
+
+    let composer = "";
+    let launcherSendAttempts = 0;
+    let launcherWriteBecameAmbiguous = false;
+    let ambiguityProbeReads = 0;
+    const submittedCommands: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:2",
+                title: "skillcreatorClaude",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:2",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:2",
+            surface: "surface:530",
+            pane: "pane:19",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text === fixture.launcher_command) {
+          launcherSendAttempts += 1;
+          composer += text;
+          if (launcherSendAttempts === 1) {
+            launcherWriteBecameAmbiguous = true;
+            throw new Error(fixture.replay.transport_error);
+          }
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        submittedCommands.push(composer);
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        let text = fixture.replay.stale_probe_screen;
+        if (submittedCommands.length > 0) {
+          text = "OpenAI Codex\nmodel: gpt-5.6-sol xhigh\n\n›";
+        } else if (launcherWriteBecameAmbiguous) {
+          ambiguityProbeReads += 1;
+          if (probe === "surface-gone") {
+            throw new Error(
+              "cmux read-screen failed: surface_not_found surface surface:530",
+            );
+          }
+          if (probe === "delayed-visible" && ambiguityProbeReads > 1) {
+            text = fixture.replay.pending_probe_screen;
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:530",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    try {
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "skillcreator",
+              cli: "codex",
+              workspace: "workspace:2",
+            },
+            {} as any,
+          ),
+        4_000,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(expectedOk);
+      if (expectedErrorCode) {
+        expect(parsed.error_code).toBe(expectedErrorCode);
+      }
+      if (expectedError) {
+        expect(parsed.error).toContain(expectedError);
+      }
+      expect(launcherSendAttempts).toBe(1);
+      expect(ambiguityProbeReads).toBeGreaterThanOrEqual(
+        probe === "delayed-visible" ? 2 : 1,
+      );
+      expect(submittedCommands).toEqual(
+        probe === "delayed-visible" ? [fixture.launcher_command] : [],
+      );
+      expect(submittedCommands).not.toContain(
+        fixture.captured_corrupted_command,
+      );
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("spawn_agent accepts the default interactive Codex update and never selects Skip", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
