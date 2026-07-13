@@ -135,7 +135,7 @@ function validateMcpList(values: string[] | undefined, field: string): string[] 
 
 export function formatMcpProfileEnv(profile?: McpProfile): string {
   if (!profile || profile === "inherit") {
-    return "CMUXLAYER_MCP_PROFILE=inherit";
+    return "";
   }
   if (profile === "sterile" || profile === "skill_eval") {
     return `CMUXLAYER_MCP_PROFILE=${profile}`;

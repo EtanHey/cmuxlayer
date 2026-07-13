@@ -458,11 +458,13 @@ describe("worktree helpers", () => {
   });
 
   it("formats MCP profile env hints without raw config passing", () => {
-    expect(formatMcpProfileEnv(undefined)).toBe(
-      "CMUXLAYER_MCP_PROFILE=inherit",
-    );
+    expect(formatMcpProfileEnv(undefined)).toBe("");
+    expect(formatMcpProfileEnv("inherit")).toBe("");
     expect(formatMcpProfileEnv("sterile")).toBe(
       "CMUXLAYER_MCP_PROFILE=sterile",
+    );
+    expect(formatMcpProfileEnv("skill_eval")).toBe(
+      "CMUXLAYER_MCP_PROFILE=skill_eval",
     );
     expect(
       formatMcpProfileEnv({

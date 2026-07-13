@@ -419,6 +419,51 @@ describe("input delivery batching helpers", () => {
       screenShowsPendingShellInput(wrappedScreen, fixture.launcher_command),
     ).toBe(true);
   });
+
+  it("ignores a launcher in shell history above the active empty prompt", async () => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+    const command = "cmuxlayerCodex -s";
+    const screen = [
+      `$ ${command}`,
+      "OpenAI Codex exited after updating",
+      "$ ",
+    ].join("\n");
+
+    expect(screenShowsPendingShellInput(screen, command)).toBe(false);
+  });
+
+  it.each([
+    ["bare", "$ cmuxlayerCodex -s"],
+    ["host", "etan@mac % cmuxlayerCodex -s"],
+    ["host and path", "etan@mac ~/repo5$ cmuxlayerCodex -s"],
+    ["host colon path", "alice@server:~/repo$ cmuxlayerCodex -s"],
+    ["path", "/tmp/repo $ cmuxlayerCodex -s"],
+    ["root", "# cmuxlayerCodex -s"],
+  ])("recognizes pending input at a %s shell prompt", async (_label, screen) => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+
+    expect(screenShowsPendingShellInput(screen, "cmuxlayerCodex -s")).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ["dollar amount", "price $5", "5"],
+    ["percentage prose", "progress % complete", "complete"],
+    ["percentage progress", "Downloading: 100% complete", "complete"],
+    ["path progress", "Saved /tmp/archive 100% complete", "complete"],
+    ["hash output", "# done", "done"],
+  ])(
+    "does not treat %s as pending shell input",
+    async (_label, screen, submittedText) => {
+      const { screenShowsPendingShellInput } =
+        await loadInputDeliveryTestModule();
+
+      expect(screenShowsPendingShellInput(screen, submittedText)).toBe(false);
+    },
+  );
 });
 
 describe("tool registration", () => {
@@ -6774,7 +6819,12 @@ describe("tool handler integration", () => {
     10_000,
   );
 
-  it("does not double-type the real surface-489 launcher command when relaunch finds it unsubmitted", async () => {
+  it.each([
+    { label: "normal Return acknowledgement", loseAcknowledgement: false },
+    { label: "lost Return acknowledgement", loseAcknowledgement: true },
+  ])("does not double-type the real surface-489 launcher command with $label", async ({
+    loseAcknowledgement,
+  }) => {
     const promptPath = join(CHANNEL_TEST_DIR, "surface-489-relaunch.md");
     mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
     writeFileSync(promptPath, "boot after stranded launcher", "utf8");
@@ -6794,6 +6844,7 @@ describe("tool handler integration", () => {
     let launcherSends = 0;
     let promptSent = false;
     let readsAfterLaunch = 0;
+    let launcherReturnPresses = 0;
     let composer = "";
     const submittedCommands: string[] = [];
 
@@ -6813,9 +6864,15 @@ describe("tool handler integration", () => {
         if (key === "ctrl-c") {
           composer = "";
         } else if (key === "return" && !promptSent) {
-          if (launcherSends >= 2) {
-            submittedCommands.push(composer);
+          launcherReturnPresses += 1;
+          if (launcherReturnPresses >= 2) {
+            if (composer) {
+              submittedCommands.push(composer);
+            }
             composer = "";
+            if (loseAcknowledgement) {
+              throw new Error("socket closed before receiving response");
+            }
           }
         }
         return { stdout: "{}", stderr: "" };
@@ -6831,8 +6888,10 @@ describe("tool handler integration", () => {
             text = "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›";
           } else if (readsAfterLaunch === 1) {
             text = "Updating Codex CLI from 0.144.2 to 0.144.3";
-          } else {
+          } else if (readsAfterLaunch === 2) {
             text = "Update ran successfully! Please restart Codex.\n$ ";
+          } else {
+            text = `Update ran successfully! Please restart Codex.\n$ ${composer}`;
           }
         }
         return {
@@ -6868,6 +6927,7 @@ describe("tool handler integration", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(launcherSends).toBe(1);
     expect(submittedCommands).toEqual([fixture.launcher_command]);
     expect(submittedCommands).not.toContain(fixture.corrupted_command);
   }, 10_000);

@@ -1344,8 +1344,38 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
   return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
+function isLauncherShellCommand(command: string): boolean {
+  return /(?:^|\s)[\w.-]+(?:Claude|Codex|Cursor|Gemini)(?=\s|$)/.test(command);
+}
+
+function matchShellPromptLine(
+  line: string,
+  opts?: { allowRootInput?: boolean },
+): { input: string } | null {
+  const normalized = line.trimEnd();
+  const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
+  if (barePrompt) {
+    return { input: barePrompt[2] ?? "" };
+  }
+  const rootPrompt = normalized.match(/^\s*#(?:\s+(.*))?$/);
+  if (rootPrompt && (!rootPrompt[1] || opts?.allowRootInput)) {
+    return { input: rootPrompt[1] ?? "" };
+  }
+
+  const prefixedPrompt = normalized.match(
+    /^\s*(?:(?:\S+@\S+)(?:\s+(?:~|\/)\S*)?|(?:\S+\s+)?(?:~|\/)\S*)(?:\s+\[[^\]]+\])?\s*[$%#](?:\s+(.*))?$/,
+  );
+  return prefixedPrompt ? { input: prefixedPrompt[1] ?? "" } : null;
+}
+
 function matchesShellPrompt(text: string): boolean {
-  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
+  const lines = normalizeTerminalText(text).split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
+  return prompt?.input.trim() === "";
 }
 
 function shouldHandleCodexUpdateMenu(
@@ -1647,21 +1677,36 @@ export function screenShowsPendingShellInput(
   }
 
   const compactSubmitted = trimmed.replace(/\s+/g, "");
+  const promptOptions = {
+    allowRootInput: isLauncherShellCommand(trimmed),
+  };
+  let activePromptIndex = -1;
   for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    const prompt = line.match(/[$%#]\s*(.*)$/);
-    if (!prompt) continue;
-    const pending = [prompt[1] ?? "", ...lines.slice(index + 1, end)]
-      .join("")
-      .trimEnd();
-    if (
-      pending === trimmed ||
-      pending.replace(/\s+/g, "") === compactSubmitted
-    ) {
-      return true;
+    const prompt = matchShellPromptLine(line, promptOptions);
+    if (prompt) {
+      activePromptIndex = index;
+      break;
     }
   }
-  return false;
+  if (activePromptIndex < 0) {
+    return false;
+  }
+
+  const prompt = matchShellPromptLine(
+    lines[activePromptIndex] ?? "",
+    promptOptions,
+  );
+  const pending = [
+    prompt?.input ?? "",
+    ...lines.slice(activePromptIndex + 1, end),
+  ]
+    .join("")
+    .trimEnd();
+  return (
+    pending === trimmed ||
+    pending.replace(/\s+/g, "") === compactSubmitted
+  );
 }
 
 function parseRawSubmitEvidenceMetrics(
@@ -3827,6 +3872,52 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
     await withSurfaceWrite(opts.surface, async () => {
+      const submitPendingLauncherCommand = async (): Promise<boolean> => {
+        const readLauncherScreen = () =>
+          client.readScreen(opts.surface, {
+            workspace: opts.workspace,
+            lines: 80,
+            scrollback: false,
+          });
+
+        let screen;
+        try {
+          screen = await readLauncherScreen();
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          return false;
+        }
+        if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
+          return false;
+        }
+
+        try {
+          // Return is a mutation: retrying after a lost acknowledgement can
+          // submit into the newly started CLI. Probe before any fallback.
+          await client.sendKey(opts.surface, "return", {
+            workspace: opts.workspace,
+          });
+          return true;
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          try {
+            const confirmation = await readLauncherScreen();
+            return !screenShowsPendingShellInput(
+              confirmation.text,
+              sanitizedCommand,
+            );
+          } catch (confirmationError) {
+            if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, confirmationError);
+            }
+            throw error;
+          }
+        }
+      };
       const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
         await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
         await waitForLaunchShellReady({
@@ -3836,6 +3927,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         });
       };
       if (opts.relaunch) {
+        if (await submitPendingLauncherCommand()) {
+          return;
+        }
         await clearAndVerifyFreshShellPrompt();
       }
       const relaunchOriginalCommand = async (): Promise<void> => {
