@@ -6,6 +6,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
@@ -856,6 +857,78 @@ setTimeout(() => {
       expect(existsSync(lockPath)).toBe(false);
     },
   );
+
+  it("does not release a replacement lock when a quarantined owner resumes", async () => {
+    const outputPath = tempOutputPath();
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const lockPath = `${statePath}.lock`;
+    const acquiredPath = join(outputPath, "..", "old-lock-acquired");
+    const releasedPath = join(outputPath, "..", "old-lock-released");
+    const moduleUrl = new URL("../src/fleet-sidebar.ts", import.meta.url).href;
+    const child = spawn(
+      "bun",
+      [
+        "-e",
+        `import { writeFileSync } from "node:fs";
+import { FleetSidebarCollapseStore } from ${JSON.stringify(moduleUrl)};
+const store = new FleetSidebarCollapseStore({ statePath: process.argv[1] });
+store["withMutationLock"](() => {
+  writeFileSync(process.argv[2], "acquired");
+  process.kill(process.pid, "SIGSTOP");
+});
+writeFileSync(process.argv[3], "released");`,
+        statePath,
+        acquiredPath,
+        releasedPath,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let childError = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      childError += chunk;
+    });
+    const childCompleted = new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`lock owner exited ${code}: ${childError}`));
+      });
+    });
+    void childCompleted.catch(() => undefined);
+    const waitForFile = (path: string): void => {
+      const startedAt = Date.now();
+      while (!existsSync(path)) {
+        if (Date.now() - startedAt >= 2_000) {
+          throw new Error(`Timed out waiting for fixture file: ${path}`);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    };
+
+    try {
+      waitForFile(acquiredPath);
+      const staleTime = new Date(Date.now() - 5_000);
+      utimesSync(lockPath, staleTime, staleTime);
+      const replacementStore = new FleetSidebarCollapseStore({ statePath });
+      const lockHarness = replacementStore as unknown as {
+        withMutationLock<T>(mutate: () => T): T;
+      };
+
+      lockHarness.withMutationLock(() => {
+        process.kill(child.pid!, "SIGCONT");
+        waitForFile(releasedPath);
+        expect(existsSync(lockPath)).toBe(true);
+      });
+      await childCompleted;
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      if (child.exitCode === null) {
+        process.kill(child.pid!, "SIGCONT");
+        child.kill("SIGKILL");
+      }
+    }
+  });
 
   it("applies persisted collapse state before publishing an unchanged snapshot", () => {
     const outputPath = tempOutputPath();

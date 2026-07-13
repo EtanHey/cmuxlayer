@@ -2,6 +2,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   unwatchFile,
@@ -623,11 +624,16 @@ export class FleetSidebarCollapseStore {
 
   private withMutationLock<T>(mutate: () => T): T {
     const lockPath = `${this.statePath}.lock`;
+    const lockOwnerPath = join(
+      lockPath,
+      `.owner.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`,
+    );
     const startedAt = Date.now();
     mkdirSync(dirname(this.statePath), { recursive: true });
     while (true) {
       try {
         mkdirSync(lockPath);
+        writeFileSync(lockOwnerPath, "", "utf8");
         break;
       } catch (error) {
         if (!isFileExistsError(error)) throw error;
@@ -649,7 +655,22 @@ export class FleetSidebarCollapseStore {
     try {
       return mutate();
     } finally {
-      rmSync(lockPath, { recursive: true, force: true });
+      this.releaseMutationLock(lockPath, lockOwnerPath);
+    }
+  }
+
+  private releaseMutationLock(lockPath: string, lockOwnerPath: string): void {
+    try {
+      rmSync(lockOwnerPath);
+    } catch {
+      // The owned lock was quarantined; do not touch a replacement lock.
+      return;
+    }
+    try {
+      rmdirSync(lockPath);
+    } catch (error) {
+      if (!isFileSystemError(error, "ENOENT", "ENOTEMPTY")) throw error;
+      // A stale-lock takeover raced cleanup and now owns this path.
     }
   }
 
@@ -694,10 +715,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return isFileSystemError(error, "EEXIST");
+}
+
+function isFileSystemError(
+  error: unknown,
+  ...codes: string[]
+): error is NodeJS.ErrnoException {
   return (
     error instanceof Error &&
     "code" in error &&
-    (error as NodeJS.ErrnoException).code === "EEXIST"
+    codes.includes((error as NodeJS.ErrnoException).code ?? "")
   );
 }
 
