@@ -2899,16 +2899,20 @@ export class AgentEngine {
       }
     }
 
-    try {
-      this.fleetSidebarPublisher.publish(
-        buildFleetSidebarSnapshot(fleetCandidates, {
-          liveSurfaceRefs: new Set(
-            surfaceTopology?.workspaceBySurface.keys() ?? [],
-          ),
-        }),
-      );
-    } catch {
-      // Best-effort custom UI: publication must never break reconciliation.
+    const fleetTopologyIsAuthoritative =
+      surfaceTopology?.complete === true &&
+      (fleetCandidates.length === 0 ||
+        surfaceTopology.workspaceBySurface.size > 0);
+    if (fleetTopologyIsAuthoritative) {
+      try {
+        this.fleetSidebarPublisher.publish(
+          buildFleetSidebarSnapshot(fleetCandidates, {
+            liveSurfaceRefs: new Set(surfaceTopology.workspaceBySurface.keys()),
+          }),
+        );
+      } catch {
+        // Best-effort custom UI: publication must never break reconciliation.
+      }
     }
   }
 

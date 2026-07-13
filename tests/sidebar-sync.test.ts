@@ -223,6 +223,56 @@ describe("Sidebar Sync", () => {
     });
   });
 
+  it("preserves the last generated fleet when topology enumeration is unknown", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockRejectedValue(new Error("socket unavailable"));
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
+  });
+
+  it("preserves the last generated fleet when topology is empty but registry seats remain", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
+  });
+
+  it("preserves the last generated fleet when topology enumeration is partial", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:coach")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:coach",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockRejectedValue(
+      new Error("pane closed during enumeration"),
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
+  });
+
   afterEach(() => {
     engine.dispose();
     vi.useRealTimers();

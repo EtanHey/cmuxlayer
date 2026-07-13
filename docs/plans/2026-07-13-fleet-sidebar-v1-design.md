@@ -108,6 +108,8 @@ name and surface ref.
   rename. A failure is best-effort and does not break lifecycle sweeps.
 - A superseded pending snapshot replaces the older pending write.
 - `dispose()` cancels any pending timer.
+- Null, partial, or implausibly empty topology is inconclusive: skip publication
+  and preserve the last-good generated source instead of erasing live rows.
 - Empty live topology produces a valid empty fleet sidebar, not stale rows.
 - The generated view retains cmux's last-good-render protection if a write is
   interrupted outside the atomic publisher.

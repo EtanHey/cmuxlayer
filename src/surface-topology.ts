@@ -13,6 +13,7 @@ import type {
 export type SurfaceTopology = AgentTopologyHealthInput;
 
 export interface SurfaceTopologySnapshot {
+  complete: boolean;
   workspaceBySurface: Map<string, string>;
   titleBySurface: Map<string, string>;
   topologyBySurface: Map<string, SurfaceTopology>;
@@ -78,6 +79,7 @@ export async function collectSurfaceTopology(
   }
 
   const snapshot: SurfaceTopologySnapshot = {
+    complete: true,
     workspaceBySurface: new Map(),
     titleBySurface: new Map(),
     topologyBySurface: new Map(),
@@ -105,6 +107,7 @@ export async function collectSurfaceTopology(
         } catch {
           // Panes can close between listPanes and listPaneSurfaces. Keep the
           // rest of the snapshot usable instead of dropping every agent's health input.
+          snapshot.complete = false;
         }
       }
       const partitioned = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
@@ -126,6 +129,7 @@ export async function collectSurfaceTopology(
       }
     } catch {
       // A single bad workspace should not erase topology already collected for others.
+      snapshot.complete = false;
     }
   }
 

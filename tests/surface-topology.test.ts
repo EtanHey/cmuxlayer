@@ -156,6 +156,7 @@ describe("collectSurfaceTopology", () => {
     const snapshot = await collectSurfaceTopology(client);
 
     expect(snapshot).not.toBeNull();
+    expect(snapshot?.complete).toBe(false);
     expect(snapshot?.workspaceBySurface.get("surface:ok")).toBe("workspace:1");
     expect(snapshot?.topologyBySurface.get("surface:ok")).toEqual({
       column: 0,
