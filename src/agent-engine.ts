@@ -1335,9 +1335,12 @@ export class AgentEngine {
         workspace: agent.workspace_id ?? undefined,
       });
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const hasTargetEvidence =
+        evidence.ready || (targetState === "ready" && evidence.activeCodex);
       if (
-        !evidence.ready ||
+        !hasTargetEvidence ||
         (targetState === "ready" &&
+          !evidence.activeCodex &&
           this.screenShowsPendingBootPrompt(agent, screen.text))
       ) {
         waitForReadyPatternMatches.delete(agent.agent_id);
@@ -1691,14 +1694,23 @@ export class AgentEngine {
     screenText: string,
   ): {
     ready: boolean;
+    activeCodex: boolean;
     consecutive: number;
   } {
     const parsed = parseScreen(screenText);
     const match = matchReadyPattern(agent.cli, screenText);
+    const hasIdentity = screenHasReadyAgentIdentity(
+      agent.cli,
+      screenText,
+      parsed,
+    );
+    const activeCodex =
+      agent.cli === "codex" &&
+      hasIdentity &&
+      screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready:
-        match.matched &&
-        screenHasReadyAgentIdentity(agent.cli, screenText, parsed),
+      ready: hasIdentity && match.matched,
+      activeCodex,
       consecutive: match.consecutive,
     };
   }
@@ -1955,8 +1967,9 @@ export class AgentEngine {
         const screen = await this.readSweepScreen(agent, ctx);
         const evidence = this.readReadyEvidence(agent, screen.text);
         if (
-          evidence.ready &&
-          !this.screenShowsPendingBootPrompt(agent, screen.text)
+          (evidence.ready || evidence.activeCodex) &&
+          (evidence.activeCodex ||
+            !this.screenShowsPendingBootPrompt(agent, screen.text))
         ) {
           const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
           this.readyPatternMatches.set(agent.agent_id, count);
@@ -2015,7 +2028,7 @@ export class AgentEngine {
     try {
       const screen = await this.readSweepScreen(agent, ctx);
       const evidence = this.readReadyEvidence(agent, screen.text);
-      if (!evidence.ready) {
+      if (!evidence.ready && !evidence.activeCodex) {
         this.readyPatternMatches.delete(agent.agent_id);
         return agent;
       }

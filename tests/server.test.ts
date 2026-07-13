@@ -25,6 +25,10 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
     firstChunkNumber: number;
     deliveredChunkCounts: number[];
   }>;
+  screenShowsPendingShellInput: (
+    screenText: string,
+    submittedText: string,
+  ) => boolean;
 };
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
@@ -391,6 +395,29 @@ describe("input delivery batching helpers", () => {
         deliveredChunkCounts: [1],
       },
     ]);
+  });
+
+  it("recognizes the real surface-489 launcher while it is wrapped across shell rows", async () => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/surface-489-doubled-launch-command.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { launcher_command: string };
+    const wrapAt = 72;
+    const wrappedScreen = [
+      `etanheyman ~/Gits/cmuxlayer [fix/spawn-reliability-3head] $ ${fixture.launcher_command.slice(0, wrapAt)}`,
+      fixture.launcher_command.slice(wrapAt),
+    ].join("\n");
+
+    expect(
+      screenShowsPendingShellInput(wrappedScreen, fixture.launcher_command),
+    ).toBe(true);
   });
 });
 
@@ -6747,6 +6774,235 @@ describe("tool handler integration", () => {
     10_000,
   );
 
+  it("does not double-type the real surface-489 launcher command when relaunch finds it unsubmitted", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "surface-489-relaunch.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot after stranded launcher", "utf8");
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/surface-489-doubled-launch-command.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      launcher_command: string;
+      corrupted_command: string;
+    };
+
+    let launcherSends = 0;
+    let promptSent = false;
+    let readsAfterLaunch = 0;
+    let composer = "";
+    const submittedCommands: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text === fixture.launcher_command) {
+          launcherSends += 1;
+          composer += text;
+        } else if (text === "boot after stranded launcher") {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key")) {
+        const key = String(args.at(-1) ?? "");
+        if (key === "ctrl-c") {
+          composer = "";
+        } else if (key === "return" && !promptSent) {
+          if (launcherSends >= 2) {
+            submittedCommands.push(composer);
+            composer = "";
+          }
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        let text = "$ ";
+        if (promptSent) {
+          text =
+            "gpt-5.6-sol high · ~/Gits/cmuxlayer.wt/spawn-reliability-3head\nWorking (1s • esc to interrupt)";
+        } else if (launcherSends > 0) {
+          readsAfterLaunch += 1;
+          if (submittedCommands.length > 0) {
+            text = "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›";
+          } else if (readsAfterLaunch === 1) {
+            text = "Updating Codex CLI from 0.144.2 to 0.144.3";
+          } else {
+            text = "Update ran successfully! Please restart Codex.\n$ ";
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:489",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:489",
+            command: fixture.launcher_command,
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 2_000,
+          },
+          {} as any,
+        ),
+      5_000,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(submittedCommands).toEqual([fixture.launcher_command]);
+    expect(submittedCommands).not.toContain(fixture.corrupted_command);
+  }, 10_000);
+
+  it("does not turn a retry-ambiguous spawn write into the real --sandbox launcher-name injection", async () => {
+    const stateDir = join(
+      CHANNEL_TEST_DIR,
+      "spawn-sandbox-launcher-injection-state",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/brainlayer-sandbox-launcher-injection.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      launcher_command: string;
+      corrupted_command: string;
+      screen: string;
+    };
+
+    let composer = "";
+    let launcherSendAttempts = 0;
+    const submittedCommands: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "brainlayer",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:478",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text === fixture.launcher_command) {
+          launcherSendAttempts += 1;
+          composer += text;
+          if (launcherSendAttempts === 1) {
+            throw new Error("socket closed before receiving response");
+          }
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        submittedCommands.push(composer);
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        const submitted = submittedCommands.at(-1);
+        const text =
+          submitted === fixture.corrupted_command
+            ? fixture.screen
+            : submitted === fixture.launcher_command
+              ? "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›"
+              : composer
+                ? `etanheyman ~/Gits/brainlayer [main] $ ${composer}`
+                : "etanheyman ~/Gits/brainlayer [main] $";
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:478",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      disableSpawnPreflight: true,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    try {
+      await runWithFakeTimers(
+        () =>
+          tool.handler(
+            {
+              repo: "brainlayer",
+              cli: "codex",
+              workspace: "workspace:1",
+            },
+            {} as any,
+          ),
+        2_000,
+      );
+
+      expect(submittedCommands).toEqual([fixture.launcher_command]);
+      expect(submittedCommands).not.toContain(fixture.corrupted_command);
+      expect(launcherSendAttempts).toBe(1);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("spawn_agent accepts the default interactive Codex update and never selects Skip", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
@@ -7421,6 +7677,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -7481,8 +7738,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7497,7 +7755,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Codex via bun install -g @openai/codex"
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "
@@ -7552,6 +7812,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -7612,8 +7873,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7628,7 +7890,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Gemini via npm install -g @google/gemini-cli"
             : launcherSends === 0 && reads === 2
               ? "Please restart Gemini\netan@mac % "
@@ -7687,6 +7951,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("new-surface")) {
@@ -7701,8 +7966,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7717,7 +7983,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Codex via bun install -g @openai/codex"
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "

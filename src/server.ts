@@ -1631,6 +1631,39 @@ function screenShowsPendingInput(
   );
 }
 
+export function screenShowsPendingShellInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+
+  const compactSubmitted = trimmed.replace(/\s+/g, "");
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trimEnd() ?? "";
+    const prompt = line.match(/[$%#]\s*(.*)$/);
+    if (!prompt) continue;
+    const pending = [prompt[1] ?? "", ...lines.slice(index + 1, end)]
+      .join("")
+      .trimEnd();
+    if (
+      pending === trimmed ||
+      pending.replace(/\s+/g, "") === compactSubmitted
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function parseRawSubmitEvidenceMetrics(
   screenText: string,
 ): RawSubmitEvidenceMetrics {
@@ -2826,6 +2859,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     chunkNumber: number,
     totalChunks: number,
     shouldPaste: boolean,
+    avoidDuplicateOnAmbiguousRetry: boolean,
   ) => {
     let attempt = 0;
     let lastError: unknown;
@@ -2866,6 +2900,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
           );
+        }
+        if (avoidDuplicateOnAmbiguousRetry) {
+          try {
+            const snapshot = await readParsedSurface(
+              surface,
+              opts.workspace,
+              { throwOnSurfaceGone: true },
+            );
+            if (
+              snapshot &&
+              (screenShowsPendingInput(snapshot.text, chunk) ||
+                screenShowsPendingShellInput(snapshot.text, chunk))
+            ) {
+              return;
+            }
+          } catch {
+            // The delivery error remains authoritative when the ambiguity
+            // probe cannot read the surface; continue the bounded retry.
+          }
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
@@ -3262,6 +3315,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         batch.firstChunkNumber,
         opts.chunks.length,
         shouldPaste,
+        opts.source_event === "spawn_agent",
       );
       for (const sentChunks of batch.deliveredChunkCounts) {
         opts.onChunkDelivered?.(sentChunks);
@@ -3578,6 +3632,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    require_fresh_shell_prompt?: boolean;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SHELL_READY_TIMEOUT_MS;
     const start = Date.now();
@@ -3593,9 +3648,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         if (
           matchesShellPrompt(screen.text) ||
-          READY_PATTERN_CLIS.some(
-            (cli) => matchReadyPattern(cli, screen.text).matched,
-          )
+          (!opts.require_fresh_shell_prompt &&
+            READY_PATTERN_CLIS.some(
+              (cli) => matchReadyPattern(cli, screen.text).matched,
+            ))
         ) {
           return;
         }
@@ -3756,6 +3812,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     command: string;
+    relaunch?: boolean;
   }): Promise<void> => {
     const sanitizedCommand = sanitizeTerminalInput(opts.command);
     const chunks =
@@ -3763,12 +3820,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedCommand];
 
-    await waitForLaunchShellReady({
-      surface: opts.surface,
-      workspace: opts.workspace,
-    });
+    if (!opts.relaunch) {
+      await waitForLaunchShellReady({
+        surface: opts.surface,
+        workspace: opts.workspace,
+      });
+    }
     await withSurfaceWrite(opts.surface, async () => {
+      const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+        await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
+        await waitForLaunchShellReady({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          require_fresh_shell_prompt: true,
+        });
+      };
+      if (opts.relaunch) {
+        await clearAndVerifyFreshShellPrompt();
+      }
       const relaunchOriginalCommand = async (): Promise<void> => {
+        await clearAndVerifyFreshShellPrompt();
         await deliverInputChunks({
           surface: opts.surface,
           workspace: opts.workspace,
@@ -5130,6 +5201,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5274,6 +5346,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5654,6 +5727,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 surface: args.surface,
                 workspace: args.workspace,
                 command: sanitizedCommand,
+                relaunch: true,
               }),
           });
         }
@@ -6884,6 +6958,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: opts.surface,
         workspace: record.workspace_id ?? opts.workspace,
         command,
+        relaunch: true,
       });
     };
 

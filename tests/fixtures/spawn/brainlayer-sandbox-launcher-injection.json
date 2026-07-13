@@ -1,0 +1,7 @@
+{
+  "source": "Live spawn_agent failure on surface:478, captured 2026-07-13 from ~/.zsh_history and the original read_screen transcript",
+  "codex_version": "0.144.3",
+  "launcher_command": "brainlayerCodex -s",
+  "corrupted_command": "brainlayerCodex -sbrainlayerCodex -s",
+  "screen": "Shellbook: starting the agent directly.\nShellbook: run `shellbook tui` in another terminal for the social pane.\nerror: invalid value 'brainlayerCodex' for '--sandbox <SANDBOX_MODE>'\n  [possible values: read-only, workspace-write, danger-full-access]\n\nFor more information, try '--help'.\nexit status 2\netanheyman ~/Gits/brainlayer [main] $"
+}
