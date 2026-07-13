@@ -8,6 +8,7 @@
 
 import * as net from "node:net";
 import * as crypto from "node:crypto";
+import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
 
@@ -222,7 +223,6 @@ export class CmuxPersistentSocket {
       this.buffer = this.buffer.slice(newlineIdx + 1);
 
       if (!line.trim()) continue;
-
       try {
         const parsed = JSON.parse(line) as Partial<V2Response>;
         if (typeof parsed.id === "string") {
@@ -237,6 +237,16 @@ export class CmuxPersistentSocket {
           this.resolveNextV1(line);
         }
       } catch (error) {
+        if (!this.isJsonLikeFrame(line) && isCmuxAccessControlDenied(line)) {
+          this.rejectAllPending(
+            new CmuxSocketError(
+              `cmux access-control denial: ${line.slice(0, 120)}`,
+              "access_denied",
+              { transportPhase: "response" },
+            ),
+          );
+          continue;
+        }
         if (this.isJsonLikeFrame(line)) {
           if (line.trimStart().startsWith("[") && this.pendingV1.length > 0) {
             this.resolveNextV1(line);
@@ -245,6 +255,8 @@ export class CmuxPersistentSocket {
           this.rejectMalformedFrame(line, error);
         } else if (this.pendingV1.length > 0) {
           this.resolveNextV1(line);
+        } else if (this.pending.size > 0) {
+          this.rejectUnexpectedV2Frame(line);
         }
       }
     }
@@ -277,6 +289,15 @@ export class CmuxPersistentSocket {
     if (this.pending.size > 0) {
       this.rejectPendingV2(socketError);
     }
+  }
+
+  private rejectUnexpectedV2Frame(line: string): void {
+    this.rejectPendingV2(
+      new CmuxSocketError(
+        `Unexpected cmux socket frame: frame=${line.slice(0, 120)}`,
+        "protocol_error",
+      ),
+    );
   }
 
   private resolveNextV1(line: string): void {

@@ -29,8 +29,9 @@ json_escape() {
 mkdir -p "$state_dir"
 output_tmp="$(mktemp "$state_dir/.nightly-contract-output.XXXXXX")"
 receipt_tmp="$receipt.tmp.$$"
+output_log_tmp=""
 cleanup() {
-  rm -f "${output_tmp:-}" "$receipt_tmp"
+  rm -f "${output_tmp:-}" "$receipt_tmp" "${output_log_tmp:-}"
 }
 trap cleanup EXIT
 
@@ -60,12 +61,27 @@ elif [[ "$command_exit" -eq 0 ]]; then
   exit_code=1
   reason="contract command exited zero without exactly one final PASS or SKIP marker"
 else
-  reason="${last_nonempty_line#\[contract\] FAIL: }"
+  failure_line="$(awk '/^\[contract\] FAIL: / { line = $0 } END { print line }' "$output_tmp")"
+  if [[ -n "$failure_line" ]]; then
+    reason="${failure_line#\[contract\] FAIL: }"
+  else
+    reason="$last_nonempty_line"
+  fi
   [[ -n "$reason" ]] || reason="contract command exited $command_exit"
+  output_log="$state_dir/contract-nightly-$run_date.output.log"
+  output_log_tmp="$(mktemp "$state_dir/.contract-nightly-$run_date.output.XXXXXX")"
+  cp "$output_tmp" "$output_log_tmp"
+  mv "$output_log_tmp" "$output_log"
+  output_log_tmp=""
 fi
 
 version="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (typeof pkg.version === "string") process.stdout.write(pkg.version);' "$repo/package.json" 2>/dev/null)"
 [[ -n "$version" ]] || version="unknown"
+
+output_log_field=""
+if [[ -n "${output_log:-}" ]]; then
+  output_log_field="$(printf ',\n  "output_log": "%s"' "$(json_escape "$output_log")")"
+fi
 
 cat >"$receipt_tmp" <<JSON
 {
@@ -74,7 +90,7 @@ cat >"$receipt_tmp" <<JSON
   "reason": "$(json_escape "$reason")",
   "timestamp": "$timestamp",
   "socket_path": "$socket_path",
-  "command": "bun run test:contract"
+  "command": "bun run test:contract"${output_log_field}
 }
 JSON
 mv "$receipt_tmp" "$receipt"

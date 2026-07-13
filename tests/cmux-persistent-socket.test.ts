@@ -182,6 +182,76 @@ describe("CmuxPersistentSocket V1 demux", () => {
     }
   });
 
+  it("rejects every pending request on a raw access-control denial", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("raw-access-denial");
+    const denial =
+      "ERROR: Access denied — only processes started inside cmux can connect";
+    const received: string[] = [];
+    await startLineServer(path, (line, conn) => {
+      received.push(line);
+      if (received.length === 2) conn.write(`${denial}\n`);
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 300,
+    });
+
+    try {
+      const results = await Promise.allSettled([
+        socket.sendLine("set_status agent active"),
+        socket.call("system.ping"),
+      ]);
+      expect(results).toEqual([
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({
+            code: "access_denied",
+            message: expect.stringContaining(denial),
+          }),
+        }),
+        expect.objectContaining({
+          status: "rejected",
+          reason: expect.objectContaining({
+            code: "access_denied",
+            message: expect.stringContaining(denial),
+          }),
+        }),
+      ]);
+    } finally {
+      socket.disconnect();
+    }
+  });
+
+  it("does not classify access-control words inside a correlated V2 result as a raw denial", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("access-denial-text-in-v2-result");
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      conn.write(
+        `${JSON.stringify({
+          id: request.id,
+          ok: true,
+          result: { message: "Access denied is displayed in pane output" },
+        })}\n`,
+      );
+    });
+
+    const socket = new CmuxPersistentSocket({
+      socketPath: path,
+      timeoutMs: 500,
+    });
+
+    try {
+      await expect(socket.call("read_screen")).resolves.toEqual({
+        message: "Access denied is displayed in pane output",
+      });
+    } finally {
+      socket.disconnect();
+    }
+  });
+
   it("does not let late V2 responses complete a queued V1 request after malformed V2 rejection", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("late-v2-after-malformed");
