@@ -164,6 +164,22 @@ ${selector} Opus
     },
   );
 
+  it("treats a Cursor picker above a live follow-up composer as stale", () => {
+    const screen = `
+Select a model
+
+› Opus
+  Sonnet
+  Haiku
+
+↑↓ to navigate · Enter to confirm · Esc to cancel
+
+→ Add a follow-up
+`;
+
+    expect(isPickerOrMenuScreen(screen, "cursor")).toBe(false);
+  });
+
   it("recognizes generic active choice menus as interactive overlays", () => {
     const parsed = parseScreen(`
 Claude Code

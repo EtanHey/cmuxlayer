@@ -686,7 +686,10 @@ function hasPickerNavigationBlock(text: string): boolean {
     if (
       lines
         .slice(footerIndex + 1)
-        .some((line) => BARE_READY_PROMPT_RE.test(line))
+        .some(
+          (line) =>
+            BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+        )
     ) {
       continue;
     }
