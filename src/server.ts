@@ -541,7 +541,7 @@ class BootPromptDeliveryError extends Error {
 class BootPromptUpdateMenuBlockedError extends Error {
   readonly error_code = "blocked_by_update_menu";
   readonly recovery =
-    "Codex is showing the interactive update menu. Select 'Skip until next version' and rerun the spawn, or launch Codex once manually and dismiss the menu.";
+    "Codex kept showing the interactive update menu after cmuxlayer accepted the default 'Update now' option. Rerun the spawn; the bounded updater guard prevents an infinite loop.";
 
   constructor(
     message: string,
@@ -1348,16 +1348,6 @@ function matchesShellPrompt(text: string): boolean {
   return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
 }
 
-function matchesCliUpdateMarker(text: string): boolean {
-  return /(?:^|\n)[^\n]*Updating\s+.+\s+via\s+.+/i.test(text);
-}
-
-function matchesCliUpdateContinuationMarker(text: string): boolean {
-  return /(?:^|\n)[^\n]*(?:Update ran successfully|Please restart)[^\n]*/i.test(
-    text,
-  );
-}
-
 function shouldHandleCodexUpdateMenu(
   cli: CliType | undefined,
   text: string,
@@ -1963,6 +1953,7 @@ export interface CmuxServerContext {
   latestDeliveryBySurface: Map<string, string>;
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
+  originalLaunchCommandsBySurface: Map<string, string>;
   surfaceWriteLivenessCandidates: Set<string>;
   surfacePtyDeadSince: Map<string, number>;
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
@@ -2058,6 +2049,7 @@ export function createServerContext(
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
+    originalLaunchCommandsBySurface: new Map(),
     surfaceWriteLivenessCandidates: new Set(),
     surfacePtyDeadSince: new Map(),
     readScreenInflight: new Map(),
@@ -2101,6 +2093,7 @@ export function createServerContext(
       context.lifecycleSweepEngine = null;
       context.lifecycleAgentInputDeliverer = null;
       context.lifecycleAgentInputDelivererReadyListeners.clear();
+      context.originalLaunchCommandsBySurface.clear();
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
       if (autoVitestStateDir) {
@@ -2175,6 +2168,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const latestDeliveryBySurface = context.latestDeliveryBySurface;
   const activeDeliveryBySurface = context.activeDeliveryBySurface;
   const activeSurfaceWrites = context.activeSurfaceWrites;
+  const originalLaunchCommandsBySurface =
+    context.originalLaunchCommandsBySurface;
   const surfaceWriteLiveness = context.surfaceWriteLiveness;
   const surfaceWriteLivenessCandidates =
     context.surfaceWriteLivenessCandidates;
@@ -3357,8 +3352,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let updateElapsedMs = 0;
     let updateWasSeen = false;
     let updateShellRelaunches = 0;
-    let codexUpdateMenuDismissed = false;
-    let codexUpdateMenuDismissedAt: number | null = null;
+    let codexUpdateMenuAccepted = false;
+    let codexUpdateMenuAcceptedAt: number | null = null;
     const updateMaxMs = bootPromptUpdateMaxMs();
     const postUpdateReadyBudgetMs = () =>
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
@@ -3373,19 +3368,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
-        const updateMarker =
-          matchesCliUpdateMarker(screen.text) ||
-          (matchesCliUpdateContinuationMarker(screen.text) &&
-            !matchesShellPrompt(screen.text));
+        const updateState = parsed.cli_update_state;
 
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
-          if (codexUpdateMenuDismissed) {
-            const elapsedSinceDismissMs =
-              codexUpdateMenuDismissedAt === null
+          if (codexUpdateMenuAccepted) {
+            const elapsedSinceAcceptMs =
+              codexUpdateMenuAcceptedAt === null
                 ? BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
-                : now - codexUpdateMenuDismissedAt;
+                : now - codexUpdateMenuAcceptedAt;
             if (
-              elapsedSinceDismissMs < BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
+              elapsedSinceAcceptMs < BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS
             ) {
               consecutiveMatches.clear();
               await delay(BOOT_PROMPT_READY_POLL_MS);
@@ -3398,16 +3390,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           updateWasSeen = true;
           consecutiveMatches.clear();
-          await sendKeyWithRetry(opts.surface, "down", opts.workspace);
-          await delay(SEND_INPUT_ENTER_DELAY_MS);
           await sendKeyWithRetry(opts.surface, "return", opts.workspace);
-          codexUpdateMenuDismissed = true;
-          const dismissedAt = Date.now();
-          codexUpdateMenuDismissedAt = dismissedAt;
+          codexUpdateMenuAccepted = true;
+          const acceptedAt = Date.now();
+          codexUpdateMenuAcceptedAt = acceptedAt;
           deadline = Math.max(
             deadline,
-            dismissedAt + postUpdateReadyBudgetMs(),
-            dismissedAt +
+            acceptedAt + postUpdateReadyBudgetMs(),
+            acceptedAt +
               BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS +
               BOOT_PROMPT_READY_POLL_MS,
           );
@@ -3415,7 +3405,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           continue;
         }
 
-        if (updateMarker) {
+        if (updateState === "updating") {
           updateWasSeen = true;
           updateStartedAt ??= now;
           updateElapsedMs = Math.max(
@@ -3440,6 +3430,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           updateStartedAt = null;
           updateElapsedMs = 0;
+        }
+
+        if (updateState === "update_complete") {
+          updateWasSeen = true;
+          consecutiveMatches.clear();
         }
 
         if (
@@ -3628,12 +3623,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    onUpdateShellRelaunch?: () => Promise<void>;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS;
-    const start = Date.now();
+    let deadline = Date.now() + timeoutMs;
     let lastText = "";
+    let updateStartedAt: number | null = null;
+    let updateElapsedMs = 0;
+    let updateWasSeen = false;
+    let updateShellRelaunches = 0;
+    const updateMaxMs = bootPromptUpdateMaxMs();
 
-    while (Date.now() - start < timeoutMs) {
+    while (Date.now() < deadline || updateStartedAt !== null) {
       try {
         const screen = await client.readScreen(opts.surface, {
           workspace: opts.workspace,
@@ -3641,6 +3642,69 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           scrollback: false,
         });
         lastText = screen.text;
+        const parsed = parseScreen(screen.text);
+        const now = Date.now();
+
+        if (parsed.cli_update_state === "updating") {
+          updateWasSeen = true;
+          updateStartedAt ??= now;
+          updateElapsedMs = Math.max(
+            updateElapsedMs + LAUNCH_SHELL_READY_POLL_MS,
+            now - updateStartedAt,
+          );
+          if (updateElapsedMs >= updateMaxMs) {
+            throw new BootPromptTimeoutError(
+              `Timed out waiting for agent launch readiness on ${opts.surface}: CLI update marker persisted for ${updateMaxMs}ms`,
+              tailLines(lastText, 10),
+            );
+          }
+          await delay(LAUNCH_SHELL_READY_POLL_MS);
+          continue;
+        }
+
+        if (updateStartedAt !== null) {
+          const updateDuration = Math.max(
+            now - updateStartedAt,
+            updateElapsedMs,
+          );
+          deadline = Math.max(
+            deadline + updateDuration,
+            now + Math.max(timeoutMs, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS),
+          );
+          updateStartedAt = null;
+          updateElapsedMs = 0;
+        }
+
+        if (parsed.cli_update_state === "update_complete") {
+          updateWasSeen = true;
+        }
+
+        if (
+          updateWasSeen &&
+          opts.onUpdateShellRelaunch &&
+          matchesShellPrompt(screen.text) &&
+          !READY_PATTERN_CLIS.some(
+            (cli) => matchReadyPattern(cli, screen.text).matched,
+          )
+        ) {
+          if (updateShellRelaunches >= BOOT_PROMPT_UPDATE_RELAUNCH_MAX) {
+            throw new BootPromptTimeoutError(
+              `Timed out waiting for agent launch readiness on ${opts.surface}: CLI returned to shell after ${updateShellRelaunches} post-update relaunch attempts`,
+              tailLines(lastText, 10),
+            );
+          }
+          updateShellRelaunches += 1;
+          const relaunchStartedAt = Date.now();
+          await opts.onUpdateShellRelaunch();
+          const relaunchEndedAt = Date.now();
+          deadline = Math.max(
+            deadline + (relaunchEndedAt - relaunchStartedAt),
+            relaunchEndedAt +
+              Math.max(timeoutMs, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS),
+          );
+          continue;
+        }
+
         if (
           READY_PATTERN_CLIS.some(
             (cli) => matchReadyPattern(cli, screen.text).matched,
@@ -3649,13 +3713,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
       } catch (error) {
+        if (error instanceof BootPromptTimeoutError) {
+          throw error;
+        }
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
           throw new SurfaceGoneError(opts.surface, error);
         }
         lastText = error instanceof Error ? error.message : String(error);
       }
 
-      const remaining = timeoutMs - (Date.now() - start);
+      const remaining = deadline - Date.now();
       if (remaining <= 0) {
         break;
       }
@@ -3701,6 +3768,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace: opts.workspace,
     });
     await withSurfaceWrite(opts.surface, async () => {
+      const relaunchOriginalCommand = async (): Promise<void> => {
+        await deliverInputChunks({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          chunks,
+          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+          press_enter: true,
+          source_event: "spawn_agent",
+          verify_submit: false,
+        });
+      };
       try {
         const delivery = await deliverInputChunks({
           surface: opts.surface,
@@ -3732,6 +3811,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         await waitForAgentLaunchReady({
           surface: opts.surface,
           workspace: opts.workspace,
+          onUpdateShellRelaunch: relaunchOriginalCommand,
         });
       }
     }, {
@@ -6669,7 +6749,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
           launchCommandSender: async ({ surface, workspace, command }) => {
-            await sendLauncherCommandToSurface({ surface, workspace, command });
+            originalLaunchCommandsBySurface.set(surface, command);
+            try {
+              await sendLauncherCommandToSurface({
+                surface,
+                workspace,
+                command,
+              });
+            } catch (error) {
+              originalLaunchCommandsBySurface.delete(surface);
+              throw error;
+            }
           },
           outboxDrain: opts?.outboxDrain,
           monitorRegistryPath: opts?.monitorRegistryPath,
@@ -6766,6 +6856,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace?: string;
       model?: string | null;
       mcpEnv?: string;
+      originalCommand?: string;
     }): Promise<void> => {
       const record = resolveSpawnRecord(opts.agentId, opts.surface);
       if (!record) {
@@ -6776,17 +6867,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
       const launchCwd = record.launch_cwd?.trim() || undefined;
       const launcherName = record.launcher_name?.trim() || undefined;
-      const command = buildLaunchCommand(
-        record.cli,
-        record.repo,
-        record.model ?? opts.model ?? undefined,
-        launcherName,
-        {
-          cwd: launchCwd,
-          envPrefix: opts.mcpEnv,
-          allowModelOverride: process.env.REPOGOLEM_ALLOW_MODEL === "1",
-        },
-      );
+      const command =
+        opts.originalCommand ??
+        buildLaunchCommand(
+          record.cli,
+          record.repo,
+          record.model ?? opts.model ?? undefined,
+          launcherName,
+          {
+            cwd: launchCwd,
+            envPrefix: opts.mcpEnv,
+            allowModelOverride: process.env.REPOGOLEM_ALLOW_MODEL === "1",
+          },
+        );
       await sendLauncherCommandToSurface({
         surface: opts.surface,
         workspace: record.workspace_id ?? opts.workspace,
@@ -7245,6 +7338,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             max_cost_per_agent: args.max_cost_per_agent,
             crash_recover: args.crash_recover,
           });
+          const originalLaunchCommand = originalLaunchCommandsBySurface.get(
+            result.surface_id,
+          );
+          originalLaunchCommandsBySurface.delete(result.surface_id);
           appendStaleBuildWarning(result);
           if (targetResolution.warnings.length > 0) {
             result.warnings = [
@@ -7276,6 +7373,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     workspace: deliveryWorkspace,
                     model: result.model ?? args.model,
                     mcpEnv: result.mcp_env,
+                    originalCommand: originalLaunchCommand,
                   }),
               });
 
@@ -7514,6 +7612,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
           });
+          const originalLaunchCommand = originalLaunchCommandsBySurface.get(
+            result.surface_id,
+          );
+          originalLaunchCommandsBySurface.delete(result.surface_id);
           appendStaleBuildWarning(result);
           if (targetResolution.warnings.length > 0) {
             result.warnings = [
@@ -7543,6 +7645,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   workspace: deliveryWorkspace,
                   model: result.model ?? args.model,
                   mcpEnv: result.mcp_env,
+                  originalCommand: originalLaunchCommand,
                 }),
             });
             canonicalizeSpawnResult(result);
@@ -7697,6 +7800,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: agent.role,
               auto_archive_on_done: false,
             });
+            const originalLaunchCommand = originalLaunchCommandsBySurface.get(
+              result.surface_id,
+            );
+            originalLaunchCommandsBySurface.delete(result.surface_id);
             appendStaleBuildWarning(result);
             let bootPromptDelivery:
               | Awaited<ReturnType<typeof deliverBootPrompt>>
@@ -7720,6 +7827,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     workspace: deliveryWorkspace,
                     model: result.model ?? agent.model,
                     mcpEnv: result.mcp_env,
+                    originalCommand: originalLaunchCommand,
                   }),
               });
 
