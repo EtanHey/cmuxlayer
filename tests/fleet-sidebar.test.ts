@@ -292,7 +292,7 @@ describe("fleet sidebar reconciled snapshot", () => {
     });
   });
 
-  it("preserves only full degraded and blocking health reasons", () => {
+  it("preserves only full actionable degraded and blocking health reasons", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
@@ -320,7 +320,7 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
       healthVisible: true,
       health:
-        "agent inbox monitor heartbeat is absent or stale · spawned agent seat identity does not match the registry and requires operator repair",
+        "spawned agent seat identity does not match the registry and requires operator repair",
     });
   });
 

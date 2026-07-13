@@ -11,11 +11,11 @@ unchanged. Change only row text density before merging PR #309.
 `AgentHealth` already returns aligned `issue_codes` and `issues`, plus an
 `issue_severities` value for each code. The fleet candidate will carry this
 metadata into the pure snapshot builder. The builder will retain a reason only
-when its code has `degraded` or `blocking` severity. `info` reasons—including
-`auto_discovered_agent`, `missing_cli_session_id`, `non_resumable`, and an
-info-tier `inbox_monitor_not_alive`—will not enter rendered row text. A degraded
-`inbox_monitor_not_alive` or any blocking actionable issue remains visible with
-its complete, wrapping reason.
+when its code is actionable and has `degraded` or `blocking` severity. The four
+diet codes—`auto_discovered_agent`, `missing_cli_session_id`, `non_resumable`,
+and `inbox_monitor_not_alive`—will not enter rendered row text, including when
+an expected missing monitor ages past its boot grace. Actionable degraded or
+blocking issues remain visible with their complete, wrapping reason.
 
 The generated row will carry an explicit `healthVisible` Boolean so the
 interpreted Swift view does not infer visibility from aggregate health status.

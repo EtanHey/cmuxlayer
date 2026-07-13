@@ -193,8 +193,13 @@ const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
-const CURRENT_ACTIVITY_LINE_RE =
-  /^(?:\s{2,}|\s*[✻✢✳✶⏺●⬢⬡]\s+)((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
+const CODEX_CURRENT_ACTION_RE =
+  /^(?:Ran|Explored|Updated Plan|Waited for|Read|Edited|Searched|Called|Running|Writing)\b/i;
+const CLAUDE_GLYPH_ACTION_RE =
+  /^\s*[⏺●⬢⬡]\s+((?:Bash|Read|Edit|Write|Search|Glob|Grep|Task|WebFetch|WebSearch|NotebookEdit|Running|Reading|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
+const CLAUDE_INDENTED_ACTIVITY_RE =
+  /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
+const CLAUDE_ACTIVE_BANNER_RE = /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i;
 const CODEX_UPDATE_MENU_RE =
   /(?:^|\n)\s*(?:[✨\u2728]\s*)?Update available!(?:\s+[^\n]+)?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_SKIP_RE =
@@ -860,19 +865,29 @@ function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
 }
 
-function parseCurrentAction(
-  text: string,
-  agentType: ParsedScreenAgentType,
-): string | null {
-  if (agentType === "codex") {
-    const actions = parseCodexActions(text);
-    return actions.at(-1) ?? null;
+function parseCurrentAction(text: string): string | null {
+  const codexAction = parseCodexActions(text)
+    .filter((action) => CODEX_CURRENT_ACTION_RE.test(action))
+    .at(-1);
+  if (codexAction) {
+    return codexAction;
   }
 
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const activity = lines[index]?.match(CURRENT_ACTIVITY_LINE_RE)?.[1]?.trim();
-    if (activity) return activity;
+    const glyphAction = lines[index]
+      ?.match(CLAUDE_GLYPH_ACTION_RE)?.[1]
+      ?.trim();
+    if (glyphAction) return glyphAction;
+
+    const indentedActivity = lines[index]
+      ?.match(CLAUDE_INDENTED_ACTIVITY_RE)?.[1]
+      ?.trim();
+    if (!indentedActivity) continue;
+    const nearbyBanner = lines
+      .slice(Math.max(0, index - 2), index)
+      .some((line) => CLAUDE_ACTIVE_BANNER_RE.test(line));
+    if (nearbyBanner) return indentedActivity;
   }
   return null;
 }
@@ -1146,7 +1161,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     context_window: contextWindow,
     done_signal: doneSignal,
     response: parseResponse(normalized),
-    current_action: parseCurrentAction(normalized, agentType),
+    current_action: parseCurrentAction(normalized),
     errors,
     model,
     cost,

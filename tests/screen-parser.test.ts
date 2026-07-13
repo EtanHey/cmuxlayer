@@ -114,6 +114,30 @@ Working (2m 06s • esc to interrupt)
     );
   });
 
+  it("keeps a Codex action fallback when displayed source mentions Claude Code", () => {
+    const parsed = parseScreen(`
+Claude Code
+const fixture = "Claude Code";
+• Ran bunx vitest run tests/screen-parser.test.ts
+Working (2m 06s • esc to interrupt)
+`);
+
+    expect(parsed.current_action).toBe(
+      "Ran bunx vitest run tests/screen-parser.test.ts",
+    );
+  });
+
+  it("does not mistake wrapped Claude prose for a current action", () => {
+    const parsed = parseScreen(`
+Claude Code
+⏺ The fleet reconnect completed, with all seats screen-checked before
+  sending — the rollout receipt is now available.
+❯
+`);
+
+    expect(parsed.current_action).toBeNull();
+  });
+
   it("returns no current action for a plain idle shell", () => {
     const parsed = parseScreen("etanheyman ~/Gits/cmuxlayer [main] $");
 

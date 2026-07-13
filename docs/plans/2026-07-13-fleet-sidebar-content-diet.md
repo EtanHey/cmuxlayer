@@ -26,7 +26,8 @@ Assert Claude `Reading src/server.ts` and Codex `• Ran bunx vitest run` become
 
 Create a candidate containing all four named info-tier codes and reasons. Assert
 that its projected seat has no visible health text. Add a degraded
-`inbox_monitor_not_alive` case and assert its full reason remains visible.
+`inbox_monitor_not_alive` alongside a blocking seat mismatch and assert only the
+actionable mismatch remains visible in full.
 
 Assert set status wins over parsed action, parsed action wins over the marker,
 and only a row with neither renders `— no status`.
@@ -69,8 +70,9 @@ to the fleet candidate.
 
 **Step 3: Filter actionable reasons**
 
-Pair codes with reasons by index and retain only `degraded|blocking` entries.
-Expose `healthVisible` and join only retained full reasons.
+Pair codes with reasons by index, suppress the four non-actionable diet codes,
+and retain only remaining `degraded|blocking` entries. Expose `healthVisible`
+and join only retained full reasons.
 
 **Step 4: Apply status priority**
 

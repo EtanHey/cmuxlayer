@@ -98,6 +98,13 @@ const LANE_LABELS: Record<FleetLaneKey, string> = {
   other: "other",
 };
 
+const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
+  "auto_discovered_agent",
+  "missing_cli_session_id",
+  "non_resumable",
+  "inbox_monitor_not_alive",
+]);
+
 export function toFleetScreenState(
   status: ParsedScreenStatus | null | undefined,
 ): FleetScreenState {
@@ -177,6 +184,7 @@ function actionableHealthReasons(
   candidate: FleetSidebarCandidate,
 ): string[] {
   return candidate.healthIssueCodes.flatMap((code, index) => {
+    if (NON_ACTIONABLE_SIDEBAR_HEALTH_CODES.has(code)) return [];
     const severity =
       candidate.healthIssueSeverities[code] ??
       DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code];
