@@ -3578,6 +3578,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    require_fresh_shell_prompt?: boolean;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SHELL_READY_TIMEOUT_MS;
     const start = Date.now();
@@ -3593,9 +3594,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         if (
           matchesShellPrompt(screen.text) ||
-          READY_PATTERN_CLIS.some(
-            (cli) => matchReadyPattern(cli, screen.text).matched,
-          )
+          (!opts.require_fresh_shell_prompt &&
+            READY_PATTERN_CLIS.some(
+              (cli) => matchReadyPattern(cli, screen.text).matched,
+            ))
         ) {
           return;
         }
@@ -3756,6 +3758,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     command: string;
+    relaunch?: boolean;
   }): Promise<void> => {
     const sanitizedCommand = sanitizeTerminalInput(opts.command);
     const chunks =
@@ -3763,12 +3766,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedCommand];
 
-    await waitForLaunchShellReady({
-      surface: opts.surface,
-      workspace: opts.workspace,
-    });
+    if (!opts.relaunch) {
+      await waitForLaunchShellReady({
+        surface: opts.surface,
+        workspace: opts.workspace,
+      });
+    }
     await withSurfaceWrite(opts.surface, async () => {
+      const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+        await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
+        await waitForLaunchShellReady({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          require_fresh_shell_prompt: true,
+        });
+      };
+      if (opts.relaunch) {
+        await clearAndVerifyFreshShellPrompt();
+      }
       const relaunchOriginalCommand = async (): Promise<void> => {
+        await clearAndVerifyFreshShellPrompt();
         await deliverInputChunks({
           surface: opts.surface,
           workspace: opts.workspace,
@@ -5130,6 +5147,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5274,6 +5292,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5654,6 +5673,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 surface: args.surface,
                 workspace: args.workspace,
                 command: sanitizedCommand,
+                relaunch: true,
               }),
           });
         }
@@ -6884,6 +6904,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: opts.surface,
         workspace: record.workspace_id ?? opts.workspace,
         command,
+        relaunch: true,
       });
     };
 

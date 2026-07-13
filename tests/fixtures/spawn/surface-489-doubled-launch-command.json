@@ -1,0 +1,7 @@
+{
+  "source": "cmuxlayer read_screen(raw=true), surface:489, 2026-07-13",
+  "codex_version": "0.144.3",
+  "captured_shell_line": "etanheyman ~ [feature/coach-agent-boot-prompt-fix] $ CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'",
+  "launcher_command": "CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'",
+  "corrupted_command": "CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'"
+}

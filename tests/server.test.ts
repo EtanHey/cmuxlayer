@@ -6747,6 +6747,104 @@ describe("tool handler integration", () => {
     10_000,
   );
 
+  it("does not double-type the real surface-489 launcher command when relaunch finds it unsubmitted", async () => {
+    const promptPath = join(CHANNEL_TEST_DIR, "surface-489-relaunch.md");
+    mkdirSync(CHANNEL_TEST_DIR, { recursive: true });
+    writeFileSync(promptPath, "boot after stranded launcher", "utf8");
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/surface-489-doubled-launch-command.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as {
+      launcher_command: string;
+      corrupted_command: string;
+    };
+
+    let launcherSends = 0;
+    let promptSent = false;
+    let readsAfterLaunch = 0;
+    let composer = "";
+    const submittedCommands: string[] = [];
+
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("send")) {
+        const text = String(args.at(-1) ?? "");
+        if (text === fixture.launcher_command) {
+          launcherSends += 1;
+          composer += text;
+        } else if (text === "boot after stranded launcher") {
+          promptSent = true;
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key")) {
+        const key = String(args.at(-1) ?? "");
+        if (key === "ctrl-c") {
+          composer = "";
+        } else if (key === "return" && !promptSent) {
+          if (launcherSends >= 2) {
+            submittedCommands.push(composer);
+            composer = "";
+          }
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        let text = "$ ";
+        if (promptSent) {
+          text =
+            "gpt-5.6-sol high · ~/Gits/cmuxlayer.wt/spawn-reliability-3head\nWorking (1s • esc to interrupt)";
+        } else if (launcherSends > 0) {
+          readsAfterLaunch += 1;
+          if (submittedCommands.length > 0) {
+            text = "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›";
+          } else if (readsAfterLaunch === 1) {
+            text = "Updating Codex CLI from 0.144.2 to 0.144.3";
+          } else {
+            text = "Update ran successfully! Please restart Codex.\n$ ";
+          }
+        }
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:489",
+            text,
+            lines: 80,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          {
+            surface: "surface:489",
+            command: fixture.launcher_command,
+            boot_prompt_path: promptPath,
+            boot_prompt_timeout_ms: 2_000,
+          },
+          {} as any,
+        ),
+      5_000,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(submittedCommands).toEqual([fixture.launcher_command]);
+    expect(submittedCommands).not.toContain(fixture.corrupted_command);
+  }, 10_000);
+
   it("spawn_agent accepts the default interactive Codex update and never selects Skip", async () => {
     const previousAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
     process.env.REPOGOLEM_ALLOW_MODEL = "1";
@@ -7421,6 +7519,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -7481,8 +7580,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7497,7 +7597,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Codex via bun install -g @openai/codex"
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "
@@ -7552,6 +7654,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -7612,8 +7715,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7628,7 +7732,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Gemini via npm install -g @google/gemini-cli"
             : launcherSends === 0 && reads === 2
               ? "Please restart Gemini\netan@mac % "
@@ -7687,6 +7793,7 @@ describe("tool handler integration", () => {
     let promptSent = false;
     let returnPresses = 0;
     let reads = 0;
+    let lineCleared = false;
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("new-surface")) {
@@ -7701,8 +7808,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("send-key") && args.includes("return")) {
-        returnPresses += 1;
+      if (args.includes("send-key")) {
+        if (args.includes("ctrl-c")) lineCleared = true;
+        if (args.includes("return")) returnPresses += 1;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send")) {
@@ -7717,7 +7825,9 @@ describe("tool handler integration", () => {
       if (args.includes("read-screen")) {
         reads += 1;
         const text =
-          launcherSends === 0 && reads === 1
+          launcherSends === 0 && lineCleared
+            ? "etan@mac % "
+            : launcherSends === 0 && reads === 1
             ? "Updating Codex via bun install -g @openai/codex"
             : launcherSends === 0 && reads === 2
               ? "Please restart Codex\netan@mac % "
