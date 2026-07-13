@@ -70,6 +70,7 @@ Token usage: total=12,345 input=10,000 output=2,345
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("working");
+    expect(parsed.current_action).toBe("Reading src/server.ts");
   });
 
   it("treats a Claude ready composer with bypass-permissions footer as idle", () => {
@@ -96,6 +97,27 @@ Token usage: total=12,345 input=10,000 output=2,345
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("working");
+    expect(parsed.current_action).toBe("Reading src/server.ts");
+  });
+
+  it("extracts the latest Codex tool command as current action", () => {
+    const parsed = parseScreen(`
+gpt-5.4 high · 87% left · ~/Gits/cmuxlayer
+Working (2m 06s • esc to interrupt)
+• Read src/fleet-sidebar.ts
+• Ran bunx vitest run tests/fleet-sidebar.test.ts
+`);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.current_action).toBe(
+      "Ran bunx vitest run tests/fleet-sidebar.test.ts",
+    );
+  });
+
+  it("returns no current action for a plain idle shell", () => {
+    const parsed = parseScreen("etanheyman ~/Gits/cmuxlayer [main] $");
+
+    expect(parsed.current_action).toBeNull();
   });
 
   it("recognizes Claude permission approval dialogs as Claude", () => {

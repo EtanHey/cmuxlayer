@@ -2596,6 +2596,7 @@ export class AgentEngine {
       }
       const harvestability = this.assessHarvestability(agent);
       const healthScreenContexts = new Map<string, SweepAgentContext>();
+      let screenCurrentAction: string | null = null;
       const healthScreenContextFor = (
         targetAgent: AgentRecord,
       ): SweepAgentContext => {
@@ -2626,6 +2627,9 @@ export class AgentEngine {
                       )
                     ).text;
               const parsed = parseScreen(screenText);
+              if (targetAgent.agent_id === agent.agent_id) {
+                screenCurrentAction = parsed.current_action;
+              }
               return {
                 status: parsed.status,
                 actions: parsed.actions,
@@ -2744,6 +2748,9 @@ export class AgentEngine {
         taskSummary: agent.task_summary ?? null,
         healthStatus: health.status,
         healthReasons: health.issues,
+        healthIssueCodes: health.issue_codes,
+        healthIssueSeverities: health.issue_severities ?? {},
+        screenCurrentAction,
         screenStatus: toParsedScreenStatus(healthInput.screen_status),
       });
 

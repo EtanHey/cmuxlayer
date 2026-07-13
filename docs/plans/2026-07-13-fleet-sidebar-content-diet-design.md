@@ -24,18 +24,26 @@ info and actionable issues.
 
 ## Status projection
 
-Missing, blank, auto-discovered, or repair-placeholder status becomes
-`— no status`. Its text uses the renderer's tertiary/dim color. A real status
-keeps secondary text styling, making the operator-authored one-liner visually
-stronger without adding decoration.
+Status priority is:
+
+1. non-placeholder registry/set-status one-liner;
+2. screen-parser `current_action`, derived from a strict current-activity or
+   last-tool/command line such as `Reading src/server.ts`, `Running tests`, or
+   Codex `Ran bunx vitest run`;
+3. `— no status` only when both sources are empty.
+
+The final marker uses the renderer's tertiary/dim color. Manual or parsed text
+uses the existing secondary styling. The parser exposes `current_action` as a
+structured nullable field instead of making the sidebar scrape raw terminal
+text independently.
 
 ## Verification
 
-- RED-first pure snapshot/render tests prove info-only health produces no
-  health line and missing status never emits `STATUS NOT SET`.
+- RED-first parser tests prove strict activity extraction, while pure
+  snapshot/render tests prove status priority, info-only health produces no
+  health line, and a fully missing status never emits `STATUS NOT SET`.
 - Integration coverage proves issue codes and severities flow from the existing
   reconciled health snapshot.
 - The fallback asset remains byte-identical to the empty generator output.
 - A live generated sidebar is validated, opened, and screenshot after the
   content diet; the PR body and comment receive the updated visual receipt.
-

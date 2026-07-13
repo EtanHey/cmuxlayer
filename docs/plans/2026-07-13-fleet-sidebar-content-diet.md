@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Remove info-tier health noise and replace loud missing-status warnings with a subtle marker in PR #309's generated fleet sidebar.
+**Goal:** Remove info-tier health noise and replace loud missing-status warnings with screen-parsed current action, using a subtle marker only as the final fallback in PR #309's generated fleet sidebar.
 
-**Architecture:** Extend the existing fleet candidate with aligned health issue codes and severity metadata. Filter reasons in the pure snapshot builder, render an explicit visibility flag, and leave all structural/sidebar-publication behavior unchanged.
+**Architecture:** Extend `ParsedScreenResult` with a strict nullable `current_action`, then carry it with aligned health issue codes and severity metadata into the existing fleet candidate. Apply set-status > parsed-action > dim-marker priority in the pure snapshot builder, filter health reasons there, and leave all structural/sidebar-publication behavior unchanged.
 
 **Tech Stack:** TypeScript, Vitest, cmux 0.64.17 interpreted SwiftUI sidebar DSL.
 
@@ -13,53 +13,73 @@
 ### Task 1: Pin the content diet with RED tests
 
 **Files:**
+- Modify: `tests/screen-parser.test.ts`
 - Modify: `tests/fleet-sidebar.test.ts`
 - Modify: `tests/sidebar-sync.test.ts`
 
-**Step 1: Write a failing snapshot test**
+**Step 1: Write failing parser tests**
+
+Assert Claude `Reading src/server.ts` and Codex `• Ran bunx vitest run` become
+`current_action`, while a plain idle prompt yields `null`.
+
+**Step 2: Write a failing snapshot test**
 
 Create a candidate containing all four named info-tier codes and reasons. Assert
 that its projected seat has no visible health text. Add a degraded
 `inbox_monitor_not_alive` case and assert its full reason remains visible.
 
-**Step 2: Write a failing renderer test**
+Assert set status wins over parsed action, parsed action wins over the marker,
+and only a row with neither renders `— no status`.
+
+**Step 3: Write a failing renderer test**
 
 Assert a missing-status row contains `— no status`, never contains
 `STATUS NOT SET`, and uses tertiary/dim styling.
 
-**Step 3: Run RED**
+**Step 4: Run RED**
 
-Run: `bunx vitest run tests/fleet-sidebar.test.ts tests/sidebar-sync.test.ts`
+Run: `bunx vitest run tests/screen-parser.test.ts tests/fleet-sidebar.test.ts tests/sidebar-sync.test.ts`
 
-Expected: failures because the current candidate lacks issue severity metadata,
-the builder retains all health reasons, and missing status is still loud.
+Expected: failures because the parser has no `current_action`, the candidate
+does not carry it, the builder retains all health reasons, and missing status
+is still loud.
 
 ### Task 2: Implement the minimal snapshot/renderer change
 
 **Files:**
+- Modify: `src/types.ts`
+- Modify: `src/screen-parser.ts`
 - Modify: `src/fleet-sidebar.ts`
 - Modify: `src/agent-engine.ts`
 - Modify: `tests/fleet-sidebar.test.ts`
 - Modify: `tests/sidebar-sync.test.ts`
 
-**Step 1: Carry issue metadata**
+**Step 1: Parse current action**
+
+Add `current_action: string | null` to `ParsedScreenResult`. Extract only strict
+activity verbs or Codex tool/command bullet lines; do not promote arbitrary
+terminal prose.
+
+**Step 2: Carry issue metadata and parsed action**
 
 Add candidate fields for `healthIssueCodes` and `healthIssueSeverities`. Populate
 them from the already-evaluated `AgentHealth` result in `AgentEngine.syncSidebar`.
+Capture `parseScreen(...).current_action` during the same screen read and add it
+to the fleet candidate.
 
-**Step 2: Filter actionable reasons**
+**Step 3: Filter actionable reasons**
 
 Pair codes with reasons by index and retain only `degraded|blocking` entries.
 Expose `healthVisible` and join only retained full reasons.
 
-**Step 3: Make missing status quiet**
+**Step 4: Apply status priority**
 
-Project missing status as `— no status`; render it with tertiary color. Keep
-real statuses unchanged.
+Project real set status first, then parsed current action, then `— no status`;
+render only the final marker with tertiary color.
 
-**Step 4: Run GREEN**
+**Step 5: Run GREEN**
 
-Run: `bunx vitest run tests/fleet-sidebar.test.ts tests/sidebar-sync.test.ts`
+Run: `bunx vitest run tests/screen-parser.test.ts tests/fleet-sidebar.test.ts tests/sidebar-sync.test.ts`
 
 Expected: both files pass.
 
@@ -120,4 +140,3 @@ comment.
 When CI and the delta review loop are clean, merge PR #309 with a merge commit,
 verify the merge contains the latest pushed SHA/content, update BrainLayer, and
 report the merge.
-

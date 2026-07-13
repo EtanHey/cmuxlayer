@@ -37,8 +37,8 @@ func fleetRow(_ seat) -> some View {
       }
       Text(seat.status)
         .font(.system(size: 10))
-        .foregroundColor(seat.statusMissing ? "#EF4444" : .secondary)
-      if seat.healthStatus != "healthy" {
+        .foregroundColor(seat.statusMissing ? .tertiary : .secondary)
+      if seat.healthVisible {
         Text("health: \(seat.health)")
           .font(.system(size: 9))
           .foregroundColor(seat.healthStatus == "unhealthy" ? "#EF4444" : "#F59E0B")

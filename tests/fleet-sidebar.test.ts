@@ -12,6 +12,10 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type {
+  AgentHealthIssueCode,
+  AgentHealthIssueSeverity,
+} from "../src/agent-health.js";
 import {
   buildFleetSidebarSnapshot,
   defaultFleetSidebarPath,
@@ -29,9 +33,17 @@ afterEach(() => {
   }
 });
 
+type ContentDietCandidate = FleetSidebarCandidate & {
+  healthIssueCodes: AgentHealthIssueCode[];
+  healthIssueSeverities: Partial<
+    Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
+  >;
+  screenCurrentAction: string | null;
+};
+
 function candidate(
-  overrides: Partial<FleetSidebarCandidate> = {},
-): FleetSidebarCandidate {
+  overrides: Partial<ContentDietCandidate> = {},
+): ContentDietCandidate {
   return {
     agentId: "agent-1",
     surfaceRef: "surface:1",
@@ -48,6 +60,9 @@ function candidate(
     taskSummary: "Implement fleet sidebar",
     healthStatus: "healthy",
     healthReasons: [],
+    healthIssueCodes: [],
+    healthIssueSeverities: {},
+    screenCurrentAction: null,
     screenStatus: "working",
     ...overrides,
   };
@@ -243,26 +258,125 @@ describe("fleet sidebar reconciled snapshot", () => {
     });
   });
 
-  it("makes missing or repair-placeholder status explicit and preserves full health reasons", () => {
+  it("suppresses info-tier health reasons from row content", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
-          taskSummary: "  ",
-          healthStatus: "unhealthy",
-          healthReasons: [
-            "agent has unacked inbox dispatches past the ACK timeout",
-            "lead is watch-blind because its monitor session ended",
+          healthStatus: "healthy",
+          healthIssueCodes: [
+            "auto_discovered_agent",
+            "missing_cli_session_id",
+            "non_resumable",
+            "inbox_monitor_not_alive",
           ],
+          healthReasons: [
+            "agent was auto-discovered, not created through managed spawn_agent",
+            "managed long-running agent has no cli_session_id",
+            "agent cannot be resumed because no CLI session id was captured",
+            "agent inbox monitor heartbeat is absent or stale",
+          ],
+          healthIssueSeverities: {
+            auto_discovered_agent: "info",
+            missing_cli_session_id: "info",
+            non_resumable: "info",
+            inbox_monitor_not_alive: "info",
+          },
         }),
       ],
       { liveSurfaceRefs: new Set(["surface:1"]) },
     );
 
     expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
-      status: "STATUS NOT SET",
-      statusMissing: true,
+      healthVisible: false,
+      health: "",
+    });
+  });
+
+  it("preserves only full degraded and blocking health reasons", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          healthStatus: "unhealthy",
+          healthIssueCodes: [
+            "auto_discovered_agent",
+            "inbox_monitor_not_alive",
+            "seat_identity_mismatch",
+          ],
+          healthReasons: [
+            "agent was auto-discovered, not created through managed spawn_agent",
+            "agent inbox monitor heartbeat is absent or stale",
+            "spawned agent seat identity does not match the registry and requires operator repair",
+          ],
+          healthIssueSeverities: {
+            auto_discovered_agent: "info",
+            inbox_monitor_not_alive: "degraded",
+            seat_identity_mismatch: "blocking",
+          },
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
+      healthVisible: true,
       health:
-        "agent has unacked inbox dispatches past the ACK timeout · lead is watch-blind because its monitor session ended",
+        "agent inbox monitor heartbeat is absent or stale · spawned agent seat identity does not match the registry and requires operator repair",
+    });
+  });
+
+  it("uses a subtle no-status marker for missing and repair-placeholder status", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [candidate({ taskSummary: "(resync-repaired)" })],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
+      status: "— no status",
+      statusMissing: true,
+    });
+  });
+
+  it("prefers set status, then parsed current action, then no-status marker", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "manual",
+          surfaceRef: "surface:1",
+          taskSummary: "Ship the content diet",
+          screenCurrentAction: "Running tests",
+        }),
+        candidate({
+          agentId: "parsed",
+          surfaceRef: "surface:2",
+          taskSummary: "(auto-discovered)",
+          screenCurrentAction: "Editing src/fleet-sidebar.ts",
+        }),
+        candidate({
+          agentId: "empty",
+          surfaceRef: "surface:3",
+          taskSummary: null,
+          screenCurrentAction: null,
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:1", "surface:2", "surface:3"]),
+      },
+    );
+
+    const byAgent = new Map(
+      snapshot.lanes[0]?.seats.map((seat) => [seat.agentId, seat]),
+    );
+    expect(byAgent.get("manual")).toMatchObject({
+      status: "Ship the content diet",
+      statusMissing: false,
+    });
+    expect(byAgent.get("parsed")).toMatchObject({
+      status: "Editing src/fleet-sidebar.ts",
+      statusMissing: false,
+    });
+    expect(byAgent.get("empty")).toMatchObject({
+      status: "— no status",
+      statusMissing: true,
     });
   });
 });
@@ -345,7 +459,9 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
         candidate({
           taskSummary: status,
           healthStatus: "unhealthy",
+          healthIssueCodes: ["seat_identity_mismatch"],
           healthReasons: [health],
+          healthIssueSeverities: { seat_identity_mismatch: "blocking" },
         }),
       ],
       { liveSurfaceRefs: new Set(["surface:1"]) },
@@ -358,6 +474,33 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).not.toContain(".fixedSize");
     expect(source).not.toContain(".lineLimit");
     expect(source).not.toContain(".truncationMode");
+  });
+
+  it("renders missing status dimly and gates health on actionable visibility", () => {
+    const source = renderFleetSidebar(
+      buildFleetSidebarSnapshot(
+        [
+          candidate({
+            taskSummary: " ",
+            healthStatus: "healthy",
+            healthIssueCodes: ["auto_discovered_agent"],
+            healthReasons: [
+              "agent was auto-discovered, not created through managed spawn_agent",
+            ],
+            healthIssueSeverities: { auto_discovered_agent: "info" },
+          }),
+        ],
+        { liveSurfaceRefs: new Set(["surface:1"]) },
+      ),
+    );
+
+    expect(source).toContain('"status": "— no status"');
+    expect(source).not.toContain("STATUS NOT SET");
+    expect(source).toContain(
+      ".foregroundColor(seat.statusMissing ? .tertiary : .secondary)",
+    );
+    expect(source).toContain("if seat.healthVisible");
+    expect(source).toContain('"healthVisible": false');
   });
 
   it("uses default text wrapping inside an explicit vertical scroll view", () => {

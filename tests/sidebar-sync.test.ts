@@ -146,7 +146,7 @@ describe("Sidebar Sync", () => {
     });
   });
 
-  it("publishes the reconciled live topology with truthful screen state and lane identity", async () => {
+  it("publishes screen current-action fallback with truthful state and lane identity", async () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "auto-voicelayer-worker",
@@ -156,7 +156,7 @@ describe("Sidebar Sync", () => {
         seat_lane: "voicelayer",
         seat_id: "transcription-worker",
         state: "idle",
-        task_summary: "Transcribe the latest recording without truncating details",
+        task_summary: " ",
       }),
     );
     liveSurfaces = [makeSurface("surface:42")];
@@ -213,8 +213,9 @@ describe("Sidebar Sync", () => {
               surfaceRef: "surface:42",
               name: "voicelayerCodex [surface:42]",
               screenState: "working",
-              status:
-                "Transcribe the latest recording without truncating details",
+              status: "Reading src/transcribe.ts",
+              healthVisible: true,
+              health: "agent inbox monitor heartbeat is absent or stale",
             },
           ],
         },

@@ -8,7 +8,12 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { AgentHealthStatus } from "./agent-health.js";
+import {
+  DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
+  type AgentHealthIssueCode,
+  type AgentHealthIssueSeverity,
+  type AgentHealthStatus,
+} from "./agent-health.js";
 import type { AgentRole } from "./agent-types.js";
 import type { ParsedScreenStatus } from "./types.js";
 
@@ -37,6 +42,11 @@ export interface FleetSidebarCandidate {
   taskSummary: string | null;
   healthStatus: AgentHealthStatus;
   healthReasons: string[];
+  healthIssueCodes: AgentHealthIssueCode[];
+  healthIssueSeverities: Partial<
+    Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
+  >;
+  screenCurrentAction: string | null;
   screenStatus: ParsedScreenStatus | null;
 }
 
@@ -50,6 +60,7 @@ export interface FleetSidebarSeat {
   status: string;
   statusMissing: boolean;
   healthStatus: AgentHealthStatus;
+  healthVisible: boolean;
   health: string;
   createdAtEpoch: number;
 }
@@ -149,10 +160,29 @@ function statusFor(candidate: FleetSidebarCandidate): {
   const missing =
     value.length === 0 ||
     /^\((?:resync-repaired|auto-discovered|unknown)\)$/i.test(value);
+  if (!missing) {
+    return { status: value, statusMissing: false };
+  }
+  const currentAction = candidate.screenCurrentAction?.trim() ?? "";
+  if (currentAction) {
+    return { status: currentAction, statusMissing: false };
+  }
   return {
-    status: missing ? "STATUS NOT SET" : value,
-    statusMissing: missing,
+    status: "— no status",
+    statusMissing: true,
   };
+}
+
+function actionableHealthReasons(
+  candidate: FleetSidebarCandidate,
+): string[] {
+  return candidate.healthIssueCodes.flatMap((code, index) => {
+    const severity =
+      candidate.healthIssueSeverities[code] ??
+      DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code];
+    const reason = candidate.healthReasons[index]?.trim();
+    return severity === "info" || !reason ? [] : [reason];
+  });
 }
 
 function candidateName(candidate: FleetSidebarCandidate): string {
@@ -168,6 +198,7 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
   const { status, statusMissing } = statusFor(candidate);
   const createdAt = Date.parse(candidate.createdAt);
   const name = candidateName(candidate);
+  const healthReasons = actionableHealthReasons(candidate);
   const role =
     candidate.role === "orchestrator" || /\b(?:lead|orchestrator)\b/i.test(name)
       ? "lead"
@@ -182,10 +213,8 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
     status,
     statusMissing,
     healthStatus: candidate.healthStatus,
-    health:
-      candidate.healthReasons.length > 0
-        ? candidate.healthReasons.join(" · ")
-        : candidate.healthStatus,
+    healthVisible: healthReasons.length > 0,
+    health: healthReasons.join(" · "),
     createdAtEpoch: Number.isFinite(createdAt)
       ? Math.floor(createdAt / 1_000)
       : 0,
@@ -256,6 +285,7 @@ function renderSeat(seat: FleetSidebarSeat): string {
       "status": ${swiftString(seat.status)},
       "statusMissing": ${seat.statusMissing},
       "healthStatus": ${swiftString(seat.healthStatus)},
+      "healthVisible": ${seat.healthVisible},
       "health": ${swiftString(seat.health)},
       "createdAtEpoch": ${seat.createdAtEpoch}
     ]`;
@@ -300,8 +330,8 @@ func fleetRow(_ seat) -> some View {
       }
       Text(seat.status)
         .font(.system(size: 10))
-        .foregroundColor(seat.statusMissing ? "#EF4444" : .secondary)
-      if seat.healthStatus != "healthy" {
+        .foregroundColor(seat.statusMissing ? .tertiary : .secondary)
+      if seat.healthVisible {
         Text("health: \\(seat.health)")
           .font(.system(size: 9))
           .foregroundColor(seat.healthStatus == "unhealthy" ? "#EF4444" : "#F59E0B")

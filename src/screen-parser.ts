@@ -193,6 +193,8 @@ const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
+const CURRENT_ACTIVITY_LINE_RE =
+  /^(?:\s{2,}|\s*[✻✢✳✶⏺●⬢⬡]\s+)((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
 const CODEX_UPDATE_MENU_RE =
   /(?:^|\n)\s*(?:[✨\u2728]\s*)?Update available!(?:\s+[^\n]+)?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_SKIP_RE =
@@ -858,6 +860,23 @@ function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
 }
 
+function parseCurrentAction(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): string | null {
+  if (agentType === "codex") {
+    const actions = parseCodexActions(text);
+    return actions.at(-1) ?? null;
+  }
+
+  const lines = text.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const activity = lines[index]?.match(CURRENT_ACTIVITY_LINE_RE)?.[1]?.trim();
+    if (activity) return activity;
+  }
+  return null;
+}
+
 function uniqueActions(actions: string[]): string[] {
   return Array.from(new Set(actions));
 }
@@ -1127,6 +1146,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     context_window: contextWindow,
     done_signal: doneSignal,
     response: parseResponse(normalized),
+    current_action: parseCurrentAction(normalized, agentType),
     errors,
     model,
     cost,
