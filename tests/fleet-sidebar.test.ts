@@ -966,9 +966,15 @@ setTimeout(() => {
     publisher.dispose();
   });
 
-  it("cancels a pending decrease when a later observation sees the omitted seat live", async () => {
+  it("rejects a populated decrease over a collapsed source while omitted seats remain live", async () => {
     const outputPath = tempOutputPath();
-    const publisher = new FleetSidebarPublisher({ outputPath });
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const store = new FleetSidebarCollapseStore({ statePath });
+    store.setLaneCollapsed("cmuxlayer", true);
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      collapseStore: store,
+    });
     publisher.publish(
       publication(
         "populated",
@@ -977,6 +983,33 @@ setTimeout(() => {
       ),
     );
     const lastGood = readFileSync(outputPath, "utf8");
+    expect(lastGood).not.toContain('"surfaceRef":');
+    expect(lastGood).toContain('surfaces=["surface:1","surface:2"]');
+
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1", "surface:2"]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("keeps the last authoritative topology when collapse changes after a pending decrease is canceled", async () => {
+    const outputPath = tempOutputPath();
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const store = new FleetSidebarCollapseStore({ statePath });
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      collapseStore: store,
+    });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
 
     publisher.publish(
       publication("populated", ["surface:1"], ["surface:1"]),
@@ -988,9 +1021,15 @@ setTimeout(() => {
         ["surface:1", "surface:2"],
       ),
     );
+    store.setLaneCollapsed("cmuxlayer", true);
     await new Promise((resolve) => setTimeout(resolve, 550));
 
-    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    const source = readFileSync(outputPath, "utf8");
+    expect(source).toContain(
+      "cmuxlayer-fleet-state: populated rendered=2 observed=2",
+    );
+    expect(source).toContain('fleetLane("cmuxlayer", 2, 2, true, 2, [');
+    expect(source).not.toContain("rendered=1");
     publisher.dispose();
   });
 

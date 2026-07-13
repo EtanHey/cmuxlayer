@@ -1,4 +1,4 @@
-// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown
+// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown surfaces=[]
 func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }

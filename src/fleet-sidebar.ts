@@ -533,8 +533,11 @@ export function renderFleetSidebar(
       (state === "discovering" || state === "unknown"))
       ? "unknown"
       : (observed ?? snapshot.seatCount);
+  const renderedSurfaceRefs = snapshot.lanes.flatMap((lane) =>
+    lane.seats.map((seat) => seat.surfaceRef),
+  );
 
-  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata}
+  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata} surfaces=${JSON.stringify(renderedSurfaceRefs)}
 ${FLEET_SWIFT_HELPERS}
 
 ScrollView {
@@ -1022,6 +1025,21 @@ function inspectFleetSidebarSource(source: string | null): {
       surfaceRefs.add(JSON.parse(match[1]!) as string);
     } catch {
       // Ignore malformed legacy rows; the rendered count remains a fallback.
+    }
+  }
+  const topologyMetadata = source.match(
+    /^\/\/ cmuxlayer-fleet-state:[^\n]* surfaces=(\[[^\n]*\])/,
+  );
+  if (topologyMetadata) {
+    try {
+      const metadataSurfaceRefs = JSON.parse(topologyMetadata[1]!) as unknown;
+      if (Array.isArray(metadataSurfaceRefs)) {
+        for (const surfaceRef of metadataSurfaceRefs) {
+          if (typeof surfaceRef === "string") surfaceRefs.add(surfaceRef);
+        }
+      }
+    } catch {
+      // Ignore malformed metadata and retain the rendered-row fallback.
     }
   }
 
