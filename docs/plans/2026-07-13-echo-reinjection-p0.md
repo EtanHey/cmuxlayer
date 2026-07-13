@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Preserve the real surface 530 recurrence
+## Task 1: Preserve the real surface 530 recurrence
 
 **Files:**
 - Create: `tests/fixtures/spawn/surface-530-stale-probe-double-emit.json`
@@ -30,7 +30,7 @@ Run: `bunx vitest run tests/server.test.ts -t "surface-530"`
 
 Expected: FAIL because v0.4.5 sends the launcher twice and submits the concatenated command.
 
-### Task 2: Make launcher text delivery at-most-once
+## Task 2: Make launcher text delivery at-most-once
 
 **Files:**
 - Modify: `src/server.ts` (`sendChunkWithRetry` launcher ambiguity branch)
@@ -52,7 +52,7 @@ Run: `bunx vitest run tests/server.test.ts -t "surface-489|sandbox launcher-name
 
 Expected: PASS for the #306/#308/#310 launcher update, submit, and relaunch cases.
 
-### Task 3: Verify and deliver
+## Task 3: Verify and deliver
 
 **Files:**
 - Verify: `src/server.ts`

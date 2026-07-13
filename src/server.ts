@@ -2980,7 +2980,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ) {
                 return;
               }
-            } catch {
+            } catch (observeError) {
+              if (observeError instanceof SurfaceGoneError) {
+                throw observeError;
+              }
               // Keep observing until the bounded deadline. Retrying the text
               // mutation after an unreadable pane can concatenate launchers.
             }
@@ -7727,6 +7730,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               submit_verified: e.submit_verified,
               screen: e.screen,
             });
+          }
+          if (e instanceof SurfaceGoneError) {
+            return err(e, surfaceGonePayload(e));
           }
           return err(e);
         }

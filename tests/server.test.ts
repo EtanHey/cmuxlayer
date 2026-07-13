@@ -7065,7 +7065,35 @@ describe("tool handler integration", () => {
     }
   }, 10_000);
 
-  it("does not replay the real surface-530 launcher when the ambiguity probe is one screen behind", async () => {
+  it.each([
+    {
+      name: "does not replay the real surface-530 launcher when the ambiguity probe is one screen behind",
+      probe: "delayed-visible" as const,
+      expectedOk: true,
+      expectedErrorCode: undefined,
+      expectedError: undefined,
+    },
+    {
+      name: "fails closed without replaying the surface-530 launcher when ambiguity never resolves",
+      probe: "always-stale" as const,
+      expectedOk: false,
+      expectedErrorCode: undefined,
+      expectedError:
+        "acknowledgement was ambiguous and launcher text was not retried",
+    },
+    {
+      name: "preserves pane_died when the surface disappears during ambiguity observation",
+      probe: "surface-gone" as const,
+      expectedOk: false,
+      expectedErrorCode: "pane_died",
+      expectedError: "surface surface:530 disappeared - respawn",
+    },
+  ])("$name", async ({
+    probe,
+    expectedOk,
+    expectedErrorCode,
+    expectedError,
+  }) => {
     const stateDir = join(
       CHANNEL_TEST_DIR,
       "surface-530-stale-probe-double-emit-state",
@@ -7157,10 +7185,14 @@ describe("tool handler integration", () => {
           text = "OpenAI Codex\nmodel: gpt-5.6-sol xhigh\n\n›";
         } else if (launcherWriteBecameAmbiguous) {
           ambiguityProbeReads += 1;
-          text =
-            ambiguityProbeReads === 1
-              ? fixture.replay.stale_probe_screen
-              : fixture.replay.pending_probe_screen;
+          if (probe === "surface-gone") {
+            throw new Error(
+              "cmux read-screen failed: surface_not_found surface surface:530",
+            );
+          }
+          if (probe === "delayed-visible" && ambiguityProbeReads > 1) {
+            text = fixture.replay.pending_probe_screen;
+          }
         }
         return {
           stdout: JSON.stringify({
@@ -7193,15 +7225,25 @@ describe("tool handler integration", () => {
             },
             {} as any,
           ),
-        2_000,
+        4_000,
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
 
-      expect(parsed.ok).toBe(true);
+      expect(parsed.ok).toBe(expectedOk);
+      if (expectedErrorCode) {
+        expect(parsed.error_code).toBe(expectedErrorCode);
+      }
+      if (expectedError) {
+        expect(parsed.error).toContain(expectedError);
+      }
       expect(launcherSendAttempts).toBe(1);
-      expect(ambiguityProbeReads).toBeGreaterThanOrEqual(2);
-      expect(submittedCommands).toEqual([fixture.launcher_command]);
+      expect(ambiguityProbeReads).toBeGreaterThanOrEqual(
+        probe === "delayed-visible" ? 2 : 1,
+      );
+      expect(submittedCommands).toEqual(
+        probe === "delayed-visible" ? [fixture.launcher_command] : [],
+      );
       expect(submittedCommands).not.toContain(
         fixture.captured_corrupted_command,
       );
