@@ -37,6 +37,8 @@
   },
   "files": [
     "dist",
+    "assets/sidebars/fleet.swift",
+    "scripts/install-fleet-sidebar.mjs",
     "LICENSE",
     "README.md"
   ],
@@ -53,6 +55,7 @@
     "pre-pr:harness": "vitest run tests/live-agent-harness.test.ts tests/live-agent-harness-ci.test.ts tests/live-agent-harness-replay.test.ts tests/pre-pr-scripts.test.ts",
     "pre-pr:live": "bun run live:harness",
     "live:worker-placement": "tsx scripts/run-live-worker-placement-repro.ts",
+    "install:fleet-sidebar": "node scripts/install-fleet-sidebar.mjs",
     "bench:daemon": "node scripts/bench-daemon.mjs",
     "test:watch": "vitest",
     "live:harness": "node scripts/run-live-agent-harness.mjs"

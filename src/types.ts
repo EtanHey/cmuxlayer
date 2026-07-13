@@ -150,6 +150,7 @@ export interface ParsedScreenResult {
   context_window: number | null;
   done_signal: string | null;
   response: string | null;
+  current_action: string | null;
   errors: string[];
   model: string | null;
   cost: number | null;

@@ -63,6 +63,34 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("forwards an injected fleet publisher to the reconciler and disposes it", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const publisher = {
+      publish: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const runtime = new CmuxAppServerRuntime({
+      client: makeClient(),
+      stateDir: TEST_DIR,
+      fleetSidebarPublisher: publisher,
+    });
+
+    try {
+      await (runtime as any).engine.runSweep();
+
+      expect(publisher.publish).toHaveBeenCalledWith({
+        seatCount: 0,
+        activeCount: 0,
+        lanes: [],
+      });
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+    expect(publisher.dispose).toHaveBeenCalledOnce();
+  });
+
   it("does not collapse surface listing failures into an absent surface", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });

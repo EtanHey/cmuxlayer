@@ -15,6 +15,7 @@ import { readMonitorRegistry, registerMonitor } from "../src/monitor-registry.js
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
+import type { FleetSidebarSnapshot } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 
@@ -123,6 +124,7 @@ describe("Sidebar Sync", () => {
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
+  let publishedFleetSnapshots: FleetSidebarSnapshot[];
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -130,13 +132,145 @@ describe("Sidebar Sync", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
+    publishedFleetSnapshots = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (snapshot) => publishedFleetSnapshots.push(snapshot),
+        dispose: () => {},
+      },
     });
+  });
+
+  it("publishes screen current-action fallback with truthful state and lane identity", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "auto-voicelayer-worker",
+        surface_id: "surface:42",
+        workspace_id: "workspace:voice",
+        repo: "misc",
+        seat_lane: "voicelayer",
+        seat_id: "transcription-worker",
+        state: "idle",
+        task_summary: " ",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:voice")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:voice",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:voice",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: [
+        {
+          ...makeSurface("surface:42"),
+          title: "voicelayerCodex [surface:42]",
+        },
+      ],
+    });
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:42",
+      text: "✻ Working (1m 2s • esc to interrupt)\n  Reading src/transcribe.ts",
+      lines: 20,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(1);
+    expect(publishedFleetSnapshots[0]).toMatchObject({
+      seatCount: 1,
+      activeCount: 1,
+      lanes: [
+        {
+          key: "voicelayer",
+          liveCount: 1,
+          activeCount: 1,
+          collapsed: false,
+          seats: [
+            {
+              agentId: "auto-voicelayer-worker",
+              surfaceRef: "surface:42",
+              name: "voicelayerCodex [surface:42]",
+              screenState: "working",
+              status: "Reading src/transcribe.ts",
+              healthVisible: false,
+              health: "",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("preserves the last generated fleet when topology enumeration is unknown", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockRejectedValue(new Error("socket unavailable"));
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
+  });
+
+  it("preserves the last generated fleet when topology is empty but registry seats remain", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
+  });
+
+  it("preserves the last generated fleet when topology enumeration is partial", async () => {
+    stateMgr.writeState(makeRecord());
+    liveSurfaces = [makeSurface("surface:42")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:coach")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:coach",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockRejectedValue(
+      new Error("pane closed during enumeration"),
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetSnapshots).toHaveLength(0);
   });
 
   afterEach(() => {

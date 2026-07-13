@@ -49,6 +49,7 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
+import { FleetSidebarPublisher } from "./fleet-sidebar.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_CHECK_INTERVAL_MS = 30_000;
@@ -552,6 +553,7 @@ export class CmuxLayerDaemon {
       monitorRegistryPath: this.opts.monitorRegistryPath,
       monitorRegistryNow: this.opts.monitorRegistryNow,
       monitorRegistryNotify: this.opts.monitorRegistryNotify,
+      fleetSidebarPublisher: this.opts.fleetSidebarPublisher,
     });
     const pendingRequestIds = new Set<RequestId>();
     this.activeTransports.add(transport);
@@ -1053,6 +1055,9 @@ export async function runDaemon(
       (testProcess ? async () => undefined : httpNotifyMonitorDeadman),
     monitorRegistryPath:
       opts.monitorRegistryPath ?? defaultMonitorRegistryPath(),
+    fleetSidebarPublisher:
+      opts.fleetSidebarPublisher ??
+      (testProcess ? undefined : new FleetSidebarPublisher()),
     monitorOwnerPtyDeadNotify:
       opts.monitorOwnerPtyDeadNotify ??
       (testProcess

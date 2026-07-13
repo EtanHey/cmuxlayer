@@ -170,6 +170,7 @@ import {
   isBrokenPipeError,
   SurfaceWriteLivenessTracker,
 } from "./surface-write-liveness.js";
+import type { FleetSidebarPublisherLike } from "./fleet-sidebar.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolReturn = {
@@ -2001,6 +2002,8 @@ export interface CreateServerOptions {
   seatManifestWriter?: SeatManifestWriter;
   /** Override the manifest timestamp source for deterministic tests. */
   seatManifestNow?: () => string;
+  /** Publish the opt-in generated fleet.swift from reconciled lifecycle state. */
+  fleetSidebarPublisher?: FleetSidebarPublisherLike;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -6941,6 +6944,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : null,
           seatRegistry,
           seatRegistryPath: opts?.seatRegistryPath,
+          fleetSidebarPublisher: opts?.fleetSidebarPublisher,
         },
       );
     lifecycleSeatManifestPublisher = async (input) => {

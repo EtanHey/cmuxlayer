@@ -137,6 +137,7 @@ export async function startInProcessRuntime(
     { drainOutbox, httpDeliver },
     { defaultMonitorRegistryPath, httpNotifyMonitorDeadman },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
+    { FleetSidebarPublisher },
   ] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/stdio.js"),
     import("./stdio-lifecycle.js"),
@@ -145,6 +146,7 @@ export async function startInProcessRuntime(
     import("./outbox-drainer.js"),
     import("./monitor-registry.js"),
     import("./heap-guard.js"),
+    import("./fleet-sidebar.js"),
   ]);
 
   ensureNodeMaxOldSpaceEnv();
@@ -156,6 +158,7 @@ export async function startInProcessRuntime(
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
     enableCloseForensics: true,
+    fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(opts.fallbackWarnings
       ? { controlHealthWarnings: opts.fallbackWarnings }

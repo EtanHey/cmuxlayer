@@ -25,6 +25,7 @@ import type {
   CmuxSendOptions,
   CmuxStatusUpdate,
   CmuxWorkspace,
+  ParsedScreenStatus,
 } from "./types.js";
 import {
   generateAgentId,
@@ -110,6 +111,11 @@ import {
   type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
 import type { InboxOpts } from "./inbox.js";
+import {
+  buildFleetSidebarSnapshot,
+  type FleetSidebarCandidate,
+  type FleetSidebarPublisherLike,
+} from "./fleet-sidebar.js";
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
 
@@ -276,6 +282,11 @@ export interface AgentEngineOptions {
    * production entrypoints inject the runner. Pass an explicit runner in tests.
    */
   closeForensicsRunner?: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
+  /**
+   * Receives the reconciled registry, topology, health, and screen evidence.
+   * Defaults to a NO-OP so bare engines never write operator configuration.
+   */
+  fleetSidebarPublisher?: FleetSidebarPublisherLike;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -312,6 +323,21 @@ const TRANSCRIPT_SESSION_CAPTURE_STATES = new Set<AgentState>([
   "working",
   "idle",
 ]);
+
+function toParsedScreenStatus(
+  status: string | null | undefined,
+): ParsedScreenStatus | null {
+  switch (status) {
+    case "frozen":
+    case "thinking":
+    case "working":
+    case "idle":
+    case "done":
+      return status;
+    default:
+      return null;
+  }
+}
 
 export { buildResumeCommand } from "./agent-command.js";
 
@@ -678,6 +704,7 @@ export class AgentEngine {
   /** Best-effort close-forensics ingest; null when disabled. */
   private closeForensicsRunner: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
   private closeForensicsSweepInFlight = false;
+  private fleetSidebarPublisher: FleetSidebarPublisherLike;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -712,6 +739,10 @@ export class AgentEngine {
     // off; an explicit runner (tests) drives it deterministically.
     this.closeForensicsRunner =
       opts?.closeForensicsRunner !== undefined ? opts.closeForensicsRunner : null;
+    this.fleetSidebarPublisher = opts?.fleetSidebarPublisher ?? {
+      publish: () => {},
+      dispose: () => {},
+    };
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -2549,6 +2580,7 @@ export class AgentEngine {
       agentId: string;
       snapshot: SidebarStatusSnapshot;
     }> = [];
+    const fleetCandidates: FleetSidebarCandidate[] = [];
 
     for (const originalAgent of agents) {
       const sweepCtx: SweepAgentContext = {};
@@ -2577,6 +2609,7 @@ export class AgentEngine {
       }
       const harvestability = this.assessHarvestability(agent);
       const healthScreenContexts = new Map<string, SweepAgentContext>();
+      let screenCurrentAction: string | null = null;
       const healthScreenContextFor = (
         targetAgent: AgentRecord,
       ): SweepAgentContext => {
@@ -2607,6 +2640,9 @@ export class AgentEngine {
                       )
                     ).text;
               const parsed = parseScreen(screenText);
+              if (targetAgent.agent_id === agent.agent_id) {
+                screenCurrentAction = parsed.current_action;
+              }
               return {
                 status: parsed.status,
                 actions: parsed.actions,
@@ -2707,6 +2743,29 @@ export class AgentEngine {
         this.clearAgentLifecycleMemory(agentId);
         continue;
       }
+
+      fleetCandidates.push({
+        agentId: agent.agent_id,
+        surfaceRef: agent.surface_id,
+        surfaceTitle:
+          surfaceTopology?.titleBySurface.get(agent.surface_id) ?? null,
+        repo: agent.repo,
+        seatLane: agent.seat_lane ?? null,
+        seatId: agent.seat_id ?? null,
+        launcherName: agent.launcher_name ?? null,
+        role: inferRecordRoleOrNull(agent),
+        discovered: agent.agent_id.startsWith("auto-"),
+        registryVersion: agent.version,
+        registryUpdatedAt: agent.updated_at,
+        createdAt: agent.created_at,
+        taskSummary: agent.task_summary ?? null,
+        healthStatus: health.status,
+        healthReasons: health.issues,
+        healthIssueCodes: health.issue_codes,
+        healthIssueSeverities: health.issue_severities ?? {},
+        screenCurrentAction,
+        screenStatus: toParsedScreenStatus(healthInput.screen_status),
+      });
 
       // Status diff — only push if changed
       const statusChanged =
@@ -2837,6 +2896,22 @@ export class AgentEngine {
         }
         this.sidebarSnapshot.delete(agentId);
         this.clearAgentLifecycleMemory(agentId);
+      }
+    }
+
+    const fleetTopologyIsAuthoritative =
+      surfaceTopology?.complete === true &&
+      (fleetCandidates.length === 0 ||
+        surfaceTopology.workspaceBySurface.size > 0);
+    if (fleetTopologyIsAuthoritative) {
+      try {
+        this.fleetSidebarPublisher.publish(
+          buildFleetSidebarSnapshot(fleetCandidates, {
+            liveSurfaceRefs: new Set(surfaceTopology.workspaceBySurface.keys()),
+          }),
+        );
+      } catch {
+        // Best-effort custom UI: publication must never break reconciliation.
       }
     }
   }
@@ -3049,6 +3124,7 @@ export class AgentEngine {
     this.sweepTiming = null;
     this.lastSweepSignature = null;
     this.unchangedSweepCount = 0;
+    this.fleetSidebarPublisher.dispose();
   }
 
   private schedulePostSpawnLivenessAssertion(agentId: string): void {
