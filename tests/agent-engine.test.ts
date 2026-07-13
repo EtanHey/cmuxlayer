@@ -3316,6 +3316,54 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("does not demote a working Codex agent to idle from the active 0.144.3 screen", async () => {
+      vi.useFakeTimers();
+      try {
+        const screenText = readFileSync(
+          join(
+            process.cwd(),
+            "tests/fixtures/spawn/codex-0.144.3-surface-489-working.txt",
+          ),
+          "utf8",
+        );
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-active-working",
+            state: "working",
+            surface_id: "surface:489",
+            workspace_id: "workspace:2",
+            cli: "codex",
+            role: "worker",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:489")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:489",
+          text: screenText,
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "cmuxlayerCodex-active-working",
+          "idle",
+          1_500,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(false);
+        expect(result.source).toBe("timeout");
+        expect(result.state).toBe("working");
+        expect(
+          engine.getAgentState("cmuxlayerCodex-active-working")?.state,
+        ).toBe("working");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("captures the boot session before waitFor marks a ready screen", async () => {
       vi.useFakeTimers();
       try {

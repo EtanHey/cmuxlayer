@@ -1335,8 +1335,10 @@ export class AgentEngine {
         workspace: agent.workspace_id ?? undefined,
       });
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const hasTargetEvidence =
+        evidence.ready || (targetState === "ready" && evidence.activeCodex);
       if (
-        !evidence.ready ||
+        !hasTargetEvidence ||
         (targetState === "ready" &&
           !evidence.activeCodex &&
           this.screenShowsPendingBootPrompt(agent, screen.text))
@@ -1707,7 +1709,7 @@ export class AgentEngine {
       hasIdentity &&
       screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready: hasIdentity && (match.matched || activeCodex),
+      ready: hasIdentity && match.matched,
       activeCodex,
       consecutive: match.consecutive,
     };
@@ -1965,7 +1967,7 @@ export class AgentEngine {
         const screen = await this.readSweepScreen(agent, ctx);
         const evidence = this.readReadyEvidence(agent, screen.text);
         if (
-          evidence.ready &&
+          (evidence.ready || evidence.activeCodex) &&
           (evidence.activeCodex ||
             !this.screenShowsPendingBootPrompt(agent, screen.text))
         ) {
@@ -2026,7 +2028,7 @@ export class AgentEngine {
     try {
       const screen = await this.readSweepScreen(agent, ctx);
       const evidence = this.readReadyEvidence(agent, screen.text);
-      if (!evidence.ready) {
+      if (!evidence.ready && !evidence.activeCodex) {
         this.readyPatternMatches.delete(agent.agent_id);
         return agent;
       }
