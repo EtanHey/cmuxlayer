@@ -146,6 +146,34 @@ Claude Code
     expect(isPickerOrMenuScreen(queuedComposer, "claude")).toBe(false);
   });
 
+  it("does not combine ordinary checklist transcript with Claude's queued-message footer", () => {
+    const queuedComposer = `
+Claude Code
+
+☐ Delivery follow-up
+
+1. Added the shared preflight.
+2. Verified the regression suite.
+
+❯ Send the final status after CI completes.
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+`;
+
+    expect(isPickerOrMenuScreen(queuedComposer, "claude")).toBe(false);
+  });
+
+  it("recognizes a structured Claude picker with a queued-message footer", () => {
+    const picker = readFixture(
+      "painpoints/claude-ask-user-question-picker-2026-07-13.txt",
+    ).replace(
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+      "❯ Press up to edit queued messages",
+    );
+
+    expect(isPickerOrMenuScreen(picker, "claude")).toBe(true);
+  });
+
   it.each(["codex", "cursor", "gemini"] as const)(
     "recognizes a footer-driven %s select list without numbered options",
     (cli) => {
