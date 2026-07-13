@@ -7305,7 +7305,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .catch((e) =>
           console.error("[cmuxlayer] lifecycle initialization failed:", e),
         )
-        .then(() => engine.startSweep(resolveSweepTiming()));
+        .then(() => {
+          if (
+            context.lifecycleStarted &&
+            context.lifecycleSweepEngine === engine
+          ) {
+            engine.startSweep(resolveSweepTiming());
+          }
+        });
     }
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route

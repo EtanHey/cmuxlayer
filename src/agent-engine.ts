@@ -2923,9 +2923,7 @@ export class AgentEngine {
             ? "unknown"
             : opts.firstConnect
               ? "unknown"
-              : observedLiveSurfaceRefs.length === 0
-                ? "empty"
-                : "unknown";
+              : "empty";
     try {
       this.fleetSidebarPublisher.publish({
         state: publicationState,

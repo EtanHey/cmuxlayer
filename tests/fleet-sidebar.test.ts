@@ -694,7 +694,7 @@ describe("fleet sidebar atomic publisher", () => {
     publisher.dispose();
   });
 
-  it("publishes authoritative empty only after all live surfaces disappear", async () => {
+  it("publishes authoritative empty only after all fleet surfaces disappear", async () => {
     const outputPath = tempOutputPath();
     const publisher = new FleetSidebarPublisher({ outputPath });
     publisher.publish(
@@ -702,11 +702,13 @@ describe("fleet sidebar atomic publisher", () => {
     );
     const lastGood = readFileSync(outputPath, "utf8");
 
-    publisher.publish(publication("empty", [], ["surface:1"]));
+    publisher.publish(
+      publication("empty", [], ["surface:1", "surface:notes"]),
+    );
     await new Promise((resolve) => setTimeout(resolve, 550));
     expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
 
-    publisher.publish(publication("empty", [], []));
+    publisher.publish(publication("empty", [], ["surface:notes"]));
     expect(readFileSync(outputPath, "utf8")).toContain(
       "cmuxlayer-fleet-state: empty",
     );

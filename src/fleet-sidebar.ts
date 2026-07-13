@@ -618,7 +618,18 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     }
 
     if (publication.state === "empty") {
-      return publication.observedLiveSurfaceRefs?.length === 0;
+      if (publication.observedLiveSurfaceRefs === null) return false;
+      if (previous.state !== "populated") return true;
+      if (previous.surfaceRefs.size === 0) {
+        return publication.observedLiveSurfaceRefs.length === 0;
+      }
+      const observedLiveSurfaceRefs = new Set(
+        publication.observedLiveSurfaceRefs,
+      );
+      for (const previousSurfaceRef of previous.surfaceRefs) {
+        if (observedLiveSurfaceRefs.has(previousSurfaceRef)) return false;
+      }
+      return true;
     }
 
     if (

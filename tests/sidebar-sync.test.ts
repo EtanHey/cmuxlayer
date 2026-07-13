@@ -466,6 +466,41 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
+  it("publishes authoritative empty when only unrelated terminals remain", async () => {
+    liveSurfaces = [makeSurface("surface:notes")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:notes")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:notes"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: liveSurfaces,
+    });
+
+    await engine.runSweep();
+
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({
+        state: "empty",
+        observedLiveSurfaceRefs: ["surface:notes"],
+      }),
+    ]);
+  });
+
   it("preserves the last generated fleet when topology enumeration is partial", async () => {
     stateMgr.writeState(makeRecord());
     liveSurfaces = [makeSurface("surface:42")];

@@ -12,6 +12,7 @@ import {
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
@@ -9931,5 +9932,54 @@ describe("registry reconstitution error logging", () => {
       "[cmuxlayer] lifecycle initialization failed:",
       expect.any(Error),
     );
+  });
+
+  it("does not arm a sweep after the lifecycle context is disposed during initialization", async () => {
+    let releaseWorkspaces!: (value: { workspaces: [] }) => void;
+    const pendingWorkspaces = new Promise<{ workspaces: [] }>((resolve) => {
+      releaseWorkspaces = resolve;
+    });
+    const mockClient = {
+      listWorkspaces: vi
+        .fn()
+        .mockImplementationOnce(() => pendingWorkspaces)
+        .mockResolvedValue({ workspaces: [] }),
+      listPanes: vi.fn().mockResolvedValue({ panes: [] }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+      readScreen: vi.fn(),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      clearProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const context = createServerContext({
+      client: mockClient as any,
+      stateDir: join(CHANNEL_TEST_DIR, "disposed-during-initialize"),
+      controlHealthIntervalMs: 0,
+    });
+    createServer({
+      context,
+      fleetSidebarPublisher: { publish: vi.fn(), dispose: vi.fn() },
+    });
+    const engine = context.lifecycleSweepEngine!;
+    const startSweep = vi.spyOn(engine, "startSweep");
+    const initialization = context.lifecycleStartPromise!;
+
+    context.dispose();
+    releaseWorkspaces({ workspaces: [] });
+    await initialization;
+
+    try {
+      expect(startSweep).not.toHaveBeenCalled();
+    } finally {
+      engine.dispose();
+    }
   });
 });
