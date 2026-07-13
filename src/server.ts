@@ -1631,7 +1631,7 @@ function screenShowsPendingInput(
   );
 }
 
-function screenShowsPendingShellInput(
+export function screenShowsPendingShellInput(
   screenText: string,
   submittedText: string,
 ): boolean {
@@ -1641,16 +1641,25 @@ function screenShowsPendingShellInput(
   }
 
   const lines = normalizeTerminalText(screenText).split("\n");
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+
+  const compactSubmitted = trimmed.replace(/\s+/g, "");
+  for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    if (!line.trim()) continue;
     const prompt = line.match(/[$%#]\s*(.*)$/);
-    if (!prompt) return false;
-    const pending = prompt[1]?.trimEnd() ?? "";
-    return (
+    if (!prompt) continue;
+    const pending = [prompt[1] ?? "", ...lines.slice(index + 1, end)]
+      .join("")
+      .trimEnd();
+    if (
       pending === trimmed ||
-      pending.replace(/\s+/g, "") === trimmed.replace(/\s+/g, "")
-    );
+      pending.replace(/\s+/g, "") === compactSubmitted
+    ) {
+      return true;
+    }
   }
   return false;
 }

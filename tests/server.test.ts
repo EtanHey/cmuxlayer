@@ -25,6 +25,10 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
     firstChunkNumber: number;
     deliveredChunkCounts: number[];
   }>;
+  screenShowsPendingShellInput: (
+    screenText: string,
+    submittedText: string,
+  ) => boolean;
 };
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
@@ -391,6 +395,29 @@ describe("input delivery batching helpers", () => {
         deliveredChunkCounts: [1],
       },
     ]);
+  });
+
+  it("recognizes the real surface-489 launcher while it is wrapped across shell rows", async () => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL(
+          "./fixtures/spawn/surface-489-doubled-launch-command.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { launcher_command: string };
+    const wrapAt = 72;
+    const wrappedScreen = [
+      `etanheyman ~/Gits/cmuxlayer [fix/spawn-reliability-3head] $ ${fixture.launcher_command.slice(0, wrapAt)}`,
+      fixture.launcher_command.slice(wrapAt),
+    ].join("\n");
+
+    expect(
+      screenShowsPendingShellInput(wrappedScreen, fixture.launcher_command),
+    ).toBe(true);
   });
 });
 
