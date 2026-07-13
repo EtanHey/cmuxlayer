@@ -15,6 +15,7 @@ import {
   shellQuote,
 } from "./agent-command.js";
 import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
+import type { AgentDiscovery } from "./agent-discovery.js";
 import { toPublicAgent } from "./agent-facade.js";
 import type {
   CmuxPane,
@@ -705,6 +706,8 @@ export class AgentEngine {
   private closeForensicsRunner: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
   private closeForensicsSweepInFlight = false;
   private fleetSidebarPublisher: FleetSidebarPublisherLike;
+  private startupInitializePromise: Promise<void> | null = null;
+  private lifecycleMutationTail: Promise<void> = Promise.resolve();
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -2570,7 +2573,7 @@ export class AgentEngine {
    * Sync sidebar: diff agents against snapshot, push only changes.
    * Logs lifecycle events (spawned, done, error) once each.
    */
-  private async syncSidebar(): Promise<void> {
+  private async syncSidebar(opts: { firstConnect?: boolean } = {}): Promise<void> {
     const agents = this.registry.list();
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
@@ -2744,28 +2747,30 @@ export class AgentEngine {
         continue;
       }
 
-      fleetCandidates.push({
-        agentId: agent.agent_id,
-        surfaceRef: agent.surface_id,
-        surfaceTitle:
-          surfaceTopology?.titleBySurface.get(agent.surface_id) ?? null,
-        repo: agent.repo,
-        seatLane: agent.seat_lane ?? null,
-        seatId: agent.seat_id ?? null,
-        launcherName: agent.launcher_name ?? null,
-        role: inferRecordRoleOrNull(agent),
-        discovered: agent.agent_id.startsWith("auto-"),
-        registryVersion: agent.version,
-        registryUpdatedAt: agent.updated_at,
-        createdAt: agent.created_at,
-        taskSummary: agent.task_summary ?? null,
-        healthStatus: health.status,
-        healthReasons: health.issues,
-        healthIssueCodes: health.issue_codes,
-        healthIssueSeverities: health.issue_severities ?? {},
-        screenCurrentAction,
-        screenStatus: toParsedScreenStatus(healthInput.screen_status),
-      });
+      if (!(opts.firstConnect && TERMINAL_STATES.has(state))) {
+        fleetCandidates.push({
+          agentId: agent.agent_id,
+          surfaceRef: agent.surface_id,
+          surfaceTitle:
+            surfaceTopology?.titleBySurface.get(agent.surface_id) ?? null,
+          repo: agent.repo,
+          seatLane: agent.seat_lane ?? null,
+          seatId: agent.seat_id ?? null,
+          launcherName: agent.launcher_name ?? null,
+          role: inferRecordRoleOrNull(agent),
+          discovered: agent.agent_id.startsWith("auto-"),
+          registryVersion: agent.version,
+          registryUpdatedAt: agent.updated_at,
+          createdAt: agent.created_at,
+          taskSummary: agent.task_summary ?? null,
+          healthStatus: health.status,
+          healthReasons: health.issues,
+          healthIssueCodes: health.issue_codes,
+          healthIssueSeverities: health.issue_severities ?? {},
+          screenCurrentAction,
+          screenStatus: toParsedScreenStatus(healthInput.screen_status),
+        });
+      }
 
       // Status diff — only push if changed
       const statusChanged =
@@ -2899,20 +2904,33 @@ export class AgentEngine {
       }
     }
 
-    const fleetTopologyIsAuthoritative =
-      surfaceTopology?.complete === true &&
-      (fleetCandidates.length === 0 ||
-        surfaceTopology.workspaceBySurface.size > 0);
-    if (fleetTopologyIsAuthoritative) {
-      try {
-        this.fleetSidebarPublisher.publish(
-          buildFleetSidebarSnapshot(fleetCandidates, {
-            liveSurfaceRefs: new Set(surfaceTopology.workspaceBySurface.keys()),
-          }),
-        );
-      } catch {
-        // Best-effort custom UI: publication must never break reconciliation.
-      }
+    const observedLiveSurfaceRefs =
+      surfaceTopology?.complete === true
+        ? [...surfaceTopology.workspaceBySurface.keys()].sort()
+        : null;
+    const snapshot = buildFleetSidebarSnapshot(fleetCandidates, {
+      liveSurfaceRefs: new Set(observedLiveSurfaceRefs ?? []),
+    });
+    const publicationState =
+      observedLiveSurfaceRefs === null
+        ? "unknown"
+        : snapshot.seatCount > 0
+          ? "populated"
+          : fleetCandidates.length > 0
+            ? "unknown"
+            : opts.firstConnect
+              ? "unknown"
+              : observedLiveSurfaceRefs.length === 0
+                ? "empty"
+                : "unknown";
+    try {
+      this.fleetSidebarPublisher.publish({
+        state: publicationState,
+        snapshot,
+        observedLiveSurfaceRefs,
+      });
+    } catch {
+      // Best-effort custom UI: publication must never break reconciliation.
     }
   }
 
@@ -2928,34 +2946,90 @@ export class AgentEngine {
   }
 
   /**
+   * Initialize lifecycle state exactly once for a fresh runtime connection.
+   * Reconstitution and one additive discovery complete before the immediate
+   * sidebar sync, so a fresh process cannot publish an empty first paint.
+   */
+  initialize(discovery: AgentDiscovery): Promise<void> {
+    if (this.startupInitializePromise === null) {
+      this.startupInitializePromise = this.initializeOnce(discovery);
+    }
+    return this.startupInitializePromise;
+  }
+
+  private async initializeOnce(discovery: AgentDiscovery): Promise<void> {
+    try {
+      this.fleetSidebarPublisher.publish({
+        state: "discovering",
+        snapshot: buildFleetSidebarSnapshot([], {
+          liveSurfaceRefs: new Set(),
+        }),
+        observedLiveSurfaceRefs: null,
+      });
+    } catch {
+      // Discovery and lifecycle startup must not depend on custom UI output.
+    }
+    await this.registry.reconstitute();
+    this.enableStartupPurge();
+    const discovered = await discovery.scan(true);
+    await this.registry.listMerged(discovery, {
+      force: true,
+      discovered,
+      nonDestructive: true,
+    });
+    await this.syncSidebar({ firstConnect: true });
+  }
+
+  private async purgeStartupTerminalAgents(): Promise<void> {
+    if (!this.startupPurgePending) return;
+    this.startupPurgePending = false;
+    const purgedIds = this.registry.purgeAllTerminal();
+    try {
+      await this.client.clearProgress();
+    } catch {
+      // Best-effort cleanup of the removed workspace-less progress row.
+    }
+    // Seed sidebar snapshot so syncSidebar clears their cmux entries.
+    for (const purgedAgent of purgedIds) {
+      this.sidebarSnapshot.set(purgedAgent.agent_id, {
+        statusValue: "__purged__",
+        surfaceId: purgedAgent.surface_id,
+        workspaceId: purgedAgent.workspace_id ?? null,
+        healthSignature: "__purged__",
+      });
+    }
+  }
+
+  /**
    * Public sweep: reconcile registry, purge dead entries, then sync sidebar.
    * If enableStartupPurge() was called, the first sweep also purges all
    * terminal-state agents unconditionally — these are stale entries from
    * previous cmux sessions whose surface refs may have been recycled.
    */
+  async runLifecycleMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycleMutationTail;
+    let release!: () => void;
+    this.lifecycleMutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   async runSweep(): Promise<void> {
+    await this.runLifecycleMutation(() => this.runSweepOnce());
+  }
+
+  private async runSweepOnce(): Promise<void> {
     this.currentSweepScreenSignatures = new Map();
     await this.registry.reconcile();
     await this.recoverCrashedAgents();
 
-    if (this.startupPurgePending) {
-      this.startupPurgePending = false;
-      const purgedIds = this.registry.purgeAllTerminal();
-      try {
-        await this.client.clearProgress();
-      } catch {
-        // Best-effort cleanup of the removed workspace-less progress row.
-      }
-      // Seed sidebar snapshot so syncSidebar clears their cmux entries
-      for (const purgedAgent of purgedIds) {
-        this.sidebarSnapshot.set(purgedAgent.agent_id, {
-          statusValue: "__purged__",
-          surfaceId: purgedAgent.surface_id,
-          workspaceId: purgedAgent.workspace_id ?? null,
-          healthSignature: "__purged__",
-        });
-      }
-    }
+    await this.purgeStartupTerminalAgents();
 
     await this.registry.purgeTerminal();
     await this.sweepMonitorRegistryBestEffort();

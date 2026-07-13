@@ -6820,22 +6820,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
     });
-    lifecycleEnsureRegistered = async () => {
-      await registry.listMerged(discovery, { force: true });
-    };
-    lifecycleRefreshManagedMetadata = async (agentId?: string) => {
-      await registry.refreshManagedSurfaceMetadata(discovery, {
-        agentId,
-        force: true,
-      });
+    const awaitLifecycleStart = async (): Promise<void> => {
+      if (context.lifecycleStartPromise) {
+        await context.lifecycleStartPromise;
+      }
     };
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
       agent: AgentRecord,
       healthSummary?: string,
     ): Promise<void> => {
-      if (!enableClaudeChannels || !server.server.transport) {
+      if (!enableClaudeChannels) {
         return;
+      }
+      if (!server.server.transport) {
+        throw new Error("Claude channel transport is not connected yet");
       }
 
       // Claude turns meta keys into <channel ...> attributes, so keep keys simple.
@@ -7006,6 +7005,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
+    lifecycleEnsureRegistered = async () => {
+      await awaitLifecycleStart();
+      await engine.runLifecycleMutation(() =>
+        registry.listMerged(discovery, { force: true }).then(() => undefined),
+      );
+    };
+    lifecycleRefreshManagedMetadata = async (agentId?: string) => {
+      await awaitLifecycleStart();
+      await engine.runLifecycleMutation(() =>
+        registry
+          .refreshManagedSurfaceMetadata(discovery, {
+            agentId,
+            force: true,
+          })
+          .then(() => undefined),
+      );
+    };
 
     const resolveSpawnRecord = (
       agentId: string,
@@ -7279,18 +7295,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // outside this lifecycle block).
     lifecycleAgentInputDeliverer = deliverAgentInput;
 
-    // Reconstitute registry from disk on startup (async, best-effort).
-    // Enable startup purge so the first sweep clears stale terminal-state
-    // agents from previous cmux sessions.
+    // Reconstitute and discover live surfaces before the first sidebar paint.
+    // The engine initializer is idempotent because daemon connections share a
+    // context and may construct more than one MCP server over its lifetime.
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
-      context.lifecycleStartPromise = registry
-        .reconstitute()
-        .then(() => engine.enableStartupPurge())
+      context.lifecycleStartPromise = engine
+        .initialize(discovery)
         .catch((e) =>
-          console.error("[cmuxlayer] registry reconstitution failed:", e),
-        );
-      engine.startSweep(resolveSweepTiming());
+          console.error("[cmuxlayer] lifecycle initialization failed:", e),
+        )
+        .then(() => engine.startSweep(resolveSweepTiming()));
     }
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route
@@ -8426,9 +8441,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
 
         try {
-          const merged = await registry.listMerged(discovery, {
-            filter,
-          });
+          await awaitLifecycleStart();
+          const merged = await engine.runLifecycleMutation(() =>
+            registry.listMerged(discovery, { filter }),
+          );
           return await buildListAgentsResponse(merged);
         } catch (e) {
           if (isSurfaceEnumerationError(e)) {
@@ -8515,6 +8531,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (rawArgs) => {
         try {
+          await awaitLifecycleStart();
           const parsedArgs = BroadcastArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
             return err(
@@ -8536,7 +8553,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const collectTargets = async (): Promise<AgentRecord[]> => {
             try {
-              return await registry.listMerged(discovery);
+              return await engine.runLifecycleMutation(() =>
+                registry.listMerged(discovery),
+              );
             } catch (e) {
               if (isSurfaceEnumerationError(e)) {
                 throw new Error(
@@ -8631,170 +8650,173 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       {},
       ANNOTATIONS.mutating,
       async () => {
-        try {
-          const beforeIds = new Set(
-            registry.list().map((agent) => agent.agent_id),
-          );
-          await registry.reconcile();
-          for (const agent of registry.list()) {
-            beforeIds.add(agent.agent_id);
-          }
-          discovery.invalidate();
-          const discoveredBeforeRepair = await discovery.scan(true);
-          const repair = registry.repairFromDiscovery(discoveredBeforeRepair, {
-            seatRegistry,
-          });
-          discovery.invalidate();
-          await registry.listMerged(discovery, { force: true });
-          const surfacelessEvicted = await registry.evictSurfaceless();
-          engine.evictDeadProcessAgents();
-          discovery.invalidate();
-          let after = await registry.listMerged(discovery, { force: true });
-          const topologyBeforeReflow = await collectSurfaceTopology();
-          const reflowed: Array<{
-            agent_id: string;
-            surface_id: string;
-            from_column: number;
-            to_column: number;
-            pane: string;
-          }> = [];
+        await awaitLifecycleStart();
+        return engine.runLifecycleMutation(async () => {
+          try {
+            const beforeIds = new Set(
+              registry.list().map((agent) => agent.agent_id),
+            );
+            await registry.reconcile();
+            for (const agent of registry.list()) {
+              beforeIds.add(agent.agent_id);
+            }
+            discovery.invalidate();
+            const discoveredBeforeRepair = await discovery.scan(true);
+            const repair = registry.repairFromDiscovery(discoveredBeforeRepair, {
+              seatRegistry,
+            });
+            discovery.invalidate();
+            await registry.listMerged(discovery, { force: true });
+            const surfacelessEvicted = await registry.evictSurfaceless();
+            engine.evictDeadProcessAgents();
+            discovery.invalidate();
+            let after = await registry.listMerged(discovery, { force: true });
+            const topologyBeforeReflow = await collectSurfaceTopology();
+            const reflowed: Array<{
+              agent_id: string;
+              surface_id: string;
+              from_column: number;
+              to_column: number;
+              pane: string;
+            }> = [];
 
-          if (topologyBeforeReflow) {
-            const panesByWorkspace = new Map<
-              string,
-              Awaited<ReturnType<typeof client.listPanes>>
-            >();
+            if (topologyBeforeReflow) {
+              const panesByWorkspace = new Map<
+                string,
+                Awaited<ReturnType<typeof client.listPanes>>
+              >();
 
-            for (const agent of after) {
-              if (inferRecordRoleOrNull(agent) !== "worker") continue;
-              const current = topologyBeforeReflow.topologyBySurface.get(
-                agent.surface_id,
-              );
-              if (current?.column !== 0) continue;
-
-              let seededSurface: string | null = null;
-              let workspace: string | null = null;
-              try {
-                workspace =
-                  topologyBeforeReflow.workspaceBySurface.get(
-                    agent.surface_id,
-                  ) ?? agent.workspace_id ?? null;
-                if (!workspace) continue;
-
-                let targetPane: string | null = null;
-                if ((current.column_count ?? 0) < 2) {
-                  const seed = await client.newSplit("right", {
-                    workspace,
-                    surface: agent.surface_id,
-                    type: "terminal",
-                  });
-                  targetPane = seed.pane;
-                  seededSurface = seed.surface;
-                  panesByWorkspace.delete(workspace);
-                } else {
-                  let panes = panesByWorkspace.get(workspace);
-                  if (!panes) {
-                    panes = await client.listPanes({ workspace });
-                    panesByWorkspace.set(workspace, panes);
-                  }
-                  const columns = deriveColumnIndex(panes.panes);
-                  targetPane = [...panes.panes]
-                    .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
-                    .sort((a, b) => {
-                      const columnDelta =
-                        (columns.get(a.ref) ?? 0) -
-                        (columns.get(b.ref) ?? 0);
-                      return columnDelta || a.index - b.index;
-                    })
-                    .at(-1)?.ref ?? null;
-                }
-                if (!targetPane) continue;
-
-                await client.moveSurface({
-                  surface: agent.surface_id,
-                  pane: targetPane,
-                  workspace,
-                  focus: false,
-                });
-
-                const topologyAfterMove = await collectSurfaceTopology(workspace);
-                const actual = topologyAfterMove?.topologyBySurface.get(
+              for (const agent of after) {
+                if (inferRecordRoleOrNull(agent) !== "worker") continue;
+                const current = topologyBeforeReflow.topologyBySurface.get(
                   agent.surface_id,
                 );
-                if (actual?.column == null || actual.column === 0) continue;
+                if (current?.column !== 0) continue;
 
-                reflowed.push({
-                  agent_id: agent.agent_id,
-                  surface_id: agent.surface_id,
-                  from_column: current.column,
-                  to_column: actual.column,
-                  pane: targetPane,
-                });
-              } catch {
-                // Reflow is self-healing best effort. One stale workspace, pane,
-                // or topology read must not abort the registry-wide resync.
-                continue;
-              } finally {
-                if (seededSurface) {
-                  try {
-                    await client.closeSurface(seededSurface, {
-                      ...(workspace ? { workspace } : {}),
+                let seededSurface: string | null = null;
+                let workspace: string | null = null;
+                try {
+                  workspace =
+                    topologyBeforeReflow.workspaceBySurface.get(
+                      agent.surface_id,
+                    ) ?? agent.workspace_id ?? null;
+                  if (!workspace) continue;
+
+                  let targetPane: string | null = null;
+                  if ((current.column_count ?? 0) < 2) {
+                    const seed = await client.newSplit("right", {
+                      workspace,
+                      surface: agent.surface_id,
+                      type: "terminal",
                     });
-                  } catch {
-                    // A seed cleanup race is isolated to this worker as well.
+                    targetPane = seed.pane;
+                    seededSurface = seed.surface;
+                    panesByWorkspace.delete(workspace);
+                  } else {
+                    let panes = panesByWorkspace.get(workspace);
+                    if (!panes) {
+                      panes = await client.listPanes({ workspace });
+                      panesByWorkspace.set(workspace, panes);
+                    }
+                    const columns = deriveColumnIndex(panes.panes);
+                    targetPane = [...panes.panes]
+                      .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
+                      .sort((a, b) => {
+                        const columnDelta =
+                          (columns.get(a.ref) ?? 0) -
+                          (columns.get(b.ref) ?? 0);
+                        return columnDelta || a.index - b.index;
+                      })
+                      .at(-1)?.ref ?? null;
+                  }
+                  if (!targetPane) continue;
+
+                  await client.moveSurface({
+                    surface: agent.surface_id,
+                    pane: targetPane,
+                    workspace,
+                    focus: false,
+                  });
+
+                  const topologyAfterMove = await collectSurfaceTopology(workspace);
+                  const actual = topologyAfterMove?.topologyBySurface.get(
+                    agent.surface_id,
+                  );
+                  if (actual?.column == null || actual.column === 0) continue;
+
+                  reflowed.push({
+                    agent_id: agent.agent_id,
+                    surface_id: agent.surface_id,
+                    from_column: current.column,
+                    to_column: actual.column,
+                    pane: targetPane,
+                  });
+                } catch {
+                  // Reflow is self-healing best effort. One stale workspace, pane,
+                  // or topology read must not abort the registry-wide resync.
+                  continue;
+                } finally {
+                  if (seededSurface) {
+                    try {
+                      await client.closeSurface(seededSurface, {
+                        ...(workspace ? { workspace } : {}),
+                      });
+                    } catch {
+                      // A seed cleanup race is isolated to this worker as well.
+                    }
                   }
                 }
               }
             }
-          }
 
-          if (reflowed.length > 0) {
-            discovery.invalidate();
-            after = await registry.listMerged(discovery, { force: true });
-          }
-          const discovered = await discovery.scan();
-          const afterIds = new Set(after.map((agent) => agent.agent_id));
-          const managedSurfaceIds = new Set(
-            registry
-              .list()
-              .filter((agent) => !agent.agent_id.startsWith("auto-"))
-              .map((agent) => agent.surface_id),
-          );
-          const orphanedSurfaces = discovered.filter(
-            (surface) =>
-              !surface.read_error &&
-              !managedSurfaceIds.has(surface.surface_id),
-          );
-          const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
-          const evicted = [
-            ...new Set([
-              ...repair.evicted,
-              ...surfacelessEvicted,
-              ...[...beforeIds].filter((id) => !afterIds.has(id)),
-            ]),
-          ];
-          const diff = {
-            added: [...afterIds].filter((id) => !beforeIds.has(id)),
-            evicted,
-            repaired: repair.repaired,
-            reflowed,
-            mismatches: after
-              .filter((agent) => agent.parsed_cli_mismatch)
-              .map((agent) => agent.agent_id),
-            orphaned: orphanedSurfaces.map((surface) => surface.surface_id),
-            orphaned_health: orphanedHealth,
-            health_failures: orphanedHealth.filter(
-              (health) => health.status === "unhealthy",
-            ),
-          };
+            if (reflowed.length > 0) {
+              discovery.invalidate();
+              after = await registry.listMerged(discovery, { force: true });
+            }
+            const discovered = await discovery.scan();
+            const afterIds = new Set(after.map((agent) => agent.agent_id));
+            const managedSurfaceIds = new Set(
+              registry
+                .list()
+                .filter((agent) => !agent.agent_id.startsWith("auto-"))
+                .map((agent) => agent.surface_id),
+            );
+            const orphanedSurfaces = discovered.filter(
+              (surface) =>
+                !surface.read_error &&
+                !managedSurfaceIds.has(surface.surface_id),
+            );
+            const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
+            const evicted = [
+              ...new Set([
+                ...repair.evicted,
+                ...surfacelessEvicted,
+                ...[...beforeIds].filter((id) => !afterIds.has(id)),
+              ]),
+            ];
+            const diff = {
+              added: [...afterIds].filter((id) => !beforeIds.has(id)),
+              evicted,
+              repaired: repair.repaired,
+              reflowed,
+              mismatches: after
+                .filter((agent) => agent.parsed_cli_mismatch)
+                .map((agent) => agent.agent_id),
+              orphaned: orphanedSurfaces.map((surface) => surface.surface_id),
+              orphaned_health: orphanedHealth,
+              health_failures: orphanedHealth.filter(
+                (health) => health.status === "unhealthy",
+              ),
+            };
 
-          return okFormatted(formatResync(diff), {
-            diff,
-            count: after.length,
-          });
-        } catch (e) {
-          return err(e);
-        }
+            return okFormatted(formatResync(diff), {
+              diff,
+              count: after.length,
+            });
+          } catch (e) {
+            return err(e);
+          }
+        });
       },
     );
 
@@ -9524,7 +9546,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.readOnly,
       async (args) => {
         try {
-          const merged = await registry.listMerged(discovery);
+          await awaitLifecycleStart();
+          const merged = await engine.runLifecycleMutation(() =>
+            registry.listMerged(discovery),
+          );
           const agents = args.parent_agent_id
             ? (() => {
                 const childIds = new Set(

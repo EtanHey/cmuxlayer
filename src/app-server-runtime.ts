@@ -11,6 +11,7 @@ import {
   httpNotifyMonitorDeadman,
 } from "./monitor-registry.js";
 import { AgentRegistry } from "./agent-registry.js";
+import { AgentDiscovery } from "./agent-discovery.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
@@ -133,6 +134,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   private stateMgr: StateManager;
   private registry: AgentRegistry;
   private engine: AgentEngine;
+  private discovery: AgentDiscovery;
   private activeSurfaceWrites = new Map<string, string>();
   private threadCwds = new Map<string, string>();
 
@@ -168,6 +170,11 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     };
 
     this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
+    this.discovery = new AgentDiscovery({
+      listSurfaces: surfaceProvider,
+      readScreen: (surface, readOpts) =>
+        this.client.readScreen(surface, readOpts),
+    });
     this.engine = new AgentEngine(this.stateMgr, this.registry, {
       log: async () => {},
       listWorkspaces: () => this.client.listWorkspaces(),
@@ -212,8 +219,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   }
 
   async initialize(): Promise<void> {
-    await this.registry.reconstitute();
-    this.engine.enableStartupPurge();
+    await this.engine.initialize(this.discovery);
     this.engine.startSweep(resolveSweepTiming());
   }
 

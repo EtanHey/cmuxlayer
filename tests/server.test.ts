@@ -514,6 +514,8 @@ describe("Claude channels", () => {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: null,
+      seat_identity_status: "mismatch",
+      seat_identity_error: "test fixture has a mismatched seat identity",
     });
 
     const mockClient = {
@@ -9926,7 +9928,7 @@ describe("registry reconstitution error logging", () => {
     }
 
     expect(console.error).toHaveBeenCalledWith(
-      "[cmuxlayer] registry reconstitution failed:",
+      "[cmuxlayer] lifecycle initialization failed:",
       expect.any(Error),
     );
   });

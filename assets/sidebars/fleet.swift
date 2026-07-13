@@ -1,3 +1,4 @@
+// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown
 func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }
@@ -88,9 +89,14 @@ VStack(alignment: .leading, spacing: 6) {
   }
   .padding(4)
   Divider()
-  Text("No live fleet seats")
-    .font(.system(size: 11))
-    .foregroundColor(.secondary)
+  VStack(alignment: .leading, spacing: 2) {
+    Text("Discovering fleet seats…")
+      .font(.system(size: 11))
+      .foregroundColor(.secondary)
+    Text("Reconnect discovery populates this view automatically.")
+      .font(.system(size: 9))
+      .foregroundColor(.tertiary)
+  }
     .padding(6)
   Spacer()
 }

@@ -516,15 +516,33 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).not.toContain(".fixedSize");
   });
 
-  it("renders an explicit, valid empty fleet state", () => {
+  it("renders an explicit discovery placeholder for an empty fleet state", () => {
     const source = renderFleetSidebar({
       seatCount: 0,
       activeCount: 0,
       lanes: [],
     });
 
-    expect(source).toContain('Text("No live fleet seats")');
+    expect(source).toContain('Text("Discovering fleet seats…")');
+    expect(source).toContain(
+      'Text("Reconnect discovery populates this view automatically.")',
+    );
+    expect(source).not.toContain('Text("No live fleet seats")');
     expect(source).toContain('Text("0 live seats · 0 active")');
+    expect(source).toContain(
+      "cmuxlayer-fleet-state: discovering rendered=0 observed=unknown",
+    );
+  });
+
+  it("distinguishes authoritative empty and unknown topology placeholders", () => {
+    const snapshot = { seatCount: 0, activeCount: 0, lanes: [] };
+    const empty = renderFleetSidebar(snapshot, { state: "empty" });
+    const unknown = renderFleetSidebar(snapshot, { state: "unknown" });
+
+    expect(empty).toContain('Text("No live fleet seats")');
+    expect(empty).not.toContain('Text("Discovering fleet seats…")');
+    expect(unknown).toContain('Text("Fleet topology unavailable")');
+    expect(unknown).not.toContain('Text("No live fleet seats")');
   });
 });
 
@@ -542,6 +560,31 @@ describe("fleet sidebar atomic publisher", () => {
     );
   }
 
+  function snapshotWithSurfaces(surfaceRefs: string[]) {
+    return buildFleetSidebarSnapshot(
+      surfaceRefs.map((surfaceRef, index) =>
+        candidate({
+          agentId: `agent-${index + 1}`,
+          surfaceRef,
+          surfaceTitle: `cmuxlayerCodex [${surfaceRef}]`,
+        }),
+      ),
+      { liveSurfaceRefs: new Set(surfaceRefs) },
+    );
+  }
+
+  function publication(
+    state: "discovering" | "populated" | "empty" | "unknown",
+    surfaceRefs: string[],
+    observedLiveSurfaceRefs: string[] | null,
+  ) {
+    return {
+      state,
+      snapshot: snapshotWithSurfaces(surfaceRefs),
+      observedLiveSurfaceRefs,
+    };
+  }
+
   it("uses the canonical home-relative output path", () => {
     expect(defaultFleetSidebarPath("/tmp/example-home")).toBe(
       "/tmp/example-home/.config/cmux/sidebars/fleet.swift",
@@ -556,6 +599,107 @@ describe("fleet sidebar atomic publisher", () => {
 
     expect(readFileSync(outputPath, "utf8")).toContain('"status": "first"');
     expect(readdirSync(join(outputPath, ".."))).toEqual(["fleet.swift"]);
+    publisher.dispose();
+  });
+
+  it("preserves a populated last-good source while topology is unknown", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+
+    publisher.publish(
+      publication("unknown", ["surface:1"], ["surface:1", "surface:2"]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("rejects a populated decrease while omitted seat surfaces remain live", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1", "surface:2"]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("accepts a populated decrease after omitted seat surfaces disappear", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+
+    const source = readFileSync(outputPath, "utf8");
+    expect(source).toContain('"surfaceRef": "surface:1"');
+    expect(source).not.toContain('"surfaceRef": "surface:2"');
+    publisher.dispose();
+  });
+
+  it("publishes authoritative empty only after all live surfaces disappear", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+
+    publisher.publish(publication("empty", [], ["surface:1"]));
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+
+    publisher.publish(publication("empty", [], []));
+    expect(readFileSync(outputPath, "utf8")).toContain(
+      "cmuxlayer-fleet-state: empty",
+    );
+    publisher.dispose();
+  });
+
+  it("recognizes an unmarked legacy populated source as last-good", async () => {
+    const outputPath = tempOutputPath();
+    mkdirSync(join(outputPath, ".."), { recursive: true });
+    const legacySource = renderFleetSidebar(
+      snapshotWithSurfaces(["surface:1", "surface:2"]),
+    ).replace(/^\/\/ cmuxlayer-fleet-state:[^\n]*\n/, "");
+    writeFileSync(outputPath, legacySource, "utf8");
+    const publisher = new FleetSidebarPublisher({ outputPath });
+
+    publisher.publish(
+      publication("discovering", [], ["surface:1", "surface:2"]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(legacySource);
     publisher.dispose();
   });
 
@@ -619,6 +763,58 @@ describe("fleet sidebar atomic publisher", () => {
       '"status": "owner-two"',
     );
     second.dispose();
+  });
+
+  it("does not flush a stale empty over a newer populated cross-process source", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      minWriteIntervalMs: 500,
+    });
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+    publisher.publish(publication("empty", [], []));
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const newerPopulatedSource = renderFleetSidebar(
+      snapshotWithSurfaces(["surface:1", "surface:2"]),
+      { state: "populated", observedLiveSurfaceCount: 2 },
+    );
+    writeFileSync(outputPath, newerPopulatedSource, "utf8");
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(readFileSync(outputPath, "utf8")).toBe(newerPopulatedSource);
+    publisher.dispose();
+  });
+
+  it("does not flush a stale populated decrease over a newer topology", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      minWriteIntervalMs: 500,
+    });
+    publisher.publish(
+      publication(
+        "populated",
+        ["surface:1", "surface:2"],
+        ["surface:1", "surface:2"],
+      ),
+    );
+    publisher.publish(
+      publication("populated", ["surface:1"], ["surface:1"]),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const newerPopulatedSource = renderFleetSidebar(
+      snapshotWithSurfaces(["surface:1", "surface:2", "surface:3"]),
+      { state: "populated", observedLiveSurfaceCount: 3 },
+    );
+    writeFileSync(outputPath, newerPopulatedSource, "utf8");
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(readFileSync(outputPath, "utf8")).toBe(newerPopulatedSource);
+    publisher.dispose();
   });
 
   it("cancels a pending coalesced write on dispose", async () => {
