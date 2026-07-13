@@ -16,7 +16,11 @@ import {
   selectReapablePids,
   type ProcessInfo,
 } from "../src/mcp-reaper.js";
-import { createServer, type CreateServerOptions } from "../src/server.js";
+import {
+  createServer,
+  createServerContext,
+  type CreateServerOptions,
+} from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState, CliType } from "../src/agent-types.js";
 import {
@@ -300,17 +304,24 @@ describe("Phase 10 painpoint e2e replay", () => {
       "surface:lead",
       ...agentIds.map((_agentId, index) => `surface:worker-${index}`),
     ]);
-    const server = startEngineServer(exec, dir);
+    const context = createServerContext({
+      exec,
+      stateDir: dir,
+      controlHealthIntervalMs: 0,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
 
     try {
+      await context.lifecycleStartPromise;
       const engine = getEngine(server);
-      await engine.getRegistry().reconstitute();
-      statusCalls.length = 0;
 
-      await engine.runSweep();
-
-      expect(statusCalls).toHaveLength(agentCount);
-      expect(statusCalls.map(({ key }) => key)).toEqual(
+      const managedStatusCalls = statusCalls.filter(({ key }) =>
+        agentIds.includes(key),
+      );
+      expect(managedStatusCalls).toHaveLength(agentCount);
+      expect(managedStatusCalls.map(({ key }) => key)).toEqual(
         expect.arrayContaining(agentIds),
       );
 
@@ -319,7 +330,8 @@ describe("Phase 10 painpoint e2e replay", () => {
 
       expect(statusCalls).toEqual([]);
     } finally {
-      await closeServer(server);
+      await server.close();
+      context.dispose();
     }
   });
 

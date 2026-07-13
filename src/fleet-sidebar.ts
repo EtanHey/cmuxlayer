@@ -80,6 +80,19 @@ export interface FleetSidebarSnapshot {
   lanes: FleetSidebarLane[];
 }
 
+export type FleetSidebarPublicationState =
+  | "discovering"
+  | "populated"
+  | "empty"
+  | "unknown";
+
+export interface FleetSidebarPublication {
+  state: FleetSidebarPublicationState;
+  snapshot: FleetSidebarSnapshot;
+  /** Null means surface enumeration was inconclusive. */
+  observedLiveSurfaceRefs: string[] | null;
+}
+
 const LANE_ORDER: FleetLaneKey[] = [
   "orc",
   "golems",
@@ -378,7 +391,15 @@ func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ seats) -> some
   }
 }`;
 
-export function renderFleetSidebar(snapshot: FleetSidebarSnapshot): string {
+export function renderFleetSidebar(
+  snapshot: FleetSidebarSnapshot,
+  opts: {
+    state?: FleetSidebarPublicationState;
+    observedLiveSurfaceCount?: number | null;
+  } = {},
+): string {
+  const state =
+    opts.state ?? (snapshot.seatCount > 0 ? "populated" : "discovering");
   const laneCalls = snapshot.lanes
     .map((lane) => {
       const seats = lane.seats.map(renderSeat).join(",\n");
@@ -386,15 +407,43 @@ export function renderFleetSidebar(snapshot: FleetSidebarSnapshot): string {
     })
     .join("\n  Divider()\n");
 
-  const content =
-    snapshot.lanes.length === 0
+  const emptyContent =
+    state === "empty"
       ? `  Text("No live fleet seats")
     .font(.system(size: 11))
     .foregroundColor(.secondary)
     .padding(6)`
-      : laneCalls;
+      : state === "unknown"
+        ? `  VStack(alignment: .leading, spacing: 2) {
+    Text("Fleet topology unavailable")
+      .font(.system(size: 11))
+      .foregroundColor(.secondary)
+    Text("Keeping the last populated fleet until discovery recovers.")
+      .font(.system(size: 9))
+      .foregroundColor(.tertiary)
+  }
+    .padding(6)`
+        : `  VStack(alignment: .leading, spacing: 2) {
+    Text("Discovering fleet seats…")
+      .font(.system(size: 11))
+      .foregroundColor(.secondary)
+    Text("Reconnect discovery populates this view automatically.")
+      .font(.system(size: 9))
+      .foregroundColor(.tertiary)
+  }
+    .padding(6)`;
 
-  return `${FLEET_SWIFT_HELPERS}
+  const content = snapshot.lanes.length === 0 ? emptyContent : laneCalls;
+  const observed = opts.observedLiveSurfaceCount;
+  const observedMetadata =
+    observed === null ||
+    (observed === undefined &&
+      (state === "discovering" || state === "unknown"))
+      ? "unknown"
+      : (observed ?? snapshot.seatCount);
+
+  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata}
+${FLEET_SWIFT_HELPERS}
 
 ScrollView {
 VStack(alignment: .leading, spacing: 6) {
@@ -419,7 +468,7 @@ export function defaultFleetSidebarPath(home = homedir()): string {
 }
 
 export interface FleetSidebarPublisherLike {
-  publish(snapshot: FleetSidebarSnapshot): void;
+  publish(publication: FleetSidebarPublication | FleetSidebarSnapshot): void;
   dispose(): void;
 }
 
@@ -432,6 +481,8 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   private readonly outputPath: string;
   private readonly minWriteIntervalMs: number;
   private pendingSource: string | null = null;
+  private pendingPublication: FleetSidebarPublication | null = null;
+  private pendingBaselineSource: string | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
@@ -443,27 +494,61 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     );
   }
 
-  publish(snapshot: FleetSidebarSnapshot): void {
+  publish(input: FleetSidebarPublication | FleetSidebarSnapshot): void {
     if (this.disposed) return;
-    const source = renderFleetSidebar(snapshot);
-    if (this.readCurrentSource() === source) {
-      this.pendingSource = null;
+    const publication = this.normalizePublication(input);
+    const currentSource = this.readCurrentSource();
+    if (
+      this.pendingSource !== null &&
+      !this.shouldPublish(publication, this.pendingBaselineSource)
+    ) {
+      if (this.pendingIsInvalidatedByObservation(publication)) {
+        this.clearPending();
+        this.clearTimer();
+      }
+      return;
+    }
+    const previousSource = this.pendingSource ?? currentSource;
+    if (!this.shouldPublish(publication, previousSource)) return;
+    if (
+      this.pendingSource !== null &&
+      currentSource !== this.pendingBaselineSource &&
+      !this.shouldPublishOverNewerSource(publication, currentSource)
+    ) {
+      return;
+    }
+
+    const source = renderFleetSidebar(publication.snapshot, {
+      state: publication.state,
+      observedLiveSurfaceCount:
+        publication.observedLiveSurfaceRefs?.length ?? null,
+    });
+    if (currentSource === source) {
+      this.clearPending();
       this.clearTimer();
       return;
     }
 
     this.pendingSource = source;
+    this.pendingPublication = publication;
+    this.pendingBaselineSource = currentSource;
     this.flushOrSchedule();
   }
 
   dispose(): void {
     this.disposed = true;
-    this.pendingSource = null;
+    this.clearPending();
     this.clearTimer();
   }
 
   private flushOrSchedule(): void {
-    if (this.disposed || this.pendingSource === null) return;
+    if (
+      this.disposed ||
+      this.pendingSource === null ||
+      this.pendingPublication === null
+    ) {
+      return;
+    }
     const waitMs = this.remainingWriteDelay();
     if (waitMs > 0) {
       if (this.timer === null) {
@@ -477,8 +562,17 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     }
 
     const source = this.pendingSource;
-    this.pendingSource = null;
-    if (this.readCurrentSource() === source) return;
+    const publication = this.pendingPublication;
+    const baselineSource = this.pendingBaselineSource;
+    this.clearPending();
+    const currentSource = this.readCurrentSource();
+    if (currentSource === source) return;
+    if (
+      currentSource !== baselineSource &&
+      !this.shouldPublishOverNewerSource(publication, currentSource)
+    ) {
+      return;
+    }
     this.atomicWrite(source);
   }
 
@@ -497,6 +591,129 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     } catch {
       return null;
     }
+  }
+
+  private normalizePublication(
+    input: FleetSidebarPublication | FleetSidebarSnapshot,
+  ): FleetSidebarPublication {
+    if ("snapshot" in input) return input;
+    const surfaceRefs = input.lanes.flatMap((lane) =>
+      lane.seats.map((seat) => seat.surfaceRef),
+    );
+    return {
+      state: input.seatCount > 0 ? "populated" : "empty",
+      snapshot: input,
+      observedLiveSurfaceRefs: surfaceRefs,
+    };
+  }
+
+  private shouldPublish(
+    publication: FleetSidebarPublication,
+    previousSource: string | null,
+  ): boolean {
+    const previous = inspectFleetSidebarSource(previousSource);
+    if (
+      previous.state === "populated" &&
+      (publication.state === "discovering" || publication.state === "unknown")
+    ) {
+      return false;
+    }
+
+    if (publication.state === "empty") {
+      if (publication.observedLiveSurfaceRefs === null) return false;
+      if (previous.state !== "populated") return true;
+      if (previous.surfaceRefs.size === 0) {
+        return publication.observedLiveSurfaceRefs.length === 0;
+      }
+      const observedLiveSurfaceRefs = new Set(
+        publication.observedLiveSurfaceRefs,
+      );
+      for (const previousSurfaceRef of previous.surfaceRefs) {
+        if (observedLiveSurfaceRefs.has(previousSurfaceRef)) return false;
+      }
+      return true;
+    }
+
+    if (
+      previous.state === "populated" &&
+      publication.state === "populated" &&
+      publication.observedLiveSurfaceRefs !== null
+    ) {
+      const nextSurfaceRefs = new Set(
+        publication.snapshot.lanes.flatMap((lane) =>
+          lane.seats.map((seat) => seat.surfaceRef),
+        ),
+      );
+      const observedLiveSurfaceRefs = new Set(
+        publication.observedLiveSurfaceRefs,
+      );
+      for (const previousSurfaceRef of previous.surfaceRefs) {
+        if (
+          !nextSurfaceRefs.has(previousSurfaceRef) &&
+          observedLiveSurfaceRefs.has(previousSurfaceRef)
+        ) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  private shouldPublishOverNewerSource(
+    publication: FleetSidebarPublication,
+    newerSource: string | null,
+  ): boolean {
+    const newer = inspectFleetSidebarSource(newerSource);
+    if (newer.state === "populated") {
+      if (publication.state !== "populated") return false;
+      const nextSurfaceRefs = new Set(
+        publication.snapshot.lanes.flatMap((lane) =>
+          lane.seats.map((seat) => seat.surfaceRef),
+        ),
+      );
+      for (const newerSurfaceRef of newer.surfaceRefs) {
+        if (!nextSurfaceRefs.has(newerSurfaceRef)) return false;
+      }
+    }
+    return this.shouldPublish(publication, newerSource);
+  }
+
+  private pendingIsInvalidatedByObservation(
+    publication: FleetSidebarPublication,
+  ): boolean {
+    if (
+      this.pendingPublication === null ||
+      publication.observedLiveSurfaceRefs === null
+    ) {
+      return false;
+    }
+    const baseline = inspectFleetSidebarSource(this.pendingBaselineSource);
+    if (baseline.state !== "populated") return false;
+
+    const pendingSurfaceRefs = new Set(
+      this.pendingPublication.snapshot.lanes.flatMap((lane) =>
+        lane.seats.map((seat) => seat.surfaceRef),
+      ),
+    );
+    const observedLiveSurfaceRefs = new Set(
+      publication.observedLiveSurfaceRefs,
+    );
+    if (baseline.surfaceRefs.size === 0) {
+      return (
+        this.pendingPublication.state === "empty" &&
+        observedLiveSurfaceRefs.size > 0
+      );
+    }
+    for (const baselineSurfaceRef of baseline.surfaceRefs) {
+      if (
+        !pendingSurfaceRefs.has(baselineSurfaceRef) &&
+        observedLiveSurfaceRefs.has(baselineSurfaceRef)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private atomicWrite(source: string): void {
@@ -523,4 +740,46 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     clearTimeout(this.timer);
     this.timer = null;
   }
+
+  private clearPending(): void {
+    this.pendingSource = null;
+    this.pendingPublication = null;
+    this.pendingBaselineSource = null;
+  }
+}
+
+function inspectFleetSidebarSource(source: string | null): {
+  state: FleetSidebarPublicationState | null;
+  surfaceRefs: Set<string>;
+} {
+  if (!source) return { state: null, surfaceRefs: new Set() };
+
+  const surfaceRefs = new Set<string>();
+  const surfaceRefPattern = /"surfaceRef":\s*("(?:\\.|[^"\\])*")/g;
+  for (const match of source.matchAll(surfaceRefPattern)) {
+    try {
+      surfaceRefs.add(JSON.parse(match[1]!) as string);
+    } catch {
+      // Ignore malformed legacy rows; the rendered count remains a fallback.
+    }
+  }
+
+  const metadata = source.match(
+    /^\/\/ cmuxlayer-fleet-state: (discovering|populated|empty|unknown)\b/,
+  );
+  if (metadata) {
+    return {
+      state: metadata[1] as FleetSidebarPublicationState,
+      surfaceRefs,
+    };
+  }
+
+  const legacyCount = source.match(/Text\("(\d+) live seats ·/);
+  return {
+    state:
+      surfaceRefs.size > 0 || Number(legacyCount?.[1] ?? 0) > 0
+        ? "populated"
+        : null,
+    surfaceRefs,
+  };
 }

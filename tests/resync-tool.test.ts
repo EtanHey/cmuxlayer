@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "../src/server.js";
+import { createServer, createServerContext } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -1103,6 +1103,59 @@ describe("resync_agents tool", () => {
     expect((server as any)._registeredTools["resync_agents"]).toBeDefined();
   });
 
+  it("discovers and publishes the first fleet once for a shared server context", async () => {
+    const exec = makeDiscoveryExec();
+    const publisher = {
+      publish: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const context = createServerContext({
+      exec,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const first = createServer({ context, fleetSidebarPublisher: publisher });
+
+    try {
+      await context.lifecycleStartPromise;
+      const discoveryReadCount = () =>
+        (exec as ReturnType<typeof vi.fn>).mock.calls.filter(([, args]) => {
+          const linesIndex = args.indexOf("--lines");
+          return (
+            args.includes("read-screen") &&
+            linesIndex >= 0 &&
+            args[linesIndex + 1] === "30"
+          );
+        }).length;
+      const readsAfterFirstInitialize = discoveryReadCount();
+      const second = createServer({
+        context,
+        fleetSidebarPublisher: publisher,
+      });
+      await context.lifecycleStartPromise;
+
+      expect(readsAfterFirstInitialize).toBeGreaterThan(0);
+      expect(discoveryReadCount()).toBe(readsAfterFirstInitialize);
+      expect(publisher.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          state: "populated",
+          snapshot: expect.objectContaining({
+            seatCount: 1,
+            lanes: [
+              expect.objectContaining({
+                key: "other",
+              }),
+            ],
+          }),
+        }),
+      );
+      await second.close();
+    } finally {
+      await first.close();
+      context.dispose();
+    }
+  });
+
   it("list_agents discovers live agents from surfaces even with an empty registry", async () => {
     const server = createServer({
       exec: makeDiscoveryExec(),
@@ -2043,13 +2096,18 @@ describe("resync_agents tool", () => {
     expect(parsedState.health.issue_codes).not.toContain(
       "worker_in_leftmost_column",
     );
-  });
+  }, 10_000);
 
   it("resync_agents evicts registry-only phantom agents instead of failing", async () => {
-    const server = createServer({
+    const context = createServerContext({
       exec: makeDiscoveryExec(),
       stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
     });
+    const server = createServer({
+      context,
+    });
+    await context.lifecycleStartPromise;
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();

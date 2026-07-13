@@ -63,6 +63,94 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("discovers and publishes a live seat on first initialize", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:app",
+          title: "App",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    });
+    client.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:app",
+      window_ref: "window:app",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:1"],
+        },
+      ],
+    });
+    client.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:app",
+      window_ref: "window:app",
+      pane_ref: "pane:1",
+      surfaces: [
+        {
+          ref: "surface:1",
+          title: "cmuxlayerCodex [surface:1]",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+    });
+    client.readScreen.mockResolvedValue({
+      surface: "surface:1",
+      text:
+        "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+      lines: 30,
+      scrollback_used: false,
+    });
+    const publisher = {
+      publish: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const runtime = new CmuxAppServerRuntime({
+      client,
+      stateDir: TEST_DIR,
+      fleetSidebarPublisher: publisher,
+    });
+
+    try {
+      await runtime.initialize();
+
+      expect(publisher.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          state: "populated",
+          observedLiveSurfaceRefs: ["surface:1"],
+          snapshot: expect.objectContaining({
+            seatCount: 1,
+            lanes: [
+              expect.objectContaining({
+                key: "cmuxlayer",
+                seats: [
+                  expect.objectContaining({
+                    surfaceRef: "surface:1",
+                    screenState: "working",
+                  }),
+                ],
+              }),
+            ],
+          }),
+        }),
+      );
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
   it("forwards an injected fleet publisher to the reconciler and disposes it", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -79,11 +167,17 @@ describe("CmuxAppServerRuntime", () => {
     try {
       await (runtime as any).engine.runSweep();
 
-      expect(publisher.publish).toHaveBeenCalledWith({
-        seatCount: 0,
-        activeCount: 0,
-        lanes: [],
-      });
+      expect(publisher.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          state: "empty",
+          observedLiveSurfaceRefs: [],
+          snapshot: {
+            seatCount: 0,
+            activeCount: 0,
+            lanes: [],
+          },
+        }),
+      );
     } finally {
       runtime.dispose();
       rmSync(TEST_DIR, { recursive: true, force: true });

@@ -537,17 +537,29 @@ export class AgentRegistry {
 
   async listMerged(
     discovery: AgentDiscovery,
-    opts?: { filter?: AgentFilter; force?: boolean },
+    opts?: {
+      filter?: AgentFilter;
+      force?: boolean;
+      discovered?: DiscoveredAgent[];
+      nonDestructive?: boolean;
+    },
   ): Promise<MergedAgent[]> {
-    await this.reconcile();
-    await this.purgeTerminal();
+    if (!opts?.nonDestructive) {
+      await this.reconcile();
+      await this.purgeTerminal();
+    }
 
-    const discovered = await discovery.scan(opts?.force ?? false);
-    await this.evictBootingGhosts(discovered);
+    const discovered =
+      opts?.discovered ?? (await discovery.scan(opts?.force ?? false));
+    if (!opts?.nonDestructive) {
+      await this.evictBootingGhosts(discovered);
+    }
 
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
     const repairCandidates = this.liveRepairCandidatesForDiscovery(discovered);
-    this.selfHealManagedRegistrationsFromDiscovery(repairCandidates, bySurface);
+    if (!opts?.nonDestructive) {
+      this.selfHealManagedRegistrationsFromDiscovery(repairCandidates, bySurface);
+    }
     const suppressedDuplicateSurfaceRefs =
       this.duplicateDiscoverySurfaceRefs(repairCandidates);
     const merged: MergedAgent[] = [];
@@ -558,6 +570,7 @@ export class AgentRegistry {
       const isAutoRecord = record.agent_id.startsWith("auto-");
 
       if (
+        !opts?.nonDestructive &&
         isAutoRecord &&
         discoveredEntry &&
         !discoveredEntry.read_error &&
@@ -590,7 +603,15 @@ export class AgentRegistry {
         }
       }
 
-      seenSurfaces.add(record.surface_id);
+      const discoveredReplacesStaleManagedRecord =
+        opts?.nonDestructive === true &&
+        !isAutoRecord &&
+        TERMINAL_STATES.has(record.state) &&
+        discoveredEntry?.has_agent === true &&
+        discoveredEntry.read_error === false;
+      if (!discoveredReplacesStaleManagedRecord) {
+        seenSurfaces.add(record.surface_id);
+      }
       merged.push({
         ...liveRecord,
         discovered: isAutoRecord,

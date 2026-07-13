@@ -7,6 +7,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
+import { AgentDiscovery } from "../src/agent-discovery.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
@@ -15,7 +16,7 @@ import { readMonitorRegistry, registerMonitor } from "../src/monitor-registry.js
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
-import type { FleetSidebarSnapshot } from "../src/fleet-sidebar.js";
+import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 
@@ -124,7 +125,7 @@ describe("Sidebar Sync", () => {
   let engine: AgentEngine;
   let liveSurfaces: CmuxSurface[];
   let inboxOpts: { baseDir: string };
-  let publishedFleetSnapshots: FleetSidebarSnapshot[];
+  let publishedFleetPublications: FleetSidebarPublication[];
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -132,7 +133,7 @@ describe("Sidebar Sync", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
-    publishedFleetSnapshots = [];
+    publishedFleetPublications = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
@@ -140,7 +141,12 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       inboxOpts,
       fleetSidebarPublisher: {
-        publish: (snapshot) => publishedFleetSnapshots.push(snapshot),
+        publish: (publication) => {
+          if (!("snapshot" in publication)) {
+            throw new Error("engine must publish an explicit fleet state");
+          }
+          publishedFleetPublications.push(publication);
+        },
         dispose: () => {},
       },
     });
@@ -197,29 +203,234 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetSnapshots).toHaveLength(1);
-    expect(publishedFleetSnapshots[0]).toMatchObject({
-      seatCount: 1,
-      activeCount: 1,
-      lanes: [
+    expect(publishedFleetPublications).toHaveLength(1);
+    expect(publishedFleetPublications[0]).toMatchObject({
+      state: "populated",
+      observedLiveSurfaceRefs: ["surface:42"],
+      snapshot: {
+        seatCount: 1,
+        activeCount: 1,
+        lanes: [
+          {
+            key: "voicelayer",
+            liveCount: 1,
+            activeCount: 1,
+            collapsed: false,
+            seats: [
+              {
+                agentId: "auto-voicelayer-worker",
+                surfaceRef: "surface:42",
+                name: "voicelayerCodex [surface:42]",
+                screenState: "working",
+                status: "Reading src/transcribe.ts",
+                healthVisible: false,
+                health: "",
+              },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("discovers and publishes live seats exactly once during idempotent startup", async () => {
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:42"),
+        title: "cmuxlayerCodex [surface:42]",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:cmuxlayer")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      window_ref: "window:1",
+      panes: [
         {
-          key: "voicelayer",
-          liveCount: 1,
-          activeCount: 1,
-          collapsed: false,
-          seats: [
-            {
-              agentId: "auto-voicelayer-worker",
-              surfaceRef: "surface:42",
-              name: "voicelayerCodex [surface:42]",
-              screenState: "working",
-              status: "Reading src/transcribe.ts",
-              healthVisible: false,
-              health: "",
-            },
-          ],
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
         },
       ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: liveSurfaces,
+    });
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:42",
+      text:
+        "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+      lines: 30,
+      scrollback_used: false,
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+    const scan = vi.spyOn(discovery, "scan");
+
+    await engine.initialize(discovery);
+    await engine.initialize(discovery);
+
+    expect(scan).toHaveBeenCalledTimes(1);
+    expect(publishedFleetPublications).toHaveLength(2);
+    expect(publishedFleetPublications[0]).toMatchObject({
+      state: "discovering",
+      observedLiveSurfaceRefs: null,
+    });
+    expect(publishedFleetPublications.at(-1)).toMatchObject({
+      state: "populated",
+      observedLiveSurfaceRefs: ["surface:42"],
+      snapshot: {
+        seatCount: 1,
+        lanes: [
+          {
+            key: "cmuxlayer",
+            seats: [
+              {
+                surfaceRef: "surface:42",
+                screenState: "working",
+              },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [],
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({ state: "discovering" }),
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: [],
+      }),
+    ]);
+  });
+
+  it("degrades a transient first-connect discovery failure to unknown", async () => {
+    mockClient.listWorkspaces.mockRejectedValue(
+      new Error("cmux socket unavailable"),
+    );
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => {
+        throw new Error("cmux socket unavailable");
+      },
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await expect(engine.initialize(discovery)).resolves.toBeUndefined();
+
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({ state: "discovering" }),
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: null,
+      }),
+    ]);
+  });
+
+  it("suppresses terminal lifecycle and status side effects on first connect", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "stale-done-agent",
+        surface_id: "surface:stale",
+        state: "done",
+      }),
+    );
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [],
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+
+    expect(mockClient.log).not.toHaveBeenCalled();
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalled();
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(mockClient.setStatuses).not.toHaveBeenCalled();
+  });
+
+  it("uses the discovered live occupant when a terminal record has the recycled surface ref", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "stale-done-agent",
+        surface_id: "surface:42",
+        state: "done",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:42"),
+        title: "cmuxlayerCodex [surface:42]",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:cmuxlayer")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:42"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:cmuxlayer",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: liveSurfaces,
+    });
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:42",
+      text:
+        "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+      lines: 30,
+      scrollback_used: false,
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+
+    expect(publishedFleetPublications.at(-1)).toMatchObject({
+      state: "populated",
+      snapshot: {
+        seatCount: 1,
+        lanes: [
+          {
+            seats: [
+              {
+                agentId: "auto-codex-surface-42",
+                surfaceRef: "surface:42",
+              },
+            ],
+          },
+        ],
+      },
     });
   });
 
@@ -231,7 +442,12 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetSnapshots).toHaveLength(0);
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: null,
+      }),
+    ]);
   });
 
   it("preserves the last generated fleet when topology is empty but registry seats remain", async () => {
@@ -242,7 +458,47 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetSnapshots).toHaveLength(0);
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: [],
+      }),
+    ]);
+  });
+
+  it("publishes authoritative empty when only unrelated terminals remain", async () => {
+    liveSurfaces = [makeSurface("surface:notes")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:notes")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:1",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:notes"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      pane_ref: "pane:1",
+      surfaces: liveSurfaces,
+    });
+
+    await engine.runSweep();
+
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({
+        state: "empty",
+        observedLiveSurfaceRefs: ["surface:notes"],
+      }),
+    ]);
   });
 
   it("preserves the last generated fleet when topology enumeration is partial", async () => {
@@ -270,7 +526,12 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    expect(publishedFleetSnapshots).toHaveLength(0);
+    expect(publishedFleetPublications).toEqual([
+      expect.objectContaining({
+        state: "unknown",
+        observedLiveSurfaceRefs: null,
+      }),
+    ]);
   });
 
   afterEach(() => {

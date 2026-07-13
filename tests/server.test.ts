@@ -12,6 +12,7 @@ import {
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
@@ -514,6 +515,8 @@ describe("Claude channels", () => {
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: null,
+      seat_identity_status: "mismatch",
+      seat_identity_error: "test fixture has a mismatched seat identity",
     });
 
     const mockClient = {
@@ -7387,11 +7390,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7410,6 +7414,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7438,6 +7443,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
@@ -7551,11 +7557,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7574,6 +7581,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7604,6 +7612,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
@@ -7693,11 +7702,12 @@ describe("tool handler integration", () => {
       return { stdout: "{}", stderr: "" };
     });
 
-    const server = createServer({
+    const context = createServerContext({
       exec: mockExec,
       stateDir,
       disableSpawnPreflight: true,
     });
+    const server = createServer({ context });
     const tool = (
       server as {
         _registeredTools: Record<
@@ -7716,6 +7726,7 @@ describe("tool handler integration", () => {
     )._registeredTools["spawn_agent"];
 
     try {
+      await context.lifecycleStartPromise;
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
@@ -7743,6 +7754,7 @@ describe("tool handler integration", () => {
       } else {
         process.env.REPOGOLEM_ALLOW_MODEL = previousAllowModel;
       }
+      context.dispose();
       rmSync(stateDir, { recursive: true, force: true });
     }
   }, 10_000);
@@ -10113,8 +10125,57 @@ describe("registry reconstitution error logging", () => {
     }
 
     expect(console.error).toHaveBeenCalledWith(
-      "[cmuxlayer] registry reconstitution failed:",
+      "[cmuxlayer] lifecycle initialization failed:",
       expect.any(Error),
     );
+  });
+
+  it("does not arm a sweep after the lifecycle context is disposed during initialization", async () => {
+    let releaseWorkspaces!: (value: { workspaces: [] }) => void;
+    const pendingWorkspaces = new Promise<{ workspaces: [] }>((resolve) => {
+      releaseWorkspaces = resolve;
+    });
+    const mockClient = {
+      listWorkspaces: vi
+        .fn()
+        .mockImplementationOnce(() => pendingWorkspaces)
+        .mockResolvedValue({ workspaces: [] }),
+      listPanes: vi.fn().mockResolvedValue({ panes: [] }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+      readScreen: vi.fn(),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      clearProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const context = createServerContext({
+      client: mockClient as any,
+      stateDir: join(CHANNEL_TEST_DIR, "disposed-during-initialize"),
+      controlHealthIntervalMs: 0,
+    });
+    createServer({
+      context,
+      fleetSidebarPublisher: { publish: vi.fn(), dispose: vi.fn() },
+    });
+    const engine = context.lifecycleSweepEngine!;
+    const startSweep = vi.spyOn(engine, "startSweep");
+    const initialization = context.lifecycleStartPromise!;
+
+    context.dispose();
+    releaseWorkspaces({ workspaces: [] });
+    await initialization;
+
+    try {
+      expect(startSweep).not.toHaveBeenCalled();
+    } finally {
+      engine.dispose();
+    }
   });
 });

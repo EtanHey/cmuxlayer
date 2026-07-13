@@ -29,6 +29,7 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
+import { StateManager } from "../src/state-manager.js";
 import {
   reconcileMonitorRegistry,
   registerMonitor,
@@ -578,6 +579,10 @@ async function createBroadcastServer(
   } = {},
 ) {
   const { client, sendCalls, sendKeyCalls } = makeBroadcastClient(records, opts);
+  const persistedState = new StateManager(TEST_DIR);
+  for (const record of records) {
+    persistedState.writeState(record);
+  }
   const server = createTrackedServer({
     client: client as any,
     stateDir: TEST_DIR,
@@ -3226,11 +3231,9 @@ describe("agent lifecycle tool handlers", () => {
       target_count: 3,
       delivered_count: 3,
     });
-    expect(sendCalls.map((call) => call.surface)).toEqual([
-      "surface:orc",
-      "surface:ic",
-      "surface:worker",
-    ]);
+    expect(sendCalls.map((call) => call.surface).sort()).toEqual(
+      ["surface:orc", "surface:ic", "surface:worker"].sort(),
+    );
   });
 
   it("list_agents state filter uses the reconciled screen-active state", async () => {
