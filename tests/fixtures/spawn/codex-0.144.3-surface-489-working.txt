@@ -1,0 +1,117 @@
+Last login: Mon Jul 13 14:56:19 on ttys002
+etanheyman ~ [feature/coach-agent-boot-prompt-fix] $ CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'CMUXLAYER_MCP_PROFILE=inherit cmuxlayerCodex -s -w '/Users/etanheyman/Gits/cmuxlayer.wt/spawn-reliability-3head'
+[4] 43007
+cmuxlayerCodex
+
+[4]  + done       ( /Applications/iTerm.app/Contents/Resources/it2profile -s Golems 2> /dev/nul)
+
+Shellbook: starting the agent directly.
+Shellbook: run `shellbook tui` in another terminal for the social pane.
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for
+  this invocation.
+
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.144.3)                               │
+│                                                          │
+│ model:       gpt-5.6-sol high   /model to change         │
+│ directory:   ~/Gits/cmuxlayer.wt/spawn-reliability-3head │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: Use the OpenAI docs MCP for API questions; enable it with codex mcp add
+  openaiDeveloperDocs --url https://developers.openai.com/mcp.
+
+• You have 2 usage limit resets available. Run /usage to use one.
+
+
+› Read and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/design/2026-07-13-spawn-
+  reliability-mission.mdRead and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/
+  design/2026-07-13-spawn-reliability-mission.md
+
+
+⚠ `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for
+  this invocation.
+
+• I’m reading the mission and searching BrainLayer first. I’ll apply the mission’s
+  requested workflow, then use the matching implementation and verification skills it
+  calls for.
+
+• Called
+  └ brainlayer.brain_search({"query":"cmuxlayer spawn reliability 3head mission 2026-07-
+        13 spawn agent
+        reliability","project":"cmuxlayer","detail":"full","num_results":10})
+    ## Search results for "cmuxlayer spawn reliability 3head mission 2026-07…" - 10 of 10
+        shown
+
+    ### 1. ETAN FRUSTRATION (2026-07-13, recurring): "I thought the waitfor would be
+        fixed by now." — cmuxlaye…
+    - ID: brainbar-4199e18c-27b
+    - Source: brainbar-store
+    - Date: 2026-07-13
+    - Preview: ETAN FRUSTRATION (2026-07-13, recurring): "I thought the waitfor would be
+        fixed by now." — cmuxlayer spawn reliability has a 3-head c...
+
+• Explored
+  └ Read SKILL.md (using-superpowers skill), 2026-07-13-spawn-reliability-mission.md
+
+• Ran git status --short --branch
+  └ ## fix/spawn-reliability-3head
+
+─────────────────────────────────────────────────────────────────────────────────────────
+
+• The mission is a three-head P1 bug-fix with real-capture RED→GREEN fixtures and PR
+  delivery. I’m using systematic debugging, TDD, cmux agent control, plan execution, PR-
+  loop, and verification/never-fabricate; the mission explicitly requires spawning a real
+  Codex worker for the readiness capture.
+
+• Explored
+  └ Read SKILL.md (systematic-debugging skill), SKILL.md (executing-plans skill),
+  SKILL.md
+         (verification-before-completion skill), SKILL.md (cmux-agents skill), SKILL.md
+         (never-fabricate skill), SKILL.md (test-driven-development skill), SKILL.md
+         (cmux
+         skill), SKILL.md (pr-loop skill)
+
+
+› LIVE SPECIMEN for HEAD 3: your OWN spawn just reproduced it — spawn_agent created this
+  surface (489) and you (codex 0.144.3) booted + are working, but spawn_agent returned
+  "Agent not found: cmuxlayerCodex-pending-1783943911-ep9m" (the pending→ready/registry
+  resolution failed even though you're clearly ready). Capture YOUR current booted
+  screen via read_screen(raw) as the head-3 RED fixture and run it through
+  matchReadyPattern("codex", …) to find the exact non-match. This is the real 0.144.3
+  boot you need.
+
+
+• I’m treating surface 489 as the authoritative Head 3 specimen. I’ll enumerate cmuxlayer
+  state, capture its raw screen unchanged, and save that exact output before running the
+  matcher—this is the skill-required real-screen evidence gate.
+
+• Called cmuxlayer.list_agents({"repo":"cmuxlayer"})
+  └ ┌─ cmux agents ─ 3 agents
+    │ ID                   Repo             State    Model              Session
+    ├───────────────────────────────────────────────────────────────────────────────
+    │ cmuxlayerLead        cmuxlayer        error    Opus 4.8 (1M co…   —
+    │ cmuxlayerCodex-pe…   cmuxlayer        ready    codex              —
+    │ cmuxlayerCodex-pe…   cmuxlayer        booting  codex       ...
+
+• Called
+  └ cmuxlayer.list_surfaces({"include_screen_preview":true,"preview_lines":8,"verbose":tr
+        ue})
+    ┌─ cmux surfaces ─ 16 surfaces in 2 workspaces
+    │ Ref            Type       Title                          Workspace
+    ├──────────────────────────────────────────────────────────────────────
+    │ surface:422    terminal   🎯 orc-driver v2               workspace:2
+    │   └ ✻ Churned for 9s · 1 monitor still running                 …
+    │ surface:441    terminal   golemsClaude [surface:441]     workspace:2
+    │   └ ◻ Re...
+
+• Calling
+  └ cmuxlayer.read_screen({"surface":"surface:489","raw":true,"scrollback":true,"lines":2
+        00})
+
+Working (47s • esc to interrupt)
+
+ 
+› Implement {feature}
+ 
+  gpt-5.6-sol high · ~/Gits/cmuxlayer.wt/spawn-reliability-3head

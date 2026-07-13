@@ -1345,8 +1345,38 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
   return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
+function isLauncherShellCommand(command: string): boolean {
+  return /(?:^|\s)[\w.-]+(?:Claude|Codex|Cursor|Gemini)(?=\s|$)/.test(command);
+}
+
+function matchShellPromptLine(
+  line: string,
+  opts?: { allowRootInput?: boolean },
+): { input: string } | null {
+  const normalized = line.trimEnd();
+  const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
+  if (barePrompt) {
+    return { input: barePrompt[2] ?? "" };
+  }
+  const rootPrompt = normalized.match(/^\s*#(?:\s+(.*))?$/);
+  if (rootPrompt && (!rootPrompt[1] || opts?.allowRootInput)) {
+    return { input: rootPrompt[1] ?? "" };
+  }
+
+  const prefixedPrompt = normalized.match(
+    /^\s*(?:(?:\S+@\S+)(?:\s+(?:~|\/)\S*)?|(?:\S+\s+)?(?:~|\/)\S*)(?:\s+\[[^\]]+\])?\s*[$%#](?:\s+(.*))?$/,
+  );
+  return prefixedPrompt ? { input: prefixedPrompt[1] ?? "" } : null;
+}
+
 function matchesShellPrompt(text: string): boolean {
-  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
+  const lines = normalizeTerminalText(text).split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
+  return prompt?.input.trim() === "";
 }
 
 function shouldHandleCodexUpdateMenu(
@@ -1629,6 +1659,54 @@ function screenShowsPendingInput(
     (composerInput.includes(tail) ||
       (compactTail.length > 0 &&
         composerInput.replace(/\s+/g, "").includes(compactTail)))
+  );
+}
+
+export function screenShowsPendingShellInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+
+  const compactSubmitted = trimmed.replace(/\s+/g, "");
+  const promptOptions = {
+    allowRootInput: isLauncherShellCommand(trimmed),
+  };
+  let activePromptIndex = -1;
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trimEnd() ?? "";
+    const prompt = matchShellPromptLine(line, promptOptions);
+    if (prompt) {
+      activePromptIndex = index;
+      break;
+    }
+  }
+  if (activePromptIndex < 0) {
+    return false;
+  }
+
+  const prompt = matchShellPromptLine(
+    lines[activePromptIndex] ?? "",
+    promptOptions,
+  );
+  const pending = [
+    prompt?.input ?? "",
+    ...lines.slice(activePromptIndex + 1, end),
+  ]
+    .join("")
+    .trimEnd();
+  return (
+    pending === trimmed ||
+    pending.replace(/\s+/g, "") === compactSubmitted
   );
 }
 
@@ -2829,6 +2907,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     chunkNumber: number,
     totalChunks: number,
     shouldPaste: boolean,
+    avoidDuplicateOnAmbiguousRetry: boolean,
   ) => {
     let attempt = 0;
     let lastError: unknown;
@@ -2869,6 +2948,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
           );
+        }
+        if (avoidDuplicateOnAmbiguousRetry) {
+          try {
+            const snapshot = await readParsedSurface(
+              surface,
+              opts.workspace,
+              { throwOnSurfaceGone: true },
+            );
+            if (
+              snapshot &&
+              (screenShowsPendingInput(snapshot.text, chunk) ||
+                screenShowsPendingShellInput(snapshot.text, chunk))
+            ) {
+              return;
+            }
+          } catch {
+            // The delivery error remains authoritative when the ambiguity
+            // probe cannot read the surface; continue the bounded retry.
+          }
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
@@ -3265,6 +3363,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         batch.firstChunkNumber,
         opts.chunks.length,
         shouldPaste,
+        opts.source_event === "spawn_agent",
       );
       for (const sentChunks of batch.deliveredChunkCounts) {
         opts.onChunkDelivered?.(sentChunks);
@@ -3581,6 +3680,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    require_fresh_shell_prompt?: boolean;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SHELL_READY_TIMEOUT_MS;
     const start = Date.now();
@@ -3596,9 +3696,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         lastText = screen.text;
         if (
           matchesShellPrompt(screen.text) ||
-          READY_PATTERN_CLIS.some(
-            (cli) => matchReadyPattern(cli, screen.text).matched,
-          )
+          (!opts.require_fresh_shell_prompt &&
+            READY_PATTERN_CLIS.some(
+              (cli) => matchReadyPattern(cli, screen.text).matched,
+            ))
         ) {
           return;
         }
@@ -3759,6 +3860,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     command: string;
+    relaunch?: boolean;
   }): Promise<void> => {
     const sanitizedCommand = sanitizeTerminalInput(opts.command);
     const chunks =
@@ -3766,12 +3868,75 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ? chunkTerminalInput(sanitizedCommand, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedCommand];
 
-    await waitForLaunchShellReady({
-      surface: opts.surface,
-      workspace: opts.workspace,
-    });
+    if (!opts.relaunch) {
+      await waitForLaunchShellReady({
+        surface: opts.surface,
+        workspace: opts.workspace,
+      });
+    }
     await withSurfaceWrite(opts.surface, async () => {
+      const submitPendingLauncherCommand = async (): Promise<boolean> => {
+        const readLauncherScreen = () =>
+          client.readScreen(opts.surface, {
+            workspace: opts.workspace,
+            lines: 80,
+            scrollback: false,
+          });
+
+        let screen;
+        try {
+          screen = await readLauncherScreen();
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          return false;
+        }
+        if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
+          return false;
+        }
+
+        try {
+          // Return is a mutation: retrying after a lost acknowledgement can
+          // submit into the newly started CLI. Probe before any fallback.
+          await client.sendKey(opts.surface, "return", {
+            workspace: opts.workspace,
+          });
+          return true;
+        } catch (error) {
+          if (isSurfaceGoneReadFailure(error, opts.surface)) {
+            throw new SurfaceGoneError(opts.surface, error);
+          }
+          try {
+            const confirmation = await readLauncherScreen();
+            return !screenShowsPendingShellInput(
+              confirmation.text,
+              sanitizedCommand,
+            );
+          } catch (confirmationError) {
+            if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, confirmationError);
+            }
+            throw error;
+          }
+        }
+      };
+      const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+        await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
+        await waitForLaunchShellReady({
+          surface: opts.surface,
+          workspace: opts.workspace,
+          require_fresh_shell_prompt: true,
+        });
+      };
+      if (opts.relaunch) {
+        if (await submitPendingLauncherCommand()) {
+          return;
+        }
+        await clearAndVerifyFreshShellPrompt();
+      }
       const relaunchOriginalCommand = async (): Promise<void> => {
+        await clearAndVerifyFreshShellPrompt();
         await deliverInputChunks({
           surface: opts.surface,
           workspace: opts.workspace,
@@ -5133,6 +5298,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5277,6 +5443,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       undefined,
                       launcher.launcherName,
                     ),
+                    relaunch: true,
                   })
               : undefined,
           });
@@ -5657,6 +5824,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 surface: args.surface,
                 workspace: args.workspace,
                 command: sanitizedCommand,
+                relaunch: true,
               }),
           });
         }
@@ -6888,6 +7056,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: opts.surface,
         workspace: record.workspace_id ?? opts.workspace,
         command,
+        relaunch: true,
       });
     };
 
