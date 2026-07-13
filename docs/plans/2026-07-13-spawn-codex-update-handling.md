@@ -72,3 +72,4 @@
 - Counterfactual verification: disabling `cli_update_state` made the launch-readiness regression test time out; restoring the parser signal returned the focused test to green.
 - Local CodeRabbit CLI review: `SKIPPED — free OSS rate limit (24 minutes)`. Required red-team and blue-team diff reviews completed with no critical, high, or medium findings.
 - Macroscope review: fixed its medium false-positive finding by requiring ambiguous bare `Downloading…` / `Installing…` steps to have no earlier ready-agent transcript; CLI-specific installer lines remain independently detectable.
+- Codex review: fixed the complementary later-evidence case by recognizing a minimal `codex>` composer independently of whole-screen agent-type inference.

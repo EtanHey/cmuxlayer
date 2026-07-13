@@ -201,6 +201,12 @@ Select a model for the next worker:
     },
   );
 
+  it("does not let a bare updater-looking line override a later minimal Codex prompt", () => {
+    const parsed = parseScreen("Downloading…\ncodex> ");
+
+    expect(parsed.cli_update_state).toBeUndefined();
+  });
+
   it("recognizes a Codex update menu with a sparkle-prefixed update line", () => {
     const parsed = parseScreen(`
 >_ OpenAI Codex
