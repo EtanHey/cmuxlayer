@@ -336,7 +336,7 @@ describe("fleet sidebar reconciled snapshot", () => {
     });
   });
 
-  it("prefers set status, then parsed current action, then no-status marker", () => {
+  it("prefers set status, then parsed action, while the idle glyph stays truthful", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
@@ -350,6 +350,7 @@ describe("fleet sidebar reconciled snapshot", () => {
           surfaceRef: "surface:2",
           taskSummary: "(auto-discovered)",
           screenCurrentAction: "Editing src/fleet-sidebar.ts",
+          screenStatus: "idle",
         }),
         candidate({
           agentId: "empty",
@@ -371,6 +372,7 @@ describe("fleet sidebar reconciled snapshot", () => {
       statusMissing: false,
     });
     expect(byAgent.get("parsed")).toMatchObject({
+      screenState: "idle",
       status: "Editing src/fleet-sidebar.ts",
       statusMissing: false,
     });
