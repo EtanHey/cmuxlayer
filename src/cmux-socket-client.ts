@@ -27,6 +27,7 @@ import { normalizeKeyName } from "./key-names.js";
 import { CmuxPersistentSocket } from "./cmux-persistent-socket.js";
 import { CmuxSocketError } from "./cmux-socket-error.js";
 import { DEFAULT_SOCKET_PATH } from "./cmux-socket-path.js";
+import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -730,17 +731,7 @@ export class CmuxSocketClient {
         .split(/\r?\n/)
         .filter(Boolean)
         .map((line) => {
-          const match = line.match(
-            /^([^=]+)=(.*?)(?:\s+icon=([^\s]+))?(?:\s+color=(#[0-9a-fA-F]{6}))?$/,
-          );
-          if (!match) return { key: line, value: "" };
-          const [, key, value, icon, color] = match;
-          return {
-            key: key ?? "",
-            value: value?.trim() ?? "",
-            ...(icon ? { icon } : {}),
-            ...(color ? { color } : {}),
-          };
+          return parseCmuxStatusFrame(line) ?? { key: line, value: "" };
         });
     }
   }
