@@ -17,8 +17,11 @@ import type {
   AgentHealthIssueSeverity,
 } from "../src/agent-health.js";
 import {
+  applyFleetSidebarCollapseState,
   buildFleetSidebarSnapshot,
+  defaultFleetSidebarCollapseStatePath,
   defaultFleetSidebarPath,
+  FleetSidebarCollapseStore,
   FleetSidebarPublisher,
   renderFleetSidebar,
   toFleetScreenState,
@@ -384,6 +387,182 @@ describe("fleet sidebar reconciled snapshot", () => {
 });
 
 describe("fleet sidebar snapshot to interpreted Swift", () => {
+  it("applies independent persisted collapse state to active lanes", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "skill-lead",
+          surfaceRef: "surface:skill-lead",
+          surfaceTitle: "skillCreator LEAD",
+          repo: "skill-creator",
+          role: "orchestrator",
+        }),
+        candidate({
+          agentId: "skill-worker",
+          surfaceRef: "surface:skill-worker",
+          surfaceTitle: "skillCreatorCodex",
+          repo: "skill-creator",
+        }),
+        candidate({
+          agentId: "cmux-lead",
+          surfaceRef: "surface:cmux-lead",
+          surfaceTitle: "cmuxlayer LEAD",
+          repo: "cmuxlayer",
+          role: "orchestrator",
+        }),
+        candidate({
+          agentId: "cmux-worker",
+          surfaceRef: "surface:cmux-worker",
+          surfaceTitle: "cmuxlayerCodex",
+          repo: "cmuxlayer",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set([
+          "surface:skill-lead",
+          "surface:skill-worker",
+          "surface:cmux-lead",
+          "surface:cmux-worker",
+        ]),
+      },
+    );
+
+    const collapsed = applyFleetSidebarCollapseState(snapshot, {
+      skillCreator: true,
+      cmuxlayer: false,
+    });
+
+    expect(
+      collapsed.lanes.find((lane) => lane.key === "skillCreator")?.collapsed,
+    ).toBe(true);
+    expect(
+      collapsed.lanes.find((lane) => lane.key === "cmuxlayer")?.collapsed,
+    ).toBe(false);
+    expect(collapsed.lanes.every((lane) => lane.activeCount > 0)).toBe(true);
+  });
+
+  it("renders a collapsed lane as counts, hidden seats, and lead summary without worker cards", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "lead",
+          surfaceRef: "surface:lead",
+          surfaceTitle: "cmuxlayerClaude LEAD",
+          repo: "cmuxlayer",
+          role: "orchestrator",
+          taskSummary: "Coordinate sidebar delivery",
+        }),
+        candidate({
+          agentId: "worker",
+          surfaceRef: "surface:worker",
+          surfaceTitle: "cmuxlayerCodex",
+          repo: "cmuxlayer",
+          taskSummary: "Implement collapse",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:lead", "surface:worker"]),
+      },
+    );
+    const source = renderFleetSidebar(
+      applyFleetSidebarCollapseState(snapshot, { cmuxlayer: true }),
+    );
+
+    expect(source).toContain('fleetLane("cmuxlayer", 2, 2, true, 2, [');
+    expect(source).toContain('"name": "cmuxlayerClaude LEAD"');
+    expect(source).toContain('"status": "Coordinate sidebar delivery"');
+    expect(source).toContain('Text("\\(hiddenSeatCount) seats hidden")');
+    expect(source).toContain("fleetLeadSummary(lead)");
+    expect(source).not.toContain('"surfaceRef": "surface:lead"');
+    expect(source).not.toContain('"surfaceRef": "surface:worker"');
+  });
+
+  it("renders every card for the same lane when explicitly expanded", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "lead",
+          surfaceRef: "surface:lead",
+          surfaceTitle: "cmuxlayer LEAD",
+          role: "orchestrator",
+        }),
+        candidate({
+          agentId: "worker",
+          surfaceRef: "surface:worker",
+          surfaceTitle: "cmuxlayerCodex",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:lead", "surface:worker"]),
+      },
+    );
+    const source = renderFleetSidebar(
+      applyFleetSidebarCollapseState(snapshot, { cmuxlayer: false }),
+    );
+
+    expect(source).toContain('fleetLane("cmuxlayer", 2, 2, false, 0, [');
+    expect(source).toContain('"surfaceRef": "surface:lead"');
+    expect(source).toContain('"surfaceRef": "surface:worker"');
+  });
+
+  it("shrinks a 15 live and 3 active topology to compact lane summaries", () => {
+    const laneSpecs = [
+      { repo: "orc", count: 1, active: 0 },
+      { repo: "golems", count: 2, active: 0 },
+      { repo: "voicelayer", count: 2, active: 0 },
+      { repo: "skill-creator", count: 3, active: 1 },
+      { repo: "cmuxlayer", count: 6, active: 2 },
+      { repo: "misc", count: 1, active: 0 },
+    ] as const;
+    const candidates = laneSpecs.flatMap((spec) =>
+      Array.from({ length: spec.count }, (_, index) => {
+        const surfaceRef = `surface:${spec.repo}:${index}`;
+        return candidate({
+          agentId: `${spec.repo}-${index}`,
+          surfaceRef,
+          surfaceTitle:
+            index === 0
+              ? `${spec.repo} LEAD`
+              : `${spec.repo} worker ${index}`,
+          repo: spec.repo,
+          role: index === 0 ? "orchestrator" : "worker",
+          screenStatus: index < spec.active ? "working" : "idle",
+          taskSummary: `Long representative status for ${spec.repo} seat ${index}`,
+        });
+      }),
+    );
+    const snapshot = buildFleetSidebarSnapshot(candidates, {
+      liveSurfaceRefs: new Set(candidates.map((item) => item.surfaceRef)),
+    });
+    expect(snapshot).toMatchObject({ seatCount: 15, activeCount: 3 });
+
+    const expanded = renderFleetSidebar(
+      applyFleetSidebarCollapseState(snapshot, {
+        orc: false,
+        golems: false,
+        voicelayer: false,
+        skillCreator: false,
+        cmuxlayer: false,
+        other: false,
+      }),
+    );
+    const compact = renderFleetSidebar(
+      applyFleetSidebarCollapseState(snapshot, {
+        orc: true,
+        golems: true,
+        voicelayer: true,
+        skillCreator: true,
+        cmuxlayer: true,
+        other: true,
+      }),
+    );
+
+    expect(expanded.match(/"surfaceRef":/g)).toHaveLength(15);
+    expect(compact.match(/"surfaceRef":/g) ?? []).toHaveLength(0);
+    expect(compact.length).toBeLessThan(expanded.length * 0.6);
+    expect(compact).toContain('Text("15 live seats · 3 active")');
+  });
+
   it("renders exact counts and click-to-focus actions for the final live rows", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [candidate({ surfaceRef: "surface:7" })],
@@ -392,7 +571,7 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
 
     const source = renderFleetSidebar(snapshot);
 
-    expect(source).toContain('fleetLane("cmuxlayer", 1, 1, false, [');
+    expect(source).toContain('fleetLane("cmuxlayer", 1, 1, false, 0, [');
     expect(source).toContain(
       'cmux("surface.focus", surface_id: seat.surfaceRef)',
     );
@@ -450,10 +629,10 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).toContain(
       'Text("\\(liveCount) live · \\(activeCount) active")',
     );
-    expect(source).toContain('Text("\\(liveCount) idle seats collapsed")');
+    expect(source).toContain('Text("\\(hiddenSeatCount) seats hidden")');
   });
 
-  it("preserves and escapes full status and health text without truncation modifiers", () => {
+  it("caps normal status at one line while leaving actionable health multiline", () => {
     const status = 'Review "quoted" \\ path\nnext line';
     const health = "בריאות מלאה — reason must wrap";
     const snapshot = buildFleetSidebarSnapshot(
@@ -474,8 +653,15 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).toContain(`"status": ${JSON.stringify(status)}`);
     expect(source).toContain(`"health": ${JSON.stringify(health)}`);
     expect(source).not.toContain(".fixedSize");
-    expect(source).not.toContain(".lineLimit");
-    expect(source).not.toContain(".truncationMode");
+    expect(source).toContain("Text(seat.status)");
+    expect(source).toContain(".lineLimit(1)");
+    expect(source).toContain(".truncationMode(.tail)");
+    const healthBlock = source.slice(
+      source.indexOf("if seat.healthVisible"),
+      source.indexOf("    }\n    .padding(6)"),
+    );
+    expect(healthBlock).not.toContain(".lineLimit");
+    expect(healthBlock).not.toContain(".truncationMode");
   });
 
   it("renders missing status dimly and gates health on actionable visibility", () => {
@@ -589,6 +775,51 @@ describe("fleet sidebar atomic publisher", () => {
     expect(defaultFleetSidebarPath("/tmp/example-home")).toBe(
       "/tmp/example-home/.config/cmux/sidebars/fleet.swift",
     );
+  });
+
+  it("keeps collapse preferences outside cmux's discoverable sidebars directory", () => {
+    expect(defaultFleetSidebarCollapseStatePath("/tmp/example-home")).toBe(
+      "/tmp/example-home/.local/state/cmuxlayer/fleet-sidebar-collapse.json",
+    );
+  });
+
+  it("persists independent lane choices across collapse-store instances", () => {
+    const outputPath = tempOutputPath();
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const first = new FleetSidebarCollapseStore({ statePath });
+
+    first.setLaneCollapsed("skillCreator", true);
+    first.setLaneCollapsed("cmuxlayer", false);
+
+    const reloaded = new FleetSidebarCollapseStore({ statePath });
+    expect(reloaded.read()).toEqual({
+      skillCreator: true,
+      cmuxlayer: false,
+    });
+    expect(reloaded.toggleLane("cmuxlayer")).toBe(true);
+    expect(new FleetSidebarCollapseStore({ statePath }).read()).toEqual({
+      skillCreator: true,
+      cmuxlayer: true,
+    });
+  });
+
+  it("applies persisted collapse state before publishing an unchanged snapshot", () => {
+    const outputPath = tempOutputPath();
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const store = new FleetSidebarCollapseStore({ statePath });
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      collapseStore: store,
+    });
+    const snapshot = snapshotWithStatus("active lane can collapse");
+
+    store.setLaneCollapsed("cmuxlayer", true);
+    publisher.publish(snapshot);
+
+    const source = readFileSync(outputPath, "utf8");
+    expect(source).toContain('fleetLane("cmuxlayer", 1, 1, true, 1, [');
+    expect(source).not.toContain('"surfaceRef": "surface:1"');
+    publisher.dispose();
   });
 
   it("creates the target atomically and leaves no temporary file", () => {

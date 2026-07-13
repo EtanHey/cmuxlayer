@@ -93,6 +93,10 @@ export interface FleetSidebarPublication {
   observedLiveSurfaceRefs: string[] | null;
 }
 
+export type FleetSidebarCollapseState = Partial<
+  Record<FleetLaneKey, boolean>
+>;
+
 const LANE_ORDER: FleetLaneKey[] = [
   "orc",
   "golems",
@@ -312,6 +316,30 @@ function renderSeat(seat: FleetSidebarSeat): string {
     ]`;
 }
 
+function renderLeadSummary(lane: FleetSidebarLane): string {
+  const lead = lane.seats.find((seat) => seat.role === "lead");
+  return `[
+      "present": ${lead !== undefined},
+      "name": ${swiftString(lead?.name ?? "No lead assigned")},
+      "screenState": ${swiftString(lead?.screenState ?? "idle")},
+      "status": ${swiftString(lead?.status ?? "— no lead status")},
+      "statusMissing": ${lead?.statusMissing ?? true}
+    ]`;
+}
+
+export function applyFleetSidebarCollapseState(
+  snapshot: FleetSidebarSnapshot,
+  state: Readonly<FleetSidebarCollapseState>,
+): FleetSidebarSnapshot {
+  return {
+    ...snapshot,
+    lanes: snapshot.lanes.map((lane) => ({
+      ...lane,
+      collapsed: state[lane.key] ?? lane.collapsed,
+    })),
+  };
+}
+
 const FLEET_SWIFT_HELPERS = `func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }
@@ -352,6 +380,8 @@ func fleetRow(_ seat) -> some View {
       Text(seat.status)
         .font(.system(size: 10))
         .foregroundColor(seat.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       if seat.healthVisible {
         Text("health: \\(seat.health)")
           .font(.system(size: 9))
@@ -368,21 +398,73 @@ func fleetRow(_ seat) -> some View {
   }
 }
 
-func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ seats) -> some View {
-  VStack(alignment: .leading, spacing: 3) {
-    HStack(spacing: 6) {
-      Text(name).font(.system(size: 11)).fontWeight(.semibold)
+func fleetLeadSummary(_ lead) -> some View {
+  HStack(spacing: 4) {
+    if lead.present {
+      if lead.screenState == "working" {
+        Text("●").foregroundColor("#3B82F6")
+      } else {
+        if lead.screenState == "idle" {
+          Text("●").foregroundColor("#6B7280")
+        } else {
+          Text("●").foregroundColor("#EF4444")
+        }
+      }
+      Text("LEAD")
+        .font(.system(size: 8, design: .monospaced))
+        .fontWeight(.semibold)
+        .foregroundColor("#3B82F6")
+      Text(lead.name)
+        .font(.system(size: 9))
+        .fontWeight(.semibold)
+        .lineLimit(1)
+      Text("·").foregroundColor(.tertiary)
+      Text(lead.status)
+        .font(.system(size: 9))
+        .foregroundColor(lead.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       Spacer()
-      Text("\\(liveCount) live · \\(activeCount) active")
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundColor(.secondary)
-    }
-    .padding(4)
-    if collapsed {
-      Text("\\(liveCount) idle seats collapsed")
+    } else {
+      Text("LEAD · not assigned")
         .font(.system(size: 9))
         .foregroundColor(.tertiary)
-        .padding(4)
+      Spacer()
+    }
+  }
+  .padding(4)
+  .background {
+    RoundedRectangle(cornerRadius: 5)
+      .foregroundColor("#3B82F6")
+      .opacity(0.07)
+  }
+}
+
+func fleetLaneHeader(_ name, _ liveCount, _ activeCount, _ collapsed) -> some View {
+  HStack(spacing: 6) {
+    Text(collapsed ? "▸" : "▾")
+      .font(.system(size: 10, design: .monospaced))
+      .foregroundColor(.secondary)
+    Text(name).font(.system(size: 11)).fontWeight(.semibold)
+    Spacer()
+    Text("\\(liveCount) live · \\(activeCount) active")
+      .font(.system(size: 9, design: .monospaced))
+      .foregroundColor(.secondary)
+  }
+  .padding(4)
+  .accessibilityLabel(collapsed ? "\\(name) lane collapsed, \\(liveCount) live, \\(activeCount) active" : "\\(name) lane expanded, \\(liveCount) live, \\(activeCount) active")
+  .help(collapsed ? "Run cmuxlayer fleet-sidebar expand \\(name)" : "Run cmuxlayer fleet-sidebar collapse \\(name)")
+}
+
+func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ hiddenSeatCount, _ lead, _ seats) -> some View {
+  VStack(alignment: .leading, spacing: 3) {
+    fleetLaneHeader(name, liveCount, activeCount, collapsed)
+    if collapsed {
+      Text("\\(hiddenSeatCount) seats hidden")
+        .font(.system(size: 9))
+        .foregroundColor(.tertiary)
+        .padding(2)
+      fleetLeadSummary(lead)
     } else {
       ForEach(seats) { seat in
         fleetRow(seat)
@@ -402,8 +484,11 @@ export function renderFleetSidebar(
     opts.state ?? (snapshot.seatCount > 0 ? "populated" : "discovering");
   const laneCalls = snapshot.lanes
     .map((lane) => {
-      const seats = lane.seats.map(renderSeat).join(",\n");
-      return `  fleetLane(${swiftString(lane.label)}, ${lane.liveCount}, ${lane.activeCount}, ${lane.collapsed}, [\n${seats}\n  ])`;
+      const seats = lane.collapsed
+        ? ""
+        : lane.seats.map(renderSeat).join(",\n");
+      const hiddenSeatCount = lane.collapsed ? lane.liveCount : 0;
+      return `  fleetLane(${swiftString(lane.label)}, ${lane.liveCount}, ${lane.activeCount}, ${lane.collapsed}, ${hiddenSeatCount}, ${renderLeadSummary(lane)}, [\n${seats}\n  ])`;
     })
     .join("\n  Divider()\n");
 
@@ -467,6 +552,82 @@ export function defaultFleetSidebarPath(home = homedir()): string {
   return join(home, ".config", "cmux", "sidebars", "fleet.swift");
 }
 
+export function defaultFleetSidebarCollapseStatePath(home = homedir()): string {
+  return join(
+    home,
+    ".local",
+    "state",
+    "cmuxlayer",
+    "fleet-sidebar-collapse.json",
+  );
+}
+
+export interface FleetSidebarCollapseStoreOptions {
+  statePath?: string;
+}
+
+export class FleetSidebarCollapseStore {
+  private readonly statePath: string;
+
+  constructor(opts: FleetSidebarCollapseStoreOptions = {}) {
+    this.statePath =
+      opts.statePath ?? defaultFleetSidebarCollapseStatePath();
+  }
+
+  read(): FleetSidebarCollapseState {
+    try {
+      const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as {
+        version?: unknown;
+        lanes?: unknown;
+      };
+      if (parsed.version !== 1 || !isRecord(parsed.lanes)) return {};
+      const state: FleetSidebarCollapseState = {};
+      for (const key of LANE_ORDER) {
+        const value = parsed.lanes[key];
+        if (typeof value === "boolean") state[key] = value;
+      }
+      return state;
+    } catch {
+      return {};
+    }
+  }
+
+  setLaneCollapsed(key: FleetLaneKey, collapsed: boolean): void {
+    this.write({ ...this.read(), [key]: collapsed });
+  }
+
+  toggleLane(key: FleetLaneKey, currentCollapsed?: boolean): boolean {
+    const state = this.read();
+    const collapsed = !(state[key] ?? currentCollapsed ?? false);
+    this.write({ ...state, [key]: collapsed });
+    return collapsed;
+  }
+
+  private write(state: FleetSidebarCollapseState): void {
+    const outputDir = dirname(this.statePath);
+    const temporaryPath = join(
+      outputDir,
+      `.${basename(this.statePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    mkdirSync(outputDir, { recursive: true });
+    try {
+      writeFileSync(
+        temporaryPath,
+        `${JSON.stringify({ version: 1, lanes: state }, null, 2)}\n`,
+        "utf8",
+      );
+      renameSync(temporaryPath, this.statePath);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export interface FleetSidebarPublisherLike {
   publish(publication: FleetSidebarPublication | FleetSidebarSnapshot): void;
   dispose(): void;
@@ -475,11 +636,13 @@ export interface FleetSidebarPublisherLike {
 export interface FleetSidebarPublisherOptions {
   outputPath?: string;
   minWriteIntervalMs?: number;
+  collapseStore?: FleetSidebarCollapseStore;
 }
 
 export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   private readonly outputPath: string;
   private readonly minWriteIntervalMs: number;
+  private readonly collapseStore: FleetSidebarCollapseStore;
   private pendingSource: string | null = null;
   private pendingPublication: FleetSidebarPublication | null = null;
   private pendingBaselineSource: string | null = null;
@@ -488,6 +651,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
     this.outputPath = opts.outputPath ?? defaultFleetSidebarPath();
+    this.collapseStore = opts.collapseStore ?? new FleetSidebarCollapseStore();
     this.minWriteIntervalMs = Math.max(
       500,
       opts.minWriteIntervalMs ?? 500,
@@ -518,11 +682,17 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       return;
     }
 
-    const source = renderFleetSidebar(publication.snapshot, {
-      state: publication.state,
-      observedLiveSurfaceCount:
-        publication.observedLiveSurfaceRefs?.length ?? null,
-    });
+    const source = renderFleetSidebar(
+      applyFleetSidebarCollapseState(
+        publication.snapshot,
+        this.collapseStore.read(),
+      ),
+      {
+        state: publication.state,
+        observedLiveSurfaceCount:
+          publication.observedLiveSurfaceRefs?.length ?? null,
+      },
+    );
     if (currentSource === source) {
       this.clearPending();
       this.clearTimer();
