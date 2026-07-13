@@ -38,7 +38,8 @@ export interface FleetSidebarCommandOptions {
  * Fallback for cmux's remote-Swift action gap: ButtonAction can dispatch only
  * cmux commands, while the V2 socket exposes no side-effect-free callback that
  * can carry a lane id back to cmuxlayer. The generator owner therefore persists
- * the preference here and applies it on the next reconciliation sweep.
+ * the preference here; the publisher watches that state file and regenerates
+ * its last authoritative snapshot inside the existing 500 ms write gate.
  */
 export function runFleetSidebarCommand(
   args: string[],

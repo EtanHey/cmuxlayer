@@ -4,6 +4,8 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unwatchFile,
+  watchFile,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -574,6 +576,10 @@ export class FleetSidebarCollapseStore {
       opts.statePath ?? defaultFleetSidebarCollapseStatePath();
   }
 
+  getStatePath(): string {
+    return this.statePath;
+  }
+
   read(): FleetSidebarCollapseState {
     try {
       const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as {
@@ -646,8 +652,14 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   private pendingSource: string | null = null;
   private pendingPublication: FleetSidebarPublication | null = null;
   private pendingBaselineSource: string | null = null;
+  private lastPublishedPublication: FleetSidebarPublication | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private readonly collapseStateListener = () => {
+    const publication =
+      this.pendingPublication ?? this.lastPublishedPublication;
+    if (publication !== null) this.publish(publication);
+  };
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
     this.outputPath = opts.outputPath ?? defaultFleetSidebarPath();
@@ -655,6 +667,11 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     this.minWriteIntervalMs = Math.max(
       500,
       opts.minWriteIntervalMs ?? 500,
+    );
+    watchFile(
+      this.collapseStore.getStatePath(),
+      { persistent: false, interval: 100 },
+      this.collapseStateListener,
     );
   }
 
@@ -694,6 +711,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       },
     );
     if (currentSource === source) {
+      this.lastPublishedPublication = publication;
       this.clearPending();
       this.clearTimer();
       return;
@@ -708,6 +726,11 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   dispose(): void {
     this.disposed = true;
     this.clearPending();
+    this.lastPublishedPublication = null;
+    unwatchFile(
+      this.collapseStore.getStatePath(),
+      this.collapseStateListener,
+    );
     this.clearTimer();
   }
 
@@ -736,7 +759,10 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     const baselineSource = this.pendingBaselineSource;
     this.clearPending();
     const currentSource = this.readCurrentSource();
-    if (currentSource === source) return;
+    if (currentSource === source) {
+      this.lastPublishedPublication = publication;
+      return;
+    }
     if (
       currentSource !== baselineSource &&
       !this.shouldPublishOverNewerSource(publication, currentSource)
@@ -744,6 +770,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       return;
     }
     this.atomicWrite(source);
+    this.lastPublishedPublication = publication;
   }
 
   private remainingWriteDelay(): number {

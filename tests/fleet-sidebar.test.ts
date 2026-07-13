@@ -822,6 +822,43 @@ describe("fleet sidebar atomic publisher", () => {
     publisher.dispose();
   });
 
+  it("republishes the cached snapshot promptly when CLI state changes", async () => {
+    const outputPath = tempOutputPath();
+    const statePath = join(outputPath, "..", "fleet-collapse.json");
+    const store = new FleetSidebarCollapseStore({ statePath });
+    const publisher = new FleetSidebarPublisher({
+      outputPath,
+      collapseStore: store,
+    });
+
+    try {
+      publisher.publish(snapshotWithStatus("collapse without waiting for sweep"));
+      expect(readFileSync(outputPath, "utf8")).toContain(
+        '"surfaceRef": "surface:1"',
+      );
+
+      new FleetSidebarCollapseStore({ statePath }).setLaneCollapsed(
+        "cmuxlayer",
+        true,
+      );
+      const deadline = Date.now() + 1_200;
+      while (
+        Date.now() < deadline &&
+        readFileSync(outputPath, "utf8").includes(
+          '"surfaceRef": "surface:1"',
+        )
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      const source = readFileSync(outputPath, "utf8");
+      expect(source).toContain('fleetLane("cmuxlayer", 1, 1, true, 1, [');
+      expect(source).not.toContain('"surfaceRef": "surface:1"');
+    } finally {
+      publisher.dispose();
+    }
+  });
+
   it("creates the target atomically and leaves no temporary file", () => {
     const outputPath = tempOutputPath();
     const publisher = new FleetSidebarPublisher({ outputPath });
