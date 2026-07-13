@@ -419,6 +419,49 @@ describe("input delivery batching helpers", () => {
       screenShowsPendingShellInput(wrappedScreen, fixture.launcher_command),
     ).toBe(true);
   });
+
+  it("ignores a launcher in shell history above the active empty prompt", async () => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+    const command = "cmuxlayerCodex -s";
+    const screen = [
+      `$ ${command}`,
+      "OpenAI Codex exited after updating",
+      "$ ",
+    ].join("\n");
+
+    expect(screenShowsPendingShellInput(screen, command)).toBe(false);
+  });
+
+  it.each([
+    ["bare", "$ cmuxlayerCodex -s"],
+    ["host", "etan@mac % cmuxlayerCodex -s"],
+    ["host and path", "etan@mac ~/repo5$ cmuxlayerCodex -s"],
+    ["path", "/tmp/repo $ cmuxlayerCodex -s"],
+  ])("recognizes pending input at a %s shell prompt", async (_label, screen) => {
+    const { screenShowsPendingShellInput } =
+      await loadInputDeliveryTestModule();
+
+    expect(screenShowsPendingShellInput(screen, "cmuxlayerCodex -s")).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ["dollar amount", "price $5", "5"],
+    ["percentage prose", "progress % complete", "complete"],
+    ["percentage progress", "Downloading: 100% complete", "complete"],
+    ["path progress", "Saved /tmp/archive 100% complete", "complete"],
+    ["hash output", "# done", "done"],
+  ])(
+    "does not treat %s as pending shell input",
+    async (_label, screen, submittedText) => {
+      const { screenShowsPendingShellInput } =
+        await loadInputDeliveryTestModule();
+
+      expect(screenShowsPendingShellInput(screen, submittedText)).toBe(false);
+    },
+  );
 });
 
 describe("tool registration", () => {

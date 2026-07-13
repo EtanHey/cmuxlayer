@@ -1344,8 +1344,30 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
   return inferLauncherFromTitle(title)?.repo ?? null;
 }
 
+function matchShellPromptLine(line: string): { input: string } | null {
+  const normalized = line.trimEnd();
+  const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
+  if (barePrompt) {
+    return { input: barePrompt[2] ?? "" };
+  }
+  if (/^\s*#\s*$/.test(normalized)) {
+    return { input: "" };
+  }
+
+  const prefixedPrompt = normalized.match(
+    /^\s*(?:(?:\S+@\S+)(?:\s+(?:~|\/)\S*)?|(?:\S+\s+)?(?:~|\/)\S*)(?:\s+\[[^\]]+\])?\s*[$%#](?:\s+(.*))?$/,
+  );
+  return prefixedPrompt ? { input: prefixedPrompt[1] ?? "" } : null;
+}
+
 function matchesShellPrompt(text: string): boolean {
-  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
+  const lines = normalizeTerminalText(text).split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
+  return prompt?.input.trim() === "";
 }
 
 function shouldHandleCodexUpdateMenu(
@@ -1647,21 +1669,30 @@ export function screenShowsPendingShellInput(
   }
 
   const compactSubmitted = trimmed.replace(/\s+/g, "");
+  let activePromptIndex = -1;
   for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    const prompt = line.match(/[$%#]\s*(.*)$/);
-    if (!prompt) continue;
-    const pending = [prompt[1] ?? "", ...lines.slice(index + 1, end)]
-      .join("")
-      .trimEnd();
-    if (
-      pending === trimmed ||
-      pending.replace(/\s+/g, "") === compactSubmitted
-    ) {
-      return true;
+    const prompt = matchShellPromptLine(line);
+    if (prompt) {
+      activePromptIndex = index;
+      break;
     }
   }
-  return false;
+  if (activePromptIndex < 0) {
+    return false;
+  }
+
+  const prompt = matchShellPromptLine(lines[activePromptIndex] ?? "");
+  const pending = [
+    prompt?.input ?? "",
+    ...lines.slice(activePromptIndex + 1, end),
+  ]
+    .join("")
+    .trimEnd();
+  return (
+    pending === trimmed ||
+    pending.replace(/\s+/g, "") === compactSubmitted
+  );
 }
 
 function parseRawSubmitEvidenceMetrics(
