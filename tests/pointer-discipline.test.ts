@@ -334,6 +334,54 @@ describe("pane input pointer discipline", () => {
     ).toBe(false);
   });
 
+  it("send_to refuses the real Claude AskUserQuestion picker before typing anything", async () => {
+    const pickerText = readPainpointFixture(
+      "claude-ask-user-question-picker-2026-07-13.txt",
+    );
+    const { createServer, createServerContext } = await loadServerModule();
+    let screenText = "Claude Code\n❯ ";
+    const mockExec = makeLifecycleExec(() => screenText);
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const tool = (server as any)._registeredTools["send_to"];
+    screenText = pickerText;
+    mockExec.mockClear();
+
+    const result = await tool.handler(
+      { agent_id: agentId, text: "new fleet message", press_enter: false },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: false,
+      delivered: false,
+      error_code: "blocked_by_interactive_prompt",
+      submit_verified: false,
+      error:
+        "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
+    });
+    expect(parsed.screen).toMatchObject({
+      control_state: "interactive_overlay",
+      errors: expect.arrayContaining(["interactive_prompt"]),
+    });
+    expect(
+      mockExec.mock.calls.some(([, args]) =>
+        args.some((arg: string) =>
+          ["send", "set-buffer", "paste-buffer", "send-key"].includes(arg),
+        ),
+      ),
+    ).toBe(false);
+    context.dispose();
+  });
+
   it("send_input allows prose that only mentions AskUserQuestion", async () => {
     const proseText = [
       "Claude Code",

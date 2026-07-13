@@ -65,6 +65,7 @@ function readPainpointFixture(fileName: string): PainpointFixture {
   const id = basename(fileName, extname(fileName));
   const expectedById: Record<string, string> = {
     "claude-ask-user-question-overlay": "interactive_overlay",
+    "claude-ask-user-question-picker-2026-07-13": "interactive_overlay",
     "claude-permission-confirmation": "permission_prompt",
     "codex-update-menu": "interactive_overlay",
     "bare-shell-and-bare-gemini-prompt": "shell",
@@ -170,6 +171,7 @@ describe("Phase 0 painpoint replay corpus", () => {
       "bare-shell-and-bare-gemini-prompt",
       "boot-prompt-typed-not-submitted",
       "claude-ask-user-question-overlay",
+      "claude-ask-user-question-picker-2026-07-13",
       "claude-permission-confirmation",
       "codex-update-menu",
       "empty-dead-pane-submit",

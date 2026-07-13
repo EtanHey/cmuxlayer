@@ -14,7 +14,7 @@
  *   - nudge="never" → file append only.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -305,6 +305,51 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(sendCalls(exec).length).toBe(before);
     expect(
       readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
+    ).toContain("GO");
+  });
+
+  it("keeps the inbox message but does not nudge into a real Claude picker", async () => {
+    await server.close();
+    const pickerText = readFileSync(
+      new URL(
+        "./fixtures/painpoints/claude-ask-user-question-picker-2026-07-13.txt",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    exec = makeExec(pickerText, "agenthtmlhostClaude");
+    server = createServer({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+    });
+
+    const agentId = "auto-claude-surface-new";
+    const before = sendCalls(exec).length;
+    const dispatchTool = server._registeredTools["dispatch_to_agent"];
+    const result = await dispatchTool.handler(
+      {
+        agent_id: agentId,
+        task: "GO",
+        from: "orc",
+        tag: "dispatch",
+        persist: false,
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.nudge.attempted).toBe(true);
+    expect(parsed.nudge.sent).toBe(false);
+    expect(parsed.nudge.error_code).toBe("blocked_by_interactive_prompt");
+    expect(parsed.nudge.reason).toContain("open picker/menu");
+    expect(sendCalls(exec)).toHaveLength(before);
+    expect(
+      readInbox(agentId, { baseDir: inboxDir }).map((message) => message.task),
     ).toContain("GO");
   });
 

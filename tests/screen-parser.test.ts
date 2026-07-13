@@ -5,6 +5,7 @@ import {
   MODEL_MAX_TOKENS,
   resolveModelMax,
   inferContextWindow,
+  isPickerOrMenuScreen,
 } from "../src/screen-parser.js";
 
 const readFixture = (name: string) =>
@@ -162,6 +163,82 @@ Claude Code
     expect(parsed.status).toBe("frozen");
     expect(parsed.errors).toContain("interactive_prompt");
     expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
+  it("recognizes the real Claude Code AskUserQuestion picker as an active menu", () => {
+    // Normalized from a live Claude Code v2.1.207 PTY capture on 2026-07-13.
+    const screen = readFixture(
+      "painpoints/claude-ask-user-question-picker-2026-07-13.txt",
+    );
+    expect(isPickerOrMenuScreen(screen, "claude")).toBe(true);
+    expect(parseScreen(screen)).toMatchObject({
+      agent_type: "claude",
+      status: "frozen",
+      control_state: "interactive_overlay",
+      errors: expect.arrayContaining(["interactive_prompt"]),
+    });
+  });
+
+  it("does not confuse Claude's queued-message composer with a picker", () => {
+    const queuedComposer = `
+Claude Code
+
+❯ Finish the review and post the verdict.
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+  🤖 Opus 4.8 (1M context) | 💰 $1.90 | ⏱️ 4m | 📚 89%
+`;
+    expect(isPickerOrMenuScreen(queuedComposer, "claude")).toBe(false);
+  });
+
+  it.each(["codex", "cursor", "gemini"] as const)(
+    "recognizes a footer-driven %s select list without numbered options",
+    (cli) => {
+      const selector = cli === "cursor" ? "›" : "❯";
+      const screen = `
+Select a model
+
+${selector} Opus
+  Sonnet
+  Haiku
+
+↑↓ to navigate · Enter to confirm · Esc to cancel
+`;
+
+      expect(isPickerOrMenuScreen(screen, cli)).toBe(true);
+    },
+  );
+
+  it("treats a Cursor picker above a live follow-up composer as stale", () => {
+    const screen = `
+Select a model
+
+› Opus
+  Sonnet
+  Haiku
+
+↑↓ to navigate · Enter to confirm · Esc to cancel
+
+→ Add a follow-up
+`;
+
+    expect(isPickerOrMenuScreen(screen, "cursor")).toBe(false);
+  });
+
+  it("treats a picker above a live shell prompt as stale", () => {
+    const screen = `
+Choose a runtime
+
+❯ Bun
+  Node
+
+↑↓ to navigate · Enter to confirm · Esc to cancel
+
+etanheyman@mac ~/repo$
+`;
+
+    expect(isPickerOrMenuScreen(screen)).toBe(false);
   });
 
   it("recognizes generic active choice menus as interactive overlays", () => {

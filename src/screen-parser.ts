@@ -4,6 +4,7 @@ import type {
   ParsedScreenResult,
   ParsedScreenStatus,
 } from "./types.js";
+import type { CliType } from "./agent-types.js";
 // AIDEV-NOTE: Single source of truth for per-model context windows lives in
 // harness-session.ts (MODEL_WINDOW_RULES). screen-parser delegates versioned lookups to it
 // (via modelContextWindow) so the fallback table below never drifts from the JSONL path.
@@ -175,9 +176,17 @@ const PROMPT_BLOCK_WINDOW_LINES = 8;
 const INTERACTIVE_PROMPT_TOOL_RE = /^\s*(AskUserQuestion|ask-tool)\s*$/i;
 const INTERACTIVE_PROMPT_CLARIFICATION_RE =
   /agent is asking for clarification/i;
-const MENU_SELECTOR_RE = /^\s*[>❯]\s+\S.+$/m;
+const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
+const PICKER_BLOCK_WINDOW_LINES = 32;
+const PICKER_NUMBERED_OPTION_RE =
+  /^\s*(?:[>❯›]\s*)?(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
+const PICKER_NAVIGATION_FOOTER_RE =
+  /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press up to edit queued messages)/i;
+const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
+const CLAUDE_PICKER_AUX_OPTION_RE =
+  /^\s*\d+\.\s+(?:Type something\.?|Chat about this)\s*$/i;
 const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
 const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
 const PERMISSION_PROMPT_MARKER_RE =
@@ -671,6 +680,72 @@ function hasInteractivePromptBlock(text: string): boolean {
   return hasMenuBlock(text, { tailOnly: true });
 }
 
+function hasPickerNavigationBlock(text: string): boolean {
+  const lines = text.split("\n");
+  for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
+    const footer = lines[footerIndex] ?? "";
+    if (!PICKER_NAVIGATION_FOOTER_RE.test(footer)) {
+      continue;
+    }
+
+    // A ready composer below copied/stale menu output means the picker is no
+    // longer active. Terminal status chrome may still follow the live footer.
+    const afterFooter = lines.slice(footerIndex + 1);
+    if (
+      afterFooter.some(
+        (line) =>
+          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+      ) || hasShellPrompt(afterFooter.join("\n"))
+    ) {
+      continue;
+    }
+
+    const block = lines.slice(
+      Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES),
+      footerIndex + 1,
+    );
+    const numberedOptions = block.filter((line) =>
+      PICKER_NUMBERED_OPTION_RE.test(line),
+    ).length;
+    const hasSelector = block.some((line) => MENU_SELECTOR_RE.test(line));
+    const isQueuedMessageFooter = /Press up to edit queued messages/i.test(
+      footer,
+    );
+    const hasClaudePickerChrome = block.some(
+      (line) =>
+        CLAUDE_PICKER_HEADER_RE.test(line) ||
+        CLAUDE_PICKER_AUX_OPTION_RE.test(line),
+    );
+
+    if (
+      (numberedOptions >= 2 ||
+        (!isQueuedMessageFooter && hasSelector)) &&
+      (!isQueuedMessageFooter || hasClaudePickerChrome)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect an active terminal picker/menu whose next text bytes would be
+ * interpreted as navigation or selection keystrokes instead of composer text.
+ */
+export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
+  const normalized = normalizeText(text);
+  if (
+    (cli === undefined || cli === "codex") &&
+    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
+  ) {
+    return true;
+  }
+  return (
+    hasInteractivePromptBlock(normalized) ||
+    hasPickerNavigationBlock(normalized)
+  );
+}
+
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
@@ -678,15 +753,7 @@ function parseErrors(text: string): string[] {
     errors.push("permission_prompt");
   }
 
-  if (!errors.includes("permission_prompt") && hasInteractivePromptBlock(text)) {
-    errors.push("interactive_prompt");
-  }
-
-  if (
-    !errors.includes("permission_prompt") &&
-    !errors.includes("interactive_prompt") &&
-    hasActiveCodexUpdateMenuScreen(text)
-  ) {
+  if (!errors.includes("permission_prompt") && isPickerOrMenuScreen(text)) {
     errors.push("interactive_prompt");
   }
 
