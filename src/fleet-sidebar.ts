@@ -757,8 +757,15 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   };
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
-    this.outputPath = opts.outputPath ?? defaultFleetSidebarPath();
-    this.collapseStore = opts.collapseStore ?? new FleetSidebarCollapseStore();
+    const canonicalOutputPath = defaultFleetSidebarPath();
+    this.outputPath = opts.outputPath ?? canonicalOutputPath;
+    this.collapseStore =
+      opts.collapseStore ??
+      new FleetSidebarCollapseStore(
+        this.outputPath === canonicalOutputPath
+          ? {}
+          : { statePath: `${this.outputPath}.collapse.json` },
+      );
     this.minWriteIntervalMs = Math.max(
       500,
       opts.minWriteIntervalMs ?? 500,

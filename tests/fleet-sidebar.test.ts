@@ -784,6 +784,28 @@ describe("fleet sidebar atomic publisher", () => {
     );
   });
 
+  it("isolates implicit collapse state beside a custom output path", () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    const publisherHarness = publisher as unknown as {
+      collapseStore: FleetSidebarCollapseStore;
+    };
+
+    expect(publisherHarness.collapseStore.getStatePath()).toBe(
+      `${outputPath}.collapse.json`,
+    );
+    publisher.dispose();
+
+    const canonicalPublisher = new FleetSidebarPublisher();
+    const canonicalHarness = canonicalPublisher as unknown as {
+      collapseStore: FleetSidebarCollapseStore;
+    };
+    expect(canonicalHarness.collapseStore.getStatePath()).toBe(
+      defaultFleetSidebarCollapseStatePath(),
+    );
+    canonicalPublisher.dispose();
+  });
+
   it("persists independent lane choices across collapse-store instances", () => {
     const outputPath = tempOutputPath();
     const statePath = join(outputPath, "..", "fleet-collapse.json");
