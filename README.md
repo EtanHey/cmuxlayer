@@ -24,6 +24,19 @@ running. For how the golem fleet wires, versions, and dogfoods it — and the
 `CMUX_SOCKET_PATH` instance pin — see
 [docs/releases-and-brew.md](docs/releases-and-brew.md).
 
+### Optional fleet sidebar
+
+The lane-grouped fleet view is opt-in. Install its fallback file with:
+
+```bash
+bun run install:fleet-sidebar
+```
+
+cmuxLayer then refreshes `~/.config/cmux/sidebars/fleet.swift` from its
+reconciled live-agent snapshot. It does not change cmux settings or replace the
+stock sidebar. To activate it, right-click the sidebar toggle and choose
+`fleet`; choose the stock entry there whenever you want the fallback UI.
+
 Add to your MCP config:
 
 **Codex CLI / T3 Code**

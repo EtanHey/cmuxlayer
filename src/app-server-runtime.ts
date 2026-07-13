@@ -17,6 +17,10 @@ import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import { enrichSurfaceIdsFromPanes } from "./surface-topology.js";
+import {
+  FleetSidebarPublisher,
+  type FleetSidebarPublisherLike,
+} from "./fleet-sidebar.js";
 import type {
   AppServerBridgeRuntime,
   BridgeScreenSnapshot,
@@ -121,6 +125,7 @@ function toBridgeThread(
 export interface CmuxAppServerRuntimeOptions {
   client: CmuxLikeClient;
   stateDir?: string;
+  fleetSidebarPublisher?: FleetSidebarPublisherLike;
 }
 
 export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
@@ -201,6 +206,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         stateMgr: this.stateMgr,
         listSurfacesForRefMap: surfaceProvider,
       }),
+      fleetSidebarPublisher:
+        opts.fleetSidebarPublisher ?? new FleetSidebarPublisher(),
     });
   }
 
