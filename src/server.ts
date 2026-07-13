@@ -1631,6 +1631,30 @@ function screenShowsPendingInput(
   );
 }
 
+function screenShowsPendingShellInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const lines = normalizeTerminalText(screenText).split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trimEnd() ?? "";
+    if (!line.trim()) continue;
+    const prompt = line.match(/[$%#]\s*(.*)$/);
+    if (!prompt) return false;
+    const pending = prompt[1]?.trimEnd() ?? "";
+    return (
+      pending === trimmed ||
+      pending.replace(/\s+/g, "") === trimmed.replace(/\s+/g, "")
+    );
+  }
+  return false;
+}
+
 function parseRawSubmitEvidenceMetrics(
   screenText: string,
 ): RawSubmitEvidenceMetrics {
@@ -2826,6 +2850,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     chunkNumber: number,
     totalChunks: number,
     shouldPaste: boolean,
+    avoidDuplicateOnAmbiguousRetry: boolean,
   ) => {
     let attempt = 0;
     let lastError: unknown;
@@ -2866,6 +2891,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             `chunk ${chunkNumber}/${totalChunks} failed: ${message}`,
             chunkNumber,
           );
+        }
+        if (avoidDuplicateOnAmbiguousRetry) {
+          try {
+            const snapshot = await readParsedSurface(
+              surface,
+              opts.workspace,
+              { throwOnSurfaceGone: true },
+            );
+            if (
+              snapshot &&
+              (screenShowsPendingInput(snapshot.text, chunk) ||
+                screenShowsPendingShellInput(snapshot.text, chunk))
+            ) {
+              return;
+            }
+          } catch {
+            // The delivery error remains authoritative when the ambiguity
+            // probe cannot read the surface; continue the bounded retry.
+          }
         }
         await delay(SEND_INPUT_RETRY_DELAY_MS);
       }
@@ -3262,6 +3306,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         batch.firstChunkNumber,
         opts.chunks.length,
         shouldPaste,
+        opts.source_event === "spawn_agent",
       );
       for (const sentChunks of batch.deliveredChunkCounts) {
         opts.onChunkDelivered?.(sentChunks);
