@@ -205,8 +205,10 @@ const CLI_UPDATE_COMPLETE_RE =
   /\b(?:Update ran successfully|Please restart (?:Codex|Claude|Cursor|Gemini)(?: CLI)?)\b/i;
 const CLI_UPDATE_PROGRESS_RE =
   /\bUpdating\s+(?:(?:Codex|Claude|Cursor|Gemini)(?: CLI)?\s+from\b|.+\s+via\s+.+)/i;
-const CLI_UPDATE_STEP_RE =
-  /^\s*(?:Downloading(?:\s+Codex CLI(?:\s+for\s+\S+)?)?|Installing(?:\s+standalone package(?:\s+to\s+.+)?)?)(?:\.{3}|…)?\s*$/i;
+const CLI_UPDATE_SPECIFIC_STEP_RE =
+  /^\s*(?:Downloading\s+Codex CLI(?:\s+for\s+\S+)?|Installing\s+standalone package(?:\s+to\s+.+)?)(?:\.{3}|…)?\s*$/i;
+const CLI_UPDATE_BARE_STEP_RE =
+  /^\s*(?:Downloading|Installing)(?:\.{3}|…)?\s*$/i;
 const GEMINI_MODEL_RE =
   /(?:^|\n)\s*(?:-\s*)?(?:Model:\s*)?(gemini-[0-9][0-9a-z.-]*)\b/im;
 const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
@@ -729,7 +731,7 @@ function hasShellPrompt(text: string): boolean {
   return /^(?:>|❯|>>>|[$%#])$/.test(last) || /(?:[$#]|\s%)$/.test(last);
 }
 
-function hasLaterAgentScreenEvidence(
+function hasAgentScreenEvidence(
   text: string,
   agentType: ParsedScreenAgentType,
 ): boolean {
@@ -769,7 +771,18 @@ function parseCliUpdateState(
       state = "update_complete";
       continue;
     }
-    if (CLI_UPDATE_PROGRESS_RE.test(line) || CLI_UPDATE_STEP_RE.test(line)) {
+    const isBareStep = CLI_UPDATE_BARE_STEP_RE.test(line);
+    const hasEarlierAgentScreen =
+      isBareStep &&
+      hasAgentScreenEvidence(
+        lines.slice(0, index).join("\n"),
+        agentType,
+      );
+    if (
+      CLI_UPDATE_PROGRESS_RE.test(line) ||
+      CLI_UPDATE_SPECIFIC_STEP_RE.test(line) ||
+      (isBareStep && !hasEarlierAgentScreen)
+    ) {
       markerIndex = index;
       state = "updating";
     }
@@ -780,7 +793,7 @@ function parseCliUpdateState(
   }
 
   const laterText = lines.slice(markerIndex + 1).join("\n");
-  if (hasLaterAgentScreenEvidence(laterText, agentType)) {
+  if (hasAgentScreenEvidence(laterText, agentType)) {
     return undefined;
   }
 

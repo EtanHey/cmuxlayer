@@ -182,6 +182,25 @@ Select a model for the next worker:
     expect(parsed.cli_update_state).toBeUndefined();
   });
 
+  it.each(["Downloading…", "Installing…"])(
+    "recognizes standalone updater step %s without an agent transcript",
+    (outputLine) => {
+      expect(parseScreen(outputLine).cli_update_state).toBe("updating");
+    },
+  );
+
+  it.each(["Downloading…", "Installing…"])(
+    "does not treat agent output %s after a ready Codex header as updater progress",
+    (outputLine) => {
+      const parsed = parseScreen(
+        [codexAutoUpdateFixture.screens.ready, outputLine].join("\n"),
+      );
+
+      expect(parsed.agent_type).toBe("codex");
+      expect(parsed.cli_update_state).toBeUndefined();
+    },
+  );
+
   it("recognizes a Codex update menu with a sparkle-prefixed update line", () => {
     const parsed = parseScreen(`
 >_ OpenAI Codex
