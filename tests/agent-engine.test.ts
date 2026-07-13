@@ -3263,6 +3263,59 @@ To continue this session, run codex resume ${sessionId}`,
       }
     });
 
+    it("resolves ready from the real Codex 0.144.3 working screen when registry is still booting", async () => {
+      vi.useFakeTimers();
+      try {
+        const screenText = readFileSync(
+          join(
+            process.cwd(),
+            "tests/fixtures/spawn/codex-0.144.3-surface-489-working.txt",
+          ),
+          "utf8",
+        );
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-pending-1783943911-ep9m",
+            state: "booting",
+            surface_id: "surface:489",
+            workspace_id: "workspace:2",
+            cli: "codex",
+            role: "worker",
+            boot_prompt_pending: true,
+            task_summary: "2026-07-13-spawn-reliability-mission.md",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:489")];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:489",
+          text: screenText,
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        const pending = engine.waitFor(
+          "cmuxlayerCodex-pending-1783943911-ep9m",
+          "ready",
+          1_500,
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        const result = await pending;
+
+        expect(result.matched).toBe(true);
+        expect(result.source).toBe("screen");
+        expect(result.state).toBe("ready");
+        expect(
+          engine.getAgentState("cmuxlayerCodex-pending-1783943911-ep9m"),
+        ).toMatchObject({
+          state: "ready",
+          boot_prompt_pending: false,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("captures the boot session before waitFor marks a ready screen", async () => {
       vi.useFakeTimers();
       try {

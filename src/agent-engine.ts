@@ -1338,6 +1338,7 @@ export class AgentEngine {
       if (
         !evidence.ready ||
         (targetState === "ready" &&
+          !evidence.activeCodex &&
           this.screenShowsPendingBootPrompt(agent, screen.text))
       ) {
         waitForReadyPatternMatches.delete(agent.agent_id);
@@ -1691,14 +1692,23 @@ export class AgentEngine {
     screenText: string,
   ): {
     ready: boolean;
+    activeCodex: boolean;
     consecutive: number;
   } {
     const parsed = parseScreen(screenText);
     const match = matchReadyPattern(agent.cli, screenText);
+    const hasIdentity = screenHasReadyAgentIdentity(
+      agent.cli,
+      screenText,
+      parsed,
+    );
+    const activeCodex =
+      agent.cli === "codex" &&
+      hasIdentity &&
+      screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready:
-        match.matched &&
-        screenHasReadyAgentIdentity(agent.cli, screenText, parsed),
+      ready: hasIdentity && (match.matched || activeCodex),
+      activeCodex,
       consecutive: match.consecutive,
     };
   }
@@ -1956,7 +1966,8 @@ export class AgentEngine {
         const evidence = this.readReadyEvidence(agent, screen.text);
         if (
           evidence.ready &&
-          !this.screenShowsPendingBootPrompt(agent, screen.text)
+          (evidence.activeCodex ||
+            !this.screenShowsPendingBootPrompt(agent, screen.text))
         ) {
           const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
           this.readyPatternMatches.set(agent.agent_id, count);
