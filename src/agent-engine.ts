@@ -3650,9 +3650,10 @@ export class AgentEngine {
 
   /**
    * Ingest cmux's own app-level close events before lifecycle reconciliation.
-   * A `tab_close` carries the operator intent that a matching managed surface
-   * is terminal; persist that intent before absence can become a recoverable
-   * crash. Forensics remains best-effort and never breaks the sweep.
+   * A `tab_close` or `workspace_teardown` carries the operator intent that a
+   * matching managed surface is terminal; persist that intent before absence
+   * can become a recoverable crash. Forensics remains best-effort and never
+   * breaks the sweep.
    */
   private async runCloseForensicsBestEffort(): Promise<void> {
     if (!this.closeForensicsRunner) return;
@@ -3675,7 +3676,8 @@ export class AgentEngine {
       events
         .filter(
           (event) =>
-            event.origin === "tab_close" &&
+            (event.origin === "tab_close" ||
+              event.origin === "workspace_teardown") &&
             typeof event.cmux_surface_id === "string",
         )
         .map((event) => event.cmux_surface_id!.toLowerCase()),

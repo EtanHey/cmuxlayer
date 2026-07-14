@@ -3418,87 +3418,90 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
-    it("treats a cmux UI tab close as terminal before crash recovery", async () => {
-      engine.dispose();
-      const closedSurfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
-      let closePending = true;
-      const tabClose: CloseForensicsEvent = {
-        ts: "2026-07-14T16:23:48.900Z",
-        event_type: "close_forensics",
-        cmux_surface_id: closedSurfaceUuid,
-        cmux_pane_id: "pane-uuid",
-        window_id: null,
-        boot_id: "boot-uuid",
-        workspace_id: "workspace-uuid",
-        origin: "tab_close",
-        occurred_at: "2026-07-14T16:23:48.852Z",
-        attribution: "app-level:no-mcp-close",
-        client_context: {
-          window_key_cycle_near_close: false,
-          last_window_key_event: null,
-          boot_id_changed_since_prev: false,
-        },
-      };
-      engine = new AgentEngine(stateMgr, registry, mockClient, {
-        spawnPreflight: async () => {},
-        sessionIdentityResolver: () => null,
-        closeForensicsRunner: async () => {
-          const events = closePending ? [tabClose] : [];
-          closePending = false;
-          return { emitted: events.length, events };
-        },
-      });
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "agent-user-closed",
-          state: "working",
-          surface_id: "surface:user-closed",
-          surface_uuid: closedSurfaceUuid,
-          workspace_id: "ws:1",
-          repo: "brainlayer",
-          model: "gpt-5.4",
-          cli: "codex",
-          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-          crash_recover: true,
-        }),
-      );
-      liveSurfaces = [
-        {
-          ...makeSurface("surface:user-closed"),
-          id: closedSurfaceUuid,
-          workspace_ref: "ws:1",
-        },
-      ];
-      await registry.reconstitute();
-
-      liveSurfaces = [
-        {
-          ...makeSurface("surface:other"),
-          id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-          workspace_ref: "ws:1",
-        },
-      ];
-      const firstObservedAt = Date.now();
-      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
-      try {
-        await engine.runSweep();
-        expect(engine.getAgentState("agent-user-closed")).toMatchObject({
-          state: "working",
-          user_killed: true,
-          surface_uuid: closedSurfaceUuid,
+    it.each(["tab_close", "workspace_teardown"] as const)(
+      "treats a cmux UI %s as terminal before crash recovery",
+      async (closeOrigin) => {
+        engine.dispose();
+        const closedSurfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        let closePending = true;
+        const tabClose: CloseForensicsEvent = {
+          ts: "2026-07-14T16:23:48.900Z",
+          event_type: "close_forensics",
+          cmux_surface_id: closedSurfaceUuid,
+          cmux_pane_id: "pane-uuid",
+          window_id: null,
+          boot_id: "boot-uuid",
+          workspace_id: "workspace-uuid",
+          origin: closeOrigin,
+          occurred_at: "2026-07-14T16:23:48.852Z",
+          attribution: "app-level:no-mcp-close",
+          client_context: {
+            window_key_cycle_near_close: false,
+            last_window_key_event: null,
+            boot_id_changed_since_prev: false,
+          },
+        };
+        engine = new AgentEngine(stateMgr, registry, mockClient, {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          closeForensicsRunner: async () => {
+            const events = closePending ? [tabClose] : [];
+            closePending = false;
+            return { emitted: events.length, events };
+          },
         });
-        nowSpy.mockReturnValue(
-          firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "agent-user-closed",
+            state: "working",
+            surface_id: "surface:user-closed",
+            surface_uuid: closedSurfaceUuid,
+            workspace_id: "ws:1",
+            repo: "brainlayer",
+            model: "gpt-5.4",
+            cli: "codex",
+            cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+            crash_recover: true,
+          }),
         );
-        await engine.runSweep();
-      } finally {
-        nowSpy.mockRestore();
-      }
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:user-closed"),
+            id: closedSurfaceUuid,
+            workspace_ref: "ws:1",
+          },
+        ];
+        await registry.reconstitute();
 
-      expect(mockClient.newSplit).not.toHaveBeenCalled();
-      expect(engine.getAgentState("agent-user-closed")).toBeNull();
-    });
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:other"),
+            id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            workspace_ref: "ws:1",
+          },
+        ];
+        const firstObservedAt = Date.now();
+        const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
+        try {
+          await engine.runSweep();
+          expect(engine.getAgentState("agent-user-closed")).toMatchObject({
+            state: "working",
+            user_killed: true,
+            surface_uuid: closedSurfaceUuid,
+          });
+          nowSpy.mockReturnValue(
+            firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
+          );
+          await engine.runSweep();
+        } finally {
+          nowSpy.mockRestore();
+        }
+
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(engine.getAgentState("agent-user-closed")).toBeNull();
+      },
+    );
 
     it("does not recover foreign or unowned crash records in a scoped observer", async () => {
       engine.dispose();
