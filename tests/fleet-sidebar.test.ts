@@ -1417,6 +1417,28 @@ writeFileSync(process.argv[3], "released");`,
     publisher.dispose();
   });
 
+  it("preserves all 16 last-good seats through a fleet-wide reconnect", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    const surfaceRefs = Array.from(
+      { length: 16 },
+      (_, index) => `surface:${index + 1}`,
+    );
+    publisher.publish(
+      publication("populated", surfaceRefs, surfaceRefs),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+    expect(lastGood).toContain("16 live seats · 16 active");
+
+    publisher.publish(publication("discovering", [], surfaceRefs));
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    const afterReconnect = readFileSync(outputPath, "utf8");
+    expect(afterReconnect).toBe(lastGood);
+    expect(afterReconnect).not.toContain("0 live seats · 0 active");
+    publisher.dispose();
+  });
+
   it("preserves the last-good UUID topology when a complete scan has mixed identity coverage", async () => {
     const outputPath = tempOutputPath();
     const publisher = new FleetSidebarPublisher({ outputPath });
