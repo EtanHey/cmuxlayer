@@ -34,7 +34,12 @@ import {
   formatOk,
   formatResync,
 } from "./format.js";
-import { inferContextWindow, parseScreen } from "./screen-parser.js";
+import {
+  inferContextWindow,
+  isSubmitVerifiedStatus,
+  parseScreen,
+  screenShowsPendingInput,
+} from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { chooseSurfaceClosePolicy } from "./layout-policy.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
@@ -289,22 +294,6 @@ function formatToolValidationError(toolName: string, error: z.ZodError): string 
     })
     .join("; ");
   return `${toolName} invalid arguments: ${details}`;
-}
-
-function isSubmitVerifiedStatus(
-  status: ParsedScreenResult["status"] | null | undefined,
-): boolean {
-  return status === "working" || status === "thinking" || status === "done";
-}
-
-function screenShowsPendingInput(screenText: string, submittedText: string): boolean {
-  const trimmed = submittedText.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  const tail = trimmed.slice(-Math.min(80, trimmed.length));
-  return screenText.includes(tail);
 }
 
 function computeEnterDelayMs(bytes: number, chunkCount: number): number {

@@ -312,3 +312,187 @@ describe("Sidebar Sync", () => {
     expect(doneChannelCalls).toHaveLength(1);
   });
 });
+
+describe("Booting agent advancement (SDLC-87)", () => {
+  let stateMgr: StateManager;
+  let mockClient: CmuxClient;
+  let engine: AgentEngine;
+  let liveSurfaces: CmuxSurface[];
+
+  const IDLE_CLAUDE_SCREEN = {
+    surface: "surface:42",
+    text: `
+  Say "go" when you're ready and I'll start your timer.
+
+──────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens
+  🤖 Sonnet 4.6 | 💰 $0.10                                    current: 2.1.81 · latest…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`,
+    lines: 40,
+    scrollback_used: false,
+  };
+
+  const WORKING_CLAUDE_SCREEN = {
+    surface: "surface:42",
+    text: `
+  Working on it…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+  (esc to interrupt)
+`,
+    lines: 40,
+    scrollback_used: false,
+  };
+
+  const UNKNOWN_SCREEN = {
+    surface: "surface:42",
+    text: "$ ",
+    lines: 40,
+    scrollback_used: false,
+  };
+
+  beforeEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    stateMgr = new StateManager(TEST_DIR);
+    mockClient = makeMockClient();
+    liveSurfaces = [];
+    const surfaceProvider = async () => liveSurfaces;
+    const registry = new AgentRegistry(stateMgr, surfaceProvider);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+    });
+  });
+
+  afterEach(() => {
+    engine.dispose();
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  });
+
+  it("promotes a booting agent to ready and delivers the stored prompt once the CLI is interactive", async () => {
+    let calls = 0;
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        calls += 1;
+        return calls === 1 ? IDLE_CLAUDE_SCREEN : WORKING_CLAUDE_SCREEN;
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        model: "sonnet",
+        task_summary: "design handoff",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const record = engine.getAgentState("a1");
+    expect(record?.state).toBe("ready");
+    expect(record?.parsed_model).toBe("Sonnet 4.6");
+    expect(record?.model_mismatch).toBe(false);
+    expect(record?.prompt_delivered).toBe(true);
+    expect(record?.submit_verified).toBe(true);
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:42",
+      "design handoff",
+    );
+    expect(mockClient.sendKey).toHaveBeenCalledWith("surface:42", "return");
+  });
+
+  it("reports a model mismatch when the parsed banner model disagrees with the requested model", async () => {
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      IDLE_CLAUDE_SCREEN,
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        model: "opus",
+        task_summary: "design handoff",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const record = engine.getAgentState("a1");
+    expect(record?.state).toBe("ready");
+    expect(record?.parsed_model).toBe("Sonnet 4.6");
+    expect(record?.model_mismatch).toBe(true);
+  });
+
+  it("reports a stuck-booting agent as errored once it exceeds the boot timeout", async () => {
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      UNKNOWN_SCREEN,
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        updated_at: "2020-01-01T00:00:00Z",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const record = engine.getAgentState("a1");
+    expect(record?.state).toBe("error");
+    expect(record?.error).toMatch(/stuck booting/i);
+    expect(mockClient.log).toHaveBeenCalledWith(
+      "errored: brainlayer",
+      expect.objectContaining({ level: "error", source: "cmux-mcp" }),
+    );
+  });
+
+  it("leaves a booting agent untouched while still within the boot window with no interactive signal", async () => {
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      UNKNOWN_SCREEN,
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("a1")?.state).toBe("booting");
+  });
+
+  it("does not advance auto-discovered agents", async () => {
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      IDLE_CLAUDE_SCREEN,
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "auto-brainlayer-1",
+        state: "booting",
+        surface_id: "surface:42",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("auto-brainlayer-1")?.state).toBe("booting");
+    expect(mockClient.send).not.toHaveBeenCalled();
+  });
+});

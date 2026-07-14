@@ -46,6 +46,12 @@ export interface AgentRecord {
   crash_recover?: boolean;
   respawn_attempts?: number;
   user_killed?: boolean;
+  // Spawn hardening fields (SDLC-87) — booting→ready promotion, prompt
+  // delivery, and model-mismatch verification, all resolved by the sweep.
+  submit_verified?: boolean | null;
+  prompt_delivered?: boolean;
+  parsed_model?: string | null;
+  model_mismatch?: boolean | null;
 }
 
 export interface MergedAgent extends AgentRecord {
@@ -59,6 +65,8 @@ export interface PublicAgent {
   model: string;
   state: AgentState;
   session_id: string | null;
+  submit_verified?: boolean | null;
+  model_mismatch?: boolean | null;
 }
 
 export interface AgentRoute {

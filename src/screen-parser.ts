@@ -465,7 +465,6 @@ function inferStatus(
 
   const workingMarkers = [
     " /loop",
-    "bypass permissions on",
     "esc to interrupt",
   ];
   if (
@@ -556,4 +555,31 @@ export function parseScreen(text: string): ParsedScreenResult {
   }
 
   return result;
+}
+
+/**
+ * True when a parsed screen status implies the CLI has picked up submitted
+ * input (as opposed to still sitting at an idle prompt with nothing queued).
+ */
+export function isSubmitVerifiedStatus(
+  status: ParsedScreenStatus | null | undefined,
+): boolean {
+  return status === "working" || status === "thinking" || status === "done";
+}
+
+/**
+ * True when the tail of previously submitted text is still literally visible
+ * in the current screen buffer — i.e. Enter did not register/submit it.
+ */
+export function screenShowsPendingInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const tail = trimmed.slice(-Math.min(80, trimmed.length));
+  return screenText.includes(tail);
 }

@@ -218,6 +218,13 @@ export class StateManager {
       crash_recover: false,
       respawn_attempts: 0,
       user_killed: false,
+      // Auto-discovered agents were never spawned through spawn_agent, so
+      // there is no stored prompt to deliver and no requested model to
+      // compare against — mark them as already-settled.
+      submit_verified: null,
+      prompt_delivered: true,
+      parsed_model: null,
+      model_mismatch: null,
     };
     this.writeState(record);
     return record;

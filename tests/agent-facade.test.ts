@@ -44,6 +44,8 @@ describe("agent facade projections", () => {
       model: "sonnet",
       state: "ready",
       session_id: "session-1",
+      submit_verified: null,
+      model_mismatch: null,
     });
     expect((projected as any).surface_id).toBeUndefined();
   });

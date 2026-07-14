@@ -7,6 +7,8 @@ export function toPublicAgent(record: AgentRecord): PublicAgent {
     model: record.model,
     state: record.state,
     session_id: record.cli_session_id,
+    submit_verified: record.submit_verified ?? null,
+    model_mismatch: record.model_mismatch ?? null,
   };
 }
 

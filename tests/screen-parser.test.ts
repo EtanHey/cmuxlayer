@@ -389,6 +389,22 @@ I only have 42 tokens
     expect(parsed.model).toBeNull();
   });
 
+  it("does not report working for an idle Claude prompt showing only the persistent permissions footer", () => {
+    const parsed = parseScreen(`
+  Say "go" when you're ready and I'll start your timer.
+
+──────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens
+  🤖 Sonnet 4.6 | 💰 $0.10                                    current: 2.1.81 · latest…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+  });
+
   // --- context_pct and context_window tests ---
 
   describe("context_pct computation", () => {

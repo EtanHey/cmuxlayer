@@ -33,7 +33,11 @@ import {
   type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
-import { parseScreen } from "./screen-parser.js";
+import {
+  isSubmitVerifiedStatus,
+  parseScreen,
+  screenShowsPendingInput,
+} from "./screen-parser.js";
 import { chooseAgentSpawnPlacement } from "./layout-policy.js";
 
 export interface SpawnAgentParams {
@@ -64,6 +68,11 @@ const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 const SWEEP_INTERVAL_MS = 1000;
 const BOOT_SESSION_CAPTURE_WINDOW_MS = 30_000;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+// A booting agent whose CLI never becomes interactive within this window is
+// reported as stuck rather than left in "booting" forever (SDLC-87).
+const BOOT_READY_TIMEOUT_MS = 45_000;
+const BOOT_READY_SCREEN_LINES = 40;
+const PROMPT_DELIVERY_VERIFY_DELAY_MS = 900;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE =
@@ -241,6 +250,27 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
+/**
+ * Loosely compares the requested model (e.g. "sonnet") against the model
+ * parsed from the CLI banner/status line (e.g. "Sonnet 4.6"). Returns null
+ * when there is nothing to compare against — that's "unknown", not "match".
+ */
+export function computeModelMismatch(
+  requestedModel: string,
+  parsedModel: string | null,
+): boolean | null {
+  const requested = requestedModel.toLowerCase().trim();
+  const parsed = parsedModel?.toLowerCase().trim();
+  if (!requested || !parsed) {
+    return null;
+  }
+  return !parsed.includes(requested) && !requested.includes(parsed);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function assertClaudeLauncherAvailable(repo: string): Promise<void> {
   const launcher = `${sanitizeRepoName(repo)}Claude`;
   const shell = process.env.SHELL || "/bin/sh";
@@ -353,6 +383,98 @@ export class AgentEngine {
 
       const updated = this.stateMgr.updateRecord(agent.agent_id, {
         cli_session_id: sessionId,
+      });
+      this.registry.set(agent.agent_id, updated);
+      return updated;
+    } catch {
+      return agent;
+    }
+  }
+
+  /**
+   * Best-effort, sweep-driven promotion of a booting agent to "ready" once
+   * the CLI is interactive, plus one-time prompt delivery and model-mismatch
+   * detection (SDLC-87). Auto-discovered agents (agent_id "auto-*") are
+   * managed by AgentRegistry.syncAutoRecord() instead and are skipped here.
+   * Never throws — any failure just leaves the record as-is for the next sweep.
+   */
+  private async maybeAdvanceBootingAgent(agent: AgentRecord): Promise<AgentRecord> {
+    if (agent.state !== "booting" || agent.agent_id.startsWith("auto-")) {
+      return agent;
+    }
+
+    let screenText: string;
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        lines: BOOT_READY_SCREEN_LINES,
+      });
+      screenText = screen.text;
+    } catch {
+      return agent;
+    }
+
+    const parsed = parseScreen(screenText);
+    const interactive = parsed.agent_type !== "unknown" && parsed.status !== "frozen";
+
+    if (!interactive) {
+      // updated_at, not created_at: crash-recovery respawns re-enter
+      // "booting" long after the original created_at, refreshing updated_at
+      // (mirrors isBootCaptureWindowOpen's use of updated_at above).
+      const since = Date.parse(agent.updated_at);
+      if (Number.isNaN(since) || Date.now() - since < BOOT_READY_TIMEOUT_MS) {
+        return agent;
+      }
+      try {
+        const failed = this.stateMgr.transition(agent.agent_id, "error", {
+          error:
+            "Stuck booting — CLI never became interactive within the boot timeout",
+        });
+        this.registry.set(agent.agent_id, failed);
+        return failed;
+      } catch {
+        return agent;
+      }
+    }
+
+    try {
+      this.stateMgr.transition(agent.agent_id, "ready", {});
+
+      const parsedModel = parsed.model;
+      const modelMismatch = computeModelMismatch(agent.model, parsedModel);
+      let promptDelivered = agent.prompt_delivered ?? false;
+      let submitVerified: boolean | null = agent.submit_verified ?? null;
+
+      if (!promptDelivered && agent.task_summary) {
+        await this.client.send(
+          agent.surface_id,
+          sanitizeTerminalInput(agent.task_summary),
+        );
+        await this.client.sendKey(agent.surface_id, "return");
+        promptDelivered = true;
+
+        await delay(PROMPT_DELIVERY_VERIFY_DELAY_MS);
+        try {
+          const recheck = await this.client.readScreen(agent.surface_id, {
+            lines: BOOT_READY_SCREEN_LINES,
+          });
+          const reparsed = parseScreen(recheck.text);
+          if (isSubmitVerifiedStatus(reparsed.status)) {
+            submitVerified = true;
+          } else if (screenShowsPendingInput(recheck.text, agent.task_summary)) {
+            submitVerified = false;
+          } else {
+            submitVerified = null;
+          }
+        } catch {
+          submitVerified = null;
+        }
+      }
+
+      const updated = this.stateMgr.updateRecord(agent.agent_id, {
+        parsed_model: parsedModel,
+        model_mismatch: modelMismatch,
+        prompt_delivered: promptDelivered,
+        submit_verified: submitVerified,
       });
       this.registry.set(agent.agent_id, updated);
       return updated;
@@ -520,7 +642,8 @@ export class AgentEngine {
     const done = agents.filter((a) => a.state === "done").length;
 
     for (const originalAgent of agents) {
-      const agent = await this.maybeCaptureBootSessionId(originalAgent);
+      const bootCaptured = await this.maybeCaptureBootSessionId(originalAgent);
+      const agent = await this.maybeAdvanceBootingAgent(bootCaptured);
       const { agent_id: agentId, repo, state, surface_id } = agent;
       const statusValue =
         state === "error" ? `${repo}: error` : `${repo}: ${state}`;
@@ -727,6 +850,10 @@ export class AgentEngine {
       crash_recover: params.crash_recover ?? false,
       respawn_attempts: 0,
       user_killed: false,
+      submit_verified: null,
+      prompt_delivered: false,
+      parsed_model: null,
+      model_mismatch: null,
     };
     this.stateMgr.writeState(record);
     this.registry.set(agentId, record);
