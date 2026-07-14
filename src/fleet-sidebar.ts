@@ -128,6 +128,11 @@ const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
   "missing_cli_session_id",
   "non_resumable",
   "inbox_monitor_not_alive",
+  "seat_identity_mismatch",
+  "non_claude_orchestrator",
+  "orchestrator_not_leftmost",
+  "worker_in_leftmost_column",
+  "registry_surface_workspace_mismatch",
 ]);
 
 export function toFleetScreenState(

@@ -304,17 +304,17 @@ describe("fleet sidebar reconciled snapshot", () => {
           healthIssueCodes: [
             "auto_discovered_agent",
             "inbox_monitor_not_alive",
-            "seat_identity_mismatch",
+            "agent_wedged",
           ],
           healthReasons: [
             "agent was auto-discovered, not created through managed spawn_agent",
             "agent inbox monitor heartbeat is absent or stale",
-            "spawned agent seat identity does not match the registry and requires operator repair",
+            "agent screen and registry heartbeat are both stale and require operator recovery",
           ],
           healthIssueSeverities: {
             auto_discovered_agent: "info",
             inbox_monitor_not_alive: "degraded",
-            seat_identity_mismatch: "blocking",
+            agent_wedged: "blocking",
           },
         }),
       ],
@@ -324,8 +324,50 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
       healthVisible: true,
       health:
-        "spawned agent seat identity does not match the registry and requires operator repair",
+        "agent screen and registry heartbeat are both stale and require operator recovery",
     });
+  });
+
+  it("suppresses registry binding artifacts even when their diagnostic severity is blocking", () => {
+    const bindingReasons = [
+      "spawned agent seat identity does not match the registry",
+      "non-Claude agent was assigned orchestrator topology role",
+      "orchestrator is not in the leftmost column",
+      "worker is in the leftmost lead column",
+      "registry workspace does not match the surface workspace",
+    ];
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          healthStatus: "unhealthy",
+          healthIssueCodes: [
+            "seat_identity_mismatch",
+            "non_claude_orchestrator",
+            "orchestrator_not_leftmost",
+            "worker_in_leftmost_column",
+            "registry_surface_workspace_mismatch",
+          ],
+          healthReasons: bindingReasons,
+          healthIssueSeverities: {
+            seat_identity_mismatch: "blocking",
+            non_claude_orchestrator: "blocking",
+            orchestrator_not_leftmost: "blocking",
+            worker_in_leftmost_column: "blocking",
+            registry_surface_workspace_mismatch: "blocking",
+          },
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
+      healthVisible: false,
+      health: "",
+    });
+    const source = renderFleetSidebar(snapshot);
+    for (const reason of bindingReasons) {
+      expect(source).not.toContain(reason);
+    }
   });
 
   it("uses a subtle no-status marker for missing and repair-placeholder status", () => {
@@ -641,9 +683,9 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
         candidate({
           taskSummary: status,
           healthStatus: "unhealthy",
-          healthIssueCodes: ["seat_identity_mismatch"],
+          healthIssueCodes: ["agent_wedged"],
           healthReasons: [health],
-          healthIssueSeverities: { seat_identity_mismatch: "blocking" },
+          healthIssueSeverities: { agent_wedged: "blocking" },
         }),
       ],
       { liveSurfaceRefs: new Set(["surface:1"]) },

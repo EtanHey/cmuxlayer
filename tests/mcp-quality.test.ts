@@ -152,7 +152,7 @@ describe("close_surface cleans up agent registry", () => {
     expect(registry.list()).toHaveLength(2);
 
     // After purge, terminal-state agents with no live surface should be removed
-    const purged = await registry.purgeTerminal();
+    const purged = await registry.purgeTerminal({ confirmationMs: 0 });
 
     expect(purged).toBe(2);
     expect(registry.list()).toHaveLength(0);

@@ -92,6 +92,7 @@ describe("AgentRegistry", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -327,6 +328,36 @@ describe("AgentRegistry", () => {
       await registry.reconcile();
       expect(registry.list()).toHaveLength(1);
       expect(registry.get("new-agent")!.state).toBe("ready");
+    });
+
+    it("does not let listMerged purge a worker on its first partial omission", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-14T05:00:00.000Z"));
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "list-worker-transient-gap",
+          surface_id: "surface:maybe-live",
+          state: "working",
+          role: "worker",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:other"),
+      ]);
+      await registry.reconstitute();
+      const discovery = { scan: vi.fn().mockResolvedValue([]) };
+
+      await registry.listMerged(discovery as any);
+
+      expect(registry.get("list-worker-transient-gap")).toMatchObject({
+        state: "error",
+        error: "Surface surface:maybe-live disappeared",
+      });
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      await registry.listMerged(discovery as any);
+
+      expect(registry.get("list-worker-transient-gap")).toBeNull();
     });
 
     it("does not evict auto agents for plain substring-matching errors", async () => {
@@ -863,7 +894,7 @@ describe("AgentRegistry", () => {
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
-      const purged = await registry.purgeTerminal();
+      const purged = await registry.purgeTerminal({ confirmationMs: 0 });
 
       expect(purged).toBe(0);
       expect(registry.get("terminal-worker-empty-scan")).toMatchObject({
@@ -902,7 +933,7 @@ describe("AgentRegistry", () => {
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
-      const purged = await registry.purgeTerminal();
+      const purged = await registry.purgeTerminal({ confirmationMs: 0 });
 
       expect(purged).toBe(1);
       expect(registry.get("orchestrator-terminal")).toMatchObject({
@@ -932,7 +963,7 @@ describe("AgentRegistry", () => {
       const registry = new AgentRegistry(stateMgr, surfaceProvider);
       await registry.reconstitute();
 
-      const purged = await registry.purgeTerminal();
+      const purged = await registry.purgeTerminal({ confirmationMs: 0 });
 
       expect(purged).toBe(1);
       expect(registry.get("stale-recovery-error")).toBeNull();
@@ -953,7 +984,7 @@ describe("AgentRegistry", () => {
       const renamed = stateMgr.renameState("agent-pending", "agent-final");
       registry.rename("agent-pending", "agent-final", renamed);
 
-      const purged = await registry.purgeTerminal();
+      const purged = await registry.purgeTerminal({ confirmationMs: 0 });
       registry.set(
         "agent-pending",
         makeRecord({
@@ -968,6 +999,40 @@ describe("AgentRegistry", () => {
         agent_id: "agent-pending",
         surface_id: "surface:new",
       });
+    });
+  });
+
+  describe("evictSurfaceless confirmation", () => {
+    it("resets the absence window when the same surface is observed live", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "terminal-with-transient-gap",
+          state: "done",
+          surface_id: "surface:maybe-live",
+          role: "orchestrator",
+        }),
+      );
+      let liveSurfaces = [makeSurface("surface:other")];
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      await registry.reconstitute();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 5_000, now: 1_000 }),
+      ).resolves.toEqual([]);
+
+      liveSurfaces = [makeSurface("surface:maybe-live")];
+      await registry.reconcile();
+
+      liveSurfaces = [makeSurface("surface:other")];
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 5_000, now: 8_000 }),
+      ).resolves.toEqual([]);
+      expect(registry.get("terminal-with-transient-gap")).not.toBeNull();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 5_000, now: 13_001 }),
+      ).resolves.toEqual(["terminal-with-transient-gap"]);
+      expect(registry.get("terminal-with-transient-gap")).toBeNull();
     });
   });
 });
