@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
+import type { AgentRoute } from "./agent-types.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
@@ -11,13 +12,24 @@ import {
   httpNotifyMonitorDeadman,
 } from "./monitor-registry.js";
 import { AgentRegistry } from "./agent-registry.js";
+import {
+  deriveCmuxObserverEpoch,
+  deriveCmuxObserverOwnerId,
+} from "./cmux-observer-identity.js";
 import { AgentDiscovery } from "./agent-discovery.js";
 import { StateManager } from "./state-manager.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { assertMutationAllowed } from "./mode-policy.js";
+import { findWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
-import { enrichSurfaceIdsFromPanes } from "./surface-topology.js";
+import {
+  captureSurfaceObserverEpoch,
+  enrichSurfaceIdsFromPanes,
+  isSurfaceObserverEpochCurrent,
+  type SurfaceObserverEpoch,
+} from "./surface-topology.js";
 import {
   FleetSidebarPublisher,
   type FleetSidebarPublisherLike,
@@ -27,6 +39,12 @@ import type {
   BridgeScreenSnapshot,
   BridgeThread,
 } from "./app-server-bridge.js";
+import type {
+  CmuxPane,
+  CmuxPaneSurfaces,
+  CmuxStatusEntry,
+  ControlMode,
+} from "./types.js";
 
 const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
@@ -36,6 +54,41 @@ const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 
 type CmuxLikeClient = CmuxClient | CmuxSocketClient;
+
+function controlModeFromStatusEntries(entries: unknown): ControlMode {
+  if (!Array.isArray(entries)) return "autonomous";
+  const entry = entries.find((candidate): candidate is CmuxStatusEntry => {
+    if (typeof candidate !== "object" || candidate === null) return false;
+    return (candidate as Partial<CmuxStatusEntry>).key === "mode.control";
+  });
+  return entry?.value === "manual" || entry?.value === "autonomous"
+    ? entry.value
+    : "autonomous";
+}
+
+function assertCompletePaneSurfaceEnumeration(
+  panes: readonly CmuxPane[],
+  groups: readonly CmuxPaneSurfaces[],
+  workspace: string,
+): void {
+  for (const pane of panes) {
+    const expectedRefs = new Set(pane.surface_refs);
+    const observed = groups.find((group) => group.pane_ref === pane.ref);
+    const observedRefs = observed?.surfaces.map((surface) => surface.ref) ?? [];
+    const observedRefSet = new Set(observedRefs);
+    if (
+      pane.surface_count !== pane.surface_refs.length ||
+      expectedRefs.size !== pane.surface_refs.length ||
+      observedRefSet.size !== observedRefs.length ||
+      observedRefSet.size !== expectedRefs.size ||
+      [...expectedRefs].some((surfaceRef) => !observedRefSet.has(surfaceRef))
+    ) {
+      throw new Error(
+        `Incomplete app-server surface enumeration for ${workspace}/${pane.ref}`,
+      );
+    }
+  }
+}
 
 function chunkTerminalInput(text: string, chunkSize: number): string[] {
   const rawChunks: string[] = [];
@@ -127,6 +180,8 @@ export interface CmuxAppServerRuntimeOptions {
   client: CmuxLikeClient;
   stateDir?: string;
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
+  surfaceObserverOwnerIdProvider?: () => string | null | undefined;
+  surfaceObserverEpochProvider?: () => string | null | undefined;
 }
 
 export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
@@ -135,16 +190,29 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   private registry: AgentRegistry;
   private engine: AgentEngine;
   private discovery: AgentDiscovery;
+  private observerOwnerIdProvider: () => string | null | undefined;
+  private observerEpochProvider: () => string | null | undefined;
   private activeSurfaceWrites = new Map<string, string>();
   private threadCwds = new Map<string, string>();
 
   constructor(opts: CmuxAppServerRuntimeOptions) {
     this.client = opts.client;
+    this.observerOwnerIdProvider =
+      opts.surfaceObserverOwnerIdProvider ??
+      (() => deriveCmuxObserverOwnerId(this.client));
+    this.observerEpochProvider =
+      opts.surfaceObserverEpochProvider ??
+      (() => deriveCmuxObserverEpoch(this.client));
     this.stateMgr = new StateManager(
       opts.stateDir ?? join(homedir(), ".local", "state", "cmux-agents"),
     );
 
     const surfaceProvider = async () => {
+      const observerEpoch = this.captureSurfaceObserverEpoch();
+      this.assertSurfaceObserverEpochCurrent(
+        observerEpoch,
+        "app-server surface enumeration",
+      );
       const workspaces = await this.client.listWorkspaces();
       const panesByWorkspace = await Promise.all(
         workspaces.workspaces.map(async (ws) => ({
@@ -159,63 +227,111 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
               this.client.listPaneSurfaces({ workspace: ref, pane: pane.ref }),
             ),
           );
-          return partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
+          const groups = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
             workspace_ref: panes.workspace_ref ?? ref,
             window_ref: panes.window_ref,
           });
+          assertCompletePaneSurfaceEnumeration(panes.panes, groups, ref);
+          return groups;
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
-      return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
+      const surfaces = enrichSurfaceIdsFromPanes(
+        panesByWorkspace,
+        surfaceGroups,
+      );
+      this.assertSurfaceObserverEpochCurrent(
+        observerEpoch,
+        "app-server surface enumeration",
+      );
+      return surfaces;
     };
 
-    this.registry = new AgentRegistry(this.stateMgr, surfaceProvider);
+    this.registry = new AgentRegistry(this.stateMgr, surfaceProvider, {
+      observerIdProvider: () => this.getSurfaceObserverOwnerId(),
+      observerEpochProvider: () => this.getSurfaceObserverEpoch(),
+    });
     this.discovery = new AgentDiscovery({
+      observerIdProvider: () => this.getSurfaceObserverEpoch(),
       listSurfaces: surfaceProvider,
       readScreen: (surface, readOpts) =>
         this.client.readScreen(surface, readOpts),
     });
-    this.engine = new AgentEngine(this.stateMgr, this.registry, {
-      log: async () => {},
-      listWorkspaces: () => this.client.listWorkspaces(),
-      setStatus: async () => {},
-      setStatuses: async () => {},
-      clearStatus: async () => {},
-      readScreen: (surface, readOpts) => this.client.readScreen(surface, readOpts),
-      send: (surface, text, sendOpts) =>
-        this.withSurfaceWrite(surface, () => this.client.send(surface, text, sendOpts)),
-      sendKey: (surface, key, keyOpts) =>
-        this.withSurfaceWrite(surface, () => this.client.sendKey(surface, key, keyOpts)),
-      setProgress: async () => {},
-      clearProgress: async () => {},
-      newSplit: (direction, splitOpts) => this.client.newSplit(direction, splitOpts),
-      newSurface: (surfaceOpts) => this.client.newSurface(surfaceOpts),
-      renameTab: (surface, title, renameOpts) =>
-        this.client.renameTab(surface, title, renameOpts),
-      selectWorkspace: (workspace) => this.client.selectWorkspace(workspace),
-      listPanes: (paneOpts) => this.client.listPanes(paneOpts),
-      listPaneSurfaces: (surfaceOpts) => this.client.listPaneSurfaces(surfaceOpts),
-      closeSurface: (surface, closeOpts) =>
-        this.withSurfaceWrite(surface, () =>
-          this.client.closeSurface(surface, closeOpts),
-        ),
-      notify: (notifyOpts) => this.client.notify(notifyOpts),
-      notifyLifecycleEvent: async () => {},
-    }, {
-      launchCommandSender: async ({ surface, workspace, command }) => {
-        await this.waitForShellReady(surface, workspace);
-        await this.sendCommand(surface, command, workspace);
+    this.engine = new AgentEngine(
+      this.stateMgr,
+      this.registry,
+      {
+        log: async () => {},
+        listWorkspaces: () => this.client.listWorkspaces(),
+        setStatus: async () => {},
+        setStatuses: async () => {},
+        clearStatus: async () => {},
+        readScreen: (surface, readOpts) =>
+          this.client.readScreen(surface, readOpts),
+        send: (surface, text, sendOpts) =>
+          this.runWorkspaceMutation("send_command", sendOpts?.workspace, () =>
+            this.withSurfaceWrite(surface, () =>
+              this.client.send(surface, text, sendOpts),
+            ),
+          ),
+        sendKey: (surface, key, keyOpts) =>
+          this.runWorkspaceMutation("send_key", keyOpts?.workspace, () =>
+            this.withSurfaceWrite(surface, () =>
+              this.client.sendKey(surface, key, keyOpts),
+            ),
+          ),
+        setProgress: async () => {},
+        clearProgress: async () => {},
+        newSplit: (direction, splitOpts) =>
+          this.runWorkspaceMutation("new_split", splitOpts?.workspace, () =>
+            this.client.newSplit(direction, splitOpts),
+          ),
+        newSurface: (surfaceOpts) =>
+          this.runWorkspaceMutation("new_surface", surfaceOpts?.workspace, () =>
+            this.client.newSurface(surfaceOpts),
+          ),
+        renameTab: (surface, title, renameOpts) =>
+          this.runWorkspaceMutation("rename_tab", renameOpts?.workspace, () =>
+            this.client.renameTab(surface, title, renameOpts),
+          ),
+        selectWorkspace: (workspace) =>
+          this.runWorkspaceMutation("select_workspace", workspace, () =>
+            this.client.selectWorkspace(workspace),
+          ),
+        listPanes: (paneOpts) => this.client.listPanes(paneOpts),
+        listPaneSurfaces: (surfaceOpts) =>
+          this.client.listPaneSurfaces(surfaceOpts),
+        closeSurface: (surface, closeOpts) =>
+          this.runWorkspaceMutation("close_surface", closeOpts?.workspace, () =>
+            this.withSurfaceWrite(surface, () =>
+              this.client.closeSurface(surface, closeOpts),
+            ),
+          ),
+        notify: (notifyOpts) => this.client.notify(notifyOpts),
+        notifyLifecycleEvent: async () => {},
       },
-      outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
-      monitorRegistryPath: defaultMonitorRegistryPath(),
-      monitorRegistryNotify: httpNotifyMonitorDeadman,
-      closeForensicsRunner: createDefaultCloseForensicsRunner({
-        stateMgr: this.stateMgr,
-        listSurfacesForRefMap: surfaceProvider,
-      }),
-      fleetSidebarPublisher:
-        opts.fleetSidebarPublisher ?? new FleetSidebarPublisher(),
-    });
+      {
+        launchCommandSender: async ({ surface, workspace, command }) => {
+          const agentId = this.findLaunchingAgentId(surface, workspace);
+          if (!agentId) {
+            throw new Error(
+              `Cannot bind app-server launch surface ${surface} to one booting agent`,
+            );
+          }
+          await this.waitForAgentShellReady(agentId);
+          await this.sendAgentCommand(agentId, command);
+        },
+        outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
+        monitorRegistryPath: defaultMonitorRegistryPath(),
+        monitorRegistryNotify: httpNotifyMonitorDeadman,
+        closeForensicsRunner: createDefaultCloseForensicsRunner({
+          stateMgr: this.stateMgr,
+          listSurfacesForRefMap: surfaceProvider,
+        }),
+        fleetSidebarPublisher:
+          opts.fleetSidebarPublisher ?? new FleetSidebarPublisher(),
+      },
+    );
   }
 
   async initialize(): Promise<void> {
@@ -233,11 +349,30 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   }): Promise<BridgeThread> {
     const repo = deriveRepoFromCwd(input.cwd);
     const createdAt = Math.floor(Date.now() / 1000);
+    const observerEpoch = this.captureSurfaceObserverEpoch();
+    this.assertSurfaceObserverEpochCurrent(
+      observerEpoch,
+      "app-server thread start",
+    );
+    const workspaces = await this.client.listWorkspaces();
+    this.assertSurfaceObserverEpochCurrent(
+      observerEpoch,
+      "app-server thread start",
+    );
+    const workspace =
+      findWorkspaceRefForRepo(workspaces.workspaces, repo) ??
+      workspaces.workspaces.find((candidate) => candidate.selected)?.ref;
+    await this.assertWorkspaceMutationAllowed("spawn_agent", workspace);
+    this.assertSurfaceObserverEpochCurrent(
+      observerEpoch,
+      "app-server thread start",
+    );
     const result = await this.engine.spawnAgent({
       repo,
       model: input.model ?? "codex",
       cli: "codex",
       prompt: `App Server bridge session for ${repo}`,
+      ...(workspace ? { workspace } : {}),
     });
 
     this.threadCwds.set(result.agent_id, input.cwd);
@@ -257,54 +392,55 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       return null;
     }
 
-    const cwd = this.threadCwds.get(threadId) ?? join(homedir(), "Gits", agent.repo);
+    const cwd =
+      this.threadCwds.get(threadId) ?? join(homedir(), "Gits", agent.repo);
     const createdAt = Math.floor(new Date(agent.created_at).getTime() / 1000);
     return toBridgeThread(cwd, createdAt, agent);
   }
 
-  async sendTurn(input: {
-    threadId: string;
-    text: string;
-  }): Promise<void> {
-    const route = this.engine.resolveAgentRoute(input.threadId);
-    await this.sendCommand(
-      route.surface_id,
-      input.text,
-      route.workspace_id ?? undefined,
-    );
+  async sendTurn(input: { threadId: string; text: string }): Promise<void> {
+    await this.sendAgentCommand(input.threadId, input.text);
   }
 
-  private async sendCommand(
-    surface: string,
-    text: string,
-    workspace?: string,
-  ): Promise<void> {
+  private async sendAgentCommand(agentId: string, text: string): Promise<void> {
     const sanitizedText = sanitizeTerminalInput(text);
-    const chunks = chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD);
+    const chunks = chunkTerminalInput(
+      sanitizedText,
+      SEND_INPUT_CHUNK_THRESHOLD,
+    );
 
-    await this.withSurfaceWrite(surface, async () => {
+    await this.withSurfaceWrite(`agent:${agentId}`, async () => {
       for (const [index, chunk] of chunks.entries()) {
-        await this.client.send(surface, chunk, { workspace });
+        const route = await this.resolveFreshMutationRoute(
+          agentId,
+          "send_command",
+        );
+        await this.client.send(route.surface_id, chunk, {
+          workspace: route.workspace_id ?? undefined,
+        });
         if (index < chunks.length - 1) {
           await delay(SEND_INPUT_CHUNK_DELAY_MS);
         }
       }
       await delay(50);
-      await this.client.sendKey(surface, "return", { workspace });
+      const route = await this.resolveFreshMutationRoute(agentId, "send_key");
+      await this.client.sendKey(route.surface_id, "return", {
+        workspace: route.workspace_id ?? undefined,
+      });
     });
   }
 
   async interruptTurn(threadId: string): Promise<void> {
-    const route = this.engine.resolveAgentRoute(threadId);
-    await this.withSurfaceWrite(route.surface_id, () =>
-      this.client.sendKey(route.surface_id, "c-c", {
+    await this.withSurfaceWrite(`agent:${threadId}`, async () => {
+      const route = await this.resolveFreshMutationRoute(threadId, "send_key");
+      await this.client.sendKey(route.surface_id, "c-c", {
         workspace: route.workspace_id ?? undefined,
-      }),
-    );
+      });
+    });
   }
 
   async readScreen(threadId: string): Promise<BridgeScreenSnapshot> {
-    const route = this.engine.resolveAgentRoute(threadId);
+    const route = await this.engine.resolveAgentIoRoute(threadId);
     const screen = await this.client.readScreen(route.surface_id, {
       workspace: route.workspace_id ?? undefined,
       lines: 40,
@@ -336,30 +472,34 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     throw new Error(`Timed out waiting for Codex prompt on thread ${threadId}`);
   }
 
-  private async waitForShellReady(
-    surface: string,
-    workspace?: string,
-  ): Promise<void> {
+  private async waitForAgentShellReady(agentId: string): Promise<void> {
     const startedAt = Date.now();
     let lastText = "";
+    let lastSurface = agentId;
 
     while (Date.now() - startedAt < LAUNCH_SHELL_READY_TIMEOUT_MS) {
       try {
-        const screen = await this.client.readScreen(surface, {
-          workspace,
+        const route = await this.engine.resolveAgentIoRoute(agentId);
+        lastSurface = route.surface_id;
+        const screen = await this.client.readScreen(route.surface_id, {
+          workspace: route.workspace_id ?? undefined,
           lines: 30,
           scrollback: false,
         });
         const text = typeof screen === "string" ? screen : (screen.text ?? "");
         lastText = text;
-        if (matchesShellPrompt(text) || matchReadyPattern("codex", text).matched) {
+        if (
+          matchesShellPrompt(text) ||
+          matchReadyPattern("codex", text).matched
+        ) {
           return;
         }
       } catch (error) {
         lastText = error instanceof Error ? error.message : String(error);
       }
 
-      const remaining = LAUNCH_SHELL_READY_TIMEOUT_MS - (Date.now() - startedAt);
+      const remaining =
+        LAUNCH_SHELL_READY_TIMEOUT_MS - (Date.now() - startedAt);
       if (remaining <= 0) {
         break;
       }
@@ -367,8 +507,121 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     }
 
     throw new Error(
-      `Timed out waiting for shell readiness on ${surface}: ${lastText}`,
+      `Timed out waiting for shell readiness on ${lastSurface}: ${lastText}`,
     );
+  }
+
+  private captureSurfaceObserverEpoch(): SurfaceObserverEpoch {
+    return captureSurfaceObserverEpoch(() => this.getSurfaceObserverEpoch());
+  }
+
+  private assertSurfaceObserverEpochCurrent(
+    observerEpoch: SurfaceObserverEpoch,
+    operation: string,
+  ): void {
+    const provider = () => this.getSurfaceObserverEpoch();
+    if (isSurfaceObserverEpochCurrent(observerEpoch, provider)) return;
+    const currentObserverEpoch = captureSurfaceObserverEpoch(provider);
+    throw new Error(
+      `Surface observer changed or became unavailable during ${operation} ` +
+        `(${observerEpoch ?? "unknown"} -> ${currentObserverEpoch ?? "unknown"}); ` +
+        `refusing to mutate a different cmux instance.`,
+    );
+  }
+
+  private getSurfaceObserverOwnerId(): string | null {
+    try {
+      return this.observerOwnerIdProvider()?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private getSurfaceObserverEpoch(): string | null {
+    try {
+      return this.observerEpochProvider()?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async assertWorkspaceMutationAllowed(
+    toolName: string,
+    workspace?: string | null,
+  ): Promise<void> {
+    let entries: CmuxStatusEntry[];
+    try {
+      entries = await this.client.listStatus(
+        workspace ? { workspace } : undefined,
+      );
+    } catch {
+      // Match the MCP server's compatibility behavior: older cmux builds may
+      // not expose status listing, so only an observed manual mode can block.
+      return;
+    }
+    assertMutationAllowed(toolName, controlModeFromStatusEntries(entries));
+  }
+
+  private async runWorkspaceMutation<T>(
+    toolName: string,
+    workspace: string | null | undefined,
+    mutate: () => Promise<T>,
+  ): Promise<T> {
+    const observerEpoch = this.captureSurfaceObserverEpoch();
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+    await this.assertWorkspaceMutationAllowed(toolName, workspace);
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+    return mutate();
+  }
+
+  private async resolveFreshMutationRoute(
+    agentId: string,
+    toolName: string,
+  ): Promise<AgentRoute> {
+    const observerEpoch = this.captureSurfaceObserverEpoch();
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+    const gatedRoute = await this.engine.resolveAgentIoRoute(agentId);
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+    await this.assertWorkspaceMutationAllowed(
+      toolName,
+      gatedRoute.workspace_id,
+    );
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+
+    // Status lookup is asynchronous. Resolve the stable identity again after
+    // that await so the actual I/O never uses the ref that preceded the gate.
+    const route = await this.engine.resolveAgentIoRoute(agentId);
+    this.assertSurfaceObserverEpochCurrent(observerEpoch, toolName);
+    const gatedUuid = gatedRoute.surface_uuid?.trim().toLowerCase() || null;
+    const routeUuid = route.surface_uuid?.trim().toLowerCase() || null;
+    if (
+      gatedUuid !== routeUuid ||
+      (gatedRoute.workspace_id ?? null) !== (route.workspace_id ?? null) ||
+      (!routeUuid && gatedRoute.surface_id !== route.surface_id)
+    ) {
+      throw new Error(
+        `Agent ${agentId} changed surface binding during ${toolName}; ` +
+          `refusing terminal I/O after a stale manual-mode check.`,
+      );
+    }
+    return route;
+  }
+
+  private findLaunchingAgentId(
+    surface: string,
+    workspace?: string,
+  ): string | null {
+    const candidates = this.registry
+      .list()
+      .filter(
+        (agent) => agent.state === "booting" && agent.surface_id === surface,
+      );
+    const workspaceCandidates = workspace
+      ? candidates.filter((agent) => (agent.workspace_id ?? null) === workspace)
+      : candidates;
+    const resolved =
+      workspaceCandidates.length > 0 ? workspaceCandidates : candidates;
+    return resolved.length === 1 ? resolved[0]!.agent_id : null;
   }
 
   private async withSurfaceWrite<T>(

@@ -32,8 +32,45 @@ import {
   type SeatIdentityAssertion,
   type SeatRegistry,
 } from "./seat-identity.js";
+import { validateSurfaceIdentityBijection } from "./surface-topology.js";
+import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
+
+interface SurfaceAbsenceOptions {
+  confirmationMs?: number;
+  now?: number;
+}
+
+export interface AgentRegistryOptions {
+  /** Static identity for a client that never changes cmux socket topology. */
+  observerId?: string | null;
+  /**
+   * Resolve the identity of the cmux topology currently observed by the client.
+   * Socket clients can fail over at runtime, so production callers should use
+   * this form rather than capturing currentSocketPath() once at construction.
+   */
+  observerIdProvider?: () => string | null | undefined;
+  /**
+   * Transient topology epoch used only to reject observations that cross a
+   * reconnect/route replacement. Unlike observerIdProvider, this value is
+   * never persisted in agent state.
+   */
+  observerEpochProvider?: () => string | null | undefined;
+}
+
+interface RegistryObserverSnapshot {
+  ownerId: string | null | undefined;
+  epoch: string | null | undefined;
+}
+
+export function deriveSurfaceObserverId(
+  client: unknown,
+  fallbackSocketPath: string | null | undefined =
+    process.env.CMUX_SOCKET_PATH,
+): string | null {
+  return deriveCmuxObserverOwnerId(client, fallbackSocketPath);
+}
 
 export const SURFACE_EVICTION_CONFIRMATION_MS = 5_000;
 
@@ -56,6 +93,7 @@ const CLI_SUFFIXES: Array<{ suffix: string; cli: CliType }> = [
 
 export interface RegistryRepairEntry {
   surface_id: string;
+  surface_uuid?: string | null;
   surface_title: string;
   agent_id: string;
   repo: string;
@@ -317,6 +355,8 @@ function patchForRepairCandidate(
   const model = discovered.model ?? record.model;
   const fields: Partial<AgentRecord> = {
     surface_id: discovered.surface_id,
+    surface_uuid:
+      discovered.surface_uuid ?? record.surface_uuid ?? null,
     workspace_id: workspaceId,
     repo: candidate.repo,
     model,
@@ -341,6 +381,63 @@ function patchForRepairCandidate(
   return patch;
 }
 
+function surfaceUuidKey(value: string | null | undefined): string | null {
+  return value?.trim().toLowerCase() || null;
+}
+
+function hasSurfaceUuidConflict(
+  record: Pick<AgentRecord, "surface_uuid">,
+  discovered: Pick<DiscoveredAgent, "surface_uuid">,
+): boolean {
+  const persistedUuid = surfaceUuidKey(record.surface_uuid);
+  const discoveredUuid = surfaceUuidKey(discovered.surface_uuid);
+  return Boolean(
+    persistedUuid && discoveredUuid && persistedUuid !== discoveredUuid,
+  );
+}
+
+/**
+ * Absence is authoritative only when one snapshot has a coherent identity
+ * regime. Mixed UUID/ref coverage is incomplete even when its observed pairs
+ * are bijective, so destructive consumers must fail closed for the whole scan.
+ */
+function hasCoherentSurfaceIdentity(
+  surfaces: readonly CmuxSurface[],
+): boolean {
+  const validation = validateSurfaceIdentityBijection(
+    surfaces.map((surface) => ({
+      surfaceRef: surface.ref,
+      surfaceId: surface.id,
+    })),
+  );
+  if (!validation.isBijective) return false;
+
+  const identifiedCount = surfaces.filter(
+    (surface) => surfaceUuidKey(surface.id) !== null,
+  ).length;
+  return identifiedCount === 0 || identifiedCount === surfaces.length;
+}
+
+function hasBijectiveDiscoveryIdentity(
+  discovered: readonly DiscoveredAgent[],
+): boolean {
+  return validateSurfaceIdentityBijection(
+    discovered.map((entry) => ({
+      surfaceRef: entry.surface_id,
+      surfaceId: entry.surface_uuid,
+    })),
+  ).isBijective;
+}
+
+function hasMixedDiscoveryIdentityCoverage(
+  discovered: readonly DiscoveredAgent[],
+): boolean {
+  const identifiedCount = discovered.filter(
+    (entry) => surfaceUuidKey(entry.surface_uuid) !== null,
+  ).length;
+  return identifiedCount > 0 && identifiedCount < discovered.length;
+}
+
 class AgentNotFoundError extends Error {
   readonly code = "AGENT_NOT_FOUND";
   readonly agentId: string;
@@ -361,17 +458,138 @@ export class AgentRegistry {
   >();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
+  private observerId: string | null;
+  private observerIdProvider: (() => string | null | undefined) | null;
+  private observerEpochProvider: (() => string | null | undefined) | null;
+  private enforceObserverOwnership: boolean;
 
-  constructor(stateMgr: StateManager, surfaceProvider: SurfaceProvider) {
+  constructor(
+    stateMgr: StateManager,
+    surfaceProvider: SurfaceProvider,
+    opts?: AgentRegistryOptions,
+  ) {
     this.stateMgr = stateMgr;
     this.surfaceProvider = surfaceProvider;
+    this.observerId = opts?.observerId?.trim() || null;
+    this.observerIdProvider = opts?.observerIdProvider ?? null;
+    this.observerEpochProvider = opts?.observerEpochProvider ?? null;
+    // Omitted options retain the historical library/test behavior. Production
+    // explicitly passes options (including null) so missing instance evidence
+    // fails closed instead of treating one topology as globally authoritative.
+    this.enforceObserverOwnership = opts !== undefined;
+  }
+
+  getObserverId(): string | null {
+    if (!this.observerIdProvider) {
+      return this.observerId;
+    }
+    try {
+      return this.observerIdProvider()?.trim() || null;
+    } catch {
+      // Losing observer identity must fail closed. A stale cached identity could
+      // otherwise authorize the replacement socket to mutate the old topology.
+      return null;
+    }
+  }
+
+  getObserverEpoch(): string | null {
+    const provider = this.observerEpochProvider ?? this.observerIdProvider;
+    if (!provider) {
+      return this.observerId;
+    }
+    try {
+      return provider()?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Capture persisted owner and transient epoch before an awaited scan. */
+  private captureObserverSnapshot(): RegistryObserverSnapshot {
+    if (!this.enforceObserverOwnership) {
+      return { ownerId: undefined, epoch: undefined };
+    }
+    return {
+      ownerId: this.getObserverId(),
+      epoch: this.getObserverEpoch(),
+    };
+  }
+
+  private isObserverSnapshotCurrent(
+    snapshot: RegistryObserverSnapshot,
+  ): boolean {
+    if (snapshot.ownerId === undefined && snapshot.epoch === undefined) {
+      return true;
+    }
+    return Boolean(
+      snapshot.ownerId &&
+        snapshot.epoch &&
+        this.getObserverId() === snapshot.ownerId &&
+        this.getObserverEpoch() === snapshot.epoch,
+    );
+  }
+
+  isObserverOwnershipEnforced(): boolean {
+    return this.enforceObserverOwnership;
+  }
+
+  /**
+   * Decide whether a live observation is strong enough to bind an existing row.
+   * Stable UUID equality can migrate ownership; mutable refs require the row to
+   * already belong to this observer.
+   */
+  canUseObservedBinding(
+    agent: Pick<AgentRecord, "surface_uuid" | "surface_observer_id">,
+    observedUuid: string | null | undefined,
+  ): boolean {
+    return this.canUseObservedBindingAtOwner(
+      agent,
+      observedUuid,
+      this.enforceObserverOwnership ? this.getObserverId() : undefined,
+    );
+  }
+
+  private canUseObservedBindingAtOwner(
+    agent: Pick<AgentRecord, "surface_uuid" | "surface_observer_id">,
+    observedUuid: string | null | undefined,
+    observerOwnerId: string | null | undefined,
+  ): boolean {
+    const persisted = surfaceUuidKey(agent.surface_uuid);
+    const observed = surfaceUuidKey(observedUuid);
+    if (this.enforceObserverOwnership && !observerOwnerId) {
+      return false;
+    }
+    if (persisted && observed) {
+      return persisted === observed;
+    }
+    // A mutable ref cannot prove that a UUID-less row belongs to the UUID now
+    // occupying it. Keep that row quarantined instead of adopting/backfilling.
+    if (!persisted && observed) {
+      return false;
+    }
+    if (!this.enforceObserverOwnership) {
+      return true;
+    }
+    return Boolean(
+      observerOwnerId && agent.surface_observer_id === observerOwnerId,
+    );
+  }
+
+  canControlSurface(
+    agent: Pick<AgentRecord, "surface_observer_id">,
+  ): boolean {
+    if (!this.enforceObserverOwnership) {
+      return true;
+    }
+    const observerId = this.getObserverId();
+    return Boolean(observerId && agent.surface_observer_id === observerId);
   }
 
   /**
    * Load all agent state from disk and cross-check against live surfaces.
    * Call once on startup.
    */
-  async reconstitute(): Promise<Set<string>> {
+  async reconstitute(opts: SurfaceAbsenceOptions = {}): Promise<Set<string>> {
     this.agents.clear();
     this.aliases.clear();
     this.surfacelessObservations.clear();
@@ -381,14 +599,14 @@ export class AgentRegistry {
       this.agents.set(record.agent_id, record);
     }
 
-    return this.reconcileSurfaces();
+    return this.reconcileSurfaces(opts);
   }
 
   /**
    * Periodic reconciliation: cross-check in-memory state against
    * actual cmux surfaces and state files on disk.
    */
-  async reconcile(): Promise<Set<string>> {
+  async reconcile(opts: SurfaceAbsenceOptions = {}): Promise<Set<string>> {
     // Pick up new state files created by other processes
     const onDisk = this.stateMgr.listStates();
     for (const record of onDisk) {
@@ -398,10 +616,65 @@ export class AgentRegistry {
       }
     }
 
-    return this.reconcileSurfaces();
+    return this.reconcileSurfaces(opts);
   }
 
-  private async reconcileSurfaces(): Promise<Set<string>> {
+  private liveSurfaceKeys(surfaces: readonly CmuxSurface[]): Set<string> {
+    return new Set(
+      surfaces.flatMap((surface) => [
+        `ref:${surface.ref}`,
+        ...(surface.id ? [`uuid:${surface.id}`] : []),
+      ]),
+    );
+  }
+
+  private agentSurfaceKey(
+    agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
+  ): string {
+    return agent.surface_uuid
+      ? `uuid:${agent.surface_uuid}`
+      : `ref:${agent.surface_id}`;
+  }
+
+  private matchingLiveSurface(
+    agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
+    surfaces: readonly CmuxSurface[],
+  ): CmuxSurface | undefined {
+    if (agent.surface_uuid) {
+      const expectedUuid = surfaceUuidKey(agent.surface_uuid);
+      const byUuid = surfaces.find(
+        (surface) => surfaceUuidKey(surface.id) === expectedUuid,
+      );
+      if (byUuid) return byUuid;
+      // Older cmux builds expose refs only. Preserve compatibility only when
+      // the entire observation lacks stable identity; never fall through to a
+      // recycled ref in a UUID-capable snapshot.
+      if (surfaces.some((surface) => surface.id)) return undefined;
+    }
+    return surfaces.find((surface) => surface.ref === agent.surface_id);
+  }
+
+  private isSurfaceAbsenceAuthoritative(
+    agent: Pick<AgentRecord, "surface_uuid">,
+    surfaces: readonly CmuxSurface[],
+  ): boolean {
+    const identifiedCount = surfaces.filter((surface) => surface.id).length;
+    if (!agent.surface_uuid) {
+      // A UUID-bearing occupant on the same mutable ref is neither positive nor
+      // negative evidence for a UUID-less persisted row. Only the complete
+      // all-ref compatibility regime may reconcile that row by ref.
+      return identifiedCount === 0;
+    }
+    // All-UUID observations prove UUID absence. All-ref observations retain
+    // compatibility and can prove ref absence. Mixed coverage proves neither:
+    // the missing UUID may belong to any identity-free surface in the scan.
+    return identifiedCount === 0 || identifiedCount === surfaces.length;
+  }
+
+  private async reconcileSurfaces(
+    opts: SurfaceAbsenceOptions = {},
+  ): Promise<Set<string>> {
+    const observerSnapshot = this.captureObserverSnapshot();
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
@@ -410,21 +683,92 @@ export class AgentRegistry {
       // socket/listing failure must not mark every active agent as disappeared.
       return new Set();
     }
+    if (!this.isObserverSnapshotCurrent(observerSnapshot)) {
+      return new Set();
+    }
     if (surfaces.length === 0) {
       // An empty topology is indistinguishable from a degraded cmux/app-server
       // listing path. Do not mass-mark agents dead until a non-empty scan proves
       // their specific surfaces are absent.
       return new Set();
     }
-    const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
-    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
+    if (!hasCoherentSurfaceIdentity(surfaces)) {
+      // Incomplete or contradictory identity evidence can prove neither
+      // presence nor absence.
+      // Reset pending absence timers so a later valid scan starts fresh.
+      this.surfacelessObservations.clear();
+      return new Set();
+    }
+    const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceKeys);
 
     // Phase 1: Mark agents with disappeared surfaces as error
     const crashedIds = new Set<string>();
-    for (const [id, agent] of this.agents) {
+    for (const [id, originalAgent] of this.agents) {
+      let agent = originalAgent;
+      const liveSurface = this.matchingLiveSurface(agent, surfaces);
+      if (liveSurface) {
+        if (
+          !this.canUseObservedBindingAtOwner(
+            agent,
+            liveSurface.id,
+            observerSnapshot.ownerId,
+          )
+        ) {
+          // A shared mutable ref cannot establish provenance for a legacy or
+          // foreign row. Preserve it without adopting this observer's surface.
+          this.surfacelessObservations.delete(agent.agent_id);
+          continue;
+        }
+        const workspaceId = liveSurface.workspace_ref ?? agent.workspace_id ?? null;
+        const patch: Partial<AgentRecord> = {};
+        if (agent.surface_id !== liveSurface.ref) {
+          patch.surface_id = liveSurface.ref;
+        }
+        if (!agent.surface_uuid && liveSurface.id) {
+          patch.surface_uuid = liveSurface.id;
+        }
+        const observerId = observerSnapshot.ownerId ?? null;
+        if (
+          observerId &&
+          liveSurface.id &&
+          agent.surface_observer_id !== observerId
+        ) {
+          patch.surface_observer_id = observerId;
+        }
+        if ((agent.workspace_id ?? null) !== workspaceId) {
+          patch.workspace_id = workspaceId;
+        }
+        if (Object.keys(patch).length > 0) {
+          try {
+            agent = this.stateMgr.updateRecord(id, patch);
+            this.agents.set(id, agent);
+          } catch (error) {
+            if (this.evictMissingStateAgent(id)) {
+              continue;
+            }
+            throw error;
+          }
+        }
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
+
+      if (!this.isSurfaceAbsenceAuthoritative(agent, surfaces)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
+
       if (TERMINAL_STATES.has(agent.state)) continue;
 
-      if (!liveSurfaceRefs.has(agent.surface_id)) {
+      if (
+        this.isSurfacelessConfirmed(
+          agent,
+          liveSurfaceKeys,
+          opts,
+          observerSnapshot.ownerId,
+        )
+      ) {
         try {
           const updated = this.stateMgr.transition(id, "error", {
             error: `Surface ${agent.surface_id} disappeared`,
@@ -446,7 +790,11 @@ export class AgentRegistry {
     // the dead parent so getSubtree on the dead parent no longer includes them.
     if (crashedIds.size > 0) {
       for (const [id, agent] of this.agents) {
-        if (agent.parent_agent_id && crashedIds.has(agent.parent_agent_id)) {
+        if (
+          this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId) &&
+          agent.parent_agent_id &&
+          crashedIds.has(agent.parent_agent_id)
+        ) {
           try {
             const reparented = this.stateMgr.updateRecord(id, {
               parent_agent_id: null,
@@ -520,13 +868,14 @@ export class AgentRegistry {
   }
 
   async isSurfaceAlive(
-    agent: Pick<AgentRecord, "surface_id">,
+    agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
     opts: { ptyDead?: boolean } = {},
   ): Promise<boolean> {
     if (opts.ptyDead === true) {
       return false;
     }
 
+    const observerSnapshot = this.captureObserverSnapshot();
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
@@ -534,11 +883,20 @@ export class AgentRegistry {
       // "Live" here means "not proven absent" for liveness guards.
       return true;
     }
+    if (!this.isObserverSnapshotCurrent(observerSnapshot)) {
+      return true;
+    }
     if (surfaces.length === 0) {
       // Empty enumeration is inconclusive until a non-empty scan proves absence.
       return true;
     }
-    return surfaces.some((surface) => surface.ref === agent.surface_id);
+    if (!hasCoherentSurfaceIdentity(surfaces)) {
+      return true;
+    }
+    return (
+      this.matchingLiveSurface(agent, surfaces) !== undefined ||
+      !this.isSurfaceAbsenceAuthoritative(agent, surfaces)
+    );
   }
 
   async hasLiveSurface(surfaceId: string): Promise<boolean> {
@@ -555,19 +913,62 @@ export class AgentRegistry {
     },
   ): Promise<MergedAgent[]> {
     if (!opts?.nonDestructive) {
-      await this.reconcile();
-      await this.purgeTerminal();
+      const surfacelessConfirmation = {
+        confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+        now: Date.now(),
+      };
+      await this.reconcile(surfacelessConfirmation);
+      await this.purgeTerminal(surfacelessConfirmation);
     }
 
+    const discoveryObserverSnapshot = this.captureObserverSnapshot();
     const discovered =
       opts?.discovered ?? (await discovery.scan(opts?.force ?? false));
-    if (!opts?.nonDestructive) {
+    if (!this.isObserverSnapshotCurrent(discoveryObserverSnapshot)) {
+      return this.list(opts?.filter).map((record) => ({
+        ...record,
+        discovered: record.agent_id.startsWith("auto-"),
+        parsed_cli_mismatch: false,
+      }));
+    }
+    const discoveryIsBijective = hasBijectiveDiscoveryIdentity(discovered);
+    const discoveryHasMixedIdentity =
+      hasMixedDiscoveryIdentityCoverage(discovered);
+    if (!discoveryIsBijective || discoveryHasMixedIdentity) {
+      // A degraded discovery scan must break any pending negative-evidence
+      // streak even when exact UUID matches remain safe for positive sync.
+      this.surfacelessObservations.clear();
+    }
+    if (!discoveryIsBijective) {
+      return this.list(opts?.filter).map((record) => ({
+        ...record,
+        discovered: record.agent_id.startsWith("auto-"),
+        parsed_cli_mismatch: false,
+      }));
+    }
+    if (!opts?.nonDestructive && !discoveryHasMixedIdentity) {
       await this.evictBootingGhosts(discovered);
+      if (!this.isObserverSnapshotCurrent(discoveryObserverSnapshot)) {
+        return this.list(opts?.filter).map((record) => ({
+          ...record,
+          discovered: record.agent_id.startsWith("auto-"),
+          parsed_cli_mismatch: false,
+        }));
+      }
     }
 
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
-    const repairCandidates = this.liveRepairCandidatesForDiscovery(discovered);
-    if (!opts?.nonDestructive) {
+    const bySurfaceUuid = new Map(
+      discovered.flatMap((entry) => {
+        const uuid = surfaceUuidKey(entry.surface_uuid);
+        return uuid ? [[uuid, entry] as const] : [];
+      }),
+    );
+    const observationHasStableIds = bySurfaceUuid.size > 0;
+    const repairCandidates = discoveryHasMixedIdentity
+      ? []
+      : this.liveRepairCandidatesForDiscovery(discovered);
+    if (!opts?.nonDestructive && !discoveryHasMixedIdentity) {
       this.selfHealManagedRegistrationsFromDiscovery(repairCandidates, bySurface);
     }
     const suppressedDuplicateSurfaceRefs =
@@ -576,15 +977,28 @@ export class AgentRegistry {
     const seenSurfaces = new Set<string>();
 
     for (const record of this.list()) {
-      const discoveredEntry = bySurface.get(record.surface_id);
+      const recordUuid = surfaceUuidKey(record.surface_uuid);
+      const observedEntry = recordUuid
+        ? bySurfaceUuid.get(recordUuid) ??
+          (observationHasStableIds ? undefined : bySurface.get(record.surface_id))
+        : discoveryHasMixedIdentity
+          ? undefined
+          : bySurface.get(record.surface_id);
+      const discoveredEntry =
+        observedEntry &&
+        this.canUseObservedBinding(record, observedEntry.surface_uuid)
+          ? observedEntry
+          : undefined;
       const isAutoRecord = record.agent_id.startsWith("auto-");
 
       if (
         !opts?.nonDestructive &&
+        !discoveryHasMixedIdentity &&
         isAutoRecord &&
         discoveredEntry &&
         !discoveredEntry.read_error &&
-        !discoveredEntry.has_agent
+        !discoveredEntry.has_agent &&
+        this.canMutateForObservedAbsence(record)
       ) {
         const removedAgentId = this.deleteAgentAndAliases(record.agent_id);
         this.stateMgr.removeState(removedAgentId);
@@ -620,7 +1034,9 @@ export class AgentRegistry {
         discoveredEntry?.has_agent === true &&
         discoveredEntry.read_error === false;
       if (!discoveredReplacesStaleManagedRecord) {
-        seenSurfaces.add(record.surface_id);
+        if (discoveredEntry) {
+          seenSurfaces.add(discoveredEntry.surface_id);
+        }
       }
       merged.push({
         ...liveRecord,
@@ -637,7 +1053,9 @@ export class AgentRegistry {
       if (
         !discoveredEntry.has_agent ||
         discoveredEntry.cli === "unknown" ||
-        discoveredEntry.read_error
+        discoveredEntry.read_error ||
+        (discoveryHasMixedIdentity &&
+          surfaceUuidKey(discoveredEntry.surface_uuid) === null)
       ) {
         continue;
       }
@@ -650,10 +1068,17 @@ export class AgentRegistry {
 
       const agentId = makeAutoAgentId(
         discoveredEntry.cli,
-        discoveredEntry.surface_id,
+        discoveredEntry.surface_uuid ?? discoveredEntry.surface_id,
       );
-      const record = this.stateMgr.ensureAutoRecord(agentId, discoveredEntry);
+      const record = this.stateMgr.ensureAutoRecord(
+        agentId,
+        discoveredEntry,
+        this.getObserverId(),
+      );
       this.agents.set(agentId, record);
+      if (!this.canUseObservedBinding(record, discoveredEntry.surface_uuid)) {
+        continue;
+      }
       const liveRecord = this.syncAutoRecord(record, discoveredEntry);
       if (!liveRecord) {
         continue;
@@ -697,20 +1122,53 @@ export class AgentRegistry {
       return null;
     }
 
+    const discoveryObserverSnapshot = this.captureObserverSnapshot();
     const discovered = await discovery.scan(opts?.force ?? false);
-    const bySurface = new Map(
-      discovered
-        .filter((entry) => !entry.read_error)
-        .map((entry) => [entry.surface_id, entry]),
+    if (!this.isObserverSnapshotCurrent(discoveryObserverSnapshot)) {
+      return opts?.agentId ? this.get(opts.agentId) : null;
+    }
+    const discoveryIsBijective = hasBijectiveDiscoveryIdentity(discovered);
+    const discoveryHasMixedIdentity =
+      hasMixedDiscoveryIdentityCoverage(discovered);
+    if (!discoveryIsBijective || discoveryHasMixedIdentity) {
+      this.surfacelessObservations.clear();
+    }
+    if (!discoveryIsBijective) {
+      return opts?.agentId ? this.get(opts.agentId) : null;
+    }
+    const readableDiscovered = discovered.filter(
+      (entry) => !entry.read_error,
     );
+    const bySurface = new Map(
+      readableDiscovered.map((entry) => [entry.surface_id, entry]),
+    );
+    const bySurfaceUuid = new Map(
+      readableDiscovered.flatMap((entry) => {
+        const uuid = surfaceUuidKey(entry.surface_uuid);
+        return uuid ? [[uuid, entry] as const] : [];
+      }),
+    );
+    const observationHasStableIds = bySurfaceUuid.size > 0;
 
     let requested: AgentRecord | null = null;
     for (const record of records) {
       if (record.agent_id.startsWith("auto-")) {
         continue;
       }
-      const discoveredEntry = bySurface.get(record.surface_id);
-      if (!discoveredEntry) {
+      const recordUuid = surfaceUuidKey(record.surface_uuid);
+      const discoveredEntry = recordUuid
+        ? bySurfaceUuid.get(recordUuid) ??
+          (observationHasStableIds
+            ? undefined
+            : bySurface.get(record.surface_id))
+        : discoveryHasMixedIdentity
+          ? undefined
+          : bySurface.get(record.surface_id);
+      if (
+        !discoveredEntry ||
+        hasSurfaceUuidConflict(record, discoveredEntry) ||
+        !this.canUseObservedBinding(record, discoveredEntry.surface_uuid)
+      ) {
         continue;
       }
       const updated = this.syncManagedRecordSurfaceMetadata(
@@ -720,7 +1178,10 @@ export class AgentRegistry {
       if (!updated) {
         continue;
       }
-      if (!opts?.agentId || updated.agent_id === this.resolveAlias(opts.agentId)) {
+      if (
+        !opts?.agentId ||
+        updated.agent_id === this.resolveAlias(opts.agentId)
+      ) {
         requested = updated;
       }
     }
@@ -772,6 +1233,8 @@ export class AgentRegistry {
       const currentLiveCandidate = candidates.find(
         (entry) =>
           entry.discovered.surface_id === record.surface_id &&
+          !hasSurfaceUuidConflict(record, entry.discovered) &&
+          this.canUseObservedBinding(record, entry.discovered.surface_uuid) &&
           identityKeysOverlap(recordKeys, entry.identityKeys),
       );
       if (currentLiveCandidate) {
@@ -782,6 +1245,8 @@ export class AgentRegistry {
       const currentSurface = bySurface.get(record.surface_id);
       if (
         currentSurface &&
+        !hasSurfaceUuidConflict(record, currentSurface) &&
+        this.canUseObservedBinding(record, currentSurface.surface_uuid) &&
         (currentSurface.read_error || currentSurface.has_agent)
       ) {
         continue;
@@ -790,16 +1255,18 @@ export class AgentRegistry {
       const replacement = candidates.find(
         (entry) =>
           !claimedSurfaceRefs.has(entry.discovered.surface_id) &&
+          !hasSurfaceUuidConflict(record, entry.discovered) &&
+          this.canUseObservedBinding(record, entry.discovered.surface_uuid) &&
           identityKeysOverlap(recordKeys, entry.identityKeys),
       );
       if (!replacement) continue;
 
-      const moved =
-        this.updateManagedSurfaceRegistration(
-          record,
-          replacement.discovered,
-          replacement.candidate,
-        ) ?? record;
+      const moved = this.updateManagedSurfaceRegistration(
+        record,
+        replacement.discovered,
+        replacement.candidate,
+      );
+      if (!moved) continue;
       const synced = this.syncManagedRecordLifecycleFromDiscovery(
         moved,
         replacement.discovered,
@@ -822,6 +1289,8 @@ export class AgentRegistry {
       const matchingLiveCandidate = candidates.find(
         (entry) =>
           entry.discovered.surface_id === record.surface_id &&
+          !hasSurfaceUuidConflict(record, entry.discovered) &&
+          this.canUseObservedBinding(record, entry.discovered.surface_uuid) &&
           identityKeysOverlap(recordKeys, entry.identityKeys),
       );
       if (!matchingLiveCandidate) continue;
@@ -859,10 +1328,14 @@ export class AgentRegistry {
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
   ): AgentRecord | null {
+    if (!this.canUseObservedBinding(record, discoveredEntry.surface_uuid)) {
+      return null;
+    }
     const agentId = record.agent_id;
     const repo = inferRepoFromTitle(discoveredEntry.surface_title) || record.repo;
     const model = discoveredEntry.model ?? record.model;
     const workspaceId = discoveredEntry.workspace_id ?? null;
+    const surfaceUuid = discoveredEntry.surface_uuid ?? null;
     const desiredState = discoveredStatusToAgentState(
       discoveredEntry.parsed_status,
     );
@@ -872,6 +1345,13 @@ export class AgentRegistry {
     if (model !== record.model) patch.model = model;
     if ((record.workspace_id ?? null) !== workspaceId) {
       patch.workspace_id = workspaceId;
+    }
+    if (surfaceUuid !== null && (record.surface_uuid ?? null) !== surfaceUuid) {
+      patch.surface_uuid = surfaceUuid;
+    }
+    const observerId = this.getObserverId();
+    if (observerId && record.surface_observer_id !== observerId) {
+      patch.surface_observer_id = observerId;
     }
     if (record.error !== null && desiredState !== "error") patch.error = null;
     if (record.error === null && desiredState === "error") {
@@ -914,18 +1394,43 @@ export class AgentRegistry {
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
   ): AgentRecord | null {
-    if (discoveredEntry.workspace_id == null) {
-      return record;
+    if (!this.canUseObservedBinding(record, discoveredEntry.surface_uuid)) {
+      return null;
     }
-    const workspaceId = discoveredEntry.workspace_id;
-    if ((record.workspace_id ?? null) === workspaceId) {
+    const patch: Partial<AgentRecord> = {};
+    const persistedUuid = surfaceUuidKey(record.surface_uuid);
+    const discoveredUuid = surfaceUuidKey(discoveredEntry.surface_uuid);
+    if (
+      record.surface_id !== discoveredEntry.surface_id &&
+      persistedUuid !== null &&
+      discoveredUuid === persistedUuid
+    ) {
+      patch.surface_id = discoveredEntry.surface_id;
+    }
+    if (
+      discoveredEntry.workspace_id != null &&
+      (record.workspace_id ?? null) !== discoveredEntry.workspace_id
+    ) {
+      patch.workspace_id = discoveredEntry.workspace_id;
+    }
+    // Discovery may backfill a legacy record, but a same-ref UUID mismatch is
+    // evidence of ref recycling and must not overwrite the persisted binding.
+    if (
+      record.surface_uuid == null &&
+      discoveredEntry.surface_uuid != null
+    ) {
+      patch.surface_uuid = discoveredEntry.surface_uuid;
+    }
+    const observerId = this.getObserverId();
+    if (observerId && record.surface_observer_id !== observerId) {
+      patch.surface_observer_id = observerId;
+    }
+    if (Object.keys(patch).length === 0) {
       return record;
     }
 
     try {
-      const updated = this.stateMgr.updateRecord(record.agent_id, {
-        workspace_id: workspaceId,
-      });
+      const updated = this.stateMgr.updateRecord(record.agent_id, patch);
       this.agents.set(record.agent_id, updated);
       return updated;
     } catch (error) {
@@ -981,7 +1486,7 @@ export class AgentRegistry {
     this.agents.delete(oldAgentId);
     const surfacelessObservation = this.surfacelessObservations.get(oldAgentId);
     this.surfacelessObservations.delete(oldAgentId);
-    if (surfacelessObservation?.surfaceId === record.surface_id) {
+    if (surfacelessObservation?.surfaceId === this.agentSurfaceKey(record)) {
       this.surfacelessObservations.set(newAgentId, surfacelessObservation);
     }
     for (const [alias, target] of this.aliases) {
@@ -1004,10 +1509,28 @@ export class AgentRegistry {
 
   evict(agentId: string): string | null {
     const resolved = this.resolveAlias(agentId);
-    if (!this.agents.has(resolved) && this.stateMgr.readState(resolved) === null) {
+    const persisted = this.stateMgr.readState(resolved);
+    const record = persisted ?? this.agents.get(resolved) ?? null;
+    if (!record) {
+      return null;
+    }
+    if (!this.canMutateForObservedAbsence(record)) {
       return null;
     }
 
+    return this.evictUnchecked(agentId);
+  }
+
+  /** Explicit user cleanup of a registry row; performs no surface mutation. */
+  evictExplicit(agentId: string): string | null {
+    const resolved = this.resolveAlias(agentId);
+    if (!this.stateMgr.readState(resolved) && !this.agents.has(resolved)) {
+      return null;
+    }
+    return this.evictUnchecked(agentId);
+  }
+
+  private evictUnchecked(agentId: string): string {
     const removedAgentId = this.deleteAgentAndAliases(agentId);
     this.stateMgr.removeState(removedAgentId);
     return removedAgentId;
@@ -1019,29 +1542,55 @@ export class AgentRegistry {
       now?: number;
     } = {},
   ): Promise<string[]> {
+    const observerSnapshot = this.captureObserverSnapshot();
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
     } catch {
       return [];
     }
+    if (!this.isObserverSnapshotCurrent(observerSnapshot)) {
+      return [];
+    }
     if (surfaces.length === 0) {
       return [];
     }
+    if (!hasCoherentSurfaceIdentity(surfaces)) {
+      this.surfacelessObservations.clear();
+      return [];
+    }
 
-    const liveSurfaceRefs = new Set(surfaces.map((surface) => surface.ref));
-    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
+    const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceKeys);
     const evicted: string[] = [];
 
     for (const [id, agent] of [...this.agents.entries()]) {
-      if (!this.isSurfacelessConfirmed(agent, liveSurfaceRefs, opts)) {
+      if (this.matchingLiveSurface(agent, surfaces)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
+      if (!this.isSurfaceAbsenceAuthoritative(agent, surfaces)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
+      if (
+        !this.isSurfacelessConfirmed(
+          agent,
+          liveSurfaceKeys,
+          opts,
+          observerSnapshot.ownerId,
+        )
+      ) {
         continue;
       }
       if (isCrashRecoveryEligible(agent)) {
         continue;
       }
 
-      const removedAgentId = this.evict(id);
+      if (!this.canMutateForObservedAbsence(agent, observerSnapshot.ownerId)) {
+        continue;
+      }
+      const removedAgentId = this.evictUnchecked(id);
       if (removedAgentId) {
         evicted.push(removedAgentId);
       }
@@ -1052,10 +1601,17 @@ export class AgentRegistry {
 
   private isSurfacelessConfirmed(
     agent: AgentRecord,
-    liveSurfaceRefs: ReadonlySet<string>,
+    liveSurfaceKeys: ReadonlySet<string>,
     opts: { confirmationMs?: number; now?: number },
+    observerEpoch?: string | null,
   ): boolean {
-    if (liveSurfaceRefs.has(agent.surface_id)) {
+    const surfaceKey = this.agentSurfaceKey(agent);
+    if (liveSurfaceKeys.has(surfaceKey)) {
+      this.surfacelessObservations.delete(agent.agent_id);
+      return false;
+    }
+
+    if (!this.canMutateForObservedAbsence(agent, observerEpoch)) {
       this.surfacelessObservations.delete(agent.agent_id);
       return false;
     }
@@ -1067,9 +1623,9 @@ export class AgentRegistry {
 
     const now = opts.now ?? Date.now();
     const observation = this.surfacelessObservations.get(agent.agent_id);
-    if (!observation || observation.surfaceId !== agent.surface_id) {
+    if (!observation || observation.surfaceId !== surfaceKey) {
       this.surfacelessObservations.set(agent.agent_id, {
-        surfaceId: agent.surface_id,
+        surfaceId: surfaceKey,
         firstObservedAt: now,
       });
       return false;
@@ -1078,11 +1634,32 @@ export class AgentRegistry {
     return now - observation.firstObservedAt >= confirmationMs;
   }
 
+  private canMutateForObservedAbsence(
+    agent: AgentRecord,
+    observerEpoch?: string | null,
+  ): boolean {
+    if (!this.enforceObserverOwnership) {
+      return true;
+    }
+    const observerId =
+      observerEpoch === undefined ? this.getObserverId() : observerEpoch;
+    return Boolean(observerId && agent.surface_observer_id === observerId);
+  }
+
+  private canPurgeAtStartup(agent: AgentRecord): boolean {
+    if (!this.enforceObserverOwnership) {
+      return true;
+    }
+    const owner = agent.surface_observer_id?.trim();
+    const observerId = this.getObserverId();
+    return !owner || Boolean(observerId && owner === observerId);
+  }
+
   private clearSurfacelessObservationsForLiveSurfaces(
-    liveSurfaceRefs: ReadonlySet<string>,
+    liveSurfaceKeys: ReadonlySet<string>,
   ): void {
     for (const [agentId, observation] of this.surfacelessObservations) {
-      if (liveSurfaceRefs.has(observation.surfaceId)) {
+      if (liveSurfaceKeys.has(observation.surfaceId)) {
         this.surfacelessObservations.delete(agentId);
       }
     }
@@ -1092,6 +1669,13 @@ export class AgentRegistry {
     discovered: DiscoveredAgent[],
     opts?: { seatRegistry?: SeatRegistry | null },
   ): RegistryRepairSummary {
+    if (
+      !hasBijectiveDiscoveryIdentity(discovered) ||
+      hasMixedDiscoveryIdentityCoverage(discovered)
+    ) {
+      this.surfacelessObservations.clear();
+      return { repaired: [], evicted: [] };
+    }
     const repaired: RegistryRepairEntry[] = [];
     const evicted = new Set<string>();
     const liveSurfaceRefs = new Set(
@@ -1146,6 +1730,9 @@ export class AgentRegistry {
     const evicted: string[] = [];
     for (const [id, agent] of [...this.agents.entries()]) {
       if (!isPendingAgentId(id)) {
+        continue;
+      }
+      if (!this.canMutateForObservedAbsence(agent)) {
         continue;
       }
 
@@ -1210,6 +1797,9 @@ export class AgentRegistry {
       });
       const keep = sorted[0];
       for (const duplicate of sorted.slice(1)) {
+        if (!this.canMutateForObservedAbsence(duplicate)) {
+          continue;
+        }
         const removedAgentId = this.evict(duplicate.agent_id);
         if (removedAgentId) {
           evicted.push(removedAgentId);
@@ -1231,7 +1821,10 @@ export class AgentRegistry {
     );
     const managedRecord = recordsForSurface.find(
       (agent) =>
-        !isAutoAgentId(agent.agent_id) && !isPendingAgentId(agent.agent_id),
+        !isAutoAgentId(agent.agent_id) &&
+        !isPendingAgentId(agent.agent_id) &&
+        !hasSurfaceUuidConflict(agent, discovered) &&
+        this.canUseObservedBinding(agent, discovered.surface_uuid),
     );
 
     if (managedRecord) {
@@ -1266,6 +1859,12 @@ export class AgentRegistry {
     }
 
     if (existingSeatRecord) {
+      if (hasSurfaceUuidConflict(existingSeatRecord, discovered)) {
+        return null;
+      }
+      if (!this.canUseObservedBinding(existingSeatRecord, discovered.surface_uuid)) {
+        return null;
+      }
       if (
         existingSeatRecord.surface_id !== discovered.surface_id &&
         liveSurfaceRefs.has(existingSeatRecord.surface_id)
@@ -1294,7 +1893,17 @@ export class AgentRegistry {
     discovered: DiscoveredAgent,
     candidate: RegistryRepairCandidate,
   ): AgentRecord | null {
+    if (
+      hasSurfaceUuidConflict(record, discovered) ||
+      !this.canUseObservedBinding(record, discovered.surface_uuid)
+    ) {
+      return null;
+    }
     const patch = patchForRepairCandidate(record, discovered, candidate);
+    const observerId = this.getObserverId();
+    if (observerId && record.surface_observer_id !== observerId) {
+      patch.surface_observer_id = observerId;
+    }
     if (Object.keys(patch).length === 0) {
       return null;
     }
@@ -1314,6 +1923,8 @@ export class AgentRegistry {
     return {
       agent_id: candidate.agentId,
       surface_id: discovered.surface_id,
+      surface_uuid: discovered.surface_uuid ?? null,
+      surface_observer_id: this.getObserverId(),
       workspace_id: discovered.workspace_id ?? null,
       state,
       repo: candidate.repo,
@@ -1357,6 +1968,9 @@ export class AgentRegistry {
   ): RegistryRepairEntry {
     return {
       surface_id: discovered.surface_id,
+      ...(discovered.surface_uuid != null
+        ? { surface_uuid: discovered.surface_uuid }
+        : {}),
       surface_title: discovered.surface_title,
       agent_id: record.agent_id,
       repo: candidate.repo,
@@ -1389,6 +2003,9 @@ export class AgentRegistry {
   private async evictBootingGhosts(
     discovered: DiscoveredAgent[],
   ): Promise<void> {
+    if (hasMixedDiscoveryIdentityCoverage(discovered)) {
+      return;
+    }
     const now = Date.now();
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
 
@@ -1396,7 +2013,9 @@ export class AgentRegistry {
       if (agent.state !== "booting") {
         continue;
       }
-
+      if (!this.canMutateForObservedAbsence(agent)) {
+        continue;
+      }
       const lastUpdated = Date.parse(agent.updated_at);
       if (Number.isNaN(lastUpdated)) {
         continue;
@@ -1447,7 +2066,13 @@ export class AgentRegistry {
     const purgedAgents: AgentRecord[] = [];
 
     for (const [id, agent] of this.agents) {
-      if (shouldRetainCrashRecoveryError(agent)) {
+      if (
+        shouldRetainCrashRecoveryError(agent) &&
+        this.canControlSurface(agent)
+      ) {
+        continue;
+      }
+      if (!this.canPurgeAtStartup(agent)) {
         continue;
       }
       if (opts.retainAgentIds?.has(agent.agent_id)) {
@@ -1471,17 +2096,25 @@ export class AgentRegistry {
   async purgeTerminal(
     opts: { confirmationMs?: number; now?: number } = {},
   ): Promise<number> {
+    const observerSnapshot = this.captureObserverSnapshot();
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
     } catch {
       return 0;
     }
+    if (!this.isObserverSnapshotCurrent(observerSnapshot)) {
+      return 0;
+    }
     if (surfaces.length === 0) {
       return 0;
     }
-    const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
-    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
+    if (!hasCoherentSurfaceIdentity(surfaces)) {
+      this.surfacelessObservations.clear();
+      return 0;
+    }
+    const liveSurfaceKeys = this.liveSurfaceKeys(surfaces);
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceKeys);
     const confirmationOpts = {
       confirmationMs:
         opts.confirmationMs ?? SURFACE_EVICTION_CONFIRMATION_MS,
@@ -1496,9 +2129,22 @@ export class AgentRegistry {
       if (agent.role === "orchestrator" || agent.role === "ic") {
         continue;
       }
+      if (this.matchingLiveSurface(agent, surfaces)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
+      if (!this.isSurfaceAbsenceAuthoritative(agent, surfaces)) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
       if (
         TERMINAL_STATES.has(agent.state) &&
-        this.isSurfacelessConfirmed(agent, liveSurfaceRefs, confirmationOpts)
+        this.isSurfacelessConfirmed(
+          agent,
+          liveSurfaceKeys,
+          confirmationOpts,
+          observerSnapshot.ownerId,
+        )
       ) {
         const removedAgentId = this.deleteAgentAndAliases(id);
         this.stateMgr.removeState(removedAgentId);

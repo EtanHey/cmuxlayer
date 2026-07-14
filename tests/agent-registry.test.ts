@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentRegistry } from "../src/agent-registry.js";
+import {
+  AgentRegistry,
+  deriveSurfaceObserverId,
+} from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState } from "../src/agent-types.js";
 import type { DiscoveredAgent } from "../src/agent-discovery.js";
@@ -96,6 +99,16 @@ describe("AgentRegistry", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
+  it("fails closed when the observer socket path is not a live socket node", () => {
+    expect(
+      deriveSurfaceObserverId(
+        { currentSocketPath: () => join(TEST_DIR, "definitely-missing.sock") },
+        null,
+      ),
+    ).toBeNull();
+    expect(deriveSurfaceObserverId({}, null)).toBeNull();
+  });
+
   describe("reconstitute", () => {
     it("loads agents from state files", async () => {
       stateMgr.writeState(makeRecord({ agent_id: "agent-a" }));
@@ -143,6 +156,415 @@ describe("AgentRegistry", () => {
 
       const agents = registry.list();
       expect(agents[0].state).toBe("done"); // Still done, not error
+    });
+
+    it("scopes absence reconciliation to the observing cmux instance", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "prod-agent",
+          surface_id: "surface:prod",
+          surface_uuid: "uuid-prod",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "nightly-agent",
+          surface_id: "surface:nightly",
+          surface_uuid: "uuid-nightly",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "legacy-unobserved",
+          surface_id: "surface:legacy",
+          surface_uuid: "uuid-legacy",
+        }),
+      );
+
+      let prodSurfaces: CmuxSurface[] = [
+        { ...makeSurface("surface:prod"), id: "uuid-prod" },
+      ];
+      const nightlySurfaces: CmuxSurface[] = [
+        { ...makeSurface("surface:nightly"), id: "uuid-nightly" },
+      ];
+      const prodRegistry = new AgentRegistry(
+        stateMgr,
+        async () => prodSurfaces,
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      const nightlyRegistry = new AgentRegistry(
+        stateMgr,
+        async () => nightlySurfaces,
+        { observerId: "cmux:/tmp/nightly.sock" },
+      );
+
+      expect(prodRegistry.getObserverId()).toBe("cmux:/tmp/prod.sock");
+
+      await prodRegistry.reconstitute();
+      await nightlyRegistry.reconstitute();
+      await prodRegistry.reconcile();
+
+      expect(stateMgr.readState("prod-agent")).toMatchObject({
+        state: "working",
+        surface_observer_id: "cmux:/tmp/prod.sock",
+      });
+      expect(stateMgr.readState("nightly-agent")).toMatchObject({
+        state: "working",
+        surface_observer_id: "cmux:/tmp/nightly.sock",
+      });
+      expect(stateMgr.readState("legacy-unobserved")).toMatchObject({
+        state: "working",
+      });
+      expect(stateMgr.readState("legacy-unobserved")).not.toHaveProperty(
+        "surface_observer_id",
+      );
+
+      // The owning registry may still act on confirmed absence. Its sibling
+      // must continue to leave both foreign and legacy-unscoped records alone.
+      prodSurfaces = [makeSurface("surface:some-other-prod-tab")];
+      await prodRegistry.reconcile();
+      await nightlyRegistry.reconcile();
+
+      expect(stateMgr.readState("prod-agent")).toMatchObject({
+        state: "error",
+        error: "Surface surface:prod disappeared",
+      });
+      expect(stateMgr.readState("nightly-agent")).toMatchObject({
+        state: "working",
+        surface_observer_id: "cmux:/tmp/nightly.sock",
+      });
+      expect(stateMgr.readState("legacy-unobserved")).toMatchObject({
+        state: "working",
+      });
+
+      expect(nightlyRegistry.evict("prod-agent")).toBeNull();
+      expect(stateMgr.readState("prod-agent")).not.toBeNull();
+      await expect(
+        nightlyRegistry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      await expect(
+        prodRegistry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual(["prod-agent"]);
+      expect(stateMgr.readState("prod-agent")).toBeNull();
+    });
+
+    it("does not claim UUID ownership from an identity-free legacy observation", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "legacy-ref-only-observation",
+          surface_id: "surface:shared-ref",
+          surface_uuid: "uuid-not-observed",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:shared-ref")],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+
+      await registry.reconstitute();
+
+      expect(stateMgr.readState("legacy-ref-only-observation")).not.toHaveProperty(
+        "surface_observer_id",
+      );
+    });
+
+    it("does not let the first observer claim a ref-only legacy record", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "legacy-shared-ref",
+          surface_id: "surface:shared",
+          surface_uuid: null,
+          workspace_id: "workspace:legacy",
+        }),
+      );
+      const nightlyRegistry = new AgentRegistry(
+        stateMgr,
+        async () => [{
+          ...makeSurface("surface:shared"),
+          id: "uuid-nightly",
+          workspace_ref: "workspace:nightly",
+        }],
+        { observerId: "cmux:/tmp/nightly.sock" },
+      );
+      const prodRegistry = new AgentRegistry(
+        stateMgr,
+        async () => [{
+          ...makeSurface("surface:shared"),
+          id: "uuid-prod",
+          workspace_ref: "workspace:prod",
+        }],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+
+      await nightlyRegistry.reconstitute();
+      await prodRegistry.reconstitute();
+
+      expect(stateMgr.readState("legacy-shared-ref")).toMatchObject({
+        surface_id: "surface:shared",
+        surface_uuid: null,
+        workspace_id: "workspace:legacy",
+      });
+      expect(stateMgr.readState("legacy-shared-ref")).not.toHaveProperty(
+        "surface_observer_id",
+      );
+    });
+
+    it("migrates observer ownership only with exact UUID evidence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "legacy-uuid-binding",
+          surface_id: "surface:stale",
+          surface_uuid: "uuid-prod",
+          workspace_id: "workspace:legacy",
+        }),
+      );
+      const nightlyRegistry = new AgentRegistry(
+        stateMgr,
+        async () => [{
+          ...makeSurface("surface:stale"),
+          id: "uuid-nightly",
+          workspace_ref: "workspace:nightly",
+        }],
+        { observerId: "cmux:/tmp/nightly.sock" },
+      );
+      const prodRegistry = new AgentRegistry(
+        stateMgr,
+        async () => [{
+          ...makeSurface("surface:moved"),
+          id: "uuid-prod",
+          workspace_ref: "workspace:prod",
+        }],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+
+      await nightlyRegistry.reconstitute();
+      expect(stateMgr.readState("legacy-uuid-binding")).toMatchObject({
+        surface_id: "surface:stale",
+        surface_uuid: "uuid-prod",
+        workspace_id: "workspace:legacy",
+      });
+
+      await prodRegistry.reconstitute();
+      expect(stateMgr.readState("legacy-uuid-binding")).toMatchObject({
+        surface_id: "surface:moved",
+        surface_uuid: "uuid-prod",
+        surface_observer_id: "cmux:/tmp/prod.sock",
+        workspace_id: "workspace:prod",
+      });
+    });
+
+    it("treats mixed UUID coverage as inconclusive for a UUID-backed record", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "mixed-coverage-agent",
+          surface_id: "surface:mixed-target",
+          surface_uuid: "uuid-mixed-target",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:mixed-target"),
+        { ...makeSurface("surface:identified-neighbor"), id: "uuid-neighbor" },
+      ]);
+
+      await registry.reconstitute({ confirmationMs: 0 });
+
+      expect(stateMgr.readState("mixed-coverage-agent")).toMatchObject({
+        state: "working",
+        surface_id: "surface:mixed-target",
+        surface_uuid: "uuid-mixed-target",
+      });
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(stateMgr.readState("mixed-coverage-agent")).not.toBeNull();
+    });
+
+    it("does not mark an owned UUID-less row absent from mixed identity coverage", async () => {
+      const agentId = "mixed-coverage-legacy-reconcile";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "working",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [
+          makeSurface("surface:ref-only-witness"),
+          {
+            ...makeSurface("surface:identified-neighbor"),
+            id: "11111111-2222-4333-8444-555555555555",
+          },
+        ],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+
+      await registry.reconstitute({ confirmationMs: 0 });
+
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        state: "working",
+        surface_id: "surface:legacy-target",
+        surface_uuid: null,
+      });
+    });
+
+    it("does not evict an owned UUID-less row from mixed identity coverage", async () => {
+      const agentId = "mixed-coverage-legacy-evict";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "working",
+        }),
+      );
+      let surfaces: CmuxSurface[] = [makeSurface("surface:legacy-target")];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces, {
+        observerId: "cmux:/tmp/prod.sock",
+      });
+      await registry.reconstitute();
+      surfaces = [
+        makeSurface("surface:ref-only-witness"),
+        {
+          ...makeSurface("surface:identified-neighbor"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(stateMgr.readState(agentId)).not.toBeNull();
+    });
+
+    it("does not purge an owned UUID-less terminal row from mixed identity coverage", async () => {
+      const agentId = "mixed-coverage-legacy-purge";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "done",
+          role: "worker",
+        }),
+      );
+      let surfaces: CmuxSurface[] = [makeSurface("surface:legacy-target")];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces, {
+        observerId: "cmux:/tmp/prod.sock",
+      });
+      await registry.reconstitute();
+      surfaces = [
+        makeSurface("surface:ref-only-witness"),
+        {
+          ...makeSurface("surface:identified-neighbor"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+
+      await expect(
+        registry.purgeTerminal({ confirmationMs: 0 }),
+      ).resolves.toBe(0);
+      expect(stateMgr.readState(agentId)).not.toBeNull();
+    });
+
+    it("resets UUID-less absence confirmation after mixed identity coverage", async () => {
+      const agentId = "mixed-coverage-legacy-reset";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "working",
+        }),
+      );
+      let surfaces: CmuxSurface[] = [makeSurface("surface:legacy-target")];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces, {
+        observerId: "cmux:/tmp/prod.sock",
+      });
+      await registry.reconstitute();
+
+      surfaces = [makeSurface("surface:all-ref-witness")];
+      await registry.reconcile({ confirmationMs: 5_000, now: 0 });
+      surfaces = [
+        makeSurface("surface:ref-only-witness"),
+        {
+          ...makeSurface("surface:identified-neighbor"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+      await registry.reconcile({ confirmationMs: 5_000, now: 6_000 });
+      expect(stateMgr.readState(agentId)?.state).toBe("working");
+
+      surfaces = [makeSurface("surface:all-ref-witness")];
+      await registry.reconcile({ confirmationMs: 5_000, now: 6_000 });
+      expect(stateMgr.readState(agentId)?.state).toBe("working");
+      await registry.reconcile({ confirmationMs: 5_000, now: 11_001 });
+      expect(stateMgr.readState(agentId)?.state).toBe("error");
+    });
+
+    it("owns a newly discovered UUID-backed auto record in the observing instance", async () => {
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      const discovered = makeDiscovered({
+        surface_id: "surface:auto-owned",
+        surface_uuid: surfaceUuid,
+        surface_title: "brainlayerCodex",
+        cli: "codex",
+      });
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [
+          { ...makeSurface("surface:auto-owned"), id: surfaceUuid },
+        ],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      await registry.reconstitute();
+
+      await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([discovered]),
+      } as any);
+
+      expect(
+        stateMgr
+          .listStates()
+          .find((record) => record.surface_uuid === surfaceUuid),
+      ).toMatchObject({
+        surface_observer_id: "cmux:/tmp/prod.sock",
+      });
+    });
+
+    it("owns a newly discovered ref-only auto record in the observing instance", async () => {
+      const discovered = makeDiscovered({
+        surface_id: "surface:auto-ref-only",
+        surface_uuid: null,
+        surface_title: "brainlayerCodex",
+        cli: "codex",
+      });
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:auto-ref-only")],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      await registry.reconstitute();
+
+      await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([discovered]),
+      } as any);
+
+      expect(
+        stateMgr
+          .listStates()
+          .find((record) => record.surface_id === "surface:auto-ref-only"),
+      ).toMatchObject({
+        surface_uuid: null,
+        surface_observer_id: "cmux:/tmp/prod.sock",
+      });
     });
   });
 
@@ -238,6 +660,268 @@ describe("AgentRegistry", () => {
   });
 
   describe("reconcile", () => {
+    it("rebinds the mutable ref by stable UUID instead of reading a recycled ref", async () => {
+      const surfaceUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "uuid-bound-agent",
+          surface_id: "surface:594",
+          surface_uuid: surfaceUuid,
+          state: "working",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:595"), id: surfaceUuid },
+        {
+          ...makeSurface("surface:594"),
+          id: "033F0B64-780F-4F0B-BCF1-3B8E085A7383",
+        },
+      ]);
+
+      await registry.reconstitute();
+
+      expect(registry.get("uuid-bound-agent")).toMatchObject({
+        state: "working",
+        surface_id: "surface:595",
+        surface_uuid: surfaceUuid,
+      });
+    });
+
+    it("does not backfill a UUID-less owned row by mutable ref in UUID topology", async () => {
+      const agentId = "owned-legacy-no-uuid-adoption";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:shared",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          workspace_id: "workspace:persisted",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [
+          {
+            ...makeSurface("surface:shared"),
+            id: "11111111-2222-4333-8444-555555555555",
+            workspace_ref: "workspace:observed",
+          },
+        ],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+
+      await registry.reconstitute({ confirmationMs: 0 });
+
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        state: "working",
+        surface_id: "surface:shared",
+        surface_uuid: null,
+        surface_observer_id: "cmux:/tmp/prod.sock",
+        workspace_id: "workspace:persisted",
+      });
+    });
+
+    it("pins the observer epoch across asynchronous surface reconciliation", async () => {
+      let observerId = "cmux:/tmp/primary.sock";
+      const agentId = "observer-epoch-reconcile";
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      const record = makeRecord({
+        agent_id: agentId,
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: observerId,
+        workspace_id: "workspace:old",
+      });
+      stateMgr.writeState(record);
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => {
+          queueMicrotask(() => {
+            observerId = "cmux:/tmp/replacement.sock";
+          });
+          return [
+            {
+              ...makeSurface("surface:new"),
+              id: surfaceUuid,
+              workspace_ref: "workspace:new",
+            },
+          ];
+        },
+        { observerIdProvider: () => observerId },
+      );
+      registry.set(record.agent_id, record);
+
+      await registry.reconcile({ confirmationMs: 0 });
+
+      expect(observerId).toBe("cmux:/tmp/replacement.sock");
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:/tmp/primary.sock",
+        workspace_id: "workspace:old",
+      });
+    });
+
+    it("rejects reconciliation when transient epoch changes under one owner", async () => {
+      const ownerId = "cmux:/tmp/stable.sock#1:2:3:4";
+      let observerEpoch = `${ownerId}@route:1`;
+      const agentId = "observer-transient-epoch-reconcile";
+      const surfaceUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      const record = makeRecord({
+        agent_id: agentId,
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: ownerId,
+        workspace_id: "workspace:old",
+      });
+      stateMgr.writeState(record);
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => {
+          queueMicrotask(() => {
+            observerEpoch = `${ownerId}@route:2`;
+          });
+          return [
+            {
+              ...makeSurface("surface:new"),
+              id: surfaceUuid,
+              workspace_ref: "workspace:new",
+            },
+          ];
+        },
+        {
+          observerIdProvider: () => ownerId,
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      registry.set(record.agent_id, record);
+
+      await registry.reconcile({ confirmationMs: 0 });
+
+      expect(observerEpoch).toBe(`${ownerId}@route:2`);
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        surface_id: "surface:old",
+        surface_observer_id: ownerId,
+        workspace_id: "workspace:old",
+      });
+    });
+
+    it("treats one UUID on two refs as inconclusive for both match and absence", async () => {
+      const duplicateUuid = "11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ambiguous-positive",
+          surface_id: "surface:old",
+          surface_uuid: duplicateUuid,
+          workspace_id: "workspace:old",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ambiguous-absence",
+          surface_id: "surface:absent",
+          surface_uuid: "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        {
+          ...makeSurface("surface:first"),
+          id: duplicateUuid,
+          workspace_ref: "workspace:first",
+        },
+        {
+          ...makeSurface("surface:second"),
+          id: duplicateUuid,
+          workspace_ref: "workspace:second",
+        },
+      ]);
+
+      await registry.reconstitute({ confirmationMs: 0 });
+
+      expect(registry.get("ambiguous-positive")).toMatchObject({
+        state: "working",
+        surface_id: "surface:old",
+        surface_uuid: duplicateUuid,
+        workspace_id: "workspace:old",
+      });
+      expect(registry.get("ambiguous-absence")).toMatchObject({
+        state: "working",
+        surface_id: "surface:absent",
+      });
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+    });
+
+    it("treats one ref with two UUIDs as inconclusive for both match and absence", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ambiguous-legacy-positive",
+          surface_id: "surface:shared",
+          surface_uuid: null,
+          workspace_id: "workspace:old",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "ambiguous-uuid-absence",
+          surface_id: "surface:absent",
+          surface_uuid: "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        {
+          ...makeSurface("surface:shared"),
+          id: "11111111-2222-4333-8444-555555555555",
+          workspace_ref: "workspace:first",
+        },
+        {
+          ...makeSurface("surface:shared"),
+          id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+          workspace_ref: "workspace:second",
+        },
+      ]);
+
+      await registry.reconstitute({ confirmationMs: 0 });
+
+      expect(registry.get("ambiguous-legacy-positive")).toMatchObject({
+        state: "working",
+        surface_id: "surface:shared",
+        surface_uuid: null,
+        workspace_id: "workspace:old",
+      });
+      expect(registry.get("ambiguous-uuid-absence")).toMatchObject({
+        state: "working",
+        surface_id: "surface:absent",
+      });
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+    });
+
+    it("requires the confirmation window before a non-empty partial scan becomes disappearance", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "transient-partial-agent",
+          surface_id: "surface:42",
+          state: "working",
+        }),
+      );
+      let surfaces = [makeSurface("surface:42")];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await registry.reconstitute();
+
+      surfaces = [makeSurface("surface:other")];
+      await registry.reconcile({ confirmationMs: 5_000, now: 1_000 });
+      expect(registry.get("transient-partial-agent")?.state).toBe("working");
+
+      await registry.reconcile({ confirmationMs: 5_000, now: 6_001 });
+      expect(registry.get("transient-partial-agent")).toMatchObject({
+        state: "error",
+        error: "Surface surface:42 disappeared",
+      });
+    });
+
     it("detects surfaces that disappeared and marks agents as error", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -360,6 +1044,178 @@ describe("AgentRegistry", () => {
       expect(registry.get("list-worker-transient-gap")).toBeNull();
     });
 
+    it("does not evict an owned UUID-less booting row from mixed discovery identity coverage", async () => {
+      const agentId = "mixed-discovery-legacy-booting";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "booting",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:legacy-target")],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      await registry.reconstitute();
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: "surface:legacy-target",
+            surface_uuid: null,
+            has_agent: false,
+          }),
+          makeDiscovered({
+            surface_id: "surface:identified-neighbor",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
+            has_agent: false,
+          }),
+        ]),
+      };
+
+      const merged = await registry.listMerged(discovery as any);
+
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        state: "booting",
+        surface_id: "surface:legacy-target",
+        surface_uuid: null,
+      });
+      expect(merged).toEqual(
+        expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+      );
+    });
+
+    it("does not evict an owned UUID-less auto row from mixed discovery identity coverage", async () => {
+      const agentId = "auto-codex-mixed-discovery-legacy";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "working",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:legacy-target")],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      await registry.reconstitute();
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: "surface:legacy-target",
+            surface_uuid: null,
+            has_agent: false,
+          }),
+          makeDiscovered({
+            surface_id: "surface:identified-neighbor",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
+            has_agent: false,
+          }),
+        ]),
+      };
+
+      const merged = await registry.listMerged(discovery as any);
+
+      expect(stateMgr.readState(agentId)).toMatchObject({
+        state: "working",
+        surface_id: "surface:legacy-target",
+        surface_uuid: null,
+      });
+      expect(merged).toEqual(
+        expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+      );
+    });
+
+    it.each([
+      {
+        label: "booting",
+        agentId: "legacy-all-ref-booting",
+        state: "booting" as const,
+      },
+      {
+        label: "auto",
+        agentId: "auto-codex-legacy-all-ref",
+        state: "working" as const,
+      },
+    ])(
+      "still evicts an owned UUID-less $label row from homogeneous all-ref discovery",
+      async ({ agentId, state }) => {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            surface_id: "surface:legacy-target",
+            surface_uuid: null,
+            surface_observer_id: "cmux:/tmp/prod.sock",
+            state,
+          }),
+        );
+        const registry = new AgentRegistry(
+          stateMgr,
+          async () => [makeSurface("surface:legacy-target")],
+          { observerId: "cmux:/tmp/prod.sock" },
+        );
+        await registry.reconstitute();
+
+        await registry.listMerged({
+          scan: vi.fn().mockResolvedValue([
+            makeDiscovered({
+              surface_id: "surface:legacy-target",
+              surface_uuid: null,
+              has_agent: false,
+            }),
+          ]),
+        } as any);
+
+        expect(stateMgr.readState(agentId)).toBeNull();
+        expect(registry.get(agentId)).toBeNull();
+      },
+    );
+
+    it("resets UUID-less absence confirmation after mixed discovery identity coverage", async () => {
+      const agentId = "mixed-discovery-legacy-reset";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          surface_id: "surface:legacy-target",
+          surface_uuid: null,
+          surface_observer_id: "cmux:/tmp/prod.sock",
+          state: "working",
+        }),
+      );
+      let surfaces: CmuxSurface[] = [makeSurface("surface:legacy-target")];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces, {
+        observerId: "cmux:/tmp/prod.sock",
+      });
+      await registry.reconstitute();
+
+      surfaces = [makeSurface("surface:all-ref-witness")];
+      await registry.reconcile({ confirmationMs: 5_000, now: 0 });
+      await registry.listMerged({ scan: vi.fn() } as any, {
+        nonDestructive: true,
+        discovered: [
+          makeDiscovered({
+            surface_id: "surface:ref-only-witness",
+            surface_uuid: null,
+          }),
+          makeDiscovered({
+            surface_id: "surface:identified-neighbor",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
+          }),
+        ],
+      });
+
+      await registry.reconcile({ confirmationMs: 5_000, now: 6_000 });
+      expect(stateMgr.readState(agentId)?.state).toBe("working");
+      await registry.reconcile({ confirmationMs: 5_000, now: 11_001 });
+      expect(stateMgr.readState(agentId)?.state).toBe("error");
+    });
+
     it("does not evict auto agents for plain substring-matching errors", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -403,7 +1259,7 @@ describe("AgentRegistry", () => {
       expect(removeStateSpy).not.toHaveBeenCalled();
     });
 
-    it("does not clear managed workspace_id when discovery omits workspace metadata", async () => {
+    it("does not backfill a managed UUID-less row from UUID discovery by ref", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "managed-codex",
@@ -421,6 +1277,7 @@ describe("AgentRegistry", () => {
         scan: vi.fn().mockResolvedValue([
           {
             surface_id: "surface:42",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
             surface_title: "brainlayerCodex",
             cli: "codex",
             parsed_status: "working",
@@ -441,6 +1298,9 @@ describe("AgentRegistry", () => {
       expect(registry.get("managed-codex")?.workspace_id).toBe(
         "workspace:known",
       );
+      expect(
+        stateMgr.readState("managed-codex")?.surface_uuid ?? null,
+      ).toBeNull();
     });
 
     it("does not clear managed workspace_id when discovery reports null workspace metadata", async () => {
@@ -483,9 +1343,320 @@ describe("AgentRegistry", () => {
         "workspace:known",
       );
     });
+
+    it("pins observer epoch across discovery-backed registry metadata sync", async () => {
+      const ownerId = "cmux:/tmp/stable.sock#socket=1:2:3:4";
+      let observerEpoch = `${ownerId}@route:1`;
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      const record = makeRecord({
+        agent_id: "managed-discovery-epoch-race",
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: ownerId,
+        workspace_id: "workspace:old",
+      });
+      stateMgr.writeState(record);
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerIdProvider: () => ownerId,
+        observerEpochProvider: () => observerEpoch,
+      });
+      registry.set(record.agent_id, record);
+      const discovery = {
+        scan: vi.fn().mockImplementation(async () => {
+          queueMicrotask(() => {
+            observerEpoch = `${ownerId}@route:2`;
+          });
+          return [
+            makeDiscovered({
+              surface_id: "surface:new",
+              surface_uuid: surfaceUuid,
+              workspace_id: "workspace:new",
+            }),
+          ];
+        }),
+      };
+
+      await registry.listMerged(discovery as any, {
+        force: true,
+        nonDestructive: true,
+      });
+
+      expect(stateMgr.readState(record.agent_id)).toMatchObject({
+        surface_id: "surface:old",
+        surface_observer_id: ownerId,
+        workspace_id: "workspace:old",
+      });
+    });
+
+    it("listMerged refreshes a managed ref and workspace from exact UUID evidence", async () => {
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      const record = makeRecord({
+        agent_id: "managed-list-moved-uuid",
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:/tmp/previous.sock",
+        workspace_id: "workspace:old",
+      });
+      stateMgr.writeState(record);
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerId: "cmux:/tmp/current.sock",
+      });
+      registry.set(record.agent_id, record);
+      const moved = makeDiscovered({
+        surface_id: "surface:new",
+        surface_uuid: surfaceUuid.toUpperCase(),
+        workspace_id: "workspace:new",
+        cli: "codex",
+      });
+      const refOnlyNeighbor = makeDiscovered({
+        surface_id: "surface:ref-only-neighbor",
+        surface_uuid: null,
+      });
+
+      const merged = await registry.listMerged(
+        { scan: vi.fn() } as any,
+        { discovered: [moved, refOnlyNeighbor], nonDestructive: true },
+      );
+
+      expect(
+        merged.find((candidate) => candidate.agent_id === record.agent_id),
+      ).toMatchObject({
+        surface_id: "surface:new",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:/tmp/current.sock",
+        workspace_id: "workspace:new",
+      });
+      expect(stateMgr.readState(record.agent_id)).toMatchObject({
+        surface_id: "surface:new",
+        workspace_id: "workspace:new",
+      });
+    });
+
+    it("refreshManagedSurfaceMetadata follows a managed UUID to its current ref", async () => {
+      const surfaceUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      const record = makeRecord({
+        agent_id: "managed-refresh-moved-uuid",
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:/tmp/previous.sock",
+        workspace_id: "workspace:old",
+      });
+      stateMgr.writeState(record);
+      const registry = new AgentRegistry(stateMgr, async () => [], {
+        observerId: "cmux:/tmp/current.sock",
+      });
+      registry.set(record.agent_id, record);
+      const discovery = {
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: "surface:new",
+            surface_uuid: surfaceUuid.toUpperCase(),
+            workspace_id: "workspace:new",
+            cli: "codex",
+          }),
+          makeDiscovered({
+            surface_id: "surface:ref-only-neighbor",
+            surface_uuid: null,
+          }),
+        ]),
+      };
+
+      const refreshed = await registry.refreshManagedSurfaceMetadata(
+        discovery as any,
+        { agentId: record.agent_id, force: true },
+      );
+
+      expect(refreshed).toMatchObject({
+        surface_id: "surface:new",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: "cmux:/tmp/current.sock",
+        workspace_id: "workspace:new",
+      });
+      expect(stateMgr.readState(record.agent_id)).toMatchObject({
+        surface_id: "surface:new",
+        workspace_id: "workspace:new",
+      });
+    });
+
+    it("keeps a recycled ref's new auto occupant separate from the old UUID record", async () => {
+      const oldUuid = "11111111-2222-4333-8444-555555555555";
+      const newUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      const oldAgentId = "auto-codex-surface-42";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: oldAgentId,
+          surface_id: "surface:42",
+          surface_uuid: oldUuid,
+          repo: "brainlayer",
+          cli: "codex",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:42"), id: newUuid },
+      ]);
+      await registry.reconstitute();
+      const discovered = makeDiscovered({
+        surface_id: "surface:42",
+        surface_uuid: newUuid,
+        surface_title: "brainlayerCodex",
+        cli: "codex",
+        model: "gpt-5.5",
+      });
+
+      const merged = await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([discovered]),
+      } as any);
+
+      expect(stateMgr.readState(oldAgentId)?.surface_uuid).toBe(oldUuid);
+      expect(merged).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            agent_id: oldAgentId,
+            surface_uuid: oldUuid,
+          }),
+          expect.objectContaining({
+            surface_id: "surface:42",
+            surface_uuid: newUuid,
+          }),
+        ]),
+      );
+      expect(
+        merged.find((agent) => agent.surface_uuid === newUuid)?.agent_id,
+      ).not.toBe(oldAgentId);
+    });
+
+    it("does not sync registry metadata from one discovered ref with two UUIDs", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "managed-ambiguous-discovery",
+          surface_id: "surface:shared",
+          surface_uuid: null,
+          workspace_id: "workspace:old",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:shared"),
+      ]);
+      await registry.reconstitute();
+      const discovered = [
+        makeDiscovered({
+          surface_id: "surface:shared",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
+          workspace_id: "workspace:first",
+          cli: "codex",
+        }),
+        makeDiscovered({
+          surface_id: "surface:shared",
+          surface_uuid: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+          workspace_id: "workspace:second",
+          cli: "codex",
+        }),
+      ];
+
+      await registry.listMerged({ scan: vi.fn() } as any, {
+        discovered,
+        nonDestructive: true,
+      });
+
+      expect(stateMgr.readState("managed-ambiguous-discovery")).toMatchObject({
+        surface_id: "surface:shared",
+        surface_uuid: null,
+        workspace_id: "workspace:old",
+      });
+      expect(stateMgr.listStates()).toHaveLength(1);
+    });
   });
 
   describe("repairFromDiscovery", () => {
+    it("does not repair or evict from a non-bijective discovery observation", () => {
+      const duplicateUuid = "11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex",
+          surface_id: "surface:old",
+          surface_uuid: duplicateUuid,
+          repo: "cmuxlayer",
+          cli: "codex",
+          launcher_name: "cmuxlayerCodex",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => []);
+      registry.set(
+        "cmuxlayerCodex",
+        stateMgr.readState("cmuxlayerCodex")!,
+      );
+      const discovered = [
+        makeDiscovered({
+          surface_id: "surface:first",
+          surface_uuid: duplicateUuid,
+          surface_title: "cmuxlayerCodex",
+          cli: "codex",
+        }),
+        makeDiscovered({
+          surface_id: "surface:second",
+          surface_uuid: duplicateUuid,
+          surface_title: "cmuxlayerCodex",
+          cli: "codex",
+        }),
+      ];
+
+      expect(registry.repairFromDiscovery(discovered)).toEqual({
+        repaired: [],
+        evicted: [],
+      });
+      expect(stateMgr.listStates()).toEqual([
+        expect.objectContaining({
+          agent_id: "cmuxlayerCodex",
+          surface_id: "surface:old",
+          surface_uuid: duplicateUuid,
+        }),
+      ]);
+    });
+
+    it("does not rebind a managed record when its ref is recycled to a different UUID", async () => {
+      const persistedUuid = "11111111-2222-4333-8444-555555555555";
+      const recycledOccupantUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex",
+          surface_id: "surface:42",
+          surface_uuid: persistedUuid,
+          repo: "cmuxlayer",
+          cli: "codex",
+          launcher_name: "cmuxlayerCodex",
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        {
+          ...makeSurface("surface:42"),
+          id: recycledOccupantUuid,
+        },
+      ]);
+      await registry.reconstitute({ confirmationMs: 5_000, now: 1_000 });
+
+      const result = registry.repairFromDiscovery([
+        makeDiscovered({
+          surface_id: "surface:42",
+          surface_uuid: recycledOccupantUuid,
+          surface_title: "cmuxlayerCodex",
+          cli: "codex",
+        }),
+      ]);
+
+      expect(result.repaired).toEqual([]);
+      expect(registry.get("cmuxlayerCodex")).toMatchObject({
+        surface_id: "surface:42",
+        surface_uuid: persistedUuid,
+        repo: "cmuxlayer",
+        cli: "codex",
+        launcher_name: "cmuxlayerCodex",
+      });
+      expect(stateMgr.readState("cmuxlayerCodex")?.surface_uuid).toBe(
+        persistedUuid,
+      );
+    });
+
     it("repairs no-suffix auto-discovered panes from parsed cli and title repo evidence", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -508,6 +1679,7 @@ describe("AgentRegistry", () => {
         [
           makeDiscovered({
             surface_id: "surface:32",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
             surface_title: "🤝 driverBuddy",
             cli: "claude",
           }),
@@ -518,6 +1690,7 @@ describe("AgentRegistry", () => {
       expect(result.repaired).toEqual([
         expect.objectContaining({
           surface_id: "surface:32",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
           agent_id: "driverBuddy",
           repo: "driverBuddy",
           cli: "claude",
@@ -531,6 +1704,7 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("driverBuddy")).toMatchObject({
         agent_id: "driverBuddy",
         surface_id: "surface:32",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
         repo: "driverBuddy",
         cli: "claude",
         launcher_name: "driverBuddyClaude",
@@ -879,6 +2053,77 @@ describe("AgentRegistry", () => {
     });
   });
 
+  describe("observer-scoped cleanup", () => {
+    it("keeps absence guarded while explicit terminal eviction is global", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "foreign-terminal",
+          state: "done",
+          surface_id: "surface:foreign-gone",
+          surface_uuid: "uuid-foreign",
+          surface_observer_id: "cmux:/tmp/prod.sock",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [{ ...makeSurface("surface:witness"), id: "uuid-witness" }],
+        { observerId: "cmux:/tmp/nightly.sock" },
+      );
+      await registry.reconstitute();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(registry.evict("foreign-terminal")).toBeNull();
+      expect(registry.evictExplicit("foreign-terminal")).toBe(
+        "foreign-terminal",
+      );
+      expect(stateMgr.readState("foreign-terminal")).toBeNull();
+    });
+
+    it("startup-purges legacy and local terminal rows but retains foreign rows", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "legacy-terminal",
+          state: "done",
+          surface_id: "surface:legacy",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "local-terminal",
+          state: "error",
+          surface_id: "surface:local",
+          surface_observer_id: "cmux:/tmp/prod.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "foreign-terminal",
+          state: "done",
+          surface_id: "surface:foreign",
+          surface_observer_id: "cmux:/tmp/nightly.sock",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:witness")],
+        { observerId: "cmux:/tmp/prod.sock" },
+      );
+      await registry.reconstitute();
+
+      expect(
+        registry
+          .purgeAllTerminal()
+          .map((record) => record.agent_id)
+          .sort(),
+      ).toEqual(["legacy-terminal", "local-terminal"]);
+      expect(stateMgr.readState("legacy-terminal")).toBeNull();
+      expect(stateMgr.readState("local-terminal")).toBeNull();
+      expect(stateMgr.readState("foreign-terminal")).not.toBeNull();
+    });
+  });
+
   describe("purgeTerminal", () => {
     it("does not purge terminal workers when surface enumeration is empty", async () => {
       stateMgr.writeState(
@@ -1003,6 +2248,27 @@ describe("AgentRegistry", () => {
   });
 
   describe("evictSurfaceless confirmation", () => {
+    it("does not evict a UUID-backed record when a legacy topology confirms its ref live", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "uuid-agent-on-legacy-topology",
+          state: "done",
+          surface_id: "surface:legacy-live",
+          surface_uuid: "uuid-known-but-unreported",
+          role: "orchestrator",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:legacy-live"),
+      ]);
+      await registry.reconstitute();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(registry.get("uuid-agent-on-legacy-topology")).not.toBeNull();
+    });
+
     it("resets the absence window when the same surface is observed live", async () => {
       stateMgr.writeState(
         makeRecord({

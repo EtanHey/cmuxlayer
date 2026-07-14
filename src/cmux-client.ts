@@ -75,6 +75,7 @@ export class CmuxClient {
   private bin?: string;
   private env?: NodeJS.ProcessEnv;
   private existsSync: (path: string) => boolean;
+  private observerTransportGeneration = 0;
 
   constructor(opts?: CmuxClientOptions) {
     this.exec = opts?.exec;
@@ -84,7 +85,22 @@ export class CmuxClient {
   }
 
   setEnv(env: NodeJS.ProcessEnv | undefined): void {
+    const previousSocketPath = this.currentSocketPath();
     this.env = env;
+    if (this.currentSocketPath() !== previousSocketPath) {
+      this.observerTransportGeneration++;
+    }
+  }
+
+  currentSocketPath(): string | null {
+    const socketPath = this.env
+      ? this.env.CMUX_SOCKET_PATH
+      : process.env.CMUX_SOCKET_PATH;
+    return socketPath?.trim() || null;
+  }
+
+  currentObserverTransportEpoch(): string {
+    return `cli:${this.observerTransportGeneration}`;
   }
 
   private async run(args: string[]): Promise<string> {
@@ -96,13 +112,14 @@ export class CmuxClient {
       // execFile path; dropping it on either is collab O2 #8.
       const env = this.env;
       const bin = this.resolveBin(env);
+      const cliArgs = ["--json", "--id-format", "both", ...args];
       const { stdout } = this.exec
         ? await this.exec(
             bin,
-            ["--json", ...args],
+            cliArgs,
             ...(env ? ([env] as const) : ([] as const)),
           )
-        : await execFileAsync(bin, ["--json", ...args], {
+        : await execFileAsync(bin, cliArgs, {
             ...(env ? { env } : {}),
           });
       return stdout;
@@ -235,6 +252,8 @@ export class CmuxClient {
         (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
       surface:
         (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      surface_id:
+        typeof parsed.surface_id === "string" ? parsed.surface_id : undefined,
       pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
       title: (parsed.title as string) ?? "",
       type: (parsed.type as "terminal" | "browser") ?? fallbackType,
@@ -250,6 +269,8 @@ export class CmuxClient {
         (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
       surface:
         (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      surface_id:
+        typeof parsed.surface_id === "string" ? parsed.surface_id : undefined,
       pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
       title: (parsed.title as string) ?? "",
       type: (parsed.type as "terminal" | "browser") ?? fallbackType,

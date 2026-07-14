@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { inboxPath, monitorAlive, readInbox } from "../src/inbox.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const STATE_DIR = join(tmpdir(), "cmuxlayer-spawn-monitor-boot-state");
 
@@ -114,12 +115,14 @@ describe("spawn monitor boot", () => {
     mkdirSync(STATE_DIR, { recursive: true });
     inboxDir = mkdtempSync(join(tmpdir(), "cmux-monitor-boot-"));
     exec = makeExec();
-    server = createServer({
-      exec,
-      stateDir: STATE_DIR,
-      disableSpawnPreflight: true,
-      inboxBaseDir: inboxDir,
-    });
+    server = createServer(
+      withTestSurfaceObserver({
+        exec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: inboxDir,
+      }),
+    );
   });
 
   afterEach(() => {
@@ -186,12 +189,14 @@ describe("spawn monitor boot", () => {
     );
     writeFileSync(blockedInboxBase, "not a directory");
     const blockedExec = makeExec();
-    const blockedServer = createServer({
-      exec: blockedExec,
-      stateDir: STATE_DIR,
-      disableSpawnPreflight: true,
-      inboxBaseDir: blockedInboxBase,
-    });
+    const blockedServer = createServer(
+      withTestSurfaceObserver({
+        exec: blockedExec,
+        stateDir: STATE_DIR,
+        disableSpawnPreflight: true,
+        inboxBaseDir: blockedInboxBase,
+      }),
+    );
 
     try {
       const spawn = blockedServer._registeredTools["spawn_agent"];

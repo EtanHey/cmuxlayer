@@ -47,9 +47,28 @@ describe("CmuxClient.listWorkspaces", () => {
 
     const result = await client.listWorkspaces();
 
-    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "list-workspaces"]);
+    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "--id-format", "both", "list-workspaces"]);
     expect(result.workspaces).toHaveLength(1);
     expect(result.workspaces[0].ref).toBe("workspace:1");
+  });
+});
+
+describe("CmuxClient observer transport identity", () => {
+  it("changes its epoch only when its pinned socket path changes", () => {
+    const firstPath = "/tmp/cmux-cli-first.sock";
+    const secondPath = "/tmp/cmux-cli-second.sock";
+    const client = new CmuxClient({
+      env: { ...process.env, CMUX_SOCKET_PATH: firstPath },
+    });
+
+    const firstEpoch = client.currentObserverTransportEpoch();
+    expect(client.currentSocketPath()).toBe(firstPath);
+    client.setEnv({ ...process.env, CMUX_SOCKET_PATH: firstPath });
+    expect(client.currentObserverTransportEpoch()).toBe(firstEpoch);
+
+    client.setEnv({ ...process.env, CMUX_SOCKET_PATH: secondPath });
+    expect(client.currentSocketPath()).toBe(secondPath);
+    expect(client.currentObserverTransportEpoch()).not.toBe(firstEpoch);
   });
 });
 
@@ -63,7 +82,7 @@ describe("CmuxClient.createWorkspace", () => {
     const result = await client.createWorkspace("red-team");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "workspace",
       "create",
       "--name",
@@ -80,7 +99,7 @@ describe("CmuxClient.deleteWorkspace", () => {
     await client.deleteWorkspace("workspace:7");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "workspace",
       "close",
       "workspace:7",
@@ -90,12 +109,14 @@ describe("CmuxClient.deleteWorkspace", () => {
 
 describe("CmuxClient.listPaneSurfaces", () => {
   it("calls with workspace flag when provided", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
     const data = {
       workspace_ref: "workspace:1",
       window_ref: "window:1",
       pane_ref: "pane:1",
       surfaces: [
         {
+          id: surfaceUuid,
           ref: "surface:1",
           title: "Terminal",
           type: "terminal",
@@ -106,14 +127,20 @@ describe("CmuxClient.listPaneSurfaces", () => {
     };
     const { client, exec } = mockClient(data);
 
-    await client.listPaneSurfaces({ workspace: "workspace:1" });
+    const result = await client.listPaneSurfaces({ workspace: "workspace:1" });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
       "--json",
+      "--id-format",
+      "both",
       "list-pane-surfaces",
       "--workspace",
       "workspace:1",
     ]);
+    expect(result.surfaces[0]).toMatchObject({
+      id: surfaceUuid,
+      ref: "surface:1",
+    });
   });
 
   it("calls without workspace flag when not provided", async () => {
@@ -127,16 +154,17 @@ describe("CmuxClient.listPaneSurfaces", () => {
 
     await client.listPaneSurfaces();
 
-    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "list-pane-surfaces"]);
+    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "--id-format", "both", "list-pane-surfaces"]);
   });
 });
 
 describe("CmuxClient.newSplit", () => {
   it("calls cmux new-split with direction", async () => {
     const data = {
-      workspace: "workspace:1",
-      surface: "surface:2",
-      pane: "pane:1",
+      workspace_ref: "workspace:1",
+      surface_id: "11111111-2222-4333-8444-555555555555",
+      surface_ref: "surface:2",
+      pane_ref: "pane:1",
       title: "New Split",
       type: "terminal",
     };
@@ -144,8 +172,9 @@ describe("CmuxClient.newSplit", () => {
 
     const result = await client.newSplit("right");
 
-    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "new-split", "right"]);
+    expect(exec).toHaveBeenCalledWith("cmux", ["--json", "--id-format", "both", "new-split", "right"]);
     expect(result.surface).toBe("surface:2");
+    expect(result.surface_id).toBe("11111111-2222-4333-8444-555555555555");
   });
 
   it("passes workspace and surface options", async () => {
@@ -164,7 +193,7 @@ describe("CmuxClient.newSplit", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "new-split",
       "left",
       "--workspace",
@@ -218,7 +247,7 @@ describe("CmuxClient.newSplit", () => {
     });
 
     expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "list-pane-surfaces",
       "--workspace",
       "workspace:1",
@@ -226,7 +255,7 @@ describe("CmuxClient.newSplit", () => {
       "pane:2",
     ]);
     expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "new-split",
       "left",
       "--workspace",
@@ -269,7 +298,7 @@ describe("CmuxClient.newSplit", () => {
     });
 
     expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "new-split",
       "left",
       "--workspace",
@@ -293,7 +322,7 @@ describe("CmuxClient.newSplit", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "new-pane",
       "--type",
       "browser",
@@ -317,9 +346,10 @@ describe("CmuxClient.newSplit", () => {
 describe("CmuxClient.newSurface", () => {
   it("calls cmux new-surface with pane and optional flags", async () => {
     const data = {
-      workspace: "workspace:1",
-      surface: "surface:9",
-      pane: "pane:2",
+      workspace_ref: "workspace:1",
+      surface_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      surface_ref: "surface:9",
+      pane_ref: "pane:2",
       title: "New Tab",
       type: "browser",
     };
@@ -333,7 +363,7 @@ describe("CmuxClient.newSurface", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "new-surface",
       "--pane",
       "pane:2",
@@ -347,6 +377,7 @@ describe("CmuxClient.newSurface", () => {
     expect(result).toEqual({
       workspace: "workspace:1",
       surface: "surface:9",
+      surface_id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
       pane: "pane:2",
       title: "New Tab",
       type: "browser",
@@ -374,7 +405,7 @@ describe("CmuxClient.moveSurface", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "move-surface",
       "--surface",
       "surface:9",
@@ -412,7 +443,7 @@ describe("CmuxClient.reorderSurface", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "reorder-surface",
       "--surface",
       "surface:9",
@@ -433,7 +464,7 @@ describe("CmuxClient.send", () => {
     await client.send("surface:1", "echo hello");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "send",
       "--surface",
       "surface:1",
@@ -447,7 +478,7 @@ describe("CmuxClient.send", () => {
     await client.send("surface:1", "ls", { workspace: "workspace:2" });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "send",
       "--surface",
       "surface:1",
@@ -480,16 +511,16 @@ describe("CmuxClient.pasteText", () => {
     });
 
     expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-buffer",
       "--name",
       expect.stringMatching(/^cmuxlayer-workspace-2-surface-1-[a-f0-9-]+$/),
       "--",
       "line one\nline two",
     ]);
-    const bufferName = exec.mock.calls[0][1][3];
+    const bufferName = exec.mock.calls[0][1][5];
     expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "paste-buffer",
       "--name",
       bufferName,
@@ -512,7 +543,7 @@ describe("CmuxClient.pasteText", () => {
 
     const setBufferNames = exec.mock.calls
       .filter(([, args]) => args.includes("set-buffer"))
-      .map(([, args]) => args[3]);
+      .map(([, args]) => args[5]);
     expect(setBufferNames).toHaveLength(2);
     expect(setBufferNames[0]).not.toBe(setBufferNames[1]);
   });
@@ -544,7 +575,7 @@ describe("CmuxClient CLI-fallback socket env (instance pin)", () => {
 
     // Backwards-compatible: no env set => 2-arg invocation as before.
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "select-workspace",
       "--workspace",
       "workspace:1",
@@ -572,7 +603,7 @@ describe("CmuxClient CLI binary resolution", () => {
 
     expect(exec).toHaveBeenCalledWith(
       "/opt/cmux-shims/cmux",
-      ["--json", "list-workspaces"],
+      ["--json", "--id-format", "both", "list-workspaces"],
       expect.objectContaining({ CMUX_SOCKET_PATH: "/tmp/pinned.sock" }),
     );
   });
@@ -592,7 +623,7 @@ describe("CmuxClient CLI binary resolution", () => {
 
     expect(exec).toHaveBeenCalledWith(
       "/tmp/custom-cmux",
-      ["--json", "list-workspaces"],
+      ["--json", "--id-format", "both", "list-workspaces"],
       expect.objectContaining({
         CMUX_BUNDLED_CLI_PATH:
           "/Applications/cmux.app/Contents/Resources/bin/cmux",
@@ -614,7 +645,7 @@ describe("CmuxClient CLI binary resolution", () => {
 
     expect(exec).toHaveBeenCalledWith(
       bundledPath,
-      ["--json", "list-workspaces"],
+      ["--json", "--id-format", "both", "list-workspaces"],
       expect.objectContaining({
         CMUX_SOCKET_PATH: "/tmp/cmux.sock",
         CMUX_BUNDLED_CLI_PATH: bundledPath,
@@ -632,7 +663,7 @@ describe("CmuxClient CLI binary resolution", () => {
     await client.listWorkspaces();
 
     expect(exec).toHaveBeenCalledWith(process.env.CMUX_BUNDLED_CLI_PATH, [
-      "--json",
+      "--json", "--id-format", "both",
       "list-workspaces",
     ]);
   });
@@ -647,7 +678,7 @@ describe("CmuxClient CLI binary resolution", () => {
     await client.listWorkspaces();
 
     expect(exec).toHaveBeenCalledWith(STANDARD_BUNDLED_CMUX, [
-      "--json",
+      "--json", "--id-format", "both",
       "list-workspaces",
     ]);
   });
@@ -659,7 +690,7 @@ describe("CmuxClient CLI binary resolution", () => {
     await client.listWorkspaces();
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "list-workspaces",
     ]);
   });
@@ -672,7 +703,7 @@ describe("CmuxClient.sendKey", () => {
     await client.sendKey("surface:1", "return");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "send-key",
       "--surface",
       "surface:1",
@@ -688,7 +719,7 @@ describe("CmuxClient.sendKey", () => {
       await client.sendKey("surface:1", key);
 
       expect(exec).toHaveBeenCalledWith("cmux", [
-        "--json",
+        "--json", "--id-format", "both",
         "send-key",
         "--surface",
         "surface:1",
@@ -705,7 +736,7 @@ describe("CmuxClient.selectWorkspace", () => {
     await client.selectWorkspace("workspace:3");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "select-workspace",
       "--workspace",
       "workspace:3",
@@ -725,7 +756,7 @@ describe("CmuxClient.readScreen", () => {
     const result = await client.readScreen("surface:1");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "read-screen",
       "--surface",
       "surface:1",
@@ -740,7 +771,7 @@ describe("CmuxClient.readScreen", () => {
     await client.readScreen("surface:1", { lines: 50, scrollback: true });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "read-screen",
       "--surface",
       "surface:1",
@@ -758,7 +789,7 @@ describe("CmuxClient.renameTab", () => {
     await client.renameTab("surface:1", "New Title");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "rename-tab",
       "--surface",
       "surface:1",
@@ -774,7 +805,7 @@ describe("CmuxClient.setStatus", () => {
     await client.setStatus("task", "building");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-status",
       "task",
       "building",
@@ -791,7 +822,7 @@ describe("CmuxClient.setStatus", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-status",
       "task",
       "building",
@@ -827,7 +858,7 @@ describe("CmuxClient.setStatuses", () => {
     expect(result).toBe(true);
     expect(exec).toHaveBeenCalledTimes(2);
     expect(exec).toHaveBeenNthCalledWith(1, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-status",
       "agent-a",
       "working",
@@ -837,7 +868,7 @@ describe("CmuxClient.setStatuses", () => {
       "workspace:1",
     ]);
     expect(exec).toHaveBeenNthCalledWith(2, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-status",
       "agent-b",
       "done",
@@ -850,7 +881,7 @@ describe("CmuxClient.setStatuses", () => {
 
   it("attempts every update and throws an error naming all failed keys", async () => {
     const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
-      const key = args[2];
+      const key = args[4];
       if (key === "agent-a" || key === "agent-c") {
         throw new Error(`rejected ${key}`);
       }
@@ -876,7 +907,7 @@ describe("CmuxClient.clearStatus", () => {
     await client.clearStatus("task");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "clear-status",
       "task",
     ]);
@@ -897,7 +928,7 @@ describe("CmuxClient.listStatus", () => {
     const result = await client.listStatus({ workspace: "workspace:1" });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "list-status",
       "--workspace",
       "workspace:1",
@@ -924,7 +955,7 @@ describe("CmuxClient.setProgress", () => {
     await client.setProgress(0.5);
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-progress",
       "0.5",
     ]);
@@ -936,7 +967,7 @@ describe("CmuxClient.setProgress", () => {
     await client.setProgress(0.75, { label: "Building..." });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "set-progress",
       "0.75",
       "--label",
@@ -952,7 +983,7 @@ describe("CmuxClient.closeSurface", () => {
     await client.closeSurface("surface:1");
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "close-surface",
       "--surface",
       "surface:1",
@@ -968,7 +999,7 @@ describe("CmuxClient.closeSurface", () => {
     });
 
     expect(exec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "close-surface",
       "--surface",
       "surface:1",

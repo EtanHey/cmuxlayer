@@ -196,6 +196,7 @@ export class CmuxSelfHealingClient {
   private irrecoverableSignaled = false;
   private lastUpgradeFailureLogAt = Number.NEGATIVE_INFINITY;
   private lastUpstreamFailureLogAt = Number.NEGATIVE_INFINITY;
+  private observerRouteGeneration = 0;
 
   constructor(private readonly opts: CmuxSelfHealingClientOptions) {
     this.socketClient = opts.socket ?? null;
@@ -257,9 +258,26 @@ export class CmuxSelfHealingClient {
       "currentSocketPath" in this.delegate &&
       typeof this.delegate.currentSocketPath === "function"
     ) {
-      return this.delegate.currentSocketPath();
+      return this.delegate.currentSocketPath() ?? this.opts.socketPath;
     }
     return this.opts.socketPath;
+  }
+
+  currentObserverTransportEpoch(): string | null {
+    const delegate = this.delegate as CmuxLayerClient & {
+      currentObserverTransportEpoch?: () => string | null;
+    };
+    if (typeof delegate.currentObserverTransportEpoch !== "function") {
+      return `${this.observerRouteGeneration}:static`;
+    }
+    try {
+      const delegateEpoch = delegate.currentObserverTransportEpoch()?.trim();
+      return delegateEpoch
+        ? `${this.observerRouteGeneration}:${delegateEpoch}`
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   async ping(): Promise<boolean> {
@@ -593,6 +611,7 @@ export class CmuxSelfHealingClient {
     }
     this.socketClient = null;
     this.delegate = this.opts.cli;
+    this.observerRouteGeneration++;
     this.transportDenial = null;
     this.opts.logger?.error(
       "[cmuxlayer] transport downgraded: socket -> cli (periodic socket re-probe active)",
@@ -656,6 +675,7 @@ export class CmuxSelfHealingClient {
       this.pinCliToSocket(client);
       this.socketClient = client;
       this.delegate = client;
+      this.observerRouteGeneration++;
       this.transportDenial = null;
       this.clearReprobe();
       this.previousReprobeDelayMs = 0;

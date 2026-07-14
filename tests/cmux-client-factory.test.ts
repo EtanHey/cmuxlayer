@@ -113,7 +113,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
       expect(exec).toHaveBeenCalledWith(
         "cmux",
-        ["--json", "list-workspaces"],
+        ["--json", "--id-format", "both", "list-workspaces"],
         expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
       );
       if ("stop" in client && typeof client.stop === "function") client.stop();
@@ -138,7 +138,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
       expect(exec).toHaveBeenCalledWith(
         "cmux",
-        ["--json", "list-workspaces"],
+        ["--json", "--id-format", "both", "list-workspaces"],
         expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
       );
       if ("stop" in client && typeof client.stop === "function") client.stop();
@@ -162,7 +162,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)(
       });
 
       await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
-      expect(exec).toHaveBeenCalledWith("cmux", ["--json", "list-workspaces"]);
+      expect(exec).toHaveBeenCalledWith("cmux", ["--json", "--id-format", "both", "list-workspaces"]);
       expect(exec.mock.calls[0]).toHaveLength(2);
       if ("stop" in client && typeof client.stop === "function") client.stop();
       fs.rmSync(stateDir, { recursive: true, force: true });

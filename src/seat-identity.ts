@@ -189,18 +189,33 @@ export function assertSeatIdentity(
       )
     : [];
 
-  const exactMatch = registryEntries.find(
+  const exactMatches = registryEntries.filter(
     ([, entry]) =>
       launcherName &&
       seatReposEquivalent(entry.repo, input.repo) &&
       launcherFor(entry, input.cli) === launcherName &&
       (!lane || entry.lane === lane),
   );
+  if (exactMatches.length > 1) {
+    return unknownAssertion(
+      `ambiguous seat registry match for repo=${input.repo} launcher=${launcherName}: ${exactMatches
+        .map(([seatId]) => seatId)
+        .join(", ")}`,
+    );
+  }
+  const exactMatch = exactMatches[0];
   if (exactMatch) {
     const [seatId, entry] = exactMatch;
     return entryAssertion(seatId, entry, "ok", null);
   }
 
+  if (launcherEntries.length > 1) {
+    return unknownAssertion(
+      `ambiguous seat registry match for launcher=${launcherName}: ${launcherEntries
+        .map(([seatId]) => seatId)
+        .join(", ")}`,
+    );
+  }
   const launcherMatch = launcherEntries[0];
   if (launcherMatch) {
     const [seatId, entry] = launcherMatch;
@@ -215,6 +230,14 @@ export function assertSeatIdentity(
       entry,
       "mismatch",
       `launcher ${launcherName} belongs to seat ${seatId} ${reasons.join(", ")}`,
+    );
+  }
+
+  if (repoEntries.length > 1 && launcherName) {
+    return unknownAssertion(
+      `ambiguous seat registry repo match for repo=${input.repo} launcher=${launcherName}: ${repoEntries
+        .map(([seatId]) => seatId)
+        .join(", ")}`,
     );
   }
 

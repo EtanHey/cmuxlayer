@@ -19,6 +19,7 @@ import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-v2");
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-v2-test.sock";
 
 function callTool(server: any, name: string, args: Record<string, unknown>) {
   const tool = server._registeredTools[name];
@@ -148,6 +149,18 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
 
 function makeSharedPaneExec(): ExecFn {
   const liveSurfaces = new Set(["surface:dying", "surface:other"]);
+  const listedSurfaces = () =>
+    liveSurfaces.size > 0
+      ? {
+          paneRef: "pane:shared",
+          surfaceRefs: [...liveSurfaces],
+          title: "agent-pane",
+        }
+      : {
+          paneRef: "pane:witness",
+          surfaceRefs: ["surface:post-close-witness"],
+          title: "witness-pane",
+        };
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("close-surface")) {
       const surface = String(args[args.indexOf("--surface") + 1] ?? "");
@@ -174,37 +187,35 @@ function makeSharedPaneExec(): ExecFn {
       };
     }
     if (args.includes("list-panes")) {
-      const surfaces = [...liveSurfaces];
+      const listed = listedSurfaces();
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
-          panes:
-            surfaces.length > 0
-              ? [
-                  {
-                    ref: "pane:shared",
-                    index: 0,
-                    focused: true,
-                    surface_count: surfaces.length,
-                    surface_refs: surfaces,
-                    selected_surface_ref: surfaces[0],
-                  },
-                ]
-              : [],
+          panes: [
+            {
+              ref: listed.paneRef,
+              index: 0,
+              focused: true,
+              surface_count: listed.surfaceRefs.length,
+              surface_refs: listed.surfaceRefs,
+              selected_surface_ref: listed.surfaceRefs[0],
+            },
+          ],
         }),
         stderr: "",
       };
     }
     if (args.includes("list-pane-surfaces")) {
+      const listed = listedSurfaces();
       return {
         stdout: JSON.stringify({
           workspace_ref: "workspace:1",
           window_ref: "window:1",
-          pane_ref: "pane:shared",
-          surfaces: [...liveSurfaces].map((ref, index) => ({
+          pane_ref: listed.paneRef,
+          surfaces: listed.surfaceRefs.map((ref, index) => ({
             ref,
-            title: "agent-pane",
+            title: listed.title,
             type: "terminal",
             index,
             selected: index === 0,
@@ -233,6 +244,7 @@ function makeAgentRecord(overrides: Partial<AgentRecord>): AgentRecord {
   return {
     agent_id: "agent",
     surface_id: "surface:agent",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "working",
     repo: "brainlayer",
@@ -262,6 +274,8 @@ function createV2Server(exec: ExecFn) {
     exec,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
+    surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
+    surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
 }
 
@@ -571,42 +585,50 @@ describe("kill — scoped targets", () => {
   });
 
   it("kill multiple agents by array", async () => {
-    const spawn1 = await callTool(server, "spawn_agent", {
-      repo: "brainlayer",
-      model: "sonnet",
-      cli: "claude",
-    });
-    const spawn2 = await callTool(server, "spawn_agent", {
-      repo: "voicelayer",
-      model: "haiku",
-      cli: "claude",
-    });
-    const id1 = parseResult(spawn1).agent_id;
-    const id2 = parseResult(spawn2).agent_id;
+    mockExec = makeSharedPaneExec();
+    const stateMgr = new StateManager(TEST_DIR);
+    const id1 = "agent-array-one";
+    const id2 = "agent-array-two";
+    stateMgr.writeState(
+      makeAgentRecord({ agent_id: id1, surface_id: "surface:dying" }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({ agent_id: id2, surface_id: "surface:other" }),
+    );
+    server = createV2Server(mockExec);
+    await callTool(server, "list_agents", {});
 
     const result = await callTool(server, "kill", {
       target: [id1, id2],
     });
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
+    expect(parsed.errors).toBeUndefined();
     expect(parsed.killed).toHaveLength(2);
   });
 
   it("kill 'all' stops all non-terminal agents", async () => {
-    await callTool(server, "spawn_agent", {
-      repo: "brainlayer",
-      model: "sonnet",
-      cli: "claude",
-    });
-    await callTool(server, "spawn_agent", {
-      repo: "voicelayer",
-      model: "haiku",
-      cli: "claude",
-    });
+    mockExec = makeSharedPaneExec();
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "agent-all-one",
+        surface_id: "surface:dying",
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "agent-all-two",
+        surface_id: "surface:other",
+      }),
+    );
+    server = createV2Server(mockExec);
+    await callTool(server, "list_agents", {});
 
     const result = await callTool(server, "kill", { target: "all" });
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
+    expect(parsed.errors).toBeUndefined();
     expect(parsed.killed.length).toBeGreaterThanOrEqual(2);
   });
 

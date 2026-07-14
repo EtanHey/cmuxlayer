@@ -68,6 +68,7 @@ export class CmuxPersistentSocket {
   private maxInFlight: number;
   /** Guards against concurrent connect() calls */
   private connectPromise: Promise<void> | null = null;
+  private connectionGeneration = 0;
 
   // Backoff state
   private backoffBaseMs: number;
@@ -127,6 +128,7 @@ export class CmuxPersistentSocket {
       let settled = false;
 
       this.socket = net.createConnection({ path: this.socketPath }, () => {
+        this.connectionGeneration++;
         this.connected = true;
         settled = true;
         this.connectPromise = null;
@@ -477,5 +479,9 @@ export class CmuxPersistentSocket {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  currentConnectionGeneration(): number {
+    return this.connectionGeneration;
   }
 }

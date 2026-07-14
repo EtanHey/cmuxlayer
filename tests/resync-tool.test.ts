@@ -2,13 +2,44 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer, createServerContext } from "../src/server.js";
+import {
+  createServer as createProductionServer,
+  createServerContext as createProductionServerContext,
+  type CreateServerOptions,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { SeatRegistry } from "../src/seat-identity.js";
+import { SURFACE_EVICTION_CONFIRMATION_MS } from "../src/agent-registry.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-resync-tool");
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmuxlayer-resync-test.sock";
+
+function withTestObserver<T extends Omit<CreateServerOptions, "context">>(
+  opts: T,
+): T & Omit<CreateServerOptions, "context"> {
+  return {
+    ...opts,
+    surfaceObserverOwnerIdProvider:
+      opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
+    surfaceObserverEpochProvider:
+      opts.surfaceObserverEpochProvider ??
+      (() => `${TEST_OBSERVER_OWNER}@test`),
+  };
+}
+
+function createServerContext(
+  opts: Omit<CreateServerOptions, "context"> = {},
+) {
+  return createProductionServerContext(withTestObserver(opts));
+}
+
+function createServer(opts: CreateServerOptions = {}) {
+  return createProductionServer(
+    opts.context ? opts : withTestObserver(opts),
+  );
+}
 
 function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -18,6 +49,7 @@ function makeAgentRecord(overrides: Partial<AgentRecord>): AgentRecord {
   return {
     agent_id: "agent",
     surface_id: "surface:agent",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "working",
     repo: "brainlayer",
@@ -881,14 +913,24 @@ function makeLeftColumnWorkerExec(
   opts: {
     singleColumn?: boolean;
     failPostMoveTopologyOnce?: boolean;
+    stableIds?: boolean;
+    workerScreen?: string;
+    workerTitle?: string;
   } = {},
-): ExecFn {
+): ExecFn & { recycleSeedSurfaceRef(): void } {
   let workerPane = "pane:left";
   let rightPaneExists = !opts.singleColumn;
   let seedSurfaceOpen = false;
   let postMoveTopologyFailed = false;
+  let seedSurfaceRef = "surface:worker-column-seed";
+  let seedSurfaceRefRecycled = false;
+  const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const workerUuid = "11111111-2222-4333-8444-555555555555";
+  const shellUuid = "22222222-3333-4444-8555-666666666666";
+  const seedUuid = "33333333-4444-4555-8666-777777777777";
+  const recycledSeedRefUuid = "44444444-5555-4666-8777-888888888888";
 
-  return vi.fn().mockImplementation(async (_cmd, args) => {
+  const exec = vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split")) {
       rightPaneExists = true;
       seedSurfaceOpen = true;
@@ -896,7 +938,8 @@ function makeLeftColumnWorkerExec(
         stdout: JSON.stringify({
           workspace: "workspace:1",
           pane: "pane:right",
-          surface: "surface:worker-column-seed",
+          surface: seedSurfaceRef,
+          ...(opts.stableIds ? { surface_id: seedUuid } : {}),
           title: "",
           type: "terminal",
         }),
@@ -917,7 +960,10 @@ function makeLeftColumnWorkerExec(
     }
 
     if (args.includes("close-surface")) {
-      seedSurfaceOpen = false;
+      const surface = String(args[args.indexOf("--surface") + 1]);
+      if (surface === seedSurfaceRef) {
+        seedSurfaceOpen = false;
+      }
       return { stdout: JSON.stringify({ ok: true }), stderr: "" };
     }
 
@@ -961,6 +1007,14 @@ function makeLeftColumnWorkerExec(
                 workerPane === "pane:left"
                   ? ["surface:lead", "surface:worker-left"]
                   : ["surface:lead"],
+              ...(opts.stableIds
+                ? {
+                    surface_ids:
+                      workerPane === "pane:left"
+                        ? [leadUuid, workerUuid]
+                        : [leadUuid],
+                  }
+                : {}),
               selected_surface_ref: "surface:lead",
               pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
             },
@@ -971,12 +1025,21 @@ function makeLeftColumnWorkerExec(
                     index: 1,
                     focused: false,
                     surface_count:
-                      Number(seedSurfaceOpen) +
+                      (seedSurfaceOpen
+                        ? seedSurfaceRefRecycled
+                          ? 2
+                          : 1
+                        : 0) +
                       Number(workerPane === "pane:right") ||
                       1,
                     surface_refs: [
                       ...(seedSurfaceOpen
-                        ? ["surface:worker-column-seed"]
+                        ? [
+                            ...(seedSurfaceRefRecycled
+                              ? ["surface:worker-column-seed"]
+                              : []),
+                            seedSurfaceRef,
+                          ]
                         : []),
                       ...(workerPane === "pane:right"
                         ? ["surface:worker-left"]
@@ -985,8 +1048,28 @@ function makeLeftColumnWorkerExec(
                         ? ["surface:shell"]
                         : []),
                     ],
+                    ...(opts.stableIds
+                      ? {
+                          surface_ids: [
+                            ...(seedSurfaceOpen
+                              ? [
+                                  ...(seedSurfaceRefRecycled
+                                    ? [recycledSeedRefUuid]
+                                    : []),
+                                  seedUuid,
+                                ]
+                              : []),
+                            ...(workerPane === "pane:right"
+                              ? [workerUuid]
+                              : []),
+                            ...(!seedSurfaceOpen && workerPane !== "pane:right"
+                              ? [shellUuid]
+                              : []),
+                          ],
+                        }
+                      : {}),
                     selected_surface_ref: seedSurfaceOpen
-                      ? "surface:worker-column-seed"
+                      ? seedSurfaceRef
                       : workerPane === "pane:right"
                         ? "surface:worker-left"
                         : "surface:shell",
@@ -1007,6 +1090,7 @@ function makeLeftColumnWorkerExec(
           ? [
               {
                 ref: "surface:lead",
+                ...(opts.stableIds ? { id: leadUuid } : {}),
                 title: "cmuxlayerClaude-LEAD",
                 type: "terminal",
                 index: 0,
@@ -1016,8 +1100,23 @@ function makeLeftColumnWorkerExec(
           : [
               ...(seedSurfaceOpen
                 ? [
+                    ...(seedSurfaceRefRecycled
+                      ? [
+                          {
+                            ref: "surface:worker-column-seed",
+                            ...(opts.stableIds
+                              ? { id: recycledSeedRefUuid }
+                              : {}),
+                            title: "replacement",
+                            type: "terminal" as const,
+                            index: 0,
+                            selected: false,
+                          },
+                        ]
+                      : []),
                     {
-                      ref: "surface:worker-column-seed",
+                      ref: seedSurfaceRef,
+                      ...(opts.stableIds ? { id: seedUuid } : {}),
                       title: "",
                       type: "terminal",
                       index: 0,
@@ -1029,6 +1128,7 @@ function makeLeftColumnWorkerExec(
                 ? [
                     {
                       ref: "surface:shell",
+                      ...(opts.stableIds ? { id: shellUuid } : {}),
                       title: "notes",
                       type: "terminal",
                       index: 0,
@@ -1048,7 +1148,8 @@ function makeLeftColumnWorkerExec(
                   ...base,
                   {
                     ref: "surface:worker-left",
-                    title: "stalkerCodex",
+                    ...(opts.stableIds ? { id: workerUuid } : {}),
+                    title: opts.workerTitle ?? "stalkerCodex",
                     type: "terminal",
                     index: 1,
                     selected: false,
@@ -1067,7 +1168,8 @@ function makeLeftColumnWorkerExec(
           surface,
           text:
             surface === "surface:worker-left"
-              ? "gpt-5.5 · Working (1m 03s • esc to interrupt)"
+              ? (opts.workerScreen ??
+                "gpt-5.5 · Working (1m 03s • esc to interrupt)")
               : "Claude Code\n✻ Working…\n🤖 Opus 4.8",
           lines: 20,
           scrollback_used: false,
@@ -1078,6 +1180,183 @@ function makeLeftColumnWorkerExec(
 
     return { stdout: JSON.stringify({}), stderr: "" };
   });
+
+  const controllable = exec as unknown as ExecFn & {
+    recycleSeedSurfaceRef(): void;
+  };
+  controllable.recycleSeedSurfaceRef = () => {
+    seedSurfaceRef = "surface:worker-column-seed-moved";
+    seedSurfaceRefRecycled = true;
+  };
+  return controllable;
+}
+
+function afterNextPaneSnapshot(
+  base: ExecFn,
+  pane: string,
+  onSnapshot: () => void,
+): { exec: ExecFn; arm(): void } {
+  let armed = false;
+  const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+    const result = await base(cmd, args);
+    if (
+      armed &&
+      args.includes("list-pane-surfaces") &&
+      String(args[args.indexOf("--pane") + 1]) === pane
+    ) {
+      armed = false;
+      queueMicrotask(onSnapshot);
+    }
+    return result;
+  });
+  return {
+    exec,
+    arm() {
+      armed = true;
+    },
+  };
+}
+
+function armAfterSecondResyncMerge(
+  registry: {
+    listMerged: (...args: any[]) => Promise<any>;
+  },
+  arm: () => void,
+): void {
+  const originalListMerged = registry.listMerged.bind(registry);
+  let listMergedCalls = 0;
+  vi.spyOn(registry, "listMerged").mockImplementation(async (...args: any[]) => {
+    const merged = await originalListMerged(...args);
+    listMergedCalls += 1;
+    if (listMergedCalls === 2) arm();
+    return merged;
+  });
+}
+
+function makeMovedUuidReflowExec(): {
+  exec: ExecFn;
+  moveStableUuidToRight(): void;
+} {
+  const stableUuid = "11111111-2222-4333-8444-555555555555";
+  let moved = false;
+  const exec: ExecFn = vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Active",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:old"],
+              surface_ids: [moved ? "uuid-recycled" : stableUuid],
+              selected_surface_ref: "surface:old",
+              pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+            },
+            {
+              ref: "pane:right",
+              index: 1,
+              focused: false,
+              surface_count: 1,
+              surface_refs: [moved ? "surface:new" : "surface:shell"],
+              surface_ids: [moved ? stableUuid : "uuid-shell"],
+              selected_surface_ref: moved ? "surface:new" : "surface:shell",
+              pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      const pane = String(args[args.indexOf("--pane") + 1]);
+      const surface =
+        pane === "pane:left"
+          ? {
+              ref: "surface:old",
+              id: moved ? "uuid-recycled" : stableUuid,
+              title: moved ? "foreignCodex" : "cmuxlayerCodex",
+            }
+          : {
+              ref: moved ? "surface:new" : "surface:shell",
+              id: moved ? stableUuid : "uuid-shell",
+              title: moved ? "cmuxlayerCodex" : "notes",
+            };
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane,
+          surfaces: [
+            {
+              ...surface,
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      const surface = String(args[args.indexOf("--surface") + 1]);
+      return {
+        stdout: JSON.stringify({
+          surface,
+          text:
+            surface === "surface:shell"
+              ? "$ "
+              : "gpt-5.5 · Working (1m 03s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("move-surface")) {
+      return {
+        stdout: JSON.stringify({
+          workspace: "workspace:1",
+          pane: String(args[args.indexOf("--pane") + 1]),
+          surface: String(args[args.indexOf("--surface") + 1]),
+        }),
+        stderr: "",
+      };
+    }
+
+    return { stdout: JSON.stringify({}), stderr: "" };
+  });
+
+  return {
+    exec,
+    moveStableUuidToRight() {
+      moved = true;
+    },
+  };
 }
 
 describe("resync_agents tool", () => {
@@ -1087,6 +1366,7 @@ describe("resync_agents tool", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
@@ -1234,6 +1514,533 @@ describe("resync_agents tool", () => {
     ]);
   });
 
+  it("resync_agents never reflows a UUID-less worker owned by another observer", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "foreign-observer-reflow-worker",
+        surface_id: "surface:worker-left",
+        surface_uuid: null,
+        surface_observer_id: "cmux:/tmp/foreign.sock",
+        workspace_id: "workspace:1",
+        role: "worker",
+        cli: "codex",
+      }),
+    );
+    const exec = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      workerScreen: "$ ",
+      workerTitle: "notes",
+    });
+    const context = createServerContext({
+      exec,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:worker-left",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([]);
+  });
+
+  it("resync_agents never reflows a recycled ref after the worker UUID moves", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "uuid-reflow-worker",
+        surface_id: "surface:old",
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:1",
+        role: "worker",
+        cli: "codex",
+      }),
+    );
+    const route = makeMovedUuidReflowExec();
+    const context = createServerContext({
+      exec: route.exec,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const registry = engine.getRegistry();
+    const originalListMerged = registry.listMerged.bind(registry);
+    let listMergedCalls = 0;
+    vi.spyOn(registry, "listMerged").mockImplementation(async (...args: any[]) => {
+      const merged = await originalListMerged(...args);
+      listMergedCalls += 1;
+      if (listMergedCalls === 2) {
+        route.moveStableUuidToRight();
+      }
+      return merged;
+    });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(route.exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:old",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([]);
+  });
+
+  it("resync_agents refuses a seed split when the observer changes after its topology snapshot", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    let currentObserverId = "cmux:/tmp/cmux-primary.sock";
+    const context = createServerContext({
+      exec: base,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+      surfaceObserverOwnerIdProvider: () => currentObserverId,
+      surfaceObserverEpochProvider: () => `${currentObserverId}@test`,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const registry = (server as any)._registeredTools["interact"]._engine.getRegistry() as any;
+    let switchOnNextBindingAuthorization = false;
+    const originalCanUseObservedBinding =
+      registry.canUseObservedBinding.bind(registry);
+    vi.spyOn(registry, "canUseObservedBinding").mockImplementation(
+      (...args: any[]) => {
+        const allowed = originalCanUseObservedBinding(...args);
+        if (allowed && switchOnNextBindingAuthorization) {
+          switchOnNextBindingAuthorization = false;
+          currentObserverId = "cmux:/tmp/cmux-secondary.sock";
+        }
+        return allowed;
+      },
+    );
+    armAfterSecondResyncMerge(registry, () => {
+      switchOnNextBindingAuthorization = true;
+    });
+
+    try {
+      const result = await (server as any)._registeredTools["resync_agents"].handler(
+        {},
+        {} as any,
+      );
+      const parsed = parseResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(base).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["new-split"]),
+      );
+      expect(base).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["move-surface"]),
+      );
+      expect(parsed.diff.reflowed).toEqual([]);
+      expect(parsed.diff.reflow_skipped).toEqual([
+        expect.objectContaining({
+          operation: "new_split",
+          reason: expect.stringMatching(/observer.*changed/i),
+        }),
+      ]);
+    } finally {
+      await server.close();
+      context.dispose();
+    }
+  });
+
+  it("resync_agents fresh-checks a worker UUID before moving and never moves its recycled ref", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "uuid-reflow-worker-after-snapshot",
+        surface_id: "surface:old",
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:1",
+        role: "worker",
+        cli: "codex",
+      }),
+    );
+    const route = makeMovedUuidReflowExec();
+    const snapshot = afterNextPaneSnapshot(
+      route.exec,
+      "pane:right",
+      route.moveStableUuidToRight,
+    );
+    const context = createServerContext({
+      exec: snapshot.exec,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const registry = (server as any)._registeredTools["interact"]._engine.getRegistry();
+    armAfterSecondResyncMerge(registry, snapshot.arm);
+
+    try {
+      const result = await (server as any)._registeredTools["resync_agents"].handler(
+        {},
+        {} as any,
+      );
+      const parsed = parseResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(snapshot.exec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["move-surface"]),
+      );
+      expect(parsed.diff.reflowed).toEqual([]);
+      expect(parsed.diff.reflow_skipped).toEqual([
+        expect.objectContaining({
+          operation: "move_surface",
+          surface_id: "surface:old",
+          reason: expect.stringMatching(/binding.*changed|stable.*uuid/i),
+        }),
+      ]);
+    } finally {
+      await server.close();
+      context.dispose();
+    }
+  });
+
+  it("resync_agents fresh-resolves a seeded surface UUID before cleanup instead of closing a recycled ref", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    let recycleAfterMove = false;
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      const result = await base(cmd, args);
+      if (args.includes("move-surface")) {
+        recycleAfterMove = true;
+      } else if (
+        recycleAfterMove &&
+        args.includes("list-pane-surfaces") &&
+        String(args[args.indexOf("--pane") + 1]) === "pane:right"
+      ) {
+        recycleAfterMove = false;
+        queueMicrotask(() => base.recycleSeedSurfaceRef());
+      }
+      return result;
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "close-surface",
+        "--surface",
+        "surface:worker-column-seed",
+      ]),
+    );
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "close-surface",
+        "--surface",
+        "surface:worker-column-seed-moved",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toHaveLength(1);
+  });
+
+  it("resync_agents reports and skips a seed split in a manual workspace", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify([{ key: "mode.control", value: "manual" }]),
+          stderr: "",
+        };
+      }
+      return base(cmd, args);
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["move-surface"]),
+    );
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "new_split",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
+  it("resync_agents reports and skips moving a manual surface", async () => {
+    const base = makeLeftColumnWorkerExec({ stableIds: true });
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify([{ key: "mode.control", value: "manual" }]),
+          stderr: "",
+        };
+      }
+      return base(cmd, args);
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["move-surface"]),
+    );
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "move_surface",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
+  it("resync_agents reports and skips seed cleanup when the seed becomes manual", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    let workerMoved = false;
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify(
+            workerMoved
+              ? [{ key: "mode.control", value: "manual" }]
+              : [],
+          ),
+          stderr: "",
+        };
+      }
+      const result = await base(cmd, args);
+      if (args.includes("move-surface")) workerMoved = true;
+      return result;
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["close-surface"]),
+    );
+    expect(parsed.diff.reflowed).toHaveLength(1);
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "close_surface",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
+  it("resync_agents rechecks workspace mode after its final seed topology read", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    let armModeFlip = false;
+    let manual = false;
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        const result = {
+          stdout: JSON.stringify(
+            manual ? [{ key: "mode.control", value: "manual" }] : [],
+          ),
+          stderr: "",
+        };
+        armModeFlip = true;
+        return result;
+      }
+      const result = await base(cmd, args);
+      if (
+        armModeFlip &&
+        !manual &&
+        args.includes("list-pane-surfaces") &&
+        String(args[args.indexOf("--pane") + 1]) === "pane:left"
+      ) {
+        manual = true;
+      }
+      return result;
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["new-split"]),
+    );
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "new_split",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
+  it("resync_agents rechecks surface mode after its final move topology read", async () => {
+    const base = makeLeftColumnWorkerExec({ stableIds: true });
+    let armModeFlip = false;
+    let manual = false;
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        const result = {
+          stdout: JSON.stringify(
+            manual ? [{ key: "mode.control", value: "manual" }] : [],
+          ),
+          stderr: "",
+        };
+        armModeFlip = true;
+        return result;
+      }
+      const result = await base(cmd, args);
+      if (
+        armModeFlip &&
+        !manual &&
+        args.includes("list-pane-surfaces") &&
+        String(args[args.indexOf("--pane") + 1]) === "pane:left"
+      ) {
+        manual = true;
+      }
+      return result;
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["move-surface"]),
+    );
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "move_surface",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
+  it("resync_agents rechecks seed mode after its final cleanup topology read", async () => {
+    const base = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
+    let workerMoved = false;
+    let postMoveRightSnapshots = 0;
+    let manual = false;
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify(
+            manual ? [{ key: "mode.control", value: "manual" }] : [],
+          ),
+          stderr: "",
+        };
+      }
+      const result = await base(cmd, args);
+      if (args.includes("move-surface")) {
+        workerMoved = true;
+      } else if (
+        workerMoved &&
+        args.includes("list-pane-surfaces") &&
+        String(args[args.indexOf("--pane") + 1]) === "pane:right"
+      ) {
+        postMoveRightSnapshots += 1;
+        if (postMoveRightSnapshots === 3) manual = true;
+      }
+      return result;
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["close-surface"]),
+    );
+    expect(parsed.diff.reflowed).toHaveLength(1);
+    expect(parsed.diff.reflow_skipped).toEqual([
+      expect.objectContaining({
+        operation: "close_surface",
+        reason: expect.stringMatching(/manual mode/i),
+      }),
+    ]);
+  });
+
   it("resync_agents seeds a right column for a single-column auto-discovered worker", async () => {
     const exec = makeLeftColumnWorkerExec({ singleColumn: true });
     const server = createServer({ exec, stateDir: TEST_DIR });
@@ -1300,6 +2107,7 @@ describe("resync_agents tool", () => {
     stateMgr.writeState({
       agent_id: "auto-claude-surface-1",
       surface_id: "surface:1",
+      surface_observer_id: TEST_OBSERVER_OWNER,
       workspace_id: null,
       state: "working",
       repo: "brainlayer",
@@ -1455,11 +2263,41 @@ describe("resync_agents tool", () => {
     expect(listed.agents[0].agent_id).toBe("auto-claude-surface-1");
   });
 
+  it("resync_agents does not mutate an active record on its first partial omission", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "transient-resync-agent",
+        surface_id: "surface:transient",
+        state: "working",
+      }),
+    );
+    const server = createServer({
+      exec: makeDiscoveryExec(),
+      stateDir: TEST_DIR,
+    });
+
+    const result = await (server as any)._registeredTools[
+      "resync_agents"
+    ].handler({}, {} as any);
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.diff.evicted).not.toContain("transient-resync-agent");
+    expect(stateMgr.readState("transient-resync-agent")).toMatchObject({
+      state: "working",
+      error: null,
+    });
+  });
+
   it("resync_agents evicts ghost booting agents whose surface no longer exists", async () => {
+    const firstObservedAt = Date.parse("2026-07-14T07:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState({
       agent_id: "ghost-agent",
       surface_id: "surface:999",
+      surface_observer_id: TEST_OBSERVER_OWNER,
       workspace_id: "workspace:1",
       state: "booting",
       repo: "skill-creator",
@@ -1488,8 +2326,16 @@ describe("resync_agents tool", () => {
     });
 
     const tool = (server as any)._registeredTools["resync_agents"];
-    const result = await tool.handler({}, {} as any);
-    const parsed = parseResult(result);
+    const firstResult = parseResult(await tool.handler({}, {} as any));
+
+    expect(firstResult.ok).toBe(true);
+    expect(firstResult.diff.evicted).not.toContain("ghost-agent");
+    expect(stateMgr.readState("ghost-agent")?.state).toBe("booting");
+
+    nowSpy.mockReturnValue(
+      firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
+    );
+    const parsed = parseResult(await tool.handler({}, {} as any));
 
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.evicted).toContain("ghost-agent");
@@ -1497,6 +2343,8 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents evicts surfaceless error agents with resumable sessions", async () => {
+    const firstObservedAt = Date.parse("2026-07-14T07:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeAgentRecord({
@@ -1515,11 +2363,17 @@ describe("resync_agents tool", () => {
       stateDir: TEST_DIR,
     });
 
-    const result = await (server as any)._registeredTools["resync_agents"].handler(
-      {},
-      {} as any,
+    const tool = (server as any)._registeredTools["resync_agents"];
+    const firstResult = parseResult(await tool.handler({}, {} as any));
+
+    expect(firstResult.ok).toBe(true);
+    expect(firstResult.diff.evicted).not.toContain("surfaceless-error-agent");
+    expect(stateMgr.readState("surfaceless-error-agent")?.state).toBe("error");
+
+    nowSpy.mockReturnValue(
+      firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
     );
-    const parsed = parseResult(result);
+    const parsed = parseResult(await tool.handler({}, {} as any));
 
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.evicted).toContain("surfaceless-error-agent");
@@ -1778,6 +2632,7 @@ describe("resync_agents tool", () => {
     stateMgr.writeState({
       agent_id: "booting-ghost",
       surface_id: "surface:999",
+      surface_observer_id: TEST_OBSERVER_OWNER,
       workspace_id: "workspace:1",
       state: "booting",
       repo: "skill-creator",
@@ -1947,8 +2802,8 @@ describe("resync_agents tool", () => {
         }),
         expect.objectContaining({
           surface_id: "surface:35",
-          agent_id: "cmuxlayerLead",
-          seat_id: "cmuxlayerLead",
+          agent_id: "cmuxlayerClaude",
+          seat_id: null,
         }),
         expect.objectContaining({
           surface_id: "surface:27",
@@ -1968,18 +2823,22 @@ describe("resync_agents tool", () => {
     expect(stateMgr.readState("auto-claude-surface-35")).toBeNull();
     expect(stateMgr.readState("brainlayerClaude-pending-1710000000-abcd")).toBeNull();
     expect(stateMgr.readState("cmuxlayerCodex-pending-1710000000-dead")).toBeNull();
-    expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
-      agent_id: "cmuxlayerLead",
+    expect(stateMgr.readState("cmuxlayerClaude")).toMatchObject({
+      agent_id: "cmuxlayerClaude",
       surface_id: "surface:35",
       workspace_id: "workspace:1",
       repo: "cmuxlayer",
       cli: "claude",
       role: "orchestrator",
       launcher_name: "cmuxlayerClaude",
-      seat_id: "cmuxlayerLead",
-      seat_lane: "cmuxlayer",
-      seat_role: "lead",
+      seat_id: null,
+      seat_lane: null,
+      seat_role: null,
+      seat_identity_status: "unknown",
     });
+    expect(
+      stateMgr.readState("cmuxlayerClaude")?.seat_identity_error,
+    ).toContain("ambiguous seat registry match");
     expect(stateMgr.readState("brainClaude")).toMatchObject({
       agent_id: "brainClaude",
       surface_id: "surface:27",
@@ -2040,7 +2899,7 @@ describe("resync_agents tool", () => {
     });
   });
 
-  it("resync_agents repairs stale worker labels on live lead surfaces instead of flagging worker_in_leftmost_column", async () => {
+  it("resync_agents clears ambiguous seat labels without guessing a lead identity", async () => {
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
       makeAgentRecord({
@@ -2071,7 +2930,7 @@ describe("resync_agents tool", () => {
         expect.objectContaining({
           agent_id: "stale-left-worker",
           surface_id: "surface:35",
-          seat_id: "cmuxlayerLead",
+          seat_id: null,
         }),
       ]),
     );
@@ -2084,10 +2943,14 @@ describe("resync_agents tool", () => {
       cli: "claude",
       role: "orchestrator",
       launcher_name: "cmuxlayerClaude",
-      seat_id: "cmuxlayerLead",
-      seat_lane: "cmuxlayer",
-      seat_role: "lead",
+      seat_identity_status: "unknown",
     });
+    expect(repaired?.seat_id ?? null).toBeNull();
+    expect(repaired?.seat_lane ?? null).toBeNull();
+    expect(repaired?.seat_role ?? null).toBeNull();
+    expect(repaired?.seat_identity_error).toContain(
+      "ambiguous seat registry match",
+    );
 
     const stateResult = await (server as any)._registeredTools[
       "get_agent_state"
@@ -2099,6 +2962,8 @@ describe("resync_agents tool", () => {
   }, 10_000);
 
   it("resync_agents evicts registry-only phantom agents instead of failing", async () => {
+    const firstObservedAt = Date.parse("2026-07-14T07:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
     const context = createServerContext({
       exec: makeDiscoveryExec(),
       stateDir: TEST_DIR,
@@ -2114,6 +2979,7 @@ describe("resync_agents tool", () => {
     registry.set("gpt-5.4-mcplayer-1776645230-hmep", {
       agent_id: "gpt-5.4-mcplayer-1776645230-hmep",
       surface_id: "surface:phantom",
+      surface_observer_id: TEST_OBSERVER_OWNER,
       workspace_id: "workspace:1",
       state: "ready",
       repo: "mcplayer",
@@ -2136,11 +3002,21 @@ describe("resync_agents tool", () => {
       user_killed: false,
     });
 
-    const result = await (server as any)._registeredTools["resync_agents"].handler(
-      {},
-      {} as any,
+    const tool = (server as any)._registeredTools["resync_agents"];
+    const firstResult = parseResult(await tool.handler({}, {} as any));
+
+    expect(firstResult.ok).toBe(true);
+    expect(firstResult.diff.evicted).not.toContain(
+      "gpt-5.4-mcplayer-1776645230-hmep",
     );
-    const parsed = parseResult(result);
+    expect(
+      registry.get("gpt-5.4-mcplayer-1776645230-hmep")?.agent_id,
+    ).toBe("gpt-5.4-mcplayer-1776645230-hmep");
+
+    nowSpy.mockReturnValue(
+      firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
+    );
+    const parsed = parseResult(await tool.handler({}, {} as any));
 
     expect(parsed.ok).toBe(true);
     expect(parsed.diff.evicted).toContain("gpt-5.4-mcplayer-1776645230-hmep");

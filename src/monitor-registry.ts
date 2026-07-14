@@ -119,7 +119,8 @@ export type MonitorCollapseReason =
   | "rearm-command-missing";
 
 export interface MonitorRegistryReconcileOptions extends MonitorRegistryOptions {
-  ownerAlive: (ownerSeat: string) => Promise<boolean> | boolean;
+  /** `null` means liveness is temporarily unobservable and must not destroy state. */
+  ownerAlive: (ownerSeat: string) => Promise<boolean | null> | boolean | null;
   ownerPtyDead?: (ownerSeat: string) => Promise<boolean> | boolean;
   watchTargetExists?: (target: string) => boolean;
   rearmClaimTimeoutMs?: number;
@@ -882,7 +883,9 @@ export async function reconcileMonitorRegistry(
   );
 
   for (const candidate of reapCandidates) {
-    if (await opts.ownerAlive(candidate.owner_seat)) continue;
+    // Ancient rows are reaped only after authoritative owner absence. Startup
+    // routing gaps and incomplete topology return null and preserve the row.
+    if ((await opts.ownerAlive(candidate.owner_seat)) !== false) continue;
     let claimed = false;
     withRegistryWriteLock(path, () => {
       const registry = readRawRegistry(path);
@@ -941,10 +944,18 @@ export async function reconcileMonitorRegistry(
       collapseReason = "watch-target-missing";
     } else if (await opts.ownerPtyDead?.(candidate.owner_seat)) {
       collapseReason = "owner-pty-dead";
-    } else if (!(await opts.ownerAlive(candidate.owner_seat))) {
-      collapseReason = "owner-not-alive";
-    } else if (ownerWedged && !useFallback) {
-      collapseReason = "owner-wedged";
+    } else {
+      const ownerAlive = await opts.ownerAlive(candidate.owner_seat);
+      if (ownerAlive === null) {
+        // Destructive reconciliation is fail-closed while the current surface
+        // observer cannot establish an authoritative route to the owner.
+        continue;
+      }
+      if (!ownerAlive) {
+        collapseReason = "owner-not-alive";
+      } else if (ownerWedged && !useFallback) {
+        collapseReason = "owner-wedged";
+      }
     }
 
     let claimed: MonitorRegistryRecord | null = null;

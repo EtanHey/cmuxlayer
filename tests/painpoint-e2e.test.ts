@@ -17,8 +17,8 @@ import {
   type ProcessInfo,
 } from "../src/mcp-reaper.js";
 import {
-  createServer,
-  createServerContext,
+  createServer as createProductionServer,
+  createServerContext as createProductionServerContext,
   type CreateServerOptions,
 } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
@@ -38,6 +38,32 @@ type StatusCall = {
 
 const tempDirs: string[] = [];
 const servers: net.Server[] = [];
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-painpoint-e2e-test.sock";
+
+function withTestObserver<T extends Omit<CreateServerOptions, "context">>(
+  opts: T,
+): T & Omit<CreateServerOptions, "context"> {
+  return {
+    ...opts,
+    surfaceObserverOwnerIdProvider:
+      opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
+    surfaceObserverEpochProvider:
+      opts.surfaceObserverEpochProvider ??
+      (() => `${TEST_OBSERVER_OWNER}@test`),
+  };
+}
+
+function createServerContext(
+  opts: Omit<CreateServerOptions, "context"> = {},
+) {
+  return createProductionServerContext(withTestObserver(opts));
+}
+
+function createServer(opts: CreateServerOptions = {}) {
+  return createProductionServer(
+    opts.context ? opts : withTestObserver(opts),
+  );
+}
 
 function tempDir(label: string): string {
   const dir = mkdtempSync(join(tmpdir(), `cmuxlayer-p10-${label}-`));
@@ -64,6 +90,7 @@ function makeRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     agent_id: "codex-cmuxlayer-p10",
     surface_id: "surface:p10",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "ready",
     repo: "cmuxlayer",
@@ -101,6 +128,12 @@ function paneArg(args: string[]): string {
   return index >= 0 ? (args[index + 1] ?? "") : "";
 }
 
+function commandArg(args: string[]): { command: string; index: number } {
+  const idFormatIndex = args.indexOf("--id-format");
+  const index = idFormatIndex >= 0 ? idFormatIndex + 2 : 1;
+  return { command: args[index] ?? "", index };
+}
+
 function makeLifecycleExec(surfaceRefs: string[], opts?: {
   emptyPanes?: boolean;
   screenBySurface?: Map<string, string>;
@@ -114,7 +147,7 @@ function makeLifecycleExec(surfaceRefs: string[], opts?: {
   const closeCalls: string[] = [];
   const screenBySurface = opts?.screenBySurface ?? new Map<string, string>();
   const exec: ExecFn = async (_cmd, args) => {
-    const command = args[1];
+    const { command, index: commandIndex } = commandArg(args);
     if (command === "list-workspaces") {
       return {
         stdout: JSON.stringify({
@@ -240,8 +273,8 @@ function makeLifecycleExec(surfaceRefs: string[], opts?: {
     }
     if (command === "set-status") {
       statusCalls.push({
-        key: args[2] ?? "",
-        value: args[3] ?? "",
+        key: args[commandIndex + 1] ?? "",
+        value: args[commandIndex + 2] ?? "",
         args: [...args],
       });
       return { stdout: "{}", stderr: "" };
@@ -729,7 +762,7 @@ describe("Phase 10 painpoint e2e replay", () => {
       }),
     );
     const exec: ExecFn = async (_cmd, args) => {
-      const command = args[1];
+      const { command } = commandArg(args);
       if (command === "read-screen") {
         return {
           stdout: JSON.stringify({

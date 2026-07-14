@@ -2,10 +2,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createServer } from "../src/server.js";
+import {
+  createServer as createProductionServer,
+  type CreateServerOptions,
+} from "../src/server.js";
 import { inboxPath, monitorAlive } from "../src/inbox.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-spawn-workspace-test");
+
+function createServer(opts: CreateServerOptions = {}) {
+  return createProductionServer(
+    opts.context ? opts : withTestSurfaceObserver(opts),
+  );
+}
 const wrongWorkspaceFixtureUrl = new URL(
   "./fixtures/painpoints/wrong-workspace-spawn.json",
   import.meta.url,

@@ -3,7 +3,7 @@
  * Tests syncSidebar(), runSweep(), and lifecycle log events.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
@@ -16,7 +16,10 @@ import { readMonitorRegistry, registerMonitor } from "../src/monitor-registry.js
 import type { CmuxClient } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
-import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
+import {
+  renderFleetSidebar,
+  type FleetSidebarPublication,
+} from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
 
@@ -25,6 +28,33 @@ type MockClient = CmuxClient & {
   notifyLifecycleEvent: ReturnType<typeof vi.fn>;
   setStatuses: ReturnType<typeof vi.fn>;
 };
+
+interface Round5SeatBindingFixture {
+  workspace: string;
+  surfaces: Array<{
+    surface_uuid: string;
+    surface_ref: string;
+    title: string;
+    screen: string;
+    parsed_status: "working" | "idle" | null;
+  }>;
+  registry: Array<{
+    agent_id: string;
+    surface_uuid: string;
+    stale_surface_ref: string;
+    expected_surface_ref?: string;
+    expected_state?: "working" | "idle" | "stalled";
+    expected_rendered?: boolean;
+    never_active?: boolean;
+  }>;
+}
+
+const ROUND5_SEAT_BINDING = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/sidebar/round5-seat-binding.json", import.meta.url),
+    "utf8",
+  ),
+) as Round5SeatBindingFixture;
 
 function makeMockClient(overrides?: Partial<CmuxClient>): MockClient {
   return {
@@ -133,12 +163,71 @@ describe("Sidebar Sync", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
+    const workspaceForSurface = (surface: CmuxSurface): string =>
+      surface.workspace_ref ??
+      stateMgr
+        .listStates()
+        .find((record) => record.surface_id === surface.ref)?.workspace_id ??
+      "workspace:test";
+    mockClient.listWorkspaces.mockImplementation(async () => ({
+      workspaces: [...new Set(liveSurfaces.map(workspaceForSurface))].map(
+        (ref, index) => ({
+          ref,
+          title: ref,
+          index,
+          selected: index === 0,
+          pinned: false,
+        }),
+      ),
+    }));
+    mockClient.listPanes.mockImplementation(
+      async ({ workspace }: { workspace?: string } = {}) => {
+        const workspaceRef = workspace ?? "workspace:test";
+        const surfaces = liveSurfaces.filter(
+          (surface) => workspaceForSurface(surface) === workspaceRef,
+        );
+        return {
+          workspace_ref: workspaceRef,
+          window_ref: `window:${workspaceRef}`,
+          panes:
+            surfaces.length === 0
+              ? []
+              : [
+                  {
+                    ref: `pane:${workspaceRef}`,
+                    index: 0,
+                    focused: true,
+                    surface_count: surfaces.length,
+                    surface_refs: surfaces.map((surface) => surface.ref),
+                    ...(surfaces.every((surface) => surface.id)
+                      ? { surface_ids: surfaces.map((surface) => surface.id!) }
+                      : {}),
+                    selected_surface_ref: surfaces[0]?.ref,
+                  },
+                ],
+        };
+      },
+    );
+    mockClient.listPaneSurfaces.mockImplementation(
+      async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => {
+        const workspaceRef = workspace ?? "workspace:test";
+        return {
+          workspace_ref: workspaceRef,
+          window_ref: `window:${workspaceRef}`,
+          pane_ref: pane ?? `pane:${workspaceRef}`,
+          surfaces: liveSurfaces.filter(
+            (surface) => workspaceForSurface(surface) === workspaceRef,
+          ),
+        };
+      },
+    );
     publishedFleetPublications = [];
     inboxOpts = { baseDir: join(TEST_DIR, "inbox") };
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
       inboxOpts,
       fleetSidebarPublisher: {
         publish: (publication) => {
@@ -149,6 +238,343 @@ describe("Sidebar Sync", () => {
         },
         dispose: () => {},
       },
+    });
+  });
+
+  it("binds state and identity to the stable UUID in the round-5 capture", async () => {
+    const workingBinding = ROUND5_SEAT_BINDING.registry.find(
+      (entry) => entry.expected_state === "working",
+    )!;
+    const idleBinding = ROUND5_SEAT_BINDING.registry.find(
+      (entry) => entry.expected_state === "idle",
+    )!;
+    const ghostBinding = ROUND5_SEAT_BINDING.registry.find(
+      (entry) => entry.expected_rendered === false,
+    )!;
+    const neverActiveBinding = ROUND5_SEAT_BINDING.registry.find(
+      (entry) => entry.never_active === true,
+    )!;
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: workingBinding.agent_id,
+        surface_id: workingBinding.stale_surface_ref,
+        surface_uuid: workingBinding.surface_uuid,
+        workspace_id: ROUND5_SEAT_BINDING.workspace,
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        role: "worker",
+        state: "working",
+        task_summary: "Topology contract verification",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: idleBinding.agent_id,
+        surface_id: idleBinding.stale_surface_ref,
+        surface_uuid: idleBinding.surface_uuid,
+        workspace_id: ROUND5_SEAT_BINDING.workspace,
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        role: "worker",
+        state: "idle",
+        task_summary: "Await next assignment",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: neverActiveBinding.agent_id,
+        surface_id: neverActiveBinding.stale_surface_ref,
+        surface_uuid: neverActiveBinding.surface_uuid,
+        workspace_id: ROUND5_SEAT_BINDING.workspace,
+        repo: "skillcreator",
+        launcher_name: "skillcreatorCodex",
+        role: "worker",
+        state: "booting",
+        task_summary: "Await first prompt",
+      }),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: ghostBinding.agent_id,
+        surface_id: ghostBinding.stale_surface_ref,
+        surface_uuid: ghostBinding.surface_uuid,
+        workspace_id: ROUND5_SEAT_BINDING.workspace,
+        repo: "voicelayer",
+        launcher_name: "voicelayerCodex",
+        role: "worker",
+        state: "idle",
+        task_summary: "Must not borrow a live surface",
+      }),
+    );
+
+    liveSurfaces = ROUND5_SEAT_BINDING.surfaces.map((entry, index) => ({
+      ...makeSurface(entry.surface_ref),
+      id: entry.surface_uuid,
+      title: entry.title,
+      index,
+      workspace_ref: ROUND5_SEAT_BINDING.workspace,
+    }));
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace(ROUND5_SEAT_BINDING.workspace)],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: ROUND5_SEAT_BINDING.workspace,
+      window_ref: "window:round5",
+      panes: [
+        {
+          ref: "pane:round5",
+          index: 0,
+          focused: true,
+          surface_count: liveSurfaces.length,
+          surface_refs: liveSurfaces.map((surface) => surface.ref),
+          surface_ids: liveSurfaces.map((surface) => surface.id!),
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: ROUND5_SEAT_BINDING.workspace,
+      window_ref: "window:round5",
+      pane_ref: "pane:round5",
+      surfaces: liveSurfaces,
+    });
+    mockClient.readScreen.mockImplementation(async (surfaceRef: string) => {
+      const captured = ROUND5_SEAT_BINDING.surfaces.find(
+        (entry) => entry.surface_ref === surfaceRef,
+      );
+      if (!captured) throw new Error(`unexpected surface read: ${surfaceRef}`);
+      return {
+        surface: surfaceRef,
+        text: captured.screen,
+        lines: captured.screen.split("\n").length,
+        scrollback_used: false,
+      };
+    });
+
+    await engine.getRegistry().reconstitute();
+    await engine.runSweep();
+
+    const publication = publishedFleetPublications.at(-1)!;
+    expect(publication.state).toBe("populated");
+    expect(publication.snapshot.seatCount).toBe(3);
+    const seats = publication.snapshot.lanes.flatMap((lane) => lane.seats);
+    expect(seats).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agentId: workingBinding.agent_id,
+          surfaceUuid: workingBinding.surface_uuid,
+          surfaceRef: workingBinding.expected_surface_ref,
+          name: "cmuxlayerCodex [surface:595]",
+          screenState: workingBinding.expected_state,
+        }),
+        expect.objectContaining({
+          agentId: idleBinding.agent_id,
+          surfaceUuid: idleBinding.surface_uuid,
+          surfaceRef: idleBinding.expected_surface_ref,
+          name: "cmuxlayerCodex [surface:594]",
+          screenState: idleBinding.expected_state,
+        }),
+        expect.objectContaining({
+          agentId: neverActiveBinding.agent_id,
+          surfaceUuid: neverActiveBinding.surface_uuid,
+          surfaceRef: neverActiveBinding.expected_surface_ref,
+          name: "skillcreatorCodex [surface:591]",
+          screenState: neverActiveBinding.expected_state,
+        }),
+      ]),
+    );
+    expect(seats).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ agentId: ghostBinding.agent_id }),
+      ]),
+    );
+    expect(mockClient.readScreen).toHaveBeenCalledWith(
+      workingBinding.expected_surface_ref,
+      expect.objectContaining({ workspace: ROUND5_SEAT_BINDING.workspace }),
+    );
+    expect(mockClient.readScreen).toHaveBeenCalledWith(
+      idleBinding.expected_surface_ref,
+      expect.objectContaining({ workspace: ROUND5_SEAT_BINDING.workspace }),
+    );
+    const rendered = renderFleetSidebar(publication.snapshot, {
+      state: publication.state,
+      observedLiveSurfaceRefs: publication.observedLiveSurfaceRefs,
+    });
+    expect(rendered).toContain(
+      'cmux("surface.focus", surface_id: seat.surfaceUuid)',
+    );
+    expect(rendered).toContain(
+      `"surfaceUuid": "${neverActiveBinding.surface_uuid}"`,
+    );
+  });
+
+  it("publishes the canonical observed UUID when persisted casing differs", async () => {
+    const observedUuid = "078D1A5B-A3F4-40A5-8A59-A6C840BAF832";
+    const persistedUuid = observedUuid.toLowerCase();
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "case-normalized-seat",
+        surface_id: "surface:case",
+        surface_uuid: persistedUuid,
+        workspace_id: "workspace:test",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        role: "worker",
+        state: "working",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:case"),
+        id: observedUuid,
+        title: "cmuxlayerCodex [surface:case]",
+        workspace_ref: "workspace:test",
+      },
+    ];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(publishedFleetPublications.at(-1)).toMatchObject({
+      state: "populated",
+      observedLiveSurfaceRefs: ["surface:case"],
+      observedLiveSurfaceUuids: [observedUuid],
+      snapshot: {
+        seatCount: 1,
+        lanes: [
+          {
+            seats: [
+              {
+                agentId: "case-normalized-seat",
+                surfaceRef: "surface:case",
+                surfaceUuid: observedUuid,
+              },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  it("publishes no mixed row when the stable UUID moves during the screen read", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "mid-sweep-move",
+        surface_id: "surface:old",
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:test",
+        state: "ready",
+        role: "worker",
+        launcher_name: "cmuxlayerCodex",
+        repo: "cmuxlayer",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:old"),
+        id: stableUuid,
+        title: "old binding",
+        workspace_ref: "workspace:test",
+      },
+    ];
+    await engine.getRegistry().reconstitute();
+    const listPaneSurfaces =
+      mockClient.listPaneSurfaces.getMockImplementation();
+    if (!listPaneSurfaces) {
+      throw new Error("missing pane-surface test implementation");
+    }
+    mockClient.listPaneSurfaces.mockImplementationOnce(async (opts) => {
+      const snapshot = await listPaneSurfaces(opts);
+      queueMicrotask(() => {
+        liveSurfaces = [
+          {
+            ...makeSurface("surface:old"),
+            id: "uuid-recycled",
+            title: "foreign occupant",
+            workspace_ref: "workspace:test",
+          },
+          {
+            ...makeSurface("surface:new"),
+            id: stableUuid,
+            title: "moved binding",
+            workspace_ref: "workspace:test",
+          },
+        ];
+      });
+      return snapshot;
+    });
+    mockClient.readScreen.mockImplementation(async (surface: string) => ({
+      surface,
+      text:
+        surface === "surface:new"
+          ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+          : "Claude Code\nWhat can I help you with?\n> ",
+      lines: 20,
+      scrollback_used: false,
+    }));
+
+    await engine.runSweep();
+
+    expect(mockClient.readScreen).toHaveBeenCalledWith(
+      "surface:new",
+      expect.anything(),
+    );
+    expect(mockClient.setStatus).not.toHaveBeenCalled();
+    expect(publishedFleetPublications.at(-1)?.snapshot.seatCount).toBe(0);
+  });
+
+  it("quarantines a foreign ref-only row instead of reading its recycled surface", async () => {
+    engine.dispose();
+    const scopedRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+      { observerId: "cmux:/tmp/nightly.sock" },
+    );
+    engine = new AgentEngine(stateMgr, scopedRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if (!("snapshot" in publication)) {
+            throw new Error("engine must publish an explicit fleet state");
+          }
+          publishedFleetPublications.push(publication);
+        },
+        dispose: () => {},
+      },
+    });
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "prod-ref-only-row",
+        surface_id: "surface:shared",
+        surface_uuid: null,
+        surface_observer_id: "cmux:/tmp/prod.sock",
+        workspace_id: "workspace:prod",
+        state: "working",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:shared"),
+        id: "uuid-nightly-occupant",
+        workspace_ref: "workspace:nightly",
+      },
+    ];
+    await scopedRegistry.reconstitute();
+    mockClient.readScreen.mockClear();
+
+    await engine.runSweep();
+
+    expect(mockClient.readScreen).not.toHaveBeenCalled();
+    expect(stateMgr.readState("prod-ref-only-row")).toMatchObject({
+      surface_uuid: null,
+      surface_observer_id: "cmux:/tmp/prod.sock",
+      workspace_id: "workspace:prod",
+    });
+    expect(publishedFleetPublications.at(-1)).toMatchObject({
+      state: "empty",
+      snapshot: { seatCount: 0 },
     });
   });
 
@@ -442,6 +868,7 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
+    expect(mockClient.readScreen).not.toHaveBeenCalled();
     expect(publishedFleetPublications).toEqual([
       expect.objectContaining({
         state: "unknown",
@@ -980,7 +1407,7 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("feeds topology and surface workspace truth into sidebar health", async () => {
+  it("repairs registry workspace drift from the bound surface observation", async () => {
     mockClient.listWorkspaces.mockResolvedValue({
       workspaces: [makeWorkspace("workspace:actual")],
     });
@@ -1026,20 +1453,21 @@ describe("Sidebar Sync", () => {
 
     await engine.runSweep();
 
-    const healthSummary =
-      "unhealthy(registry_surface_workspace_mismatch:blocking)";
     expect(mockClient.setStatus).toHaveBeenCalledWith(
       "workspace-drift",
-      `brainlayer | role=worker | state=working | health=${healthSummary} | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a`,
+      "brainlayer | role=worker | state=working | health=healthy | blocked=- | last_prompt=Fix search gap F | worktree=- | branch=- | report=n/a | pr=n/a",
       expect.objectContaining({
         surface: "surface:42",
-        workspace: "workspace:registry",
+        workspace: "workspace:actual",
       }),
     );
-    expect(mockClient.notifyLifecycleEvent).toHaveBeenCalledWith(
+    expect(engine.getAgentState("workspace-drift")?.workspace_id).toBe(
+      "workspace:actual",
+    );
+    expect(mockClient.notifyLifecycleEvent).not.toHaveBeenCalledWith(
       "health",
       expect.objectContaining({ agent_id: "workspace-drift" }),
-      healthSummary,
+      expect.stringContaining("registry_surface_workspace_mismatch"),
     );
   });
 

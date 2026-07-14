@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-dock-pane-ref-test");
 
@@ -158,11 +159,13 @@ class RealCmuxFormatClient {
 }
 
 function createDockServer(client: RealCmuxFormatClient) {
-  return createServer({
-    client: client as any,
-    stateDir: TEST_DIR,
-    disableSpawnPreflight: true,
-  });
+  return createServer(
+    withTestSurfaceObserver({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    }),
+  );
 }
 
 function registerWorkers(server: any) {

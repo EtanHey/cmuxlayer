@@ -1,4 +1,4 @@
-// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown surfaces=[]
+// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown surfaces=[] surfaceIds=[]
 func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }
@@ -26,7 +26,7 @@ func fleetState(_ state) -> some View {
 }
 
 func fleetRow(_ seat) -> some View {
-  Button(action: { cmux("surface.focus", surface_id: seat.surfaceRef) }) {
+  Button(action: { cmux("surface.focus", surface_id: seat.surfaceUuid) }) {
     VStack(alignment: .leading, spacing: 3) {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
         fleetState(seat.screenState)

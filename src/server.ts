@@ -32,7 +32,14 @@ import {
   currentTransportRetryCount,
   withTransportRetryTracking,
 } from "./transport-retry-context.js";
-import { AgentRegistry } from "./agent-registry.js";
+import {
+  AgentRegistry,
+  SURFACE_EVICTION_CONFIRMATION_MS,
+} from "./agent-registry.js";
+import {
+  deriveCmuxObserverEpoch,
+  deriveCmuxObserverOwnerId,
+} from "./cmux-observer-identity.js";
 import {
   AgentEngine,
   buildLaunchCommand,
@@ -51,7 +58,11 @@ import {
   type MonitorRegistryOptions,
   type RegisterMonitorInput,
 } from "./monitor-registry.js";
-import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
+import {
+  AgentDiscovery,
+  SurfaceBindingChangedDuringDiscoveryError,
+  type DiscoveredAgent,
+} from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
   toAgentStatePayload,
@@ -144,16 +155,27 @@ import {
 import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
+  buildSurfaceBindingObservation,
+  isPaneSurfaceEnumerationComplete,
+  resolveObservedAgentSurfaceRef,
+  type SurfaceBindingObservation,
+} from "./surface-binding-observation.js";
+import {
   collectSelfHealHealth,
   collectControlHealth,
   formatControlHealth,
   type ControlHealth,
 } from "./control-health.js";
 import {
+  captureSurfaceObserverEpoch as captureObserverEpoch,
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   EMPTY_SURFACE_TOPOLOGY,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
+  isSurfaceObserverEpochCurrent,
+  resolveAgentSurfaceBinding,
+  type SurfaceObserverEpoch,
+  type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
   type SurfaceTopology,
 } from "./surface-topology.js";
@@ -1948,6 +1970,10 @@ export interface CreateServerOptions {
   bin?: string;
   /** Pre-built client (socket or CLI). If omitted, creates a CLI client. */
   client?: CmuxClient | CmuxSocketClient;
+  /** Override stable socket-node ownership derivation (primarily for tests). */
+  surfaceObserverOwnerIdProvider?: () => string | null | undefined;
+  /** Override transient reconnect/route epoch derivation (primarily for tests). */
+  surfaceObserverEpochProvider?: () => string | null | undefined;
   /** Shared server-side world-model reused across many MCP connections. */
   context?: CmuxServerContext;
   /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
@@ -2035,11 +2061,15 @@ export type LifecycleAgentInputDeliverer = (args: {
 
 export interface CmuxServerContext {
   client: CmuxLayerClient;
+  /** Persisted stable socket-node owner identity. */
+  surfaceObserverId: string | null;
+  /** Non-persisted transport/route generation for in-flight guards. */
+  surfaceObserverEpoch: string | null;
   stateDir: string;
   stateMgr: StateManager;
   roleSurfaceOverrides: Map<
     string,
-    { role: AgentRole; workspace: string | null }
+    { role: AgentRole; workspace: string | null; surfaceUuid: string | null }
   >;
   eventLog: ReturnType<StateManager["getEventLog"]>;
   deliveries: Map<string, DeliveryRecord>;
@@ -2132,8 +2162,29 @@ export function createServerContext(
     registerAutoVitestStateDir(autoVitestStateDir);
   }
   const stateMgr = new StateManager(stateDir);
+  const readObserverProvider = (
+    provider: () => string | null | undefined,
+  ): string | null => {
+    try {
+      return provider()?.trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  const observerOwnerIdProvider =
+    opts?.surfaceObserverOwnerIdProvider ??
+    (() => deriveCmuxObserverOwnerId(client));
+  const observerEpochProvider =
+    opts?.surfaceObserverEpochProvider ??
+    (() => deriveCmuxObserverEpoch(client));
   const context: CmuxServerContext = {
     client,
+    get surfaceObserverId() {
+      return readObserverProvider(observerOwnerIdProvider);
+    },
+    get surfaceObserverEpoch() {
+      return readObserverProvider(observerEpochProvider);
+    },
     stateDir,
     stateMgr,
     roleSurfaceOverrides: new Map(),
@@ -2723,9 +2774,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const collectServerRoleSurfaceIds = (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
+    observation?: SurfaceBindingObservation,
   ) => {
     const roleRecords = context.lifecycleRegistry?.list() ?? [];
-    const ids = collectRoleSurfaceIds(roleRecords);
+    const observedRoleRecords = observation
+      ? roleRecords.flatMap((record) => {
+          const surfaceRef = resolveObservedAgentSurfaceRef(
+            record,
+            observation,
+          );
+          const observedUuid = surfaceRef
+            ? observation.surfaceUuidByRef.get(surfaceRef)
+            : null;
+          return surfaceRef &&
+            context.lifecycleRegistry?.canUseObservedBinding(
+              record,
+              observedUuid,
+            )
+            ? [{ ...record, surface_id: surfaceRef }]
+            : [];
+        })
+      : roleRecords;
+    const ids = collectRoleSurfaceIds(observedRoleRecords);
     if (liveSurfaceIds) {
       for (const role of ["orchestrator", "ic", "worker"] as const) {
         for (const surfaceId of ids[role]) {
@@ -2735,7 +2805,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       }
     }
+    const movedOverrides: Array<{
+      oldRef: string;
+      newRef: string;
+      override: {
+        role: AgentRole;
+        workspace: string | null;
+        surfaceUuid: string | null;
+      };
+    }> = [];
     for (const [surfaceId, override] of roleSurfaceOverrides) {
+      if (observation) {
+        const observedRef = resolveObservedAgentSurfaceRef(
+          {
+            surface_id: surfaceId,
+            surface_uuid: override.surfaceUuid,
+          },
+          observation,
+        );
+        if (!observedRef) {
+          if (
+            workspace &&
+            override.workspace === workspace &&
+            (observation.coverage === "uuid" ||
+              observation.coverage === "ref")
+          ) {
+            roleSurfaceOverrides.delete(surfaceId);
+          }
+          continue;
+        }
+        ids[override.role].add(observedRef);
+        if (observedRef !== surfaceId) {
+          movedOverrides.push({
+            oldRef: surfaceId,
+            newRef: observedRef,
+            override,
+          });
+        }
+        continue;
+      }
       if (liveSurfaceIds && !liveSurfaceIds.has(surfaceId)) {
         if (workspace && override.workspace === workspace) {
           roleSurfaceOverrides.delete(surfaceId);
@@ -2743,6 +2851,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         continue;
       }
       ids[override.role].add(surfaceId);
+    }
+    for (const { oldRef, newRef, override } of movedOverrides) {
+      roleSurfaceOverrides.delete(oldRef);
+      roleSurfaceOverrides.set(newRef, override);
     }
     return ids;
   };
@@ -2798,8 +2910,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const recordSurfaceWriteSuccess = (surface: string): void => {
-    surfaceWriteLiveness.recordSuccess(surface);
+  const recordSurfaceWriteSuccess = (
+    surface: string,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): void => {
+    surfaceWriteLiveness.recordSuccess(
+      surface,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
+    if (stableSurfaceIdentity || surfaceObserverIdentity) {
+      // Preserve ref-only telemetry for control-health consumers. Mutating
+      // decisions use the identity-scoped observation and never fall back.
+      surfaceWriteLiveness.recordSuccess(surface);
+    }
     surfaceWriteLivenessCandidates.delete(surface);
     surfacePtyDeadSince.delete(surface);
   };
@@ -2807,10 +2932,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const recordSurfaceWriteFailure = (
     surface: string,
     error: unknown,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
   ): void => {
     if (!isBrokenPipeError(error)) return;
-    surfaceWriteLiveness.recordFailure(surface, error);
-    const observation = surfaceWriteLiveness.observe(surface);
+    surfaceWriteLiveness.recordFailure(
+      surface,
+      error,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
+    if (stableSurfaceIdentity || surfaceObserverIdentity) {
+      surfaceWriteLiveness.recordFailure(surface, error);
+    }
+    const observation = surfaceWriteLiveness.observe(
+      surface,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
     if (!observation || observation.consecutive_broken_pipe_failures === 0) {
       surfaceWriteLivenessCandidates.delete(surface);
       surfacePtyDeadSince.delete(surface);
@@ -2835,22 +2974,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace?: string;
       owner?: string;
       observePtyWrite?: boolean;
+      stableSurfaceIdentity?: string | null;
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
       await assertSurfaceMutationAllowed(opts.toolName, surface, opts.workspace);
     }
     const owner = opts.owner ?? `surface-write:${randomUUID()}`;
+    // Capture the ref-only provenance before the async write. A reconnect or
+    // socket replacement after the attempt must not relabel its liveness.
+    const surfaceObserverIdentity = context.surfaceObserverId;
     acquireSurfaceWrite(surface, owner);
     try {
       const result = await fn();
       if (opts.observePtyWrite) {
-        recordSurfaceWriteSuccess(surface);
+        recordSurfaceWriteSuccess(
+          surface,
+          opts.stableSurfaceIdentity,
+          surfaceObserverIdentity,
+        );
       }
       return result;
     } catch (error) {
       if (opts.observePtyWrite) {
-        recordSurfaceWriteFailure(surface, error);
+        recordSurfaceWriteFailure(
+          surface,
+          error,
+          opts.stableSurfaceIdentity,
+          surfaceObserverIdentity,
+        );
       }
       throw error;
     } finally {
@@ -2920,12 +3072,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     totalChunks: number,
     shouldPaste: boolean,
     avoidDuplicateOnAmbiguousRetry: boolean,
+    beforeMutation?: () => Promise<void>,
   ) => {
     let attempt = 0;
     let lastError: unknown;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
+        await beforeMutation?.();
         if (shouldPaste) {
           if (typeof client.pasteText !== "function") {
             throw pasteRequiredError("client does not support pasteText");
@@ -3018,11 +3172,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string,
     key: string,
     workspace?: string,
+    beforeMutation?: () => Promise<void>,
   ) => {
     let attempt = 0;
 
     while (attempt < SEND_INPUT_RETRY_ATTEMPTS) {
       try {
+        await beforeMutation?.();
         await client.sendKey(surface, key, { workspace });
         return;
       } catch (error) {
@@ -3229,6 +3385,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     require_working_status?: boolean;
     allow_recovery_enter_retry?: boolean;
     timeout_ms?: number;
+    beforeMutation?: () => Promise<void>;
   }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -3256,6 +3413,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
 
     while (Date.now() - startedAt < timeoutMs) {
+      await opts.beforeMutation?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -3323,7 +3481,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         Date.now() - retryEligiblePendingSince >= retryObserveMs
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
-        await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+        await sendKeyWithRetry(
+          opts.surface,
+          "return",
+          opts.workspace,
+          opts.beforeMutation,
+        );
         retryCount += 1;
         appendDeliveryEvent({
           event_type: "press_enter",
@@ -3378,11 +3541,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
     submit_verify_timeout_ms?: number;
+    beforeMutation?: () => Promise<void>;
   }): Promise<{
     bytes: number;
     retry_count: number;
     submit_verified: boolean | null;
   }> => {
+    await opts.beforeMutation?.();
     await assertDeliveryTargetIsSafe(opts.surface, opts.workspace);
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
@@ -3400,6 +3565,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts.chunks.length,
         shouldPaste,
         opts.source_event === "spawn_agent",
+        opts.beforeMutation,
       );
       for (const sentChunks of batch.deliveredChunkCounts) {
         opts.onChunkDelivered?.(sentChunks);
@@ -3418,7 +3584,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     if (opts.press_enter) {
       await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-      await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+      await sendKeyWithRetry(
+        opts.surface,
+        "return",
+        opts.workspace,
+        opts.beforeMutation,
+      );
       appendDeliveryEvent({
         event_type: "press_enter",
         source_agent: opts.source_agent ?? null,
@@ -3440,6 +3611,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
         timeout_ms: opts.submit_verify_timeout_ms,
         require_working_status: opts.source_event === "boot_prompt",
+        beforeMutation: opts.beforeMutation,
       });
       submit_verified = verification.submit_verified;
       retry_count = verification.retry_count;
@@ -3481,9 +3653,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     cli?: CliType;
     timeout_ms: number;
     onUpdateShellRelaunch?: () => Promise<void>;
-  }): Promise<RawSubmitEvidenceMetrics | null> => {
+    resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
+  }): Promise<{
+    metrics: RawSubmitEvidenceMetrics | null;
+    route: { surface: string; workspace?: string };
+  }> => {
     let deadline = Date.now() + opts.timeout_ms;
     let lastText = "";
+    let lastSurface = opts.surface;
     const consecutiveMatches = new Map<CliType, number>();
     const candidates = readyPatternCandidates(opts.cli);
     let updateStartedAt: number | null = null;
@@ -3497,9 +3674,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       Math.max(opts.timeout_ms, BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS);
 
     while (Date.now() < deadline || updateStartedAt !== null) {
+      let target: { surface: string; workspace?: string } = {
+        surface: opts.surface,
+        workspace: opts.workspace,
+      };
       try {
-        const screen = await client.readScreen(opts.surface, {
-          workspace: opts.workspace,
+        target = opts.resolveRoute ? await opts.resolveRoute() : target;
+        lastSurface = target.surface;
+        const screen = await client.readScreen(target.surface, {
+          workspace: target.workspace,
           lines: 80,
           scrollback: false,
         });
@@ -3522,13 +3705,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               continue;
             }
             throw new BootPromptUpdateMenuBlockedError(
-              `Boot prompt delivery blocked by Codex update menu on ${opts.surface}`,
+              `Boot prompt delivery blocked by Codex update menu on ${target.surface}`,
               tailLines(lastText, 10),
             );
           }
           updateWasSeen = true;
           consecutiveMatches.clear();
-          await sendKeyWithRetry(opts.surface, "return", opts.workspace);
+          await sendKeyWithRetry(
+            target.surface,
+            "return",
+            target.workspace,
+            opts.resolveRoute
+              ? async () => {
+                  const current = await opts.resolveRoute!();
+                  if (
+                    current.surface !== target.surface ||
+                    (current.workspace ?? null) !==
+                      (target.workspace ?? null)
+                  ) {
+                    throw new Error(
+                      `Boot prompt route changed before update-menu Return; ` +
+                        `refusing terminal mutation.`,
+                    );
+                  }
+                }
+              : undefined,
+          );
           codexUpdateMenuAccepted = true;
           const acceptedAt = Date.now();
           codexUpdateMenuAcceptedAt = acceptedAt;
@@ -3552,7 +3754,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           if (updateElapsedMs >= updateMaxMs) {
             throw new BootPromptTimeoutError(
-              `Timed out waiting for boot prompt readiness on ${opts.surface}: CLI update marker persisted for ${updateMaxMs}ms`,
+              `Timed out waiting for boot prompt readiness on ${target.surface}: CLI update marker persisted for ${updateMaxMs}ms`,
               tailLines(lastText, 10),
             );
           }
@@ -3585,7 +3787,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ) {
           if (updateShellRelaunches >= BOOT_PROMPT_UPDATE_RELAUNCH_MAX) {
             throw new BootPromptTimeoutError(
-              `Timed out waiting for boot prompt readiness on ${opts.surface}: CLI returned to shell after ${updateShellRelaunches} post-update relaunch attempts`,
+              `Timed out waiting for boot prompt readiness on ${target.surface}: CLI returned to shell after ${updateShellRelaunches} post-update relaunch attempts`,
               tailLines(lastText, 10),
             );
           }
@@ -3611,7 +3813,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : 0;
           consecutiveMatches.set(candidate, count);
           if (count >= match.consecutive) {
-            return parseRawSubmitEvidenceMetrics(screen.text);
+            return {
+              metrics: parseRawSubmitEvidenceMetrics(screen.text),
+              route: target,
+            };
           }
         }
       } catch (error) {
@@ -3621,8 +3826,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ) {
           throw error;
         }
-        if (isSurfaceGoneReadFailure(error, opts.surface)) {
-          throw new SurfaceGoneError(opts.surface, error);
+        if (isSurfaceGoneReadFailure(error, target.surface)) {
+          throw new SurfaceGoneError(target.surface, error);
         }
         lastText = error instanceof Error ? error.message : String(error);
       }
@@ -3635,7 +3840,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     throw new BootPromptTimeoutError(
-      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${opts.surface}`,
+      `Timed out after ${opts.timeout_ms}ms waiting for boot prompt readiness on ${lastSurface}`,
       tailLines(lastText, 10),
     );
   };
@@ -3646,6 +3851,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     text: string;
     timeout_ms: number;
     baseline_metrics?: RawSubmitEvidenceMetrics | null;
+    beforeRead?: () => Promise<void>;
   }): Promise<void> => {
     const start = Date.now();
     let lastText = "";
@@ -3653,6 +3859,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let stableClearedComposerPolls = 0;
 
     while (Date.now() - start < opts.timeout_ms) {
+      await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -3894,9 +4101,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const sendLauncherCommandToSurface = async (opts: {
     surface: string;
+    stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
     relaunch?: boolean;
+    assertSurfaceBindingCurrent?: () => Promise<void>;
   }): Promise<void> => {
     const sanitizedCommand = sanitizeTerminalInput(opts.command);
     const chunks =
@@ -3910,6 +4119,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         workspace: opts.workspace,
       });
     }
+    await opts.assertSurfaceBindingCurrent?.();
     await withSurfaceWrite(opts.surface, async () => {
       const submitPendingLauncherCommand = async (): Promise<boolean> => {
         const readLauncherScreen = () =>
@@ -3935,6 +4145,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         try {
           // Return is a mutation: retrying after a lost acknowledgement can
           // submit into the newly started CLI. Probe before any fallback.
+          await opts.assertSurfaceBindingCurrent?.();
           await client.sendKey(opts.surface, "return", {
             workspace: opts.workspace,
           });
@@ -3958,6 +4169,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
       };
       const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+        await opts.assertSurfaceBindingCurrent?.();
         await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
         await waitForLaunchShellReady({
           surface: opts.surface,
@@ -3982,6 +4194,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           press_enter: true,
           source_event: "spawn_agent",
           verify_submit: false,
+          beforeMutation: opts.assertSurfaceBindingCurrent,
         });
       };
       try {
@@ -3995,6 +4208,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           source_event: "spawn_agent",
           verify_submit: true,
           submit_verify_timeout_ms: SEND_INPUT_RECOVERY_ENTER_DELAY_MS,
+          beforeMutation: opts.assertSurfaceBindingCurrent,
         });
         if (delivery.submit_verified !== true) {
           // The command can clear from the shell without proving the launcher
@@ -4022,6 +4236,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       toolName: "send_command",
       workspace: opts.workspace,
       observePtyWrite: true,
+      stableSurfaceIdentity: opts.stableSurfaceIdentity,
     });
   };
 
@@ -4033,6 +4248,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     boot_prompt_path?: string | null;
     timeout_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
+    resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
   }): Promise<{
     bytes: number;
     retry_count: number;
@@ -4052,17 +4268,55 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
 
-    const baselineSubmitMetrics = await waitForBootPromptReady({
+    let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
       cli: opts.cli,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
       onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
+      resolveRoute: opts.resolveRoute,
     });
 
     const rawPrompt = bootPromptPath
       ? await readFile(bootPromptPath, "utf8")
       : opts.prompt!;
+    let deliveryRoute = opts.resolveRoute
+      ? await opts.resolveRoute()
+      : readiness.route;
+    const sameRoute = (
+      left: { surface: string; workspace?: string },
+      right: { surface: string; workspace?: string },
+    ): boolean =>
+      left.surface === right.surface &&
+      (left.workspace ?? null) === (right.workspace ?? null);
+    if (!sameRoute(readiness.route, deliveryRoute)) {
+      readiness = await waitForBootPromptReady({
+        surface: deliveryRoute.surface,
+        workspace: deliveryRoute.workspace,
+        cli: opts.cli,
+        timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+        onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
+        resolveRoute: opts.resolveRoute,
+      });
+      deliveryRoute = opts.resolveRoute
+        ? await opts.resolveRoute()
+        : readiness.route;
+      if (!sameRoute(readiness.route, deliveryRoute)) {
+        throw new Error(
+          "Boot prompt route changed after readiness; refusing stale delivery",
+        );
+      }
+    }
+    const assertDeliveryRouteCurrent = opts.resolveRoute
+      ? async (): Promise<void> => {
+          const current = await opts.resolveRoute!();
+          if (!sameRoute(deliveryRoute, current)) {
+            throw new Error(
+              "Boot prompt route changed during delivery; refusing to split prompt across terminals",
+            );
+          }
+        }
+      : undefined;
     const useFilePointer =
       Boolean(bootPromptPath) &&
       (/[\r\n]/.test(rawPrompt) || rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
@@ -4084,11 +4338,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     try {
       const delivery = await withSurfaceWrite(
-        opts.surface,
+        deliveryRoute.surface,
         async () =>
           deliverInputChunks({
-            surface: opts.surface,
-            workspace: opts.workspace,
+            surface: deliveryRoute.surface,
+            workspace: deliveryRoute.workspace,
             chunks,
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
@@ -4101,10 +4355,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verify_timeout_ms: opts.timeout_ms
               ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
               : undefined,
+            beforeMutation: assertDeliveryRouteCurrent,
           }),
         {
           toolName: "boot_prompt",
-          workspace: opts.workspace,
+          workspace: deliveryRoute.workspace,
           observePtyWrite: true,
         },
       );
@@ -4118,17 +4373,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         throw error;
       }
       if (error instanceof SubmitVerificationError) {
-        const snapshot = await readParsedSurface(opts.surface, opts.workspace);
+        await assertDeliveryRouteCurrent?.();
+        const snapshot = await readParsedSurface(
+          deliveryRoute.surface,
+          deliveryRoute.workspace,
+        );
         if (
           !snapshot ||
           !screenShowsPendingInput(snapshot.text, sanitizedText)
         ) {
           await waitForBootPromptSubmitEvidence({
-            surface: opts.surface,
-            workspace: opts.workspace,
+            surface: deliveryRoute.surface,
+            workspace: deliveryRoute.workspace,
             text: sanitizedText,
             timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
-            baseline_metrics: baselineSubmitMetrics,
+            baseline_metrics: readiness.metrics,
+            beforeRead: assertDeliveryRouteCurrent,
           });
           return {
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
@@ -4393,9 +4653,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return null;
   };
 
-  const collectSurfaceTopology = async (
-    workspace?: string,
-  ) => collectCmuxSurfaceTopology(client, workspace);
+  const surfaceObserverEpochProvider =
+    (): SurfaceObserverIdProvider | undefined =>
+      () => context.surfaceObserverEpoch;
+
+  const assertSurfaceObserverEpochCurrent = (
+    observerEpoch: SurfaceObserverEpoch,
+    operation: string,
+  ): void => {
+    const provider = surfaceObserverEpochProvider();
+    if (isSurfaceObserverEpochCurrent(observerEpoch, provider)) return;
+    const currentObserverEpoch = captureObserverEpoch(provider);
+    throw new Error(
+      `Surface observer changed or became unavailable during ${operation} ` +
+        `(${observerEpoch ?? "unknown"} -> ${currentObserverEpoch ?? "unknown"}); ` +
+        `refusing to mutate a different cmux instance.`,
+    );
+  };
+
+  const collectSurfaceTopology = async (workspace?: string) =>
+    collectCmuxSurfaceTopology(
+      client,
+      workspace,
+      surfaceObserverEpochProvider(),
+    );
 
   const readScreenSnapshotKey = (opts: {
     surface: string;
@@ -4459,10 +4740,68 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): Promise<string | null> =>
     (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ?? null;
 
+  const resolveAuthorizedAgentSurfaceBinding = (
+    agent: AgentRecord,
+    topology: SurfaceTopologySnapshot | null,
+  ) => {
+    const binding = resolveAgentSurfaceBinding(agent, topology);
+    if (!binding) return null;
+
+    const observedUuid =
+      topology?.surfaceIdByRef.get(binding.surfaceRef) ?? null;
+    return context.lifecycleRegistry?.canUseObservedBinding(
+      agent,
+      observedUuid,
+    ) === true
+      ? binding
+      : null;
+  };
+
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
     overrides?: AgentHealthInputOverrides,
+    topologyOverride?: SurfaceTopologySnapshot | null,
   ) => {
+    const topology =
+      topologyOverride === undefined
+        ? await collectSurfaceTopology()
+        : topologyOverride;
+    const binding = resolveAuthorizedAgentSurfaceBinding(agent, topology);
+    let parsedSurface: Awaited<ReturnType<typeof readParsedSurface>> = null;
+    if (
+      binding &&
+      (overrides?.screen_status === undefined ||
+        overrides?.screen_actions === undefined)
+    ) {
+      parsedSurface = await readParsedSurface(
+        binding.surfaceRef,
+        binding.workspaceId ?? undefined,
+      );
+    }
+    const surfaceOverrides = healthTopologyOverrides(
+      agent,
+      binding ? topology : null,
+    );
+    const safeSurfaceOverrides: AgentHealthInputOverrides = {
+      ...surfaceOverrides,
+      screen_status: binding
+        ? overrides?.screen_status !== undefined
+          ? overrides.screen_status
+          : (parsedSurface?.parsed.status ?? null)
+        : null,
+      screen_actions: binding
+        ? overrides?.screen_actions !== undefined
+          ? overrides.screen_actions
+          : (parsedSurface?.parsed.actions ?? null)
+        : null,
+      surface_write_liveness: binding
+        ? surfaceWriteLiveness.observe(
+            binding.surfaceRef,
+            agent.surface_uuid,
+            agent.surface_observer_id,
+          )
+        : null,
+    };
     const input = await buildAgentHealthInput(
       agent,
       {
@@ -4471,27 +4810,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         dispatchAckTimeoutMs: AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
         assessHarvestability: (target) =>
           lifecycleHealthEngine?.assessHarvestability(target),
-        resolveTopology: (target) =>
-          resolveSurfaceColumn(
-            target.surface_id,
-            target.workspace_id ?? undefined,
-          ),
-        readParsedSurface: async (target) => {
-          const screen = await readParsedSurface(
-            target.surface_id,
-            target.workspace_id ?? undefined,
-          );
-          return screen
-            ? {
-                status: screen.parsed.status,
-                actions: screen.parsed.actions,
-              }
-            : null;
-        },
-        resolveSurfaceWorkspace: (target) =>
-          resolveSurfaceWorkspace(target.surface_id),
-        observeSurfaceWriteLiveness: (target) =>
-          surfaceWriteLiveness.observe(target.surface_id),
         resolveCollapsedMonitors: (ownerSeats) => {
           if (!opts?.monitorRegistryPath) return [];
           const owners = new Set(ownerSeats);
@@ -4507,7 +4825,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }));
         },
       },
-      overrides,
+      {
+        ...overrides,
+        ...safeSurfaceOverrides,
+      },
     );
     return evaluateAgentHealth(agent, input);
   };
@@ -4596,16 +4917,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         health: undefined,
       };
     }
-    const screen = await readParsedSurface(
-      agent.surface_id,
-      agent.workspace_id ?? undefined,
-    );
     const topology = await collectSurfaceTopology();
-    const health = await evaluateServerAgentHealth(agent, {
-      screen_status: screen?.parsed.status ?? null,
-      screen_actions: screen?.parsed.actions ?? null,
-      ...healthTopologyOverrides(agent, topology),
-    });
+    const binding = resolveAuthorizedAgentSurfaceBinding(agent, topology);
+    const screen = binding
+      ? await readParsedSurface(
+          binding.surfaceRef,
+          binding.workspaceId ?? undefined,
+        )
+      : null;
+    const health = await evaluateServerAgentHealth(
+      agent,
+      {
+        screen_status: screen?.parsed.status ?? null,
+        screen_actions: screen?.parsed.actions ?? null,
+      },
+      topology,
+    );
     return {
       registry_state: agent.state,
       screen: screen
@@ -5201,6 +5528,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           await preflightBootPromptFile(bootPromptPath);
         }
+        const rolePlacementObserverEpoch =
+          inferredRole && (args.type ?? "terminal") === "terminal"
+            ? captureObserverEpoch(surfaceObserverEpochProvider())
+            : undefined;
+        if (inferredRole && (args.type ?? "terminal") === "terminal") {
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
+        }
         const targetResolution =
           args.pane || args.surface
             ? {
@@ -5211,6 +5548,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 explicitWorkspace: args.workspace,
                 repo: inferRepoFromLauncherTitle(args.title),
               });
+        if (inferredRole && (args.type ?? "terminal") === "terminal") {
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
+        }
         const targetWorkspace = targetResolution.workspace;
         if (args.surface) {
           await assertSurfaceMutationAllowed("new_split", args.surface);
@@ -5225,6 +5568,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let actualPlacement: "split" | "surface" = "split";
         let actualDirection: string | null = args.direction;
         if (inferredRole && (args.type ?? "terminal") === "terminal") {
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
           const panes = await client.listPanes({ workspace: targetWorkspace });
           const rawPaneSurfaces = await Promise.all(
             panes.panes.map(async (pane) => {
@@ -5245,15 +5592,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               window_ref: panes.window_ref,
             },
           );
-          const liveSurfaceIds = new Set(
-            paneSurfaces.flatMap((group) =>
-              group.surfaces.map((surface) => surface.ref),
-            ),
+          const surfaceObservation = buildSurfaceBindingObservation(
+            panes.panes,
+            paneSurfaces,
           );
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
+          const liveSurfaceIds = surfaceObservation.liveSurfaceRefs;
           const placement = chooseAgentSpawnPlacement(
             panes.panes,
             paneSurfaces,
-            collectServerRoleSurfaceIds(liveSurfaceIds, targetWorkspace),
+            collectServerRoleSurfaceIds(
+              liveSurfaceIds,
+              targetWorkspace,
+              surfaceObservation,
+            ),
             { role: inferredRole },
           );
           actualPlacement = placement.kind;
@@ -5266,7 +5621,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           // Role-based placement has no explicit pane/surface (validated above),
           // so it is always a workspace-targeted split — apply auto-focus.
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
           priorFocus = await focusTargetBeforeSplit(targetWorkspace);
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
           result =
             placement.kind === "surface"
               ? await client.newSurface({
@@ -5283,6 +5646,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   title: args.title,
                   focus: args.focus,
                 });
+          assertSurfaceObserverEpochCurrent(
+            rolePlacementObserverEpoch,
+            "role-based new_split placement",
+          );
         } else {
           // Only workspace-targeted splits need auto-focus; an explicit
           // pane/surface anchor already pins the destination workspace.
@@ -5309,6 +5676,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           roleSurfaceOverrides.set(result.surface, {
             role: inferredRole,
             workspace: result.workspace ?? targetWorkspace ?? null,
+            surfaceUuid: result.surface_id ?? null,
           });
         }
         let bootPromptDelivery:
@@ -6785,6 +7153,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   if (!skipAgentLifecycle) {
     let registry: AgentRegistry | null = null;
     let lastLifecycleSurfaces: CmuxSurface[] | null = null;
+    let lastLifecycleSurfaceObserverEpoch: string | null = null;
     const readLifecycleSurfaces = async () => {
       const workspaces = await client.listWorkspaces();
       const workspaceList = requireSurfaceEnumerationArray<CmuxWorkspace>(
@@ -6808,25 +7177,64 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
             ),
           );
-          return partitionPaneSurfacesByMembership(paneList, rawGroups, {
+          const groups = partitionPaneSurfacesByMembership(paneList, rawGroups, {
             workspace_ref: panes.workspace_ref ?? ref,
             window_ref: panes.window_ref,
           });
+          if (!isPaneSurfaceEnumerationComplete(paneList, groups)) {
+            throw new SurfaceEnumerationError(
+              `Incomplete cmux surface enumeration for ${ref}`,
+            );
+          }
+          return groups;
         }),
       );
       const surfaceGroups = surfaceGroupsByWorkspace.flat();
       return enrichSurfaceIdsFromPanes(panesByWorkspace, surfaceGroups);
     };
     const surfaceProvider = async () => {
+      const observerEpoch = context.surfaceObserverEpoch;
+      if (
+        lastLifecycleSurfaces &&
+        (!observerEpoch ||
+          lastLifecycleSurfaceObserverEpoch !== observerEpoch)
+      ) {
+        lastLifecycleSurfaces = null;
+        lastLifecycleSurfaceObserverEpoch = null;
+      }
       try {
         const surfaces = await readLifecycleSurfaces();
-        lastLifecycleSurfaces = surfaces;
+        const completedObserverEpoch = context.surfaceObserverEpoch;
+        if (completedObserverEpoch !== observerEpoch) {
+          lastLifecycleSurfaces = null;
+          lastLifecycleSurfaceObserverEpoch = null;
+          throw new SurfaceEnumerationError(
+            `cmux surface observer changed during enumeration (${observerEpoch ?? "unknown"} -> ${completedObserverEpoch ?? "unknown"})`,
+          );
+        }
+        if (observerEpoch) {
+          lastLifecycleSurfaces = surfaces;
+          lastLifecycleSurfaceObserverEpoch = observerEpoch;
+        } else {
+          lastLifecycleSurfaces = null;
+          lastLifecycleSurfaceObserverEpoch = null;
+        }
         return surfaces;
       } catch (error) {
         if (!isSurfaceEnumerationError(error)) {
           throw error;
         }
-        if (lastLifecycleSurfaces) {
+        const completedObserverEpoch = context.surfaceObserverEpoch;
+        if (completedObserverEpoch !== observerEpoch) {
+          lastLifecycleSurfaces = null;
+          lastLifecycleSurfaceObserverEpoch = null;
+          throw error;
+        }
+        if (
+          observerEpoch &&
+          lastLifecycleSurfaces &&
+          lastLifecycleSurfaceObserverEpoch === observerEpoch
+        ) {
           return lastLifecycleSurfaces;
         }
         if (!registry || registry.list().length === 0) {
@@ -6836,9 +7244,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     };
     registry =
-      context.lifecycleRegistry ?? new AgentRegistry(stateMgr, surfaceProvider);
+      context.lifecycleRegistry ??
+      new AgentRegistry(
+        stateMgr,
+        surfaceProvider,
+        {
+          observerIdProvider: () => context.surfaceObserverId,
+          observerEpochProvider: () => context.surfaceObserverEpoch,
+        },
+      );
     context.lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
+      observerIdProvider: () => context.surfaceObserverEpoch,
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
     });
@@ -6890,45 +7307,87 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
           readScreen: (surface, readOpts) =>
             client.readScreen(surface, readOpts),
-          send: (surface, text, sendOpts) =>
-            withSurfaceWrite(
+          send: (surface, text, sendOpts) => {
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = sendOpts ?? {};
+            return withSurfaceWrite(
               surface,
-              () => client.send(surface, text, sendOpts),
+              async () => {
+                await beforeMutation?.();
+                return client.send(surface, text, clientOpts);
+              },
               {
                 toolName: "agent_engine",
                 workspace: sendOpts?.workspace,
                 observePtyWrite: true,
+                stableSurfaceIdentity,
               },
-            ),
-          sendKey: (surface, key, keyOpts) =>
-            withSurfaceWrite(
+            );
+          },
+          sendKey: (surface, key, keyOpts) => {
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = keyOpts ?? {};
+            return withSurfaceWrite(
               surface,
-              () => client.sendKey(surface, key, keyOpts),
+              async () => {
+                await beforeMutation?.();
+                return client.sendKey(surface, key, clientOpts);
+              },
               {
                 toolName: "send_key",
                 workspace: keyOpts?.workspace,
                 observePtyWrite: true,
+                stableSurfaceIdentity,
               },
-            ),
+            );
+          },
           setProgress: (value, progressOpts) =>
             client.setProgress(value, progressOpts),
           clearProgress: (progressOpts) => client.clearProgress(progressOpts),
-          newSplit: (direction, splitOpts) =>
-            client.newSplit(direction, splitOpts),
-          newSurface: (surfaceOpts) => client.newSurface(surfaceOpts),
-          renameTab: (surface, title, renameOpts) =>
-            typeof client.renameTab === "function"
+          newSplit: async (direction, splitOpts) => {
+            await assertWorkspaceMutationAllowed(
+              "agent_engine",
+              splitOpts?.workspace,
+            );
+            return client.newSplit(direction, splitOpts);
+          },
+          newSurface: async (surfaceOpts) => {
+            await assertWorkspaceMutationAllowed(
+              "agent_engine",
+              surfaceOpts?.workspace,
+            );
+            return client.newSurface(surfaceOpts);
+          },
+          renameTab: async (surface, title, renameOpts) => {
+            await assertSurfaceMutationAllowed(
+              "agent_engine",
+              surface,
+              renameOpts?.workspace,
+            );
+            return typeof client.renameTab === "function"
               ? client.renameTab(surface, title, renameOpts)
-              : Promise.resolve(),
-          selectWorkspace: (workspace) => client.selectWorkspace(workspace),
+              : undefined;
+          },
+          selectWorkspace: async (workspace) => {
+            await assertWorkspaceMutationAllowed("agent_engine", workspace);
+            return client.selectWorkspace(workspace);
+          },
           listPanes: (paneOpts) => client.listPanes(paneOpts),
           listPaneSurfaces: (surfaceOpts) =>
             client.listPaneSurfaces(surfaceOpts),
-          closeSurface: (surface, closeOpts) =>
-            withSurfaceWrite(
+          closeSurface: (surface, closeOpts) => {
+            const { beforeMutation, ...clientOpts } = closeOpts ?? {};
+            return withSurfaceWrite(
               surface,
               async () => {
-                const result = await client.closeSurface(surface, closeOpts);
+                await beforeMutation?.();
+                const result = await client.closeSurface(surface, clientOpts);
                 appendCloseEvent({
                   event: "internal",
                   target: surface,
@@ -6940,7 +7399,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 return result;
               },
               { toolName: "close_surface", workspace: closeOpts?.workspace },
-            ),
+            );
+          },
           notify: (notifyOpts) => client.notify(notifyOpts),
           notifyLifecycleEvent,
         },
@@ -6951,18 +7411,49 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sessionIdentityResolver: context.sessionIdentityResolver,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
-          launchCommandSender: async ({ surface, workspace, command }) => {
+          launchCommandSender: async ({
+            surface,
+            stableSurfaceIdentity,
+            workspace,
+            command,
+            assertSurfaceBindingCurrent,
+          }) => {
             originalLaunchCommandsBySurface.set(surface, command);
             try {
               await sendLauncherCommandToSurface({
                 surface,
+                stableSurfaceIdentity,
                 workspace,
                 command,
+                assertSurfaceBindingCurrent,
               });
             } catch (error) {
               originalLaunchCommandsBySurface.delete(surface);
               throw error;
             }
+          },
+          beforeCrashRecoveryMutation: async ({
+            phase,
+            surface,
+            workspace,
+          }) => {
+            if (phase === "placement") {
+              await assertWorkspaceMutationAllowed(
+                "agent_engine",
+                workspace,
+              );
+              return;
+            }
+            if (!surface) {
+              throw new Error(
+                "Crash recovery resume mutation requires a surface route",
+              );
+            }
+            await assertSurfaceMutationAllowed(
+              "agent_engine",
+              surface,
+              workspace,
+            );
           },
           outboxDrain: opts?.outboxDrain,
           monitorRegistryPath: opts?.monitorRegistryPath,
@@ -7006,6 +7497,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           `${updated.launcher_name ?? launcherNameForCli(updated.repo, updated.cli)} [${updated.surface_id}]`;
         await seatManifestWriter({
           surface_id: updated.surface_id,
+          ...(updated.surface_uuid
+            ? { surface_uuid: updated.surface_uuid }
+            : {}),
           agent_id: updated.agent_id,
           tab_name: tabName,
           session_name: updated.cli_session_id,
@@ -7071,6 +7565,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return registryDirect;
     };
 
+    const resolveManagedDeliveryRoute = async (
+      agentId: string,
+    ): Promise<{ surface: string; workspace?: string }> => {
+      const route = await engine.resolveAgentIoRoute(agentId);
+      return {
+        surface: route.surface_id,
+        workspace: route.workspace_id ?? undefined,
+      };
+    };
+
     const relaunchSpawnAgentAfterUpdate = async (opts: {
       agentId: string;
       surface: string;
@@ -7101,11 +7605,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allowModelOverride: process.env.REPOGOLEM_ALLOW_MODEL === "1",
           },
         );
+      const route = await resolveManagedDeliveryRoute(record.agent_id);
+      const assertSurfaceBindingCurrent = async (): Promise<void> => {
+        const current = await resolveManagedDeliveryRoute(record.agent_id);
+        if (
+          current.surface !== route.surface ||
+          (current.workspace ?? null) !== (route.workspace ?? null)
+        ) {
+          throw new Error(
+            `Agent "${record.agent_id}" surface route changed during ` +
+              `post-update relaunch; refusing terminal mutation.`,
+          );
+        }
+      };
       await sendLauncherCommandToSurface({
-        surface: opts.surface,
-        workspace: record.workspace_id ?? opts.workspace,
+        surface: route.surface,
+        workspace: route.workspace,
         command,
         relaunch: true,
+        assertSurfaceBindingCurrent,
       });
     };
 
@@ -7175,7 +7693,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       source_event: DeliveryEventType;
     }) => {
       await refreshManagedMetadataBestEffort(args.agent_id);
-      let route = engine.resolveAgentRoute(args.agent_id);
+      let route = await engine.resolveAgentIoRoute(args.agent_id);
+      const requiresMutableRefGuards = !route.surface_uuid;
       // Guard against stale surface refs before sending. Registry refs drift
       // after a crash/respawn (a pane closes or is recycled), so a cached
       // surface_id can point at a dead surface. Check the resolved ref against
@@ -7198,15 +7717,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         refs: Set<string> | null,
         surfaceId: string,
       ): boolean => refs !== null && !refs.has(surfaceId);
-      if (isPositivelyStale(await liveSurfaceRefs(), route.surface_id)) {
+      if (
+        requiresMutableRefGuards &&
+        isPositivelyStale(await liveSurfaceRefs(), route.surface_id)
+      ) {
         discovery.invalidate();
         await registry.listMerged(discovery, { force: true });
         // Re-resolve after the resync. The agent may have been evicted (its
         // surface vanished) or still point at a dead surface — either way,
         // refuse with a clear stale-ref error instead of misdelivering.
-        let reresolved: ReturnType<typeof engine.resolveAgentRoute> | null;
+        let reresolved: typeof route | null;
         try {
-          reresolved = engine.resolveAgentRoute(args.agent_id);
+          reresolved = await engine.resolveAgentIoRoute(args.agent_id);
         } catch {
           reresolved = null;
         }
@@ -7228,7 +7750,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // than delivering to the new occupant. Fails OPEN when the live CLI is
       // unknown/unreadable so a parse miss never blocks a healthy relay.
       const expectedCli = engine.getAgentState(args.agent_id)?.cli;
-      if (expectedCli) {
+      if (requiresMutableRefGuards && expectedCli) {
         const cachedOccupant = (await discovery.scan(false)).find(
           (entry) => entry.surface_id === route.surface_id,
         );
@@ -7243,8 +7765,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (isForeign(cachedOccupant)) {
           // Confirm against a FRESH scan before refusing. discovery.scan(false)
           // serves a 2s cache that can predate the current occupant; refusing
-          // on it alone would false-refuse a healthy relay (adversarial-review
-          // finding). Only a mismatch confirmed live is a recycled surface.
+          // on it alone would false-refuse a healthy relay.
           discovery.invalidate();
           const freshOccupant = (await discovery.scan(true)).find(
             (entry) => entry.surface_id === route.surface_id,
@@ -7262,7 +7783,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         route.state === "error" &&
         (await registry.isSurfaceAlive(route, {
           ptyDead:
-            surfaceWriteLiveness.observe(route.surface_id)?.pty_dead === true,
+            surfaceWriteLiveness.observe(
+              route.surface_id,
+              route.surface_uuid,
+              context.surfaceObserverId,
+            )?.pty_dead === true,
         }));
       if (
         !args.allow_busy &&
@@ -7282,12 +7807,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
           : [sanitizedText];
 
+      // All validation above can await. Establish the delivery binding only
+      // after those gates, then prove the exact UUID/ref/workspace pair again
+      // immediately before every chunk attempt and Return. Once any text has
+      // landed, following a moved UUID would split one logical message across
+      // terminals, so route changes fail closed instead.
+      route = await engine.resolveAgentIoRoute(args.agent_id);
+      const deliveryRoute = route;
+      const assertDeliveryRouteCurrent = async (): Promise<void> => {
+        const current = await engine.resolveAgentIoRoute(args.agent_id);
+        if (
+          current.surface_id !== deliveryRoute.surface_id ||
+          (current.surface_uuid ?? null) !==
+            (deliveryRoute.surface_uuid ?? null) ||
+          (current.workspace_id ?? null) !==
+            (deliveryRoute.workspace_id ?? null)
+        ) {
+          throw new Error(
+            `Agent "${args.agent_id}" surface route changed during terminal ` +
+              `delivery; refusing to continue on another surface.`,
+          );
+        }
+      };
+
       return withSurfaceWrite(
-        route.surface_id,
+        deliveryRoute.surface_id,
         async () => {
           return deliverInputChunks({
-            surface: route.surface_id,
-            workspace: route.workspace_id ?? undefined,
+            surface: deliveryRoute.surface_id,
+            workspace: deliveryRoute.workspace_id ?? undefined,
             chunks,
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
@@ -7302,14 +7850,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             verify_submit:
               args.press_enter &&
               !args.allow_busy &&
-              INTERACTIVE_AGENT_STATES.has(route.state),
+              INTERACTIVE_AGENT_STATES.has(deliveryRoute.state),
             allow_recovery_enter_retry: !args.allow_busy,
+            beforeMutation: assertDeliveryRouteCurrent,
           });
         },
         {
           toolName: args.source_event,
-          workspace: route.workspace_id ?? undefined,
+          workspace: deliveryRoute.workspace_id ?? undefined,
           observePtyWrite: true,
+          stableSurfaceIdentity: deliveryRoute.surface_uuid,
         },
       );
     };
@@ -7586,6 +8136,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
+                resolveRoute: () =>
+                  resolveManagedDeliveryRoute(result.agent_id),
                 cli: args.cli,
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,
@@ -7704,6 +8256,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 {
                   ...healthTopologyOverrides(currentAgent, topology),
                 },
+                topology,
               )
             : undefined;
 
@@ -7862,6 +8415,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
               workspace: deliveryWorkspace,
+              resolveRoute: () => resolveManagedDeliveryRoute(result.agent_id),
               cli: args.cli,
               prompt: args.prompt,
               timeout_ms: args.boot_prompt_timeout_ms,
@@ -7900,6 +8454,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 {
                   ...healthTopologyOverrides(currentAgent, topology),
                 },
+                topology,
               )
             : undefined;
 
@@ -8044,6 +8599,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
+                resolveRoute: () =>
+                  resolveManagedDeliveryRoute(result.agent_id),
                 cli: agent.cli,
                 prompt: agent.prompt,
                 timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
@@ -8096,6 +8653,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   {
                     ...healthTopologyOverrides(currentAgent, topology),
                   },
+                  topology,
                 )
               : undefined;
 
@@ -8235,9 +8793,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ? engine.getAgentState(result.agent.agent_id)
                   : null;
                 const health = resultAgent
-                  ? await evaluateServerAgentHealth(resultAgent, {
-                      ...healthTopologyOverrides(resultAgent, topology),
-                    })
+                  ? await evaluateServerAgentHealth(
+                      resultAgent,
+                      {
+                        ...healthTopologyOverrides(resultAgent, topology),
+                      },
+                      topology,
+                    )
                   : undefined;
                 return {
                   ...result,
@@ -8271,9 +8833,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : null;
           const topology = resultAgent ? await collectSurfaceTopology() : null;
           const health = resultAgent
-            ? await evaluateServerAgentHealth(resultAgent, {
-                ...healthTopologyOverrides(resultAgent, topology),
-              })
+            ? await evaluateServerAgentHealth(
+                resultAgent,
+                {
+                  ...healthTopologyOverrides(resultAgent, topology),
+                },
+                topology,
+              )
             : undefined;
           return okFormatted(
             formatOk("wait_for", {
@@ -8348,9 +8914,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? engine.getAgentState(result.agent.agent_id)
                 : null;
               const health = resultAgent
-                ? await evaluateServerAgentHealth(resultAgent, {
-                    ...healthTopologyOverrides(resultAgent, topology),
-                  })
+                ? await evaluateServerAgentHealth(
+                    resultAgent,
+                    {
+                      ...healthTopologyOverrides(resultAgent, topology),
+                    },
+                    topology,
+                  )
                 : undefined;
               return {
                 ...result,
@@ -8391,10 +8961,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const topology = await collectSurfaceTopology();
           const harvestability = engine.assessHarvestability(state);
-          const health = await evaluateServerAgentHealth(state, {
-            ...healthTopologyOverrides(state, topology),
-            harvestability,
-          });
+          const health = await evaluateServerAgentHealth(
+            state,
+            {
+              ...healthTopologyOverrides(state, topology),
+              harvestability,
+            },
+            topology,
+          );
           const formatted =
             formatAgentState(state) +
             `\nharvestability: ${
@@ -8451,9 +9025,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const topology = await collectSurfaceTopology();
           const enrichedAgents = await Promise.all(
             records.map(async (agent) => {
-              const health = await evaluateServerAgentHealth(agent, {
-                ...healthTopologyOverrides(agent, topology),
-              });
+              const health = await evaluateServerAgentHealth(
+                agent,
+                {
+                  ...healthTopologyOverrides(agent, topology),
+                },
+                topology,
+              );
               return {
                 ...toPublicAgent(agent),
                 state: health.reconciled_state ?? agent.state,
@@ -8517,14 +9095,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const broadcastSkipReason = async (
       agent: AgentRecord,
     ): Promise<string | null> => {
-      if (
-        agent.state === "error" &&
-        (await registry.isSurfaceAlive(agent, {
-          ptyDead:
-            surfaceWriteLiveness.observe(agent.surface_id)?.pty_dead === true,
-        }))
-      ) {
-        return null;
+      if (agent.state === "error") {
+        let livenessTarget: Pick<
+          AgentRecord,
+          "surface_id" | "surface_uuid"
+        > = agent;
+        try {
+          livenessTarget = await engine.resolveAgentIoRoute(agent.agent_id);
+        } catch {
+          // Preserve the existing registry/PTY liveness semantics when no
+          // fresh I/O route can be established.
+        }
+        if (
+          await registry.isSurfaceAlive(livenessTarget, {
+            ptyDead:
+              surfaceWriteLiveness.observe(
+                livenessTarget.surface_id,
+                livenessTarget.surface_uuid,
+                context.surfaceObserverId,
+              )?.pty_dead === true,
+          })
+        ) {
+          return null;
+        }
       }
       if (TERMINAL_AGENT_STATES.has(agent.state)) {
         return `dead:${agent.state}`;
@@ -8585,9 +9178,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const collectTargets = async (): Promise<AgentRecord[]> => {
             try {
-              return await engine.runLifecycleMutation(() =>
-                registry.listMerged(discovery),
-              );
+              return await engine.runLifecycleMutation(async () => {
+                try {
+                  return await registry.listMerged(discovery);
+                } catch (error) {
+                  if (
+                    !(error instanceof SurfaceBindingChangedDuringDiscoveryError)
+                  ) {
+                    throw error;
+                  }
+                  // The first scan's screen evidence was correctly rejected.
+                  // Retry once from the now-current topology; a second move
+                  // still propagates and fails the broadcast closed.
+                  discovery.invalidate();
+                  return registry.listMerged(discovery, { force: true });
+                }
+              });
             } catch (e) {
               if (isSurfaceEnumerationError(e)) {
                 throw new Error(
@@ -8688,7 +9294,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const beforeIds = new Set(
               registry.list().map((agent) => agent.agent_id),
             );
-            await registry.reconcile();
+            const surfaceAbsenceConfirmation = {
+              confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+            };
+            await registry.reconcile(surfaceAbsenceConfirmation);
             for (const agent of registry.list()) {
               beforeIds.add(agent.agent_id);
             }
@@ -8699,11 +9308,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
             discovery.invalidate();
             await registry.listMerged(discovery, { force: true });
-            const surfacelessEvicted = await registry.evictSurfaceless();
+            const surfacelessEvicted = await registry.evictSurfaceless(
+              surfaceAbsenceConfirmation,
+            );
             engine.evictDeadProcessAgents();
             discovery.invalidate();
             let after = await registry.listMerged(discovery, { force: true });
+            const reflowObserverEpoch = captureObserverEpoch(
+              surfaceObserverEpochProvider(),
+            );
             const topologyBeforeReflow = await collectSurfaceTopology();
+            const topologyIsCoherent = (
+              topology: SurfaceTopologySnapshot | null,
+            ): topology is SurfaceTopologySnapshot => {
+              const surfaceCount = topology?.workspaceBySurface.size ?? 0;
+              const uuidCount = topology?.surfaceIdByRef.size ?? 0;
+              return (
+                topology?.complete === true &&
+                surfaceCount > 0 &&
+                (uuidCount === 0 || uuidCount === surfaceCount)
+              );
+            };
+            const topologyBeforeReflowIsCoherent = topologyIsCoherent(
+              topologyBeforeReflow,
+            );
             const reflowed: Array<{
               agent_id: string;
               surface_id: string;
@@ -8711,8 +9339,86 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               to_column: number;
               pane: string;
             }> = [];
+            type ReflowOperation =
+              | "new_split"
+              | "move_surface"
+              | "verify_reflow"
+              | "close_surface";
+            const reflowSkipped: Array<{
+              agent_id: string;
+              surface_id: string;
+              operation: ReflowOperation;
+              reason: string;
+            }> = [];
+            const recordReflowSkip = (
+              agent: AgentRecord,
+              surfaceId: string,
+              operation: ReflowOperation,
+              error: unknown,
+            ): void => {
+              reflowSkipped.push({
+                agent_id: agent.agent_id,
+                surface_id: surfaceId,
+                operation,
+                reason: error instanceof Error ? error.message : String(error),
+              });
+            };
+            const resolveFreshReflowBinding = async (
+              agent: AgentRecord,
+              expectedSurfaceRef: string,
+              expectedWorkspace: string,
+              operation: ReflowOperation,
+            ) => {
+              assertSurfaceObserverEpochCurrent(
+                reflowObserverEpoch,
+                `resync_agents ${operation}`,
+              );
+              const topology = await collectSurfaceTopology();
+              assertSurfaceObserverEpochCurrent(
+                reflowObserverEpoch,
+                `resync_agents ${operation}`,
+              );
+              if (!topologyIsCoherent(topology)) {
+                throw new Error(
+                  `Fresh topology is incomplete before ${operation}; refusing reflow mutation.`,
+                );
+              }
+              const binding = resolveAgentSurfaceBinding(agent, topology);
+              if (!binding) {
+                throw new Error(
+                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} is not uniquely bound before ${operation}; refusing reflow mutation.`,
+                );
+              }
+              const observedUuid =
+                topology.surfaceIdByRef.get(binding.surfaceRef) ?? null;
+              if (!registry.canUseObservedBinding(agent, observedUuid)) {
+                throw new Error(
+                  `Fresh binding ${binding.surfaceRef} is not owned by the current observer before ${operation}; refusing reflow mutation.`,
+                );
+              }
+              const workspace =
+                topology.workspaceBySurface.get(binding.surfaceRef) ??
+                binding.workspaceId;
+              if (
+                binding.surfaceRef !== expectedSurfaceRef ||
+                workspace !== expectedWorkspace
+              ) {
+                throw new Error(
+                  `Surface binding changed before ${operation} ` +
+                    `(${expectedSurfaceRef}@${expectedWorkspace} -> ` +
+                    `${binding.surfaceRef}@${workspace ?? "unknown"}); refusing to mutate a recycled ref.`,
+                );
+              }
+              const current = topology.topologyBySurface.get(binding.surfaceRef);
+              if (current?.column !== 0) {
+                throw new Error(
+                  `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} no longer needs left-column reflow before ${operation}.`,
+                );
+              }
+              return { binding, current, topology, workspace };
+            };
 
-            if (topologyBeforeReflow) {
+            if (topologyBeforeReflow && topologyBeforeReflowIsCoherent) {
               const panesByWorkspace = new Map<
                 string,
                 Awaited<ReturnType<typeof client.listPanes>>
@@ -8720,36 +9426,99 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
               for (const agent of after) {
                 if (inferRecordRoleOrNull(agent) !== "worker") continue;
+                const binding = resolveAgentSurfaceBinding(
+                  agent,
+                  topologyBeforeReflow,
+                );
+                if (!binding) continue;
+                const observedUuid =
+                  topologyBeforeReflow.surfaceIdByRef.get(binding.surfaceRef) ??
+                  null;
+                if (!registry.canUseObservedBinding(agent, observedUuid)) {
+                  continue;
+                }
+                const liveSurfaceRef = binding.surfaceRef;
                 const current = topologyBeforeReflow.topologyBySurface.get(
-                  agent.surface_id,
+                  liveSurfaceRef,
                 );
                 if (current?.column !== 0) continue;
 
                 let seededSurface: string | null = null;
+                let seededSurfaceUuid: string | null = null;
                 let workspace: string | null = null;
+                let attemptedOperation: ReflowOperation =
+                  (current.column_count ?? 0) < 2
+                    ? "new_split"
+                    : "move_surface";
                 try {
                   workspace =
                     topologyBeforeReflow.workspaceBySurface.get(
-                      agent.surface_id,
+                      liveSurfaceRef,
                     ) ?? agent.workspace_id ?? null;
                   if (!workspace) continue;
 
                   let targetPane: string | null = null;
                   if ((current.column_count ?? 0) < 2) {
-                    const seed = await client.newSplit("right", {
+                    attemptedOperation = "new_split";
+                    await resolveFreshReflowBinding(
+                      agent,
+                      liveSurfaceRef,
                       workspace,
-                      surface: agent.surface_id,
-                      type: "terminal",
-                    });
-                    targetPane = seed.pane;
-                    seededSurface = seed.surface;
+                      attemptedOperation,
+                    );
+                    await assertWorkspaceMutationAllowed(
+                      "new_split",
+                      workspace,
+                    );
+                    await withSurfaceWrite(
+                      liveSurfaceRef,
+                      async () => {
+                        const immediate = await resolveFreshReflowBinding(
+                          agent,
+                          liveSurfaceRef,
+                          workspace!,
+                          attemptedOperation,
+                        );
+                        await assertWorkspaceMutationAllowed(
+                          "new_split",
+                          immediate.workspace ?? workspace!,
+                        );
+                        assertSurfaceObserverEpochCurrent(
+                          reflowObserverEpoch,
+                          "resync_agents new_split",
+                        );
+                        const seed = await client.newSplit("right", {
+                          workspace: immediate.workspace,
+                          surface: immediate.binding.surfaceRef,
+                          type: "terminal",
+                        });
+                        seededSurface = seed.surface;
+                        seededSurfaceUuid = seed.surface_id ?? null;
+                        targetPane = seed.pane;
+                        assertSurfaceObserverEpochCurrent(
+                          reflowObserverEpoch,
+                          "resync_agents new_split",
+                        );
+                      },
+                      {
+                        owner: `resync-reflow:new_split:${agent.agent_id}`,
+                      },
+                    );
                     panesByWorkspace.delete(workspace);
                   } else {
+                    assertSurfaceObserverEpochCurrent(
+                      reflowObserverEpoch,
+                      "resync_agents move_surface pane selection",
+                    );
                     let panes = panesByWorkspace.get(workspace);
                     if (!panes) {
                       panes = await client.listPanes({ workspace });
                       panesByWorkspace.set(workspace, panes);
                     }
+                    assertSurfaceObserverEpochCurrent(
+                      reflowObserverEpoch,
+                      "resync_agents move_surface pane selection",
+                    );
                     const columns = deriveColumnIndex(panes.panes);
                     targetPane = [...panes.panes]
                       .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
@@ -8763,38 +9532,193 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   }
                   if (!targetPane) continue;
 
-                  await client.moveSurface({
-                    surface: agent.surface_id,
-                    pane: targetPane,
+                  attemptedOperation = "move_surface";
+                  const freshBeforeMove = await resolveFreshReflowBinding(
+                    agent,
+                    liveSurfaceRef,
                     workspace,
-                    focus: false,
-                  });
-
-                  const topologyAfterMove = await collectSurfaceTopology(workspace);
-                  const actual = topologyAfterMove?.topologyBySurface.get(
-                    agent.surface_id,
+                    attemptedOperation,
                   );
-                  if (actual?.column == null || actual.column === 0) continue;
+                  await withSurfaceWrite(
+                    freshBeforeMove.binding.surfaceRef,
+                    async () => {
+                      const immediate = await resolveFreshReflowBinding(
+                        agent,
+                        liveSurfaceRef,
+                        workspace!,
+                        attemptedOperation,
+                      );
+                      await assertSurfaceMutationAllowed(
+                        "move_surface",
+                        immediate.binding.surfaceRef,
+                        immediate.workspace ?? workspace!,
+                      );
+                      assertSurfaceObserverEpochCurrent(
+                        reflowObserverEpoch,
+                        "resync_agents move_surface",
+                      );
+                      await client.moveSurface({
+                        surface: immediate.binding.surfaceRef,
+                        pane: targetPane!,
+                        workspace: immediate.workspace,
+                        focus: false,
+                      });
+                      assertSurfaceObserverEpochCurrent(
+                        reflowObserverEpoch,
+                        "resync_agents move_surface",
+                      );
+                    },
+                    {
+                      toolName: "move_surface",
+                      workspace: freshBeforeMove.workspace ?? workspace,
+                      owner: `resync-reflow:move_surface:${agent.agent_id}`,
+                    },
+                  );
+                  panesByWorkspace.delete(workspace);
+
+                  attemptedOperation = "verify_reflow";
+                  const topologyAfterMove = await collectSurfaceTopology(workspace);
+                  assertSurfaceObserverEpochCurrent(
+                    reflowObserverEpoch,
+                    "resync_agents verify_reflow",
+                  );
+                  if (!topologyIsCoherent(topologyAfterMove)) {
+                    throw new Error(
+                      "Post-move topology is incomplete; reflow could not be verified.",
+                    );
+                  }
+                  const bindingAfterMove = resolveAgentSurfaceBinding(
+                    agent,
+                    topologyAfterMove,
+                  );
+                  if (!bindingAfterMove) {
+                    throw new Error(
+                      "Post-move stable UUID binding is unavailable; reflow could not be verified.",
+                    );
+                  }
+                  const actual = topologyAfterMove.topologyBySurface.get(
+                    bindingAfterMove.surfaceRef,
+                  );
+                  if (actual?.column == null || actual.column === 0) {
+                    throw new Error(
+                      "Post-move topology still places the worker in column 0.",
+                    );
+                  }
 
                   reflowed.push({
                     agent_id: agent.agent_id,
-                    surface_id: agent.surface_id,
+                    surface_id: bindingAfterMove.surfaceRef,
                     from_column: current.column,
                     to_column: actual.column,
                     pane: targetPane,
                   });
-                } catch {
+                } catch (error) {
                   // Reflow is self-healing best effort. One stale workspace, pane,
                   // or topology read must not abort the registry-wide resync.
-                  continue;
+                  recordReflowSkip(
+                    agent,
+                    liveSurfaceRef,
+                    attemptedOperation,
+                    error,
+                  );
                 } finally {
                   if (seededSurface) {
                     try {
-                      await client.closeSurface(seededSurface, {
-                        ...(workspace ? { workspace } : {}),
-                      });
-                    } catch {
+                      const cleanupSeedUuid = seededSurfaceUuid as string | null;
+                      assertSurfaceObserverEpochCurrent(
+                        reflowObserverEpoch,
+                        "resync_agents close_surface",
+                      );
+                      if (!cleanupSeedUuid) {
+                        throw new Error(
+                          `Seed ${seededSurface} has no stable UUID; refusing cleanup by mutable ref.`,
+                        );
+                      }
+                      const cleanupTopology = await collectSurfaceTopology();
+                      assertSurfaceObserverEpochCurrent(
+                        reflowObserverEpoch,
+                        "resync_agents close_surface",
+                      );
+                      if (!topologyIsCoherent(cleanupTopology)) {
+                        throw new Error(
+                          "Fresh topology is incomplete before seed cleanup; refusing close_surface.",
+                        );
+                      }
+                      const seedUuidKey = cleanupSeedUuid.toLowerCase();
+                      const freshSeedRef = [...cleanupTopology.surfaceRefById]
+                        .find(([surfaceUuid]) =>
+                          surfaceUuid.toLowerCase() === seedUuidKey,
+                        )?.[1];
+                      if (!freshSeedRef) {
+                        throw new Error(
+                          `Seed UUID ${cleanupSeedUuid} is no longer uniquely bound; refusing close_surface.`,
+                        );
+                      }
+                      const cleanupWorkspace =
+                        cleanupTopology.workspaceBySurface.get(freshSeedRef) ??
+                        workspace ??
+                        undefined;
+                      await withSurfaceWrite(
+                        freshSeedRef,
+                        async () => {
+                          const immediateTopology =
+                            await collectSurfaceTopology();
+                          assertSurfaceObserverEpochCurrent(
+                            reflowObserverEpoch,
+                            "resync_agents close_surface",
+                          );
+                          if (!topologyIsCoherent(immediateTopology)) {
+                            throw new Error(
+                              "Immediate topology is incomplete before seed cleanup; refusing close_surface.",
+                            );
+                          }
+                          const immediateSeedRef = [
+                            ...immediateTopology.surfaceRefById,
+                          ].find(([surfaceUuid]) =>
+                            surfaceUuid.toLowerCase() === seedUuidKey,
+                          )?.[1];
+                          if (immediateSeedRef !== freshSeedRef) {
+                            throw new Error(
+                              `Seed binding changed before close_surface (${freshSeedRef} -> ${immediateSeedRef ?? "missing"}); refusing to close a recycled ref.`,
+                            );
+                          }
+                          const immediateCleanupWorkspace =
+                            immediateTopology.workspaceBySurface.get(
+                              freshSeedRef,
+                            ) ?? cleanupWorkspace;
+                          await assertSurfaceMutationAllowed(
+                            "close_surface",
+                            freshSeedRef,
+                            immediateCleanupWorkspace,
+                          );
+                          assertSurfaceObserverEpochCurrent(
+                            reflowObserverEpoch,
+                            "resync_agents close_surface",
+                          );
+                          await client.closeSurface(freshSeedRef, {
+                            ...(immediateCleanupWorkspace
+                              ? { workspace: immediateCleanupWorkspace }
+                              : {}),
+                          });
+                          assertSurfaceObserverEpochCurrent(
+                            reflowObserverEpoch,
+                            "resync_agents close_surface",
+                          );
+                        },
+                        {
+                          toolName: "close_surface",
+                          workspace: cleanupWorkspace,
+                          owner: `resync-reflow:close_surface:${agent.agent_id}`,
+                        },
+                      );
+                    } catch (error) {
                       // A seed cleanup race is isolated to this worker as well.
+                      recordReflowSkip(
+                        agent,
+                        seededSurface,
+                        "close_surface",
+                        error,
+                      );
                     }
                   }
                 }
@@ -8831,6 +9755,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               evicted,
               repaired: repair.repaired,
               reflowed,
+              reflow_skipped: reflowSkipped,
               mismatches: after
                 .filter((agent) => agent.parsed_cli_mismatch)
                 .map((agent) => agent.agent_id),
@@ -8867,15 +9792,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.destructive,
       async (args) => {
         try {
-          const current = engine.getAgentState(args.agent_id);
-          if (current) {
-            await assertSurfaceMutationAllowed(
-              "stop_agent",
-              current.surface_id,
-              current.workspace_id ?? undefined,
-            );
-          }
-          await engine.stopAgent(args.agent_id, args.force);
+          await engine.stopAgent(args.agent_id, args.force, {
+            beforeSurfaceMutation: (route) =>
+              assertSurfaceMutationAllowed(
+                "stop_agent",
+                route.surface_id,
+                route.workspace_id ?? undefined,
+              ),
+          });
           const state = engine.getAgentState(args.agent_id);
           appendCloseEvent({
             event: "stop_agent",
@@ -9368,15 +10292,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return okFormatted(formatOk("interact:send", d), d);
             }
             case "interrupt": {
+              const route = await engine.resolveAgentIoRoute(args.agent);
               await withSurfaceWrite(
-                agent.surface_id,
+                route.surface_id,
                 () =>
-                  client.sendKey(agent.surface_id, "c-c", {
-                    workspace: agent.workspace_id ?? undefined,
+                  client.sendKey(route.surface_id, "c-c", {
+                    workspace: route.workspace_id ?? undefined,
                   }),
                 {
                   toolName: "interact",
-                  workspace: agent.workspace_id ?? undefined,
+                  workspace: route.workspace_id ?? undefined,
                   observePtyWrite: true,
                 },
               );
@@ -9441,25 +10366,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             case "usage": {
               // Read screen to extract usage info
-              const screen = await client.readScreen(agent.surface_id, {
+              const route = await engine.resolveAgentIoRoute(args.agent);
+              const screen = await client.readScreen(route.surface_id, {
+                workspace: route.workspace_id ?? undefined,
                 lines: 5,
               });
               return ok({
                 agent_id: args.agent,
                 action: "usage",
-                surface_id: agent.surface_id,
+                surface_id: route.surface_id,
                 screen_tail: screen.text,
               });
             }
             case "mcp": {
               // Read screen for MCP server status
-              const mcpScreen = await client.readScreen(agent.surface_id, {
+              const route = await engine.resolveAgentIoRoute(args.agent);
+              const mcpScreen = await client.readScreen(route.surface_id, {
+                workspace: route.workspace_id ?? undefined,
                 lines: 10,
               });
               return ok({
                 agent_id: args.agent,
                 action: "mcp",
-                surface_id: agent.surface_id,
+                surface_id: route.surface_id,
                 screen_tail: mcpScreen.text,
               });
             }
@@ -9522,14 +10451,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           for (const agentId of targetIds) {
             try {
               const current = engine.getAgentState(agentId);
-              if (current) {
-                await assertSurfaceMutationAllowed(
-                  "kill",
-                  current.surface_id,
-                  current.workspace_id ?? undefined,
-                );
-              }
-              await engine.stopAgent(agentId, args.force);
+              await engine.stopAgent(agentId, args.force, {
+                beforeSurfaceMutation: (route) =>
+                  assertSurfaceMutationAllowed(
+                    "kill",
+                    route.surface_id,
+                    route.workspace_id ?? undefined,
+                  ),
+              });
               killed.push(agentId);
               appendCloseEvent({
                 event: "kill",
@@ -9592,11 +10521,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 return merged.filter((agent) => childIds.has(agent.agent_id));
               })()
             : merged.filter((agent) => agent.parent_agent_id === null);
+          const topology = await collectSurfaceTopology().catch(() => null);
 
           const SCREEN_TIMEOUT = 3000;
           const enriched = await Promise.all(
             agents.map(async (agent) => {
               let screenData: ParsedScreenResult | null = null;
+              let liveSurfaceId: string | null = null;
               let screenFailure:
                 | {
                     screen_unavailable: true;
@@ -9605,8 +10536,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   }
                 | null = null;
               try {
-                const screen = await Promise.race([
-                  client.readScreen(agent.surface_id, { lines: 20 }),
+                const resolved = await Promise.race([
+                  (async () => {
+                    const binding = resolveAuthorizedAgentSurfaceBinding(
+                      agent,
+                      topology,
+                    );
+                    if (!binding) {
+                      throw new Error(
+                        `No authorized live surface binding for ${agent.agent_id}`,
+                      );
+                    }
+                    const route = {
+                      surface_id: binding.surfaceRef,
+                      workspace_id: binding.workspaceId,
+                    };
+                    const screen = await client.readScreen(route.surface_id, {
+                      lines: 20,
+                      workspace: route.workspace_id ?? undefined,
+                    });
+                    return { route, screen };
+                  })(),
                   new Promise<never>((_, reject) =>
                     setTimeout(
                       () => reject(new Error("timeout")),
@@ -9614,13 +10564,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ),
                   ),
                 ]);
+                liveSurfaceId = resolved.route.surface_id;
+                const screen = resolved.screen;
                 screenData = applyHarnessState(
                   enrichParsedScreen(
                     parseScreen(screen.text),
                     screen.text,
-                    pickLatestSurfaceModel(stateMgr, agent.surface_id),
+                    pickLatestSurfaceModel(stateMgr, liveSurfaceId),
                   ),
-                  resolveHarnessStateForSurface(stateMgr, agent.surface_id),
+                  resolveHarnessStateForSurface(stateMgr, liveSurfaceId),
                 );
               } catch (error) {
                 // Surface may be closed, unavailable, or timed out
@@ -9643,7 +10595,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 session_id: agent.cli_session_id,
                 resumable: !!agent.cli_session_id,
                 ...(resumeCommand ? { resume_command: resumeCommand } : {}),
-                surface_id: agent.surface_id,
+                surface_id: liveSurfaceId,
                 token_count: screenData?.token_count ?? null,
                 context_pct: screenData?.context_pct ?? null,
                 cost: screenData?.cost ?? null,

@@ -67,13 +67,18 @@ describe("agent facade projections", () => {
 describe("agent route table", () => {
   it("builds routes keyed by agent_id", () => {
     const table = buildRouteTable([
-      makeRecord({ agent_id: "agent-1", surface_id: "surface:1" }),
+      makeRecord({
+        agent_id: "agent-1",
+        surface_id: "surface:1",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+      }),
       makeRecord({ agent_id: "agent-2", surface_id: "surface:2" }),
     ]);
 
     expect(table.get("agent-1")).toEqual({
       agent_id: "agent-1",
       surface_id: "surface:1",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
       workspace_id: "ws:1",
       state: "ready",
       session_id: "session-1",

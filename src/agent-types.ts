@@ -25,6 +25,10 @@ export const MAX_RESPAWN_ATTEMPTS = 10;
 export interface AgentRecord {
   agent_id: string;
   surface_id: string;
+  /** Stable cmux surface UUID paired with the mutable `surface_id` ref. */
+  surface_uuid?: string | null;
+  /** cmux app/socket instance that is authoritative for surface absence. */
+  surface_observer_id?: string | null;
   workspace_id?: string | null;
   state: AgentState;
   repo: string;
@@ -90,6 +94,8 @@ export interface PublicAgent {
 export interface AgentRoute {
   agent_id: string;
   surface_id: string;
+  /** Stable surface identity used to refresh the mutable ref before I/O. */
+  surface_uuid?: string | null;
   workspace_id?: string | null;
   state: AgentState;
   session_id: string | null;

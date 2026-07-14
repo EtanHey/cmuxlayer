@@ -105,6 +105,9 @@ describe("assertMutationAllowed", () => {
       /manual/i,
     );
     expect(() => assertMutationAllowed("send_to", "manual")).toThrow(/manual/i);
+    expect(() => assertMutationAllowed("boot_prompt", "manual")).toThrow(
+      /manual/i,
+    );
     expect(() => assertMutationAllowed("agent_engine", "manual")).toThrow(
       /manual/i,
     );

@@ -13,16 +13,19 @@ import { createServer } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { CmuxPersistentSocket } from "../src/cmux-persistent-socket.js";
 import { CmuxSocketError } from "../src/cmux-socket-client.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-audit-fixes-test");
 
 function createAuditServer(exec: ExecFn, client?: Record<string, unknown>) {
-  return createServer({
-    exec,
-    client: client as any,
-    stateDir: TEST_DIR,
-    disableSpawnPreflight: true,
-  });
+  return createServer(
+    withTestSurfaceObserver({
+      exec,
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    }),
+  );
 }
 
 function makeSpawnReadyExec(): ExecFn {

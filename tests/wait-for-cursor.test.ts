@@ -35,9 +35,44 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
     renameTab: vi.fn(),
     setStatus: vi.fn(),
     closeSurface: vi.fn(),
-    listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
-    listPanes: vi.fn().mockResolvedValue({ panes: [] }),
-    listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+    listWorkspaces: vi.fn().mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:cursor",
+          title: "Cursor",
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    }),
+    listPanes: vi.fn().mockResolvedValue({
+      workspace_ref: "workspace:cursor",
+      window_ref: "window:cursor",
+      panes: [
+        {
+          ref: "pane:cursor",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:cursor-idle"],
+        },
+      ],
+    }),
+    listPaneSurfaces: vi.fn().mockResolvedValue({
+      workspace_ref: "workspace:cursor",
+      window_ref: "window:cursor",
+      pane_ref: "pane:cursor",
+      surfaces: [
+        {
+          ref: "surface:cursor-idle",
+          title: "cmuxlayerCursor",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+    }),
     selectWorkspace: vi.fn(),
     clearStatus: vi.fn(),
     setProgress: vi.fn(),

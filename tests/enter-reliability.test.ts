@@ -6,6 +6,7 @@ import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-enter-reliability-test");
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-enter-reliability-test.sock";
 
 function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -354,6 +355,8 @@ function createReliabilityServer(client: FakeClaudeSurfaceClient) {
     client: client as any,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
+    surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
+    surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
   // These tests exercise registry routing and submit verification, not the
   // periodic reconciliation loop. Stop its wall-clock sweep so it cannot race
@@ -371,6 +374,7 @@ function registerAgent(server: any, overrides?: Partial<AgentRecord>): AgentReco
   const record: AgentRecord = {
     agent_id: "agent-1",
     surface_id: "surface:agent",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "ready",
     repo: "brainlayer",

@@ -120,6 +120,53 @@ describe("Quality Tracking (sweep)", () => {
     stateMgr = new StateManager(TEST_DIR);
     mockClient = makeMockClient();
     liveSurfaces = [];
+    const workspaceRef = "workspace:quality";
+    const paneRef = "pane:quality";
+    (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => ({
+        workspaces:
+          liveSurfaces.length === 0
+            ? []
+            : [
+                {
+                  ref: workspaceRef,
+                  title: "quality",
+                  index: 0,
+                  selected: true,
+                  pinned: false,
+                },
+              ],
+      }),
+    );
+    (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ workspace }: { workspace?: string } = {}) => ({
+        workspace_ref: workspace ?? workspaceRef,
+        window_ref: "window:quality",
+        panes:
+          liveSurfaces.length === 0
+            ? []
+            : [
+                {
+                  ref: paneRef,
+                  index: 0,
+                  focused: true,
+                  surface_count: liveSurfaces.length,
+                  surface_refs: liveSurfaces.map((surface) => surface.ref),
+                  selected_surface_ref: liveSurfaces[0]?.ref,
+                },
+              ],
+      }),
+    );
+    (
+      mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+    ).mockImplementation(
+      async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => ({
+        workspace_ref: workspace ?? workspaceRef,
+        window_ref: "window:quality",
+        pane_ref: pane ?? paneRef,
+        surfaces: liveSurfaces,
+      }),
+    );
     const surfaceProvider = async () => liveSurfaces;
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
@@ -166,8 +213,67 @@ describe("Quality Tracking (sweep)", () => {
     await engine.runSweep();
 
     // Should send /compact + return
-    expect(mockClient.send).toHaveBeenCalledWith("s:1", "/compact", {});
-    expect(mockClient.sendKey).toHaveBeenCalledWith("s:1", "return", {});
+    expect(mockClient.send).toHaveBeenCalledWith("s:1", "/compact", {
+      workspace: "workspace:quality",
+    });
+    expect(mockClient.sendKey).toHaveBeenCalledWith("s:1", "return", {
+      workspace: "workspace:quality",
+    });
+  });
+
+  it("auto-compact follows a stable UUID after its cached surface ref is recycled", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "uuid-compact",
+        state: "working",
+        surface_id: "surface:old",
+        surface_uuid: stableUuid,
+        workspace_id: "workspace:quality",
+        spawn_depth: 0,
+      }),
+    );
+    liveSurfaces = [{ ...makeSurface("surface:old"), id: stableUuid }];
+    await engine.getRegistry().reconstitute();
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+      async (surface: string) => {
+        queueMicrotask(() => {
+          liveSurfaces = [
+            { ...makeSurface("surface:old"), id: "uuid-recycled" },
+            { ...makeSurface("surface:new"), id: stableUuid },
+          ];
+        });
+        return {
+          surface,
+          text: "gpt-5.5 · 5% left · ~/Gits/cmuxlayer\nWorking (1m • esc to interrupt)",
+          lines: 5,
+          scrollback_used: false,
+        };
+      },
+    );
+
+    await engine.runSweep();
+
+    // The first sweep must discard screen evidence read through the old ref
+    // after the UUID moves. A fresh sweep may then act on the new binding.
+    expect(mockClient.send).not.toHaveBeenCalled();
+    await engine.runSweep();
+
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "surface:new",
+      "/compact",
+      { workspace: "workspace:quality" },
+    );
+    expect(mockClient.sendKey).toHaveBeenCalledWith(
+      "surface:new",
+      "return",
+      { workspace: "workspace:quality" },
+    );
+    expect(mockClient.send).not.toHaveBeenCalledWith(
+      "surface:old",
+      "/compact",
+      expect.anything(),
+    );
   });
 
   it("at 80% context, depth-1 agent is warned but not killed", async () => {
