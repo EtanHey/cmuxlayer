@@ -100,15 +100,22 @@ func fleetLeadSummary(_ lead) -> some View {
 }
 
 func fleetLaneHeader(_ name, _ liveCount, _ activeCount, _ collapsed) -> some View {
-  HStack(spacing: 6) {
-    Text(collapsed ? "▸" : "▾")
-      .font(.system(size: 10, design: .monospaced))
-      .foregroundColor(.secondary)
-    Text(name).font(.system(size: 11)).fontWeight(.semibold)
-    Spacer()
-    Text("\(liveCount) live · \(activeCount) active")
-      .font(.system(size: 9, design: .monospaced))
-      .foregroundColor(.secondary)
+  VStack(alignment: .leading, spacing: 2) {
+    HStack(spacing: 6) {
+      Text(collapsed ? "collapsed" : "expanded")
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundColor(.tertiary)
+      Text(name).font(.system(size: 11)).fontWeight(.semibold)
+      Spacer()
+      Text("\(liveCount) live · \(activeCount) active")
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundColor(.secondary)
+    }
+    Text(collapsed ? "CLI · cmuxlayer fleet-sidebar expand \(name)" : "CLI · cmuxlayer fleet-sidebar collapse \(name)")
+      .font(.system(size: 8, design: .monospaced))
+      .foregroundColor(.tertiary)
+      .lineLimit(1)
+      .truncationMode(.tail)
   }
   .padding(4)
   .accessibilityLabel(collapsed ? "\(name) lane collapsed, \(liveCount) live, \(activeCount) active" : "\(name) lane expanded, \(liveCount) live, \(activeCount) active")

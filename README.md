@@ -37,6 +37,18 @@ reconciled live-agent snapshot. It does not change cmux settings or replace the
 stock sidebar. To activate it, right-click the sidebar toggle and choose
 `fleet`; choose the stock entry there whenever you want the fallback UI.
 
+Development and screenshot QA use a separate picker entry and never publish to
+the live `fleet.swift` path:
+
+```bash
+bun run install:fleet-sidebar:dev
+bun run dev
+```
+
+Those commands publish only
+`~/.config/cmux/sidebars/fleet-dev.swift`; choose `fleet-dev` in cmux while
+testing. Runtime tests must inject a temporary publisher `outputPath`.
+
 Add to your MCP config:
 
 **Codex CLI / T3 Code**

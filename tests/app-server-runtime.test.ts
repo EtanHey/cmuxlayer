@@ -7,6 +7,7 @@ import {
   type CmuxAppServerRuntimeOptions,
 } from "../src/app-server-runtime.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { FleetSidebarPublisher } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-app-server-runtime-test");
 
@@ -20,6 +21,8 @@ class CmuxAppServerRuntime extends ProductionCmuxAppServerRuntime {
     };
     super({
       ...opts,
+      fleetSidebarPublisher:
+        opts.fleetSidebarPublisher ?? makeTempFleetPublisher(),
       surfaceObserverOwnerIdProvider: ownerId,
       surfaceObserverEpochProvider: () => {
         const owner = ownerId();
@@ -33,6 +36,12 @@ class CmuxAppServerRuntime extends ProductionCmuxAppServerRuntime {
       },
     });
   }
+}
+
+function makeTempFleetPublisher(): FleetSidebarPublisher {
+  return new FleetSidebarPublisher({
+    outputPath: join(TEST_DIR, "fleet.swift"),
+  });
 }
 
 function makeClient() {
@@ -398,7 +407,11 @@ describe("CmuxAppServerRuntime", () => {
     client.listWorkspaces.mockRejectedValueOnce(
       new Error("socket unavailable"),
     );
-    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const runtime = new CmuxAppServerRuntime({
+      client,
+      stateDir: TEST_DIR,
+      fleetSidebarPublisher: makeTempFleetPublisher(),
+    });
 
     await expect(
       (runtime as any).registry.hasLiveSurface("surface:1"),
@@ -569,7 +582,11 @@ describe("CmuxAppServerRuntime", () => {
         },
       ],
     });
-    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const runtime = new CmuxAppServerRuntime({
+      client,
+      stateDir: TEST_DIR,
+      fleetSidebarPublisher: makeTempFleetPublisher(),
+    });
     const record = {
       ...makeRecord(),
       surface_observer_id: (runtime as any).registry.getObserverId(),

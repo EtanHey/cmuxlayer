@@ -473,15 +473,22 @@ func fleetLeadSummary(_ lead) -> some View {
 }
 
 func fleetLaneHeader(_ name, _ liveCount, _ activeCount, _ collapsed) -> some View {
-  HStack(spacing: 6) {
-    Text(collapsed ? "▸" : "▾")
-      .font(.system(size: 10, design: .monospaced))
-      .foregroundColor(.secondary)
-    Text(name).font(.system(size: 11)).fontWeight(.semibold)
-    Spacer()
-    Text("\\(liveCount) live · \\(activeCount) active")
-      .font(.system(size: 9, design: .monospaced))
-      .foregroundColor(.secondary)
+  VStack(alignment: .leading, spacing: 2) {
+    HStack(spacing: 6) {
+      Text(collapsed ? "collapsed" : "expanded")
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundColor(.tertiary)
+      Text(name).font(.system(size: 11)).fontWeight(.semibold)
+      Spacer()
+      Text("\\(liveCount) live · \\(activeCount) active")
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundColor(.secondary)
+    }
+    Text(collapsed ? "CLI · cmuxlayer fleet-sidebar expand \\(name)" : "CLI · cmuxlayer fleet-sidebar collapse \\(name)")
+      .font(.system(size: 8, design: .monospaced))
+      .foregroundColor(.tertiary)
+      .lineLimit(1)
+      .truncationMode(.tail)
   }
   .padding(4)
   .accessibilityLabel(collapsed ? "\\(name) lane collapsed, \\(liveCount) live, \\(activeCount) active" : "\\(name) lane expanded, \\(liveCount) live, \\(activeCount) active")
@@ -588,6 +595,10 @@ ${content}
 
 export function defaultFleetSidebarPath(home = homedir()): string {
   return join(home, ".config", "cmux", "sidebars", "fleet.swift");
+}
+
+export function defaultFleetSidebarDevPath(home = homedir()): string {
+  return join(home, ".config", "cmux", "sidebars", "fleet-dev.swift");
 }
 
 export function defaultFleetSidebarCollapseStatePath(home = homedir()): string {
@@ -785,7 +796,23 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
     const canonicalOutputPath = defaultFleetSidebarPath();
-    this.outputPath = opts.outputPath ?? canonicalOutputPath;
+    this.outputPath =
+      opts.outputPath ??
+      process.env.CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH ??
+      canonicalOutputPath;
+    if (process.env.VITEST === "true" && opts.outputPath === undefined) {
+      throw new Error(
+        "FleetSidebarPublisher tests must inject an explicit outputPath",
+      );
+    }
+    if (
+      process.env.VITEST === "true" &&
+      this.outputPath === canonicalOutputPath
+    ) {
+      throw new Error(
+        "FleetSidebarPublisher tests must inject a non-production outputPath",
+      );
+    }
     this.collapseStore =
       opts.collapseStore ??
       new FleetSidebarCollapseStore(
