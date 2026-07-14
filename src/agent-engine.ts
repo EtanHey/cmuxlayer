@@ -1618,10 +1618,19 @@ export class AgentEngine {
       const parentRole = parentAgent
         ? inferRecordRoleOrNull(parentAgent)
         : null;
-      const parentSurfaceId = parentAgent
+      const parentDefinitelyElsewhere = Boolean(
+        parentAgent?.workspace_id &&
+          workspace &&
+          parentAgent.workspace_id !== workspace,
+      );
+      const parentSurfaceId = parentAgent && !parentDefinitelyElsewhere
         ? resolveObservedAgentSurfaceRef(parentAgent, surfaceObservation)
         : null;
-      if (parentAgent?.surface_uuid && !parentSurfaceId) {
+      if (
+        parentAgent?.surface_uuid &&
+        !parentSurfaceId &&
+        !parentDefinitelyElsewhere
+      ) {
         throw new PlacementSurfaceBindingError(
           `Stable surface UUID ${parentAgent.surface_uuid} for parent ` +
             `"${parentAgent.agent_id}" is not uniquely bound in the current ` +
@@ -2594,10 +2603,8 @@ export class AgentEngine {
         const patched = this.stateMgr.updateRecord(agent.agent_id, {
           surface_id: surface.surface,
           surface_uuid: surface.surface_id ?? null,
-          ...(this.registry.getObserverId()
-            ? { surface_observer_id: this.registry.getObserverId() }
-            : {}),
-          workspace_id: surface.workspace,
+          surface_observer_id: surface.observerId,
+          workspace_id: resumeWorkspace,
           crash_recover: true,
           respawn_attempts: nextRespawnAttempt,
           user_killed: false,
@@ -3918,14 +3925,11 @@ export class AgentEngine {
 
     // 2. Write initial state (creating → booting)
     const now = new Date().toISOString();
-    const surfaceObserverId = this.registry.getObserverId();
     const record: AgentRecord = {
       agent_id: agentId,
       surface_id: surface.surface,
       surface_uuid: surface.surface_id ?? null,
-      ...(surfaceObserverId
-        ? { surface_observer_id: surfaceObserverId }
-        : {}),
+      surface_observer_id: surface.observerId,
       workspace_id: surface.workspace,
       state: "booting",
       repo: spawnParams.repo,
@@ -3977,9 +3981,38 @@ export class AgentEngine {
         this.isExactDurableSurfaceBinding(durableRecord, record)
       ) {
         // rename(state.json.tmp, state.json) may have committed before a
-        // secondary index/event append failed. Preserve the durably bound
-        // surface and rehydrate the in-memory registry instead of closing it.
-        this.registry.set(agentId, durableRecord);
+        // secondary index/event append failed. No launch command has been sent,
+        // so close this exact created surface and make the durable record
+        // terminal rather than leaving an unlaunched booting child forever.
+        await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
+        const persistenceMessage =
+          error instanceof Error ? error.message : String(error);
+        try {
+          const failed = this.stateMgr.transition(agentId, "error", {
+            error: `Initial agent state persistence failed: ${persistenceMessage}`,
+            pid: null,
+            cli_session_id: null,
+          });
+          this.registry.set(agentId, failed);
+        } catch {
+          // transition() also renames the state file before updating secondary
+          // indexes. Re-read so a post-commit transition failure still
+          // rehydrates the durable error record.
+          let failedRecord: AgentRecord | null = null;
+          try {
+            failedRecord = this.stateMgr.readState(agentId);
+          } catch {
+            // The original persistence failure remains authoritative.
+          }
+          if (
+            failedRecord?.state === "error" &&
+            this.isExactDurableSurfaceBinding(failedRecord, record)
+          ) {
+            this.registry.set(agentId, failedRecord);
+          } else {
+            this.registry.remove(agentId);
+          }
+        }
       } else {
         await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
       }

@@ -1275,13 +1275,20 @@ writeFileSync(process.argv[3], "released");`,
       ),
     );
     store.setLaneCollapsed("cmuxlayer", true);
-    await new Promise((resolve) => setTimeout(resolve, 550));
+    const collapsedLane = 'fleetLane("cmuxlayer", 2, 2, true, 2, [';
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      !readFileSync(outputPath, "utf8").includes(collapsedLane)
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
 
     const source = readFileSync(outputPath, "utf8");
     expect(source).toContain(
       "cmuxlayer-fleet-state: populated rendered=2 observed=2",
     );
-    expect(source).toContain('fleetLane("cmuxlayer", 2, 2, true, 2, [');
+    expect(source).toContain(collapsedLane);
     expect(source).not.toContain("rendered=1");
     publisher.dispose();
   });

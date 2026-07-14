@@ -772,7 +772,7 @@ describe("AgentEngine", () => {
       expect(mockClient.send).not.toHaveBeenCalled();
     });
 
-    it("preserves an exact durable binding when state persistence fails after commit", async () => {
+    it("closes and errors an unlaunched durable binding when initial persistence fails after commit", async () => {
       const writeState = stateMgr.writeState.bind(stateMgr);
       vi.spyOn(stateMgr, "writeState").mockImplementationOnce((record) => {
         writeState(record);
@@ -792,13 +792,23 @@ describe("AgentEngine", () => {
         surface_id: "surface:new",
         surface_uuid: SPAWN_SURFACE_UUID,
         workspace_id: "ws:1",
-        state: "booting",
+        state: "error",
+        error:
+          "Initial agent state persistence failed: post-commit telemetry failed",
       });
       expect(engine.getAgentState(durableRecord!.agent_id)).toMatchObject({
         surface_id: "surface:new",
         surface_uuid: SPAWN_SURFACE_UUID,
+        state: "error",
       });
-      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:new",
+        expect.objectContaining({
+          workspace: "ws:1",
+          collapsePane: false,
+          beforeMutation: expect.any(Function),
+        }),
+      );
       expect(mockClient.renameTab).not.toHaveBeenCalled();
       expect(mockClient.send).not.toHaveBeenCalled();
     });
@@ -1248,6 +1258,79 @@ describe("AgentEngine", () => {
       expect(mockClient.newSplit).not.toHaveBeenCalledWith(
         "down",
         expect.objectContaining({ pane: "pane:old-recycled" }),
+      );
+    });
+
+    it("places a cross-repo child without requiring its UUID parent in the child workspace", async () => {
+      const parentUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const parent = makeRecord({
+        agent_id: "parent-cross-repo",
+        surface_id: "surface:parent",
+        surface_uuid: parentUuid,
+        workspace_id: "workspace:parent",
+        state: "ready",
+        role: "ic",
+        cli: "claude",
+        repo: "brainlayer",
+      });
+      stateMgr.writeState(parent);
+      engine.getRegistry().set(parent.agent_id, parent);
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:parent-live"),
+          id: parentUuid,
+          workspace_ref: "workspace:parent",
+        },
+        {
+          ...makeSurface("surface:parent"),
+          id: "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb",
+          workspace_ref: "workspace:voice",
+        },
+        {
+          ...makeSurface("surface:voice-lead"),
+          id: "12345678-1234-4123-8123-123456789abc",
+          workspace_ref: "workspace:voice",
+        },
+      ];
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:parent",
+            title: "BrainLayer",
+            current_directory: "/Users/etanheyman/Gits/brainlayer",
+          },
+          {
+            ref: "workspace:voice",
+            title: "VoiceLayer",
+            current_directory: "/Users/etanheyman/Gits/voicelayer",
+          },
+        ],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace: "workspace:voice",
+        surface: "surface:voice-child",
+        surface_id: SPAWN_SURFACE_UUID,
+        pane: "pane:voice-child",
+        title: "",
+        type: "terminal",
+      } satisfies CmuxNewSplitResult);
+
+      const result = await engine.spawnAgent({
+        repo: "voicelayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Fix the voice worker",
+        parent_agent_id: parent.agent_id,
+      });
+
+      expect(result.workspace_id).toBe("workspace:voice");
+      expect(mockClient.newSplit).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ workspace: "workspace:voice" }),
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ workspace: "workspace:parent" }),
       );
     });
 
@@ -3558,43 +3641,134 @@ describe("AgentEngine", () => {
       });
     });
 
-    it("sends crash recovery resume commands to the actual cmux workspace on placement mismatch", async () => {
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspace: "workspace:wrong",
-        surface: "surface:new",
-        pane: "pane:1",
-        title: "",
-        type: "terminal",
-      } satisfies CmuxNewSplitResult);
-      stateMgr.writeState(
-        makeRecord({
-          agent_id: "agent-crash-mismatch",
-          state: "working",
-          surface_id: "surface:dead",
-          repo: "brainlayer",
-          model: "gpt-5.4",
-          cli: "codex",
-          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-          crash_recover: true,
-          workspace_id: "workspace:intended",
-        }),
-      );
-      liveSurfaces = [makeSurface("surface:dead")];
-      await engine.getRegistry().reconstitute();
+    it("persists the observer captured when creating a crash recovery surface", async () => {
+      engine.dispose();
+      const createdObserverId = "cmux:/tmp/created-owner.sock";
+      let currentObserverId = createdObserverId;
+      let persistedDuringLaunch: AgentRecord | null = null;
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => currentObserverId,
+        observerEpochProvider: () => "stable-observer-epoch",
+      });
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        beforeCrashRecoveryMutation: async (input) => {
+          if (input.phase === "resume") {
+            currentObserverId = "cmux:/tmp/foreign-owner.sock";
+          }
+        },
+        launchCommandSender: async () => {
+          persistedDuringLaunch = engine.getAgentState(
+            "agent-crash-captured-owner",
+          );
+        },
+      });
+      const record = makeRecord({
+        agent_id: "agent-crash-captured-owner",
+        state: "error",
+        surface_id: "surface:dead-owner",
+        surface_uuid: "uuid-dead-owner",
+        surface_observer_id: createdObserverId,
+        workspace_id: "ws:1",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        crash_recover: true,
+        error: "Surface surface:dead-owner disappeared",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:witness"),
+          id: "uuid-witness",
+          workspace_ref: "workspace:witness",
+        },
+      ];
+      await registry.reconstitute();
 
-      liveSurfaces = [makeSurface("surface:other")];
-      await runConfirmedSurfaceAbsenceSweep();
+      await engine.runSweep();
+
+      expect(currentObserverId).toBe("cmux:/tmp/foreign-owner.sock");
+      expect(persistedDuringLaunch).toMatchObject({
+        state: "booting",
+        surface_id: "surface:new",
+        surface_observer_id: createdObserverId,
+      });
+      expect(engine.getAgentState(record.agent_id)).toMatchObject({
+        state: "booting",
+        surface_observer_id: createdObserverId,
+      });
+    });
+
+    it("sends crash recovery resume commands to the actual cmux workspace on placement mismatch", async () => {
+      engine.dispose();
+      const observerId = "cmux:/tmp/recovery-owner.sock";
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => observerId,
+        observerEpochProvider: () => `${observerId}@socket:1`,
+      });
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:new"),
+              id: SPAWN_SURFACE_UUID,
+              workspace_ref: "workspace:wrong",
+            },
+          ];
+          return {
+            workspace: "workspace:wrong",
+            surface: "surface:new",
+            surface_id: SPAWN_SURFACE_UUID,
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          } satisfies CmuxNewSplitResult;
+        },
+      );
+      const record = makeRecord({
+        agent_id: "agent-crash-mismatch",
+        state: "error",
+        surface_id: "surface:dead",
+        surface_uuid: "uuid-dead",
+        surface_observer_id: observerId,
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        crash_recover: true,
+        workspace_id: "workspace:intended",
+        error: "Surface surface:dead disappeared",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:witness"),
+          id: "uuid-witness",
+          workspace_ref: "workspace:witness",
+        },
+      ];
+      await registry.reconstitute();
+
+      await engine.runSweep();
 
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
         "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-        { workspace: "workspace:wrong" },
+        expect.objectContaining({ workspace: "workspace:wrong" }),
       );
       expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
         workspace: "workspace:wrong",
+        stableSurfaceIdentity: SPAWN_SURFACE_UUID,
       });
       expect(engine.getAgentState("agent-crash-mismatch")?.workspace_id).toBe(
-        "workspace:intended",
+        "workspace:wrong",
+      );
+      expect(engine.getAgentState("agent-crash-mismatch")?.state).toBe(
+        "booting",
       );
     });
 

@@ -518,6 +518,10 @@ export class CmuxLayerDaemon {
           enableClaudeChannels: this.opts.enableClaudeChannels,
           spawnPreflight: this.opts.spawnPreflight,
           disableSpawnPreflight: this.opts.disableSpawnPreflight,
+          surfaceObserverOwnerIdProvider:
+            this.opts.surfaceObserverOwnerIdProvider,
+          surfaceObserverEpochProvider:
+            this.opts.surfaceObserverEpochProvider,
         });
         return this.context;
       })();

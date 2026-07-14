@@ -509,6 +509,34 @@ describe("CmuxLayerDaemon", () => {
     expect(daemonExitCode("SIGTERM", forced)).toBe(1);
   });
 
+  it("forwards custom surface observer providers into its lazy context", async () => {
+    const ownerId = "cmux:/tmp/custom-owner.sock#socket=7:8:9:10";
+    const observerEpoch = `${ownerId}@socket:11`;
+    const client = {
+      ...createPlacementClient([]),
+      currentSocketPath: vi.fn().mockReturnValue(" "),
+    };
+    const daemon = new CmuxLayerDaemon({
+      client: client as any,
+      stateDir: stateDir("custom-observer-provider-state"),
+      skipAgentLifecycle: true,
+      surfaceObserverOwnerIdProvider: () => ownerId,
+      surfaceObserverEpochProvider: () => observerEpoch,
+    });
+
+    const context = await (
+      daemon as unknown as {
+        getContext(): Promise<
+          ReturnType<typeof createProductionServerContext>
+        >;
+      }
+    ).getContext();
+
+    expect(context.surfaceObserverId).toBe(ownerId);
+    expect(context.surfaceObserverEpoch).toBe(observerEpoch);
+    context.dispose();
+  });
+
   it("retires exactly once when the installed build becomes stale", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("stale-retire");
