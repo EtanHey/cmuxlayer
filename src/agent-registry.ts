@@ -35,6 +35,8 @@ import {
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
+export const SURFACE_EVICTION_CONFIRMATION_MS = 5_000;
+
 export interface AgentFilter {
   state?: AgentState;
   repo?: string;
@@ -353,6 +355,10 @@ class AgentNotFoundError extends Error {
 export class AgentRegistry {
   private agents = new Map<string, AgentRecord>();
   private aliases = new Map<string, string>();
+  private surfacelessObservations = new Map<
+    string,
+    { surfaceId: string; firstObservedAt: number }
+  >();
   private stateMgr: StateManager;
   private surfaceProvider: SurfaceProvider;
 
@@ -365,23 +371,24 @@ export class AgentRegistry {
    * Load all agent state from disk and cross-check against live surfaces.
    * Call once on startup.
    */
-  async reconstitute(): Promise<void> {
+  async reconstitute(): Promise<Set<string>> {
     this.agents.clear();
     this.aliases.clear();
+    this.surfacelessObservations.clear();
 
     const stateFiles = this.stateMgr.listStates();
     for (const record of stateFiles) {
       this.agents.set(record.agent_id, record);
     }
 
-    await this.reconcileSurfaces();
+    return this.reconcileSurfaces();
   }
 
   /**
    * Periodic reconciliation: cross-check in-memory state against
    * actual cmux surfaces and state files on disk.
    */
-  async reconcile(): Promise<void> {
+  async reconcile(): Promise<Set<string>> {
     // Pick up new state files created by other processes
     const onDisk = this.stateMgr.listStates();
     for (const record of onDisk) {
@@ -391,25 +398,26 @@ export class AgentRegistry {
       }
     }
 
-    await this.reconcileSurfaces();
+    return this.reconcileSurfaces();
   }
 
-  private async reconcileSurfaces(): Promise<void> {
+  private async reconcileSurfaces(): Promise<Set<string>> {
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
     } catch {
       // Treat enumeration failures as "unknown", not "zero surfaces". A transient
       // socket/listing failure must not mark every active agent as disappeared.
-      return;
+      return new Set();
     }
     if (surfaces.length === 0) {
       // An empty topology is indistinguishable from a degraded cmux/app-server
       // listing path. Do not mass-mark agents dead until a non-empty scan proves
       // their specific surfaces are absent.
-      return;
+      return new Set();
     }
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
 
     // Phase 1: Mark agents with disappeared surfaces as error
     const crashedIds = new Set<string>();
@@ -453,6 +461,7 @@ export class AgentRegistry {
         }
       }
     }
+    return crashedIds;
   }
 
   private resolveAlias(agentId: string): string {
@@ -483,6 +492,7 @@ export class AgentRegistry {
     const resolved = this.resolveAlias(agentId);
     const aliases = this.aliasesResolvingTo(resolved);
     this.agents.delete(resolved);
+    this.surfacelessObservations.delete(resolved);
     this.aliases.delete(agentId);
     this.aliases.delete(resolved);
     for (const alias of aliases) {
@@ -969,6 +979,11 @@ export class AgentRegistry {
 
   rename(oldAgentId: string, newAgentId: string, record: AgentRecord): void {
     this.agents.delete(oldAgentId);
+    const surfacelessObservation = this.surfacelessObservations.get(oldAgentId);
+    this.surfacelessObservations.delete(oldAgentId);
+    if (surfacelessObservation?.surfaceId === record.surface_id) {
+      this.surfacelessObservations.set(newAgentId, surfacelessObservation);
+    }
     for (const [alias, target] of this.aliases) {
       if (target === oldAgentId) {
         this.aliases.set(alias, newAgentId);
@@ -998,7 +1013,12 @@ export class AgentRegistry {
     return removedAgentId;
   }
 
-  async evictSurfaceless(): Promise<string[]> {
+  async evictSurfaceless(
+    opts: {
+      confirmationMs?: number;
+      now?: number;
+    } = {},
+  ): Promise<string[]> {
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
@@ -1010,13 +1030,14 @@ export class AgentRegistry {
     }
 
     const liveSurfaceRefs = new Set(surfaces.map((surface) => surface.ref));
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
     const evicted: string[] = [];
 
     for (const [id, agent] of [...this.agents.entries()]) {
-      if (isCrashRecoveryEligible(agent)) {
+      if (!this.isSurfacelessConfirmed(agent, liveSurfaceRefs, opts)) {
         continue;
       }
-      if (liveSurfaceRefs.has(agent.surface_id)) {
+      if (isCrashRecoveryEligible(agent)) {
         continue;
       }
 
@@ -1027,6 +1048,44 @@ export class AgentRegistry {
     }
 
     return evicted;
+  }
+
+  private isSurfacelessConfirmed(
+    agent: AgentRecord,
+    liveSurfaceRefs: ReadonlySet<string>,
+    opts: { confirmationMs?: number; now?: number },
+  ): boolean {
+    if (liveSurfaceRefs.has(agent.surface_id)) {
+      this.surfacelessObservations.delete(agent.agent_id);
+      return false;
+    }
+
+    const confirmationMs = Math.max(0, opts.confirmationMs ?? 0);
+    if (confirmationMs === 0) {
+      return true;
+    }
+
+    const now = opts.now ?? Date.now();
+    const observation = this.surfacelessObservations.get(agent.agent_id);
+    if (!observation || observation.surfaceId !== agent.surface_id) {
+      this.surfacelessObservations.set(agent.agent_id, {
+        surfaceId: agent.surface_id,
+        firstObservedAt: now,
+      });
+      return false;
+    }
+
+    return now - observation.firstObservedAt >= confirmationMs;
+  }
+
+  private clearSurfacelessObservationsForLiveSurfaces(
+    liveSurfaceRefs: ReadonlySet<string>,
+  ): void {
+    for (const [agentId, observation] of this.surfacelessObservations) {
+      if (liveSurfaceRefs.has(observation.surfaceId)) {
+        this.surfacelessObservations.delete(agentId);
+      }
+    }
   }
 
   repairFromDiscovery(
@@ -1369,23 +1428,29 @@ export class AgentRegistry {
   }
 
   /**
-   * Startup purge: remove ALL terminal-state agents (done/error) unconditionally.
+   * Startup purge: remove terminal-state agents (done/error) without checking
+   * whether their old surface ref was recycled into the new cmux session.
    * Called after reconstitute() to clear stale entries from previous cmux sessions.
    *
    * More aggressive than purgeTerminal() because it doesn't check surface existence:
    * after cmux restart, surface refs get recycled (surface:3 in a new session
    * ≠ surface:3 from before), so a live surface ref doesn't mean the agent is alive.
    *
-   * Non-terminal agents with dead surfaces are already handled by reconcileSurfaces()
-   * (marked as error during reconstitute), then caught here as terminal.
+   * Callers can retain errors created by surfaceless reconciliation so those
+   * ambiguous topology misses still pass through the normal confirmation gate.
    *
    * Returns purged agent records for sidebar cleanup.
    */
-  purgeAllTerminal(): AgentRecord[] {
+  purgeAllTerminal(
+    opts: { retainAgentIds?: ReadonlySet<string> } = {},
+  ): AgentRecord[] {
     const purgedAgents: AgentRecord[] = [];
 
     for (const [id, agent] of this.agents) {
       if (shouldRetainCrashRecoveryError(agent)) {
+        continue;
+      }
+      if (opts.retainAgentIds?.has(agent.agent_id)) {
         continue;
       }
       if (TERMINAL_STATES.has(agent.state)) {
@@ -1403,7 +1468,9 @@ export class AgentRegistry {
    * Used by the periodic sweep — less aggressive than purgeStale().
    * Agents whose surface is still alive are kept (user may want to inspect output).
    */
-  async purgeTerminal(): Promise<number> {
+  async purgeTerminal(
+    opts: { confirmationMs?: number; now?: number } = {},
+  ): Promise<number> {
     let surfaces: CmuxSurface[];
     try {
       surfaces = await this.surfaceProvider();
@@ -1414,6 +1481,12 @@ export class AgentRegistry {
       return 0;
     }
     const liveSurfaceRefs = new Set(surfaces.map((s) => s.ref));
+    this.clearSurfacelessObservationsForLiveSurfaces(liveSurfaceRefs);
+    const confirmationOpts = {
+      confirmationMs:
+        opts.confirmationMs ?? SURFACE_EVICTION_CONFIRMATION_MS,
+      ...(opts.now === undefined ? {} : { now: opts.now }),
+    };
     let purged = 0;
 
     for (const [id, agent] of this.agents) {
@@ -1425,7 +1498,7 @@ export class AgentRegistry {
       }
       if (
         TERMINAL_STATES.has(agent.state) &&
-        !liveSurfaceRefs.has(agent.surface_id)
+        this.isSurfacelessConfirmed(agent, liveSurfaceRefs, confirmationOpts)
       ) {
         const removedAgentId = this.deleteAgentAndAliases(id);
         this.stateMgr.removeState(removedAgentId);

@@ -14,7 +14,11 @@ import {
   sanitizeRepoName,
   shellQuote,
 } from "./agent-command.js";
-import { AgentRegistry, type AgentFilter } from "./agent-registry.js";
+import {
+  AgentRegistry,
+  SURFACE_EVICTION_CONFIRMATION_MS,
+  type AgentFilter,
+} from "./agent-registry.js";
 import type { AgentDiscovery } from "./agent-discovery.js";
 import { toPublicAgent } from "./agent-facade.js";
 import type {
@@ -2937,13 +2941,17 @@ export class AgentEngine {
 
   /** Whether a startup purge is pending (opt-in via enableStartupPurge) */
   private startupPurgePending = false;
+  private startupPurgeRetainedAgentIds = new Set<string>();
 
   /**
    * Enable startup purge on the next sweep. Call after reconstitute()
    * to clear stale terminal-state agents from previous cmux sessions.
    */
-  enableStartupPurge(): void {
+  enableStartupPurge(
+    opts: { retainAgentIds?: ReadonlySet<string> } = {},
+  ): void {
     this.startupPurgePending = true;
+    this.startupPurgeRetainedAgentIds = new Set(opts.retainAgentIds ?? []);
   }
 
   /**
@@ -2970,8 +2978,8 @@ export class AgentEngine {
     } catch {
       // Discovery and lifecycle startup must not depend on custom UI output.
     }
-    await this.registry.reconstitute();
-    this.enableStartupPurge();
+    const newlySurfacelessAgentIds = await this.registry.reconstitute();
+    this.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
     let discovered: Awaited<ReturnType<AgentDiscovery["scan"]>> | null = null;
     try {
       discovered = await discovery.scan(true);
@@ -2992,7 +3000,10 @@ export class AgentEngine {
   private async purgeStartupTerminalAgents(): Promise<void> {
     if (!this.startupPurgePending) return;
     this.startupPurgePending = false;
-    const purgedIds = this.registry.purgeAllTerminal();
+    const purgedIds = this.registry.purgeAllTerminal({
+      retainAgentIds: this.startupPurgeRetainedAgentIds,
+    });
+    this.startupPurgeRetainedAgentIds.clear();
     try {
       await this.client.clearProgress();
     } catch {
@@ -3011,9 +3022,9 @@ export class AgentEngine {
 
   /**
    * Public sweep: reconcile registry, purge dead entries, then sync sidebar.
-   * If enableStartupPurge() was called, the first sweep also purges all
-   * terminal-state agents unconditionally — these are stale entries from
-   * previous cmux sessions whose surface refs may have been recycled.
+   * If enableStartupPurge() was called, the first sweep also purges terminal
+   * records carried over from the previous cmux session while retaining any
+   * records that this startup's own topology scan just marked surfaceless.
    */
   async runLifecycleMutation<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.lifecycleMutationTail;
@@ -3036,11 +3047,21 @@ export class AgentEngine {
   private async runSweepOnce(): Promise<void> {
     this.currentSweepScreenSignatures = new Map();
     await this.registry.reconcile();
+    // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
+    // but require one confirmation window after the surface is first observed
+    // absent. The same gate also applies to terminal worker cleanup below.
+    // This absorbs cmux's short post-create topology lag without retaining old
+    // ghosts indefinitely. Empty or failed enumeration remains inconclusive.
+    const surfacelessConfirmation = {
+      confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+      now: Date.now(),
+    };
+    await this.registry.evictSurfaceless(surfacelessConfirmation);
     await this.recoverCrashedAgents();
 
     await this.purgeStartupTerminalAgents();
 
-    await this.registry.purgeTerminal();
+    await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
     this.runCloseForensicsBestEffort();
     await this.syncSidebar();

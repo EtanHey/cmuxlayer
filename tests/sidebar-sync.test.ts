@@ -466,6 +466,198 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
+  it("auto-evicts a registry ghost on the next authoritative normal sweep", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T05:00:00.000Z"));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "ghost-voicelayer-codex",
+        surface_id: "surface:ghost",
+        workspace_id: "workspace:voice",
+        repo: "voicelayer",
+        cli: "codex",
+        launcher_name: "voicelayerCodex",
+        role: "orchestrator",
+        crash_recover: false,
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:notes")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:notes")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:notes",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:notes"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      pane_ref: "pane:notes",
+      surfaces: liveSurfaces,
+    });
+    const newlySurfacelessAgentIds =
+      await engine.getRegistry().reconstitute();
+    engine.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("ghost-voicelayer-codex")).toMatchObject({
+      state: "error",
+      error: "Surface surface:ghost disappeared",
+    });
+    expect(
+      publishedFleetPublications
+        .at(-1)
+        ?.snapshot.lanes.flatMap((lane) => lane.seats)
+        .map((seat) => seat.surfaceRef),
+    ).not.toContain("surface:ghost");
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await engine.runSweep();
+
+    expect(engine.getAgentState("ghost-voicelayer-codex")).toBeNull();
+  });
+
+  it("does not let terminal worker cleanup bypass the sweep confirmation window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T05:00:00.000Z"));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "ghost-worker",
+        surface_id: "surface:ghost-worker",
+        workspace_id: "workspace:workers",
+        role: "worker",
+        crash_recover: false,
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:notes")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:notes")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:notes",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:notes"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      pane_ref: "pane:notes",
+      surfaces: liveSurfaces,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("ghost-worker")).toMatchObject({
+      state: "error",
+      error: "Surface surface:ghost-worker disappeared",
+    });
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await engine.runSweep();
+
+    expect(engine.getAgentState("ghost-worker")).toBeNull();
+  });
+
+  it("requires observed absence instead of using generic terminal record age", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T05:00:00.000Z"));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "old-terminal-lead",
+        surface_id: "surface:old-terminal-lead",
+        workspace_id: "workspace:lead",
+        state: "done",
+        role: "orchestrator",
+        updated_at: "2026-07-01T00:00:00.000Z",
+        crash_recover: false,
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:notes")];
+    mockClient.listWorkspaces.mockResolvedValue({
+      workspaces: [makeWorkspace("workspace:notes")],
+    });
+    mockClient.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      panes: [
+        {
+          ref: "pane:notes",
+          index: 0,
+          focused: true,
+          surface_count: 1,
+          surface_refs: ["surface:notes"],
+        },
+      ],
+    });
+    mockClient.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:notes",
+      window_ref: "window:1",
+      pane_ref: "pane:notes",
+      surfaces: liveSurfaces,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("old-terminal-lead")).toMatchObject({
+      state: "done",
+      updated_at: "2026-07-01T00:00:00.000Z",
+    });
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await engine.runSweep();
+
+    expect(engine.getAgentState("old-terminal-lead")).toBeNull();
+  });
+
+  it("keeps registry seats when a normal sweep sees only a transient empty topology", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "possibly-live-voicelayer-codex",
+        surface_id: "surface:possibly-live",
+        workspace_id: "workspace:voice",
+        repo: "voicelayer",
+        cli: "codex",
+        launcher_name: "voicelayerCodex",
+        role: "orchestrator",
+        crash_recover: false,
+      }),
+    );
+    liveSurfaces = [];
+    mockClient.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("possibly-live-voicelayer-codex")).toMatchObject({
+      surface_id: "surface:possibly-live",
+      state: "working",
+    });
+    expect(publishedFleetPublications.at(-1)).toMatchObject({
+      state: "unknown",
+      observedLiveSurfaceRefs: [],
+    });
+  });
+
   it("publishes authoritative empty when only unrelated terminals remain", async () => {
     liveSurfaces = [makeSurface("surface:notes")];
     mockClient.listWorkspaces.mockResolvedValue({
@@ -709,6 +901,29 @@ describe("Sidebar Sync", () => {
       "stale-done-agent",
       expect.any(String),
       expect.any(Object),
+    );
+  });
+
+  it("purges a preexisting surfaceless error when its ref is recycled at startup", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "stale-surface-error",
+        state: "error",
+        error: "Surface surface:recycled disappeared",
+        surface_id: "surface:recycled",
+        workspace_id: "workspace:previous-session",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:recycled")];
+    await engine.getRegistry().reconstitute();
+    engine.enableStartupPurge();
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("stale-surface-error")).toBeNull();
+    expect(mockClient.clearStatus).toHaveBeenCalledWith(
+      "stale-surface-error",
+      { workspace: "workspace:previous-session" },
     );
   });
 
