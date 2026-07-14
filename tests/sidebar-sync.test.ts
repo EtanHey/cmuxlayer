@@ -229,6 +229,7 @@ describe("Sidebar Sync", () => {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts,
+      sessionIdentityResolver: () => null,
       fleetSidebarPublisher: {
         publish: (publication) => {
           if (!("snapshot" in publication)) {
