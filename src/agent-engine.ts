@@ -44,9 +44,11 @@ import {
   type AgentRole,
   type AgentState,
   type CliType,
+  type CloseForensicsEvent,
   type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
+import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import { cleanScreenText, parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
@@ -314,13 +316,15 @@ export interface AgentEngineOptions {
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
   /**
-   * Best-effort close-forensics ingest, run at the tail of each sweep. It reads
-   * cmux's OWN event stream (`~/.cmuxterm/events.jsonl`) and attributes
-   * app-level `tab_close` deaths that never went through an MCP tool. Defaults
-   * to DISABLED (`null`) so bare construction never reads the real cmux file;
-   * production entrypoints inject the runner. Pass an explicit runner in tests.
+   * Best-effort close-forensics ingest, run before absence reconciliation so a
+   * cmux UI `tab_close` can make the matching managed agent terminal before
+   * crash recovery evaluates it. Defaults to DISABLED (`null`) so bare
+   * construction never reads the real cmux file; production entrypoints inject
+   * the runner. Pass an explicit runner in tests.
    */
-  closeForensicsRunner?: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
+  closeForensicsRunner?: (() =>
+    | CloseForensicsSweepResult
+    | Promise<CloseForensicsSweepResult>) | null;
   /**
    * Receives the reconciled registry, topology, health, and screen evidence.
    * Defaults to a NO-OP so bare engines never write operator configuration.
@@ -773,7 +777,9 @@ export class AgentEngine {
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
   /** Best-effort close-forensics ingest; null when disabled. */
-  private closeForensicsRunner: (() => { emitted: number } | Promise<{ emitted: number }>) | null;
+  private closeForensicsRunner: (() =>
+    | CloseForensicsSweepResult
+    | Promise<CloseForensicsSweepResult>) | null;
   private closeForensicsSweepInFlight = false;
   private fleetSidebarPublisher: FleetSidebarPublisherLike;
   private fleetWorkingNoProgressTimeoutMs: number;
@@ -3687,6 +3693,7 @@ export class AgentEngine {
 
   private async runSweepOnce(): Promise<void> {
     this.currentSweepScreenSignatures = new Map();
+    await this.runCloseForensicsBestEffort();
     // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
     // but require one confirmation window after the surface is first observed
     // absent. The same gate also applies to terminal worker cleanup below.
@@ -3704,37 +3711,65 @@ export class AgentEngine {
 
     await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
-    this.runCloseForensicsBestEffort();
     await this.syncSidebar();
     await this.drainOutboxBestEffort();
   }
 
   /**
-   * Ingest cmux's own app-level close events at the tail of a sweep and attribute
-   * them (see close-forensics.ts). Fully best-effort: the runner is self-guarding
-   * and never throws, and an in-flight guard prevents overlap if a sweep runs
-   * long. Forensics must never break lifecycle reconciliation.
+   * Ingest cmux's own app-level close events before lifecycle reconciliation.
+   * A `tab_close` or `workspace_teardown` carries the operator intent that a
+   * matching managed surface is terminal; persist that intent before absence
+   * can become a recoverable crash. Forensics remains best-effort and never
+   * breaks the sweep.
    */
-  private runCloseForensicsBestEffort(): void {
+  private async runCloseForensicsBestEffort(): Promise<void> {
     if (!this.closeForensicsRunner) return;
     if (this.closeForensicsSweepInFlight) return;
     this.closeForensicsSweepInFlight = true;
     try {
-      const result = this.closeForensicsRunner();
-      if (result && typeof (result as Promise<unknown>).then === "function") {
-        void (result as Promise<unknown>)
-          .catch(() => {
-            // Never break the sweep on a forensics failure; it retries next sweep.
-          })
-          .finally(() => {
-            this.closeForensicsSweepInFlight = false;
-          });
-        return;
-      }
+      const result = await this.closeForensicsRunner();
+      this.markIntentionalSurfaceCloses(result.events);
     } catch {
       // Never break the sweep on a forensics failure; it retries next sweep.
+    } finally {
+      this.closeForensicsSweepInFlight = false;
     }
-    this.closeForensicsSweepInFlight = false;
+  }
+
+  private markIntentionalSurfaceCloses(
+    events: CloseForensicsEvent[],
+  ): void {
+    const closedSurfaceUuids = new Set(
+      events
+        .filter(
+          (event) =>
+            (event.origin === "tab_close" ||
+              event.origin === "workspace_teardown") &&
+            typeof event.cmux_surface_id === "string",
+        )
+        .map((event) => event.cmux_surface_id!.toLowerCase()),
+    );
+    if (closedSurfaceUuids.size === 0) return;
+
+    for (const agent of this.registry.list()) {
+      const surfaceUuid = agent.surface_uuid?.toLowerCase();
+      if (
+        !surfaceUuid ||
+        !closedSurfaceUuids.has(surfaceUuid) ||
+        agent.user_killed === true
+      ) {
+        continue;
+      }
+      try {
+        const terminal = this.stateMgr.updateRecord(agent.agent_id, {
+          user_killed: true,
+        });
+        this.registry.set(agent.agent_id, terminal);
+      } catch {
+        // A concurrently removed record cannot be recovered, so no suppression
+        // is needed. Preserve best-effort lifecycle reconciliation.
+      }
+    }
   }
 
   private async sweepMonitorRegistryBestEffort(): Promise<void> {

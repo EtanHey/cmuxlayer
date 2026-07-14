@@ -9732,6 +9732,280 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface makes a forced managed-agent close terminal for crash recovery", async () => {
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-crash-recovery-terminal",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    const stableSurfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    stateMgr.writeState({
+      agent_id: "worker-crash-recoverable",
+      surface_id: "surface:worker-crash-recoverable",
+      surface_uuid: stableSurfaceUuid,
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      task_summary: "mid task",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: true,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({ caller: {} }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:1", title: "workspace" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:worker-crash-recoverable",
+            id: stableSurfaceUuid,
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-crash-recoverable", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalled();
+    expect(stateMgr.readState("worker-crash-recoverable")).toMatchObject({
+      user_killed: true,
+      crash_recover: true,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface does not make a stale UUID owner terminal when its ref was recycled", async () => {
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-recycled-ref-terminal",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-stale-ref-owner",
+      surface_id: "surface:recycled-worker",
+      surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      task_summary: "recover the original worker",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: true,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+    stateMgr.writeState({
+      ...stateMgr.readState("worker-stale-ref-owner")!,
+      agent_id: "worker-legacy-stale-ref-owner",
+      surface_uuid: undefined,
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f5f",
+      version: 1,
+      user_killed: false,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({ caller: {} }),
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [{ ref: "workspace:1", title: "workspace" }],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [{ ref: "pane:1" }],
+      }),
+      listPaneSurfaces: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ref: "surface:recycled-worker",
+            id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            type: "terminal",
+            index: 0,
+            selected: true,
+          },
+        ],
+      }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:recycled-worker", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalled();
+    expect(stateMgr.readState("worker-stale-ref-owner")).toMatchObject({
+      user_killed: false,
+      crash_recover: true,
+    });
+    expect(stateMgr.readState("worker-legacy-stale-ref-owner")).toMatchObject({
+      user_killed: false,
+      crash_recover: true,
+    });
+
+    const degradedRecord = stateMgr.readState("worker-stale-ref-owner")!;
+    stateMgr.writeState({
+      ...degradedRecord,
+      agent_id: "worker-degraded-ref-owner",
+      surface_id: "surface:degraded-worker",
+      surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
+      version: 1,
+      user_killed: false,
+    });
+    mockClient.listWorkspaces.mockRejectedValueOnce(
+      new Error("surface enumeration unavailable"),
+    );
+
+    const degradedResult = await tool.handler(
+      { surface: "surface:degraded-worker", force: true },
+      {} as any,
+    );
+
+    expect(degradedResult.isError).not.toBe(true);
+    expect(stateMgr.readState("worker-degraded-ref-owner")).toMatchObject({
+      user_killed: true,
+      crash_recover: true,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("close_surface ignores only a matching agent eviction after the surface closes", async () => {
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-concurrent-agent-eviction",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-concurrently-evicted",
+      surface_id: "surface:worker-concurrently-evicted",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      task_summary: "being evicted",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: true,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({ caller: {} }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+    const updateSpy = vi
+      .spyOn(StateManager.prototype, "updateRecord")
+      .mockImplementationOnce(() => {
+        throw new Error("Agent not found: worker-concurrently-evicted");
+      });
+
+    try {
+      const result = await tool.handler(
+        { surface: "surface:worker-concurrently-evicted", force: true },
+        {} as any,
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(mockClient.closeSurface).toHaveBeenCalled();
+
+      updateSpy.mockImplementationOnce(() => {
+        throw new Error("state disk write failed");
+      });
+      const unexpectedFailure = await tool.handler(
+        { surface: "surface:worker-concurrently-evicted", force: true },
+        {} as any,
+      );
+      expect(unexpectedFailure.isError).toBe(true);
+      expect(unexpectedFailure.structuredContent?.error).toContain(
+        "state disk write failed",
+      );
+    } finally {
+      updateSpy.mockRestore();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("close_surface logs a durable close entry with caller, force, and target", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-close-surface-eventlog");
     rmSync(stateDir, { recursive: true, force: true });

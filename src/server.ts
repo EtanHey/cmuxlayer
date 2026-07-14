@@ -6812,10 +6812,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         const collapsePane = closePolicy?.collapsePane ?? false;
+        const observedSurface = await findSurfaceByRef(
+          args.surface,
+          args.workspace,
+        );
+        const requestedSurfaceKey = args.surface.toLowerCase();
+        const observedSurfaceUuid = observedSurface?.id?.toLowerCase();
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
           collapsePane,
         });
+        for (const record of stateMgr.listStates()) {
+          // Stable identity wins whenever cmux exposes it. On a ref-only or
+          // unavailable observation, preserve the explicit close intent by
+          // falling back to the mutable ref instead of treating it as a crash.
+          const matchesClosedSurface = record.surface_uuid
+            ? record.surface_uuid.toLowerCase() === requestedSurfaceKey ||
+              record.surface_uuid.toLowerCase() === observedSurfaceUuid ||
+              (observedSurfaceUuid === undefined &&
+                record.surface_id === args.surface)
+            : observedSurfaceUuid === undefined &&
+              record.surface_id === args.surface;
+          if (!matchesClosedSurface) {
+            continue;
+          }
+          try {
+            const terminal = stateMgr.updateRecord(record.agent_id, {
+              user_killed: true,
+            });
+            context.lifecycleRegistry?.set(record.agent_id, terminal);
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === `Agent not found: ${record.agent_id}`
+            ) {
+              continue;
+            }
+            throw error;
+          }
+        }
         appendCloseEvent({
           event: "close_surface",
           target: args.surface,
