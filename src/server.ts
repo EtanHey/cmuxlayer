@@ -6812,21 +6812,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         const collapsePane = closePolicy?.collapsePane ?? false;
+        const observedSurface = await findSurfaceByRef(
+          args.surface,
+          args.workspace,
+        );
+        const requestedSurfaceKey = args.surface.toLowerCase();
+        const observedSurfaceUuid = observedSurface?.id?.toLowerCase();
         await client.closeSurface(args.surface, {
           workspace: args.workspace,
           collapsePane,
         });
         for (const record of stateMgr.listStates()) {
-          if (
-            record.surface_id !== args.surface &&
-            record.surface_uuid !== args.surface
-          ) {
+          const matchesClosedSurface = record.surface_uuid
+            ? record.surface_uuid.toLowerCase() === requestedSurfaceKey ||
+              record.surface_uuid.toLowerCase() === observedSurfaceUuid
+            : record.surface_id === args.surface;
+          if (!matchesClosedSurface) {
             continue;
           }
-          const terminal = stateMgr.updateRecord(record.agent_id, {
-            user_killed: true,
-          });
-          context.lifecycleRegistry?.set(record.agent_id, terminal);
+          try {
+            const terminal = stateMgr.updateRecord(record.agent_id, {
+              user_killed: true,
+            });
+            context.lifecycleRegistry?.set(record.agent_id, terminal);
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              error.message === `Agent not found: ${record.agent_id}`
+            ) {
+              continue;
+            }
+            throw error;
+          }
         }
         appendCloseEvent({
           event: "close_surface",
