@@ -51,6 +51,7 @@
     "proxy": "node dist/proxy.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:topology": "vitest run tests/topology-contract.test.ts",
     "test:contract": "bun run build && tsx scripts/run-real-cmux-contract.ts",
     "pre-pr": "bun run typecheck && bun run pre-pr:harness",
     "pre-pr:harness": "vitest run tests/live-agent-harness.test.ts tests/live-agent-harness-ci.test.ts tests/live-agent-harness-replay.test.ts tests/pre-pr-scripts.test.ts",
