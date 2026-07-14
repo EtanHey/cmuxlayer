@@ -306,7 +306,13 @@ describe("topology contract: authoritative ghost eviction", () => {
       surface_id: "surface:ghost",
     });
 
-    vi.setSystemTime(new Date("2026-07-14T09:00:02.000Z"));
+    vi.setSystemTime(
+      new Date(
+        Date.parse("2026-07-14T09:00:01.000Z") +
+          SURFACE_EVICTION_CONFIRMATION_MS +
+          1,
+      ),
+    );
     fixture.setTopology([surface("surface:notes", "notes")]);
     await fixture.engine.runSweep();
     expect(fixture.engine.getAgentState("ghost-agent")).toMatchObject({
@@ -314,7 +320,7 @@ describe("topology contract: authoritative ghost eviction", () => {
       error: "Surface surface:ghost disappeared",
     });
 
-    vi.setSystemTime(new Date("2026-07-14T09:00:03.000Z"));
+    vi.setSystemTime(new Date("2026-07-14T09:00:07.000Z"));
     fixture.setTopology([
       surface("surface:ghost"),
       surface("surface:notes", "notes"),
