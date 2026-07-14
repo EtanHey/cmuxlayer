@@ -65,6 +65,18 @@ describe("fleet-sidebar CLI fallback", () => {
     expect(store.read()).toEqual({ skillCreator: true });
   });
 
+  it("expands and collapses the mm lane", () => {
+    const { store, sidebarPath } = fixture();
+
+    expect(
+      runFleetSidebarCommand(["expand", "mm"], { store, sidebarPath }),
+    ).toEqual({ ok: true, message: "mm lane expanded" });
+    expect(
+      runFleetSidebarCommand(["collapse", "mm"], { store, sidebarPath }),
+    ).toEqual({ ok: true, message: "mm lane collapsed" });
+    expect(store.read()).toEqual({ mm: true });
+  });
+
   it("toggles from the currently rendered state when no preference exists", () => {
     const { store, sidebarPath } = fixture();
     writeFileSync(

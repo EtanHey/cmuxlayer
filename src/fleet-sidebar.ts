@@ -17,7 +17,7 @@ import {
   type AgentHealthIssueSeverity,
   type AgentHealthStatus,
 } from "./agent-health.js";
-import type { AgentRole } from "./agent-types.js";
+import type { AgentRole, CliType } from "./agent-types.js";
 import type { ParsedScreenStatus } from "./types.js";
 
 export type FleetScreenState = "working" | "idle" | "stalled";
@@ -27,10 +27,12 @@ export type FleetLaneKey =
   | "voicelayer"
   | "skillCreator"
   | "cmuxlayer"
+  | "mm"
   | "other";
 
 export interface FleetSidebarCandidate {
   agentId: string;
+  agentType: CliType;
   /** Stable cmux UUID. Absent only for legacy/ref-only compatibility. */
   surfaceUuid?: string;
   surfaceRef: string;
@@ -57,8 +59,11 @@ export interface FleetSidebarCandidate {
 
 export interface FleetSidebarSeat {
   agentId: string;
+  agentType: CliType;
   /** Stable focus and deduplication handle (ref fallback for legacy clients). */
   surfaceUuid: string;
+  /** Resolved stable UUID only; null for legacy/ref-only compatibility. */
+  resolvedSurfaceUuid: string | null;
   surfaceRef: string;
   name: string;
   lane: FleetLaneKey;
@@ -112,6 +117,7 @@ const LANE_ORDER: FleetLaneKey[] = [
   "voicelayer",
   "skillCreator",
   "cmuxlayer",
+  "mm",
   "other",
 ];
 
@@ -126,6 +132,7 @@ const LANE_LABELS: Record<FleetLaneKey, string> = {
   voicelayer: "voicelayer",
   skillCreator: "skillCreator",
   cmuxlayer: "cmuxlayer",
+  mm: "mm",
   other: "other",
 };
 
@@ -153,15 +160,27 @@ function normalizedIdentity(value: string | null | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function isMmIdentity(value: string | null | undefined): boolean {
+  const identity = value?.trim().toLowerCase();
+  if (!identity) return false;
+  return (
+    /^(?:mm|mm(?:claude|codex|gemini|cursor|kiro))(?:$|[^a-z0-9])/.test(
+      identity,
+    ) || /(?:^|[/\\])mm(?:\.wt)?(?:[/\\]|$)/.test(identity)
+  );
+}
+
 function inferLane(candidate: FleetSidebarCandidate): FleetLaneKey {
-  const identities = [
+  const rawIdentities = [
     candidate.seatLane,
     candidate.repo,
     candidate.seatId,
     candidate.launcherName,
     candidate.agentId,
     candidate.surfaceTitle,
-  ].map(normalizedIdentity);
+  ];
+  if (rawIdentities.some(isMmIdentity)) return "mm";
+  const identities = rawIdentities.map(normalizedIdentity);
 
   for (const value of identities) {
     if (value.includes("golems")) return "golems";
@@ -249,7 +268,9 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
       : "worker";
   return {
     agentId: candidate.agentId,
+    agentType: candidate.agentType,
     surfaceUuid: candidate.surfaceUuid ?? candidate.surfaceRef,
+    resolvedSurfaceUuid: candidate.surfaceUuid ?? null,
     surfaceRef: candidate.surfaceRef,
     name,
     lane: inferLane(candidate),
@@ -334,6 +355,7 @@ function swiftString(value: string): string {
 function renderSeat(seat: FleetSidebarSeat): string {
   return `    [
       "agentId": ${swiftString(seat.agentId)},
+      "agentType": ${swiftString(seat.agentType)},
       "surfaceUuid": ${swiftString(seat.surfaceUuid)},
       "surfaceRef": ${swiftString(seat.surfaceRef)},
       "name": ${swiftString(seat.name)},
@@ -352,6 +374,8 @@ function renderLeadSummary(lane: FleetSidebarLane): string {
   const lead = lane.seats.find((seat) => seat.role === "lead");
   return `[
       "present": ${lead !== undefined},
+      "agentType": ${swiftString(lead?.agentType ?? "unknown")},
+      "surfaceUuid": ${swiftString(lead?.resolvedSurfaceUuid ?? "")},
       "name": ${swiftString(lead?.name ?? "No lead assigned")},
       "screenState": ${swiftString(lead?.screenState ?? "idle")},
       "status": ${swiftString(lead?.status ?? "— no lead status")},
@@ -378,6 +402,12 @@ const FLEET_SWIFT_HELPERS = `func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> 
   if age < 3600 { return "seat \\(age / 60)m" }
   if age < 86400 { return "seat \\(age / 3600)h" }
   return "seat \\(age / 86400)d"
+}
+
+func fleetAgentTint(_ agentType) -> String {
+  if agentType == "claude" { return "#F59E0B" }
+  if agentType == "codex" { return "#3B82F6" }
+  return "#6B7280"
 }
 
 func fleetState(_ state) -> some View {
@@ -424,13 +454,13 @@ func fleetRow(_ seat) -> some View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .background {
       RoundedRectangle(cornerRadius: 6)
-        .foregroundColor(seat.role == "lead" ? "#3B82F6" : "#6B7280")
+        .foregroundColor(fleetAgentTint(seat.agentType))
         .opacity(seat.role == "lead" ? 0.10 : 0.05)
     }
   }
 }
 
-func fleetLeadSummary(_ lead) -> some View {
+func fleetLeadSummaryContent(_ lead) -> some View {
   HStack(spacing: 4) {
     if lead.present {
       if lead.screenState == "working" {
@@ -467,8 +497,18 @@ func fleetLeadSummary(_ lead) -> some View {
   .padding(4)
   .background {
     RoundedRectangle(cornerRadius: 5)
-      .foregroundColor("#3B82F6")
+      .foregroundColor(fleetAgentTint(lead.agentType))
       .opacity(0.07)
+  }
+}
+
+func fleetLeadSummary(_ lead) -> some View {
+  if lead.present && !lead.surfaceUuid.isEmpty {
+    Button(action: { cmux("surface.focus", surface_id: lead.surfaceUuid) }) {
+      fleetLeadSummaryContent(lead)
+    }
+  } else {
+    fleetLeadSummaryContent(lead)
   }
 }
 

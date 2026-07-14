@@ -3271,7 +3271,8 @@ export class AgentEngine {
       if (!(opts.firstConnect && TERMINAL_STATES.has(state))) {
         fleetCandidates.push({
           agentId: agent.agent_id,
-          surfaceUuid: surfaceBinding.surfaceUuid,
+          agentType: agent.cli,
+          surfaceUuid: observedSurfaceUuid ?? undefined,
           surfaceRef: boundSurfaceRef,
           surfaceTitle:
             surfaceBinding.title ??
