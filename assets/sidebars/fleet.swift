@@ -1,4 +1,4 @@
-// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown
+// cmuxlayer-fleet-state: discovering rendered=0 observed=unknown surfaces=[]
 func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }
@@ -39,6 +39,8 @@ func fleetRow(_ seat) -> some View {
       Text(seat.status)
         .font(.system(size: 10))
         .foregroundColor(seat.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       if seat.healthVisible {
         Text("health: \(seat.health)")
           .font(.system(size: 9))
@@ -55,21 +57,73 @@ func fleetRow(_ seat) -> some View {
   }
 }
 
-func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ seats) -> some View {
-  VStack(alignment: .leading, spacing: 3) {
-    HStack(spacing: 6) {
-      Text(name).font(.system(size: 11)).fontWeight(.semibold)
+func fleetLeadSummary(_ lead) -> some View {
+  HStack(spacing: 4) {
+    if lead.present {
+      if lead.screenState == "working" {
+        Text("●").foregroundColor("#3B82F6")
+      } else {
+        if lead.screenState == "idle" {
+          Text("●").foregroundColor("#6B7280")
+        } else {
+          Text("●").foregroundColor("#EF4444")
+        }
+      }
+      Text("LEAD")
+        .font(.system(size: 8, design: .monospaced))
+        .fontWeight(.semibold)
+        .foregroundColor("#3B82F6")
+      Text(lead.name)
+        .font(.system(size: 9))
+        .fontWeight(.semibold)
+        .lineLimit(1)
+      Text("·").foregroundColor(.tertiary)
+      Text(lead.status)
+        .font(.system(size: 9))
+        .foregroundColor(lead.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       Spacer()
-      Text("\(liveCount) live · \(activeCount) active")
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundColor(.secondary)
-    }
-    .padding(4)
-    if collapsed {
-      Text("\(liveCount) idle seats collapsed")
+    } else {
+      Text("LEAD · not assigned")
         .font(.system(size: 9))
         .foregroundColor(.tertiary)
-        .padding(4)
+      Spacer()
+    }
+  }
+  .padding(4)
+  .background {
+    RoundedRectangle(cornerRadius: 5)
+      .foregroundColor("#3B82F6")
+      .opacity(0.07)
+  }
+}
+
+func fleetLaneHeader(_ name, _ liveCount, _ activeCount, _ collapsed) -> some View {
+  HStack(spacing: 6) {
+    Text(collapsed ? "▸" : "▾")
+      .font(.system(size: 10, design: .monospaced))
+      .foregroundColor(.secondary)
+    Text(name).font(.system(size: 11)).fontWeight(.semibold)
+    Spacer()
+    Text("\(liveCount) live · \(activeCount) active")
+      .font(.system(size: 9, design: .monospaced))
+      .foregroundColor(.secondary)
+  }
+  .padding(4)
+  .accessibilityLabel(collapsed ? "\(name) lane collapsed, \(liveCount) live, \(activeCount) active" : "\(name) lane expanded, \(liveCount) live, \(activeCount) active")
+  .help(collapsed ? "Run cmuxlayer fleet-sidebar expand \(name)" : "Run cmuxlayer fleet-sidebar collapse \(name)")
+}
+
+func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ hiddenSeatCount, _ lead, _ seats) -> some View {
+  VStack(alignment: .leading, spacing: 3) {
+    fleetLaneHeader(name, liveCount, activeCount, collapsed)
+    if collapsed {
+      Text("\(hiddenSeatCount) seats hidden")
+        .font(.system(size: 9))
+        .foregroundColor(.tertiary)
+        .padding(2)
+      fleetLeadSummary(lead)
     } else {
       ForEach(seats) { seat in
         fleetRow(seat)

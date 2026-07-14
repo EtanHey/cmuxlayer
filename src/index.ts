@@ -15,6 +15,7 @@
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
+import { runFleetSidebarCommand } from "./fleet-sidebar-cli.js";
 import { RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
@@ -31,6 +32,11 @@ Usage:
                        standard §0/§1/§3/§6) and exit. Read-only; no mutation.
                        Add --json for machine-readable output. Exits 0 when
                        healthy.
+  cmuxlayer fleet-sidebar <collapse|expand|toggle> <lane>
+                       Persist an independent Fleet lane state. Supported lanes:
+                       orc, golems, voicelayer, skillCreator, cmuxlayer, other.
+  cmuxlayer fleet-sidebar state
+                       Print the persisted per-lane collapse preferences.
 
 Environment:
   CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
@@ -63,6 +69,13 @@ async function main() {
       (json ? renderDoctorJson(report) : renderDoctorText(report)) + "\n",
     );
     process.exitCode = report.healthy ? 0 : 1;
+    return;
+  }
+  if (arg === "fleet-sidebar") {
+    const result = runFleetSidebarCommand(process.argv.slice(3));
+    const stream = result.ok ? process.stdout : process.stderr;
+    stream.write(`${result.message}\n`);
+    process.exitCode = result.ok ? 0 : 1;
     return;
   }
 

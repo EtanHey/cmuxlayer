@@ -2,8 +2,11 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
+  unwatchFile,
+  watchFile,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -93,6 +96,10 @@ export interface FleetSidebarPublication {
   observedLiveSurfaceRefs: string[] | null;
 }
 
+export type FleetSidebarCollapseState = Partial<
+  Record<FleetLaneKey, boolean>
+>;
+
 const LANE_ORDER: FleetLaneKey[] = [
   "orc",
   "golems",
@@ -101,6 +108,11 @@ const LANE_ORDER: FleetLaneKey[] = [
   "cmuxlayer",
   "other",
 ];
+
+const COLLAPSE_LOCK_RETRY_MS = 10;
+const COLLAPSE_LOCK_STALE_MS = 2_000;
+const COLLAPSE_LOCK_TIMEOUT_MS = 5_000;
+const COLLAPSE_LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 const LANE_LABELS: Record<FleetLaneKey, string> = {
   orc: "orc",
@@ -312,6 +324,30 @@ function renderSeat(seat: FleetSidebarSeat): string {
     ]`;
 }
 
+function renderLeadSummary(lane: FleetSidebarLane): string {
+  const lead = lane.seats.find((seat) => seat.role === "lead");
+  return `[
+      "present": ${lead !== undefined},
+      "name": ${swiftString(lead?.name ?? "No lead assigned")},
+      "screenState": ${swiftString(lead?.screenState ?? "idle")},
+      "status": ${swiftString(lead?.status ?? "— no lead status")},
+      "statusMissing": ${lead?.statusMissing ?? true}
+    ]`;
+}
+
+export function applyFleetSidebarCollapseState(
+  snapshot: FleetSidebarSnapshot,
+  state: Readonly<FleetSidebarCollapseState>,
+): FleetSidebarSnapshot {
+  return {
+    ...snapshot,
+    lanes: snapshot.lanes.map((lane) => ({
+      ...lane,
+      collapsed: state[lane.key] ?? lane.collapsed,
+    })),
+  };
+}
+
 const FLEET_SWIFT_HELPERS = `func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   let age = max(0, nowEpoch - createdAtEpoch)
   if age < 60 { return "seat <1m" }
@@ -352,6 +388,8 @@ func fleetRow(_ seat) -> some View {
       Text(seat.status)
         .font(.system(size: 10))
         .foregroundColor(seat.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       if seat.healthVisible {
         Text("health: \\(seat.health)")
           .font(.system(size: 9))
@@ -368,21 +406,73 @@ func fleetRow(_ seat) -> some View {
   }
 }
 
-func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ seats) -> some View {
-  VStack(alignment: .leading, spacing: 3) {
-    HStack(spacing: 6) {
-      Text(name).font(.system(size: 11)).fontWeight(.semibold)
+func fleetLeadSummary(_ lead) -> some View {
+  HStack(spacing: 4) {
+    if lead.present {
+      if lead.screenState == "working" {
+        Text("●").foregroundColor("#3B82F6")
+      } else {
+        if lead.screenState == "idle" {
+          Text("●").foregroundColor("#6B7280")
+        } else {
+          Text("●").foregroundColor("#EF4444")
+        }
+      }
+      Text("LEAD")
+        .font(.system(size: 8, design: .monospaced))
+        .fontWeight(.semibold)
+        .foregroundColor("#3B82F6")
+      Text(lead.name)
+        .font(.system(size: 9))
+        .fontWeight(.semibold)
+        .lineLimit(1)
+      Text("·").foregroundColor(.tertiary)
+      Text(lead.status)
+        .font(.system(size: 9))
+        .foregroundColor(lead.statusMissing ? .tertiary : .secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
       Spacer()
-      Text("\\(liveCount) live · \\(activeCount) active")
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundColor(.secondary)
-    }
-    .padding(4)
-    if collapsed {
-      Text("\\(liveCount) idle seats collapsed")
+    } else {
+      Text("LEAD · not assigned")
         .font(.system(size: 9))
         .foregroundColor(.tertiary)
-        .padding(4)
+      Spacer()
+    }
+  }
+  .padding(4)
+  .background {
+    RoundedRectangle(cornerRadius: 5)
+      .foregroundColor("#3B82F6")
+      .opacity(0.07)
+  }
+}
+
+func fleetLaneHeader(_ name, _ liveCount, _ activeCount, _ collapsed) -> some View {
+  HStack(spacing: 6) {
+    Text(collapsed ? "▸" : "▾")
+      .font(.system(size: 10, design: .monospaced))
+      .foregroundColor(.secondary)
+    Text(name).font(.system(size: 11)).fontWeight(.semibold)
+    Spacer()
+    Text("\\(liveCount) live · \\(activeCount) active")
+      .font(.system(size: 9, design: .monospaced))
+      .foregroundColor(.secondary)
+  }
+  .padding(4)
+  .accessibilityLabel(collapsed ? "\\(name) lane collapsed, \\(liveCount) live, \\(activeCount) active" : "\\(name) lane expanded, \\(liveCount) live, \\(activeCount) active")
+  .help(collapsed ? "Run cmuxlayer fleet-sidebar expand \\(name)" : "Run cmuxlayer fleet-sidebar collapse \\(name)")
+}
+
+func fleetLane(_ name, _ liveCount, _ activeCount, _ collapsed, _ hiddenSeatCount, _ lead, _ seats) -> some View {
+  VStack(alignment: .leading, spacing: 3) {
+    fleetLaneHeader(name, liveCount, activeCount, collapsed)
+    if collapsed {
+      Text("\\(hiddenSeatCount) seats hidden")
+        .font(.system(size: 9))
+        .foregroundColor(.tertiary)
+        .padding(2)
+      fleetLeadSummary(lead)
     } else {
       ForEach(seats) { seat in
         fleetRow(seat)
@@ -402,8 +492,11 @@ export function renderFleetSidebar(
     opts.state ?? (snapshot.seatCount > 0 ? "populated" : "discovering");
   const laneCalls = snapshot.lanes
     .map((lane) => {
-      const seats = lane.seats.map(renderSeat).join(",\n");
-      return `  fleetLane(${swiftString(lane.label)}, ${lane.liveCount}, ${lane.activeCount}, ${lane.collapsed}, [\n${seats}\n  ])`;
+      const seats = lane.collapsed
+        ? ""
+        : lane.seats.map(renderSeat).join(",\n");
+      const hiddenSeatCount = lane.collapsed ? lane.liveCount : 0;
+      return `  fleetLane(${swiftString(lane.label)}, ${lane.liveCount}, ${lane.activeCount}, ${lane.collapsed}, ${hiddenSeatCount}, ${renderLeadSummary(lane)}, [\n${seats}\n  ])`;
     })
     .join("\n  Divider()\n");
 
@@ -441,8 +534,11 @@ export function renderFleetSidebar(
       (state === "discovering" || state === "unknown"))
       ? "unknown"
       : (observed ?? snapshot.seatCount);
+  const renderedSurfaceRefs = snapshot.lanes.flatMap((lane) =>
+    lane.seats.map((seat) => seat.surfaceRef),
+  );
 
-  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata}
+  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata} surfaces=${JSON.stringify(renderedSurfaceRefs)}
 ${FLEET_SWIFT_HELPERS}
 
 ScrollView {
@@ -467,6 +563,172 @@ export function defaultFleetSidebarPath(home = homedir()): string {
   return join(home, ".config", "cmux", "sidebars", "fleet.swift");
 }
 
+export function defaultFleetSidebarCollapseStatePath(home = homedir()): string {
+  return join(
+    home,
+    ".local",
+    "state",
+    "cmuxlayer",
+    "fleet-sidebar-collapse.json",
+  );
+}
+
+export interface FleetSidebarCollapseStoreOptions {
+  statePath?: string;
+}
+
+export class FleetSidebarCollapseStore {
+  private readonly statePath: string;
+
+  constructor(opts: FleetSidebarCollapseStoreOptions = {}) {
+    this.statePath =
+      opts.statePath ?? defaultFleetSidebarCollapseStatePath();
+  }
+
+  getStatePath(): string {
+    return this.statePath;
+  }
+
+  read(): FleetSidebarCollapseState {
+    try {
+      const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as {
+        version?: unknown;
+        lanes?: unknown;
+      };
+      if (parsed.version !== 1 || !isRecord(parsed.lanes)) return {};
+      const state: FleetSidebarCollapseState = {};
+      for (const key of LANE_ORDER) {
+        const value = parsed.lanes[key];
+        if (typeof value === "boolean") state[key] = value;
+      }
+      return state;
+    } catch {
+      return {};
+    }
+  }
+
+  setLaneCollapsed(key: FleetLaneKey, collapsed: boolean): void {
+    this.withMutationLock(() => {
+      this.write({ ...this.read(), [key]: collapsed });
+    });
+  }
+
+  toggleLane(key: FleetLaneKey, currentCollapsed?: boolean): boolean {
+    return this.withMutationLock(() => {
+      const state = this.read();
+      const collapsed = !(state[key] ?? currentCollapsed ?? false);
+      this.write({ ...state, [key]: collapsed });
+      return collapsed;
+    });
+  }
+
+  private withMutationLock<T>(mutate: () => T): T {
+    const lockPath = `${this.statePath}.lock`;
+    const lockOwnerPath = join(
+      lockPath,
+      `.owner.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`,
+    );
+    const startedAt = Date.now();
+    mkdirSync(dirname(this.statePath), { recursive: true });
+    while (true) {
+      try {
+        mkdirSync(lockPath);
+        writeFileSync(lockOwnerPath, "", "utf8");
+        break;
+      } catch (error) {
+        if (!isFileExistsError(error)) throw error;
+        this.clearStaleMutationLock(lockPath);
+        if (Date.now() - startedAt >= COLLAPSE_LOCK_TIMEOUT_MS) {
+          throw new Error(
+            `Timed out waiting for Fleet collapse state lock: ${lockPath}`,
+          );
+        }
+        Atomics.wait(
+          COLLAPSE_LOCK_SLEEP,
+          0,
+          0,
+          COLLAPSE_LOCK_RETRY_MS,
+        );
+      }
+    }
+
+    try {
+      return mutate();
+    } finally {
+      this.releaseMutationLock(lockPath, lockOwnerPath);
+    }
+  }
+
+  private releaseMutationLock(lockPath: string, lockOwnerPath: string): void {
+    try {
+      rmSync(lockOwnerPath);
+    } catch {
+      // The owned lock was quarantined; do not touch a replacement lock.
+      return;
+    }
+    try {
+      rmdirSync(lockPath);
+    } catch (error) {
+      if (!isFileSystemError(error, "ENOENT", "ENOTEMPTY")) throw error;
+      // A stale-lock takeover raced cleanup and now owns this path.
+    }
+  }
+
+  private clearStaleMutationLock(lockPath: string): void {
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs < COLLAPSE_LOCK_STALE_MS) {
+        return;
+      }
+      const stalePath =
+        `${lockPath}.stale.${process.pid}.${Date.now()}.` +
+        Math.random().toString(16).slice(2);
+      renameSync(lockPath, stalePath);
+      rmSync(stalePath, { recursive: true, force: true });
+    } catch {
+      // Another process released, acquired, or quarantined the lock first.
+    }
+  }
+
+  private write(state: FleetSidebarCollapseState): void {
+    const outputDir = dirname(this.statePath);
+    const temporaryPath = join(
+      outputDir,
+      `.${basename(this.statePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
+    );
+    mkdirSync(outputDir, { recursive: true });
+    try {
+      writeFileSync(
+        temporaryPath,
+        `${JSON.stringify({ version: 1, lanes: state }, null, 2)}\n`,
+        "utf8",
+      );
+      renameSync(temporaryPath, this.statePath);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return isFileSystemError(error, "EEXIST");
+}
+
+function isFileSystemError(
+  error: unknown,
+  ...codes: string[]
+): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    codes.includes((error as NodeJS.ErrnoException).code ?? "")
+  );
+}
+
 export interface FleetSidebarPublisherLike {
   publish(publication: FleetSidebarPublication | FleetSidebarSnapshot): void;
   dispose(): void;
@@ -475,22 +737,43 @@ export interface FleetSidebarPublisherLike {
 export interface FleetSidebarPublisherOptions {
   outputPath?: string;
   minWriteIntervalMs?: number;
+  collapseStore?: FleetSidebarCollapseStore;
 }
 
 export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   private readonly outputPath: string;
   private readonly minWriteIntervalMs: number;
+  private readonly collapseStore: FleetSidebarCollapseStore;
   private pendingSource: string | null = null;
   private pendingPublication: FleetSidebarPublication | null = null;
   private pendingBaselineSource: string | null = null;
+  private lastPublishedPublication: FleetSidebarPublication | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private readonly collapseStateListener = () => {
+    const publication =
+      this.pendingPublication ?? this.lastPublishedPublication;
+    if (publication !== null) this.publish(publication);
+  };
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
-    this.outputPath = opts.outputPath ?? defaultFleetSidebarPath();
+    const canonicalOutputPath = defaultFleetSidebarPath();
+    this.outputPath = opts.outputPath ?? canonicalOutputPath;
+    this.collapseStore =
+      opts.collapseStore ??
+      new FleetSidebarCollapseStore(
+        this.outputPath === canonicalOutputPath
+          ? {}
+          : { statePath: `${this.outputPath}.collapse.json` },
+      );
     this.minWriteIntervalMs = Math.max(
       500,
       opts.minWriteIntervalMs ?? 500,
+    );
+    watchFile(
+      this.collapseStore.getStatePath(),
+      { persistent: false, interval: 100 },
+      this.collapseStateListener,
     );
   }
 
@@ -518,12 +801,19 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       return;
     }
 
-    const source = renderFleetSidebar(publication.snapshot, {
-      state: publication.state,
-      observedLiveSurfaceCount:
-        publication.observedLiveSurfaceRefs?.length ?? null,
-    });
+    const source = renderFleetSidebar(
+      applyFleetSidebarCollapseState(
+        publication.snapshot,
+        this.collapseStore.read(),
+      ),
+      {
+        state: publication.state,
+        observedLiveSurfaceCount:
+          publication.observedLiveSurfaceRefs?.length ?? null,
+      },
+    );
     if (currentSource === source) {
+      this.lastPublishedPublication = publication;
       this.clearPending();
       this.clearTimer();
       return;
@@ -538,6 +828,11 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   dispose(): void {
     this.disposed = true;
     this.clearPending();
+    this.lastPublishedPublication = null;
+    unwatchFile(
+      this.collapseStore.getStatePath(),
+      this.collapseStateListener,
+    );
     this.clearTimer();
   }
 
@@ -566,7 +861,10 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     const baselineSource = this.pendingBaselineSource;
     this.clearPending();
     const currentSource = this.readCurrentSource();
-    if (currentSource === source) return;
+    if (currentSource === source) {
+      this.lastPublishedPublication = publication;
+      return;
+    }
     if (
       currentSource !== baselineSource &&
       !this.shouldPublishOverNewerSource(publication, currentSource)
@@ -574,6 +872,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       return;
     }
     this.atomicWrite(source);
+    this.lastPublishedPublication = publication;
   }
 
   private remainingWriteDelay(): number {
@@ -761,6 +1060,21 @@ function inspectFleetSidebarSource(source: string | null): {
       surfaceRefs.add(JSON.parse(match[1]!) as string);
     } catch {
       // Ignore malformed legacy rows; the rendered count remains a fallback.
+    }
+  }
+  const topologyMetadata = source.match(
+    /^\/\/ cmuxlayer-fleet-state:[^\n]* surfaces=(\[[^\n]*\])/,
+  );
+  if (topologyMetadata) {
+    try {
+      const metadataSurfaceRefs = JSON.parse(topologyMetadata[1]!) as unknown;
+      if (Array.isArray(metadataSurfaceRefs)) {
+        for (const surfaceRef of metadataSurfaceRefs) {
+          if (typeof surfaceRef === "string") surfaceRefs.add(surfaceRef);
+        }
+      }
+    } catch {
+      // Ignore malformed metadata and retain the rendered-row fallback.
     }
   }
 
