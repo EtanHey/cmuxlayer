@@ -749,30 +749,57 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).toContain('Text("\\(hiddenSeatCount) seats hidden")');
   });
 
-  it("caps normal status at one line while leaving actionable health multiline", () => {
-    const status = 'Review "quoted" \\ path\nnext line';
+  it("caps a long screen-derived action while leaving actionable health multiline", () => {
+    const screenCurrentAction =
+      "Analyzing the sidebar wake-republish path across every active fleet lane while preserving the last populated snapshot through coalesced writes, first-paint discovery protection, and delayed screen-state reconciliation without allowing the status row to grow taller";
     const health = "בריאות מלאה — reason must wrap";
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
-          taskSummary: status,
+          taskSummary: "(unknown)",
+          screenCurrentAction,
           healthStatus: "unhealthy",
           healthIssueCodes: ["agent_wedged"],
           healthReasons: [health],
           healthIssueSeverities: { agent_wedged: "blocking" },
         }),
+        candidate({
+          agentId: "lead-1",
+          surfaceRef: "surface:2",
+          surfaceTitle: "cmuxlayer lead",
+          role: "orchestrator",
+          taskSummary: null,
+          screenCurrentAction,
+        }),
       ],
-      { liveSurfaceRefs: new Set(["surface:1"]) },
+      { liveSurfaceRefs: new Set(["surface:1", "surface:2"]) },
     );
 
     const source = renderFleetSidebar(snapshot);
 
-    expect(source).toContain(`"status": ${JSON.stringify(status)}`);
+    expect(screenCurrentAction.length).toBeGreaterThan(200);
+    expect(
+      snapshot.lanes[0]?.seats.every(
+        (seat) => seat.status === screenCurrentAction,
+      ),
+    ).toBe(true);
+    expect(source).toContain(
+      `"status": ${JSON.stringify(screenCurrentAction)}`,
+    );
     expect(source).toContain(`"health": ${JSON.stringify(health)}`);
     expect(source).not.toContain(".fixedSize");
-    expect(source).toContain("Text(seat.status)");
-    expect(source).toContain(".lineLimit(1)");
-    expect(source).toContain(".truncationMode(.tail)");
+    const seatStatusBlock = source.slice(
+      source.indexOf("Text(seat.status)"),
+      source.indexOf("if seat.healthVisible"),
+    );
+    const leadStatusBlock = source.slice(
+      source.indexOf("Text(lead.status)"),
+      source.indexOf("      Spacer()", source.indexOf("Text(lead.status)")),
+    );
+    for (const statusBlock of [seatStatusBlock, leadStatusBlock]) {
+      expect(statusBlock).toContain(".lineLimit(1)");
+      expect(statusBlock).toContain(".truncationMode(.tail)");
+    }
     const healthBlock = source.slice(
       source.indexOf("if seat.healthVisible"),
       source.indexOf("    }\n    .padding(6)"),
