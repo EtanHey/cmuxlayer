@@ -468,6 +468,44 @@ describe("monitor registry deadman core", () => {
     });
   });
 
+  it("defers a stale monitor while owner liveness is unobservable", async () => {
+    const watchedFile = join(TEST_DIR, "unknown-owner.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "stale-unknown-owner",
+        owner_seat: "worker-routing-not-ready",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn();
+
+    const result = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 62_000,
+      ownerAlive: async () => null,
+      rearm,
+    });
+
+    expect(result).toMatchObject({
+      rearmed: [],
+      collapsed: [],
+      reaped: [],
+      failed: [],
+    });
+    expect(rearm).not.toHaveBeenCalled();
+    expect(
+      readMonitorRegistry({ registryPath: registryPath() }).monitors[0],
+    ).toMatchObject({
+      monitor_id: "stale-unknown-owner",
+      state: "alive",
+    });
+  });
+
   it("keeps an already claimed deadman-fired monitor quiet across ten reconcile ticks", async () => {
     await registerMonitor(
       {
@@ -551,6 +589,45 @@ describe("monitor registry deadman core", () => {
     expect(readMonitorRegistry({ registryPath: registryPath() }).monitors[0]).toMatchObject({
       monitor_id: "ancient-abandoned",
       state: "dead",
+    });
+  });
+
+  it("does not reap an ancient monitor while owner liveness is unobservable", async () => {
+    const watchedFile = join(TEST_DIR, "ancient-unknown-owner.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "ancient-unknown-owner",
+        owner_seat: "worker-routing-not-ready",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    const rearm = vi.fn();
+
+    const result = await reconcileMonitorRegistry({
+      registryPath: registryPath(),
+      now: () => 172_801_001,
+      reapAfterMs: 86_400_000,
+      ownerAlive: async () => null,
+      rearm,
+    });
+
+    expect(result).toMatchObject({
+      rearmed: [],
+      collapsed: [],
+      reaped: [],
+      failed: [],
+    });
+    expect(rearm).not.toHaveBeenCalled();
+    expect(
+      readMonitorRegistry({ registryPath: registryPath() }).monitors[0],
+    ).toMatchObject({
+      monitor_id: "ancient-unknown-owner",
+      state: "alive",
     });
   });
 

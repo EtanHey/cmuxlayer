@@ -1654,7 +1654,9 @@ export class AgentEngine {
               workspace,
               type: "terminal",
             });
-      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
+      // Transfer the created handle to the caller before any post-mutation
+      // epoch assertion can throw. The caller owns cleanup until it durably
+      // binds this exact surface into agent state.
       return {
         ...this.withWorkspacePlacementWarning(surface, workspace),
         observerEpoch,
@@ -1673,7 +1675,6 @@ export class AgentEngine {
         workspace,
         type: "terminal",
       });
-      this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
       return {
         ...this.withWorkspacePlacementWarning(surface, workspace),
         observerEpoch,
@@ -2426,84 +2427,101 @@ export class AgentEngine {
     );
   }
 
-  private async cleanupUnboundCrashRecoverySurface(
+  private async cleanupUnboundCreatedSurface(
     surface: CreatedAgentSurface,
+    operation: "agent-placement" | "crash-recovery",
   ): Promise<void> {
-    let surfaceRef = surface.surface;
-    let workspace = surface.actual_workspace ?? surface.workspace;
-    let cleanupEpoch = surface.observerEpoch;
-
-    if (!this.isSurfaceObserverEpochCurrent(cleanupEpoch)) {
-      const currentObserverId = this.registry.getObserverId();
-      if (
-        !surface.surface_id ||
-        !surface.observerId ||
-        currentObserverId !== surface.observerId
-      ) {
-        await this.logCrashRecoveryCleanupWarning(
-          `crash-recovery: refusing cleanup of unbound ${surface.surface}; ` +
-            `surface observer ownership changed`,
-        );
-        return;
-      }
-
-      const topology = await this.collectObservedSurfaceTopology();
-      if (
-        topology?.complete !== true ||
-        topology.workspaceBySurface.size === 0
-      ) {
-        await this.logCrashRecoveryCleanupWarning(
-          `crash-recovery: could not prove unbound surface ${surface.surface_id} ` +
-            `for cleanup after reconnect`,
-        );
-        return;
-      }
-      const binding = resolveAgentSurfaceBinding(
-        {
-          surface_id: surface.surface,
-          surface_uuid: surface.surface_id,
-        },
-        topology,
-      );
-      if (!binding || binding.provenance !== "uuid") {
-        await this.logCrashRecoveryCleanupWarning(
-          `crash-recovery: stable surface ${surface.surface_id} was not uniquely ` +
-            `resolvable for cleanup`,
-        );
-        return;
-      }
-      surfaceRef = binding.surfaceRef;
-      workspace = binding.workspaceId ?? workspace;
-      cleanupEpoch = this.captureSurfaceObserverEpoch();
-    }
-
     try {
+      let surfaceRef = surface.surface;
+      let workspace = surface.actual_workspace ?? surface.workspace;
+      let cleanupEpoch = surface.observerEpoch;
+
+      if (!this.isSurfaceObserverEpochCurrent(cleanupEpoch)) {
+        const currentObserverId = this.registry.getObserverId();
+        if (
+          !surface.surface_id ||
+          !surface.observerId ||
+          currentObserverId !== surface.observerId
+        ) {
+          await this.logUnboundSurfaceCleanupWarning(
+            `${operation}: refusing cleanup of unbound ${surface.surface} ` +
+              `(${surface.surface_id ?? "UUID unknown"}); surface observer ` +
+              `ownership changed`,
+          );
+          return;
+        }
+
+        const topology = await this.collectObservedSurfaceTopology();
+        if (
+          topology?.complete !== true ||
+          topology.workspaceBySurface.size === 0
+        ) {
+          await this.logUnboundSurfaceCleanupWarning(
+            `${operation}: could not prove unbound surface ${surface.surface_id} ` +
+              `for cleanup after reconnect`,
+          );
+          return;
+        }
+        const binding = resolveAgentSurfaceBinding(
+          {
+            surface_id: surface.surface,
+            surface_uuid: surface.surface_id,
+          },
+          topology,
+        );
+        if (!binding || binding.provenance !== "uuid") {
+          await this.logUnboundSurfaceCleanupWarning(
+            `${operation}: stable surface ${surface.surface_id} was not uniquely ` +
+              `resolvable for cleanup`,
+          );
+          return;
+        }
+        surfaceRef = binding.surfaceRef;
+        workspace = binding.workspaceId ?? workspace;
+        cleanupEpoch = this.captureSurfaceObserverEpoch();
+      }
+
       await this.client.closeSurface(surfaceRef, {
         workspace,
         collapsePane: false,
         beforeMutation: async () => {
           this.assertSurfaceObserverEpochCurrent(
             cleanupEpoch,
-            "crash recovery cleanup",
+            `${operation} cleanup`,
           );
         },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.logCrashRecoveryCleanupWarning(
-        `crash-recovery: failed to clean unbound surface ${surfaceRef}: ${message}`,
+      await this.logUnboundSurfaceCleanupWarning(
+        `${operation}: failed to clean unbound surface ${surface.surface} ` +
+          `(${surface.surface_id ?? "UUID unknown"}): ${message}`,
       );
     }
   }
 
-  private async logCrashRecoveryCleanupWarning(message: string): Promise<void> {
+  private isExactDurableSurfaceBinding(
+    actual: AgentRecord,
+    expected: AgentRecord,
+  ): boolean {
+    return (
+      actual.agent_id === expected.agent_id &&
+      actual.surface_id === expected.surface_id &&
+      (actual.surface_uuid ?? null) === (expected.surface_uuid ?? null) &&
+      (actual.surface_observer_id ?? null) ===
+        (expected.surface_observer_id ?? null) &&
+      (actual.workspace_id ?? null) === (expected.workspace_id ?? null)
+    );
+  }
+
+  private async logUnboundSurfaceCleanupWarning(message: string): Promise<void> {
     try {
       await this.client.log(message, {
         level: "warning",
         source: "cmuxlayer",
       });
     } catch {
-      // Cleanup diagnostics must never mask the original recovery failure.
+      // Cleanup diagnostics must never mask the original placement failure.
     }
   }
 
@@ -2617,7 +2635,10 @@ export class AgentEngine {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (createdSurface && !createdSurfaceBound) {
-          await this.cleanupUnboundCrashRecoverySurface(createdSurface);
+          await this.cleanupUnboundCreatedSurface(
+            createdSurface,
+            "crash-recovery",
+          );
         }
         await this.persistCrashRecoveryFailure(agent.agent_id, message);
       }
@@ -3885,10 +3906,15 @@ export class AgentEngine {
       repo: spawnParams.repo,
       worktree: isWorktreeLaunch(spawnParams),
     });
-    this.assertSurfaceObserverEpochCurrent(
-      surface.observerEpoch,
-      "agent placement",
-    );
+    try {
+      this.assertSurfaceObserverEpochCurrent(
+        surface.observerEpoch,
+        "agent placement",
+      );
+    } catch (error) {
+      await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
+      throw error;
+    }
 
     // 2. Write initial state (creating → booting)
     const now = new Date().toISOString();
@@ -3936,7 +3962,29 @@ export class AgentEngine {
       worktree_path: spawnParams.cwd ?? null,
       worktree_branch: spawnParams.worktree_branch ?? null,
     };
-    this.stateMgr.writeState(record);
+    try {
+      this.stateMgr.writeState(record);
+    } catch (error) {
+      let durableRecord: AgentRecord | null = null;
+      try {
+        durableRecord = this.stateMgr.readState(agentId);
+      } catch {
+        // Without a readable exact binding, the created surface is still
+        // unbound from cmuxlayer's point of view and must be cleaned safely.
+      }
+      if (
+        durableRecord &&
+        this.isExactDurableSurfaceBinding(durableRecord, record)
+      ) {
+        // rename(state.json.tmp, state.json) may have committed before a
+        // secondary index/event append failed. Preserve the durably bound
+        // surface and rehydrate the in-memory registry instead of closing it.
+        this.registry.set(agentId, durableRecord);
+      } else {
+        await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
+      }
+      throw error;
+    }
     this.registry.set(agentId, record);
 
     // 3. Send launch command

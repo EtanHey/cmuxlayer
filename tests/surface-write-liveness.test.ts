@@ -96,7 +96,7 @@ describe("SurfaceWriteLivenessTracker", () => {
     expect(tracker.observe("surface:1")?.pty_dead).toBe(false);
   });
 
-  it("expires an otherwise qualifying failure chain outside the window", () => {
+  it("forgets an otherwise qualifying failure chain outside the window", () => {
     let now = 1_000;
     const tracker = new SurfaceWriteLivenessTracker({
       now: () => now,
@@ -109,7 +109,7 @@ describe("SurfaceWriteLivenessTracker", () => {
     tracker.recordFailure("surface:1", new Error("EPIPE"));
     now += 10_001;
 
-    expect(tracker.observe("surface:1")?.pty_dead).toBe(false);
+    expect(tracker.observe("surface:1")).toBeNull();
   });
 
   it("does not transfer a dead-PTY verdict between stable identities that reuse one ref", () => {
@@ -136,5 +136,52 @@ describe("SurfaceWriteLivenessTracker", () => {
 
     expect(tracker.observe("surface:1", null, "owner:a")?.pty_dead).toBe(true);
     expect(tracker.observe("surface:1", null, "owner:b")).toBeNull();
+  });
+
+  it("bounds retained binding history while keeping the most recent identities", () => {
+    const tracker = new SurfaceWriteLivenessTracker({
+      failureThreshold: 2,
+      now: () => 1_000,
+      maxBindings: 2,
+    });
+
+    tracker.recordFailure("surface:1", new Error("EPIPE"), "uuid:oldest");
+    tracker.recordFailure("surface:2", new Error("EPIPE"), "uuid:middle");
+    tracker.recordFailure("surface:3", new Error("EPIPE"), "uuid:newest");
+
+    expect(tracker.observe("surface:1", "uuid:oldest")).toBeNull();
+    expect(tracker.observe("surface:2", "uuid:middle")).not.toBeNull();
+    expect(tracker.observe("surface:3", "uuid:newest")).not.toBeNull();
+  });
+
+  it("does not retain healthy binding history", () => {
+    const tracker = new SurfaceWriteLivenessTracker({
+      failureThreshold: 2,
+      now: () => 1_000,
+    });
+
+    tracker.recordFailure("surface:1", new Error("EPIPE"), "uuid:healthy");
+    tracker.recordSuccess("surface:1", "uuid:healthy");
+
+    expect(tracker.observe("surface:1", "uuid:healthy")).toBeNull();
+  });
+
+  it("prunes expired episodes when another binding records traffic", () => {
+    let now = 1_000;
+    const tracker = new SurfaceWriteLivenessTracker({
+      failureThreshold: 2,
+      failureWindowMs: 10_000,
+      now: () => now,
+    });
+
+    tracker.recordFailure("surface:1", new Error("EPIPE"), "uuid:expired");
+    now += 10_001;
+    tracker.recordFailure("surface:2", new Error("EPIPE"), "uuid:active");
+
+    expect(tracker.observe("surface:1", "uuid:expired")).toBeNull();
+    expect(tracker.observe("surface:2", "uuid:active")).toMatchObject({
+      consecutive_broken_pipe_failures: 1,
+      pty_dead: false,
+    });
   });
 });

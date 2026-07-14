@@ -672,7 +672,15 @@ export class CmuxLayerDaemon {
             record.agent_id === ownerSeat || record.seat_id === ownerSeat,
         ) ?? null;
 
-    const resolveOwnerSurface = async (ownerSeat: string) => {
+    type ResolvedOwnerSurface = {
+      surfaceId: string;
+      stableSurfaceIdentity: string | null;
+      surfaceObserverIdentity: string | null;
+      workspaceId: string | null;
+    };
+    const resolveOwnerSurface = async (
+      ownerSeat: string,
+    ): Promise<ResolvedOwnerSurface | null | undefined> => {
       const owner = findOwner(ownerSeat);
       if (!owner) return null;
 
@@ -684,13 +692,14 @@ export class CmuxLayerDaemon {
             surfaceId: route.surface_id,
             stableSurfaceIdentity: route.surface_uuid ?? null,
             surfaceObserverIdentity: context.surfaceObserverId,
-            workspaceId: route.workspace_id,
+            workspaceId: route.workspace_id ?? null,
           };
         } catch {
           // A UUID-backed owner that is absent, ambiguous, or only visible in
-          // incomplete topology is not safely addressable. Treat its pane
-          // liveness as unknown/dead instead of probing a recycled ref.
-          return null;
+          // incomplete topology is not safely addressable. Preserve its
+          // monitor until lifecycle routing can establish authoritative
+          // presence or absence instead of converting uncertainty to death.
+          return undefined;
         }
       }
 
@@ -705,7 +714,7 @@ export class CmuxLayerDaemon {
         !observerId ||
         owner.surface_observer_id !== observerId
       ) {
-        return null;
+        return undefined;
       }
       return {
         surfaceId: owner.surface_id,
@@ -730,7 +739,7 @@ export class CmuxLayerDaemon {
         ownerPtyDead: async (ownerSeat) => {
           const route = await resolveOwnerSurface(ownerSeat);
           return (
-            route !== null &&
+            route != null &&
             context.surfaceWriteLiveness.observe(
               route.surfaceId,
               route.stableSurfaceIdentity,
@@ -744,7 +753,8 @@ export class CmuxLayerDaemon {
             return false;
           }
           const route = await resolveOwnerSurface(ownerSeat);
-          if (!route) return false;
+          if (route === undefined) return null;
+          if (route === null) return false;
           try {
             await context.client.readScreen(route.surfaceId, {
               ...(route.workspaceId ? { workspace: route.workspaceId } : {}),

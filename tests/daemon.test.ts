@@ -949,7 +949,73 @@ describe("CmuxLayerDaemon", () => {
     );
   });
 
-  it("does not probe an owned UUID-less monitor row when the current observer is unknown", async () => {
+  it("defers a UUID-backed monitor until lifecycle routing is initialized", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "uuid-owner-boot-registry.json");
+    const watchedFile = join(TEST_ROOT, "uuid-owner-boot-collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "uuid-owner-boot-monitor",
+        owner_seat: "worker-before-first-connection",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const client = createPlacementClient([]);
+    const context = createServerContext({
+      client: client as any,
+      stateDir: stateDir("uuid-owner-boot-state"),
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-before-first-connection",
+      surface_id: "surface:stale-before-connect",
+      surface_uuid: "surface-uuid-before-connect",
+      surface_observer_id: TEST_OBSERVER_OWNER,
+      workspace_id: "workspace:stale",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-before-connect",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    expect(context.lifecycleSweepEngine).toBeNull();
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-uuid-owner-before-connect"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir: join(TEST_ROOT, "uuid-owner-boot-inbox"),
+    });
+
+    await daemon.start();
+    await delay(20);
+    await daemon.shutdown();
+
+    expect(client.readScreen).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "uuid-owner-boot-monitor",
+      state: "alive",
+    });
+  });
+
+  it("defers an owned UUID-less monitor row when the current observer is unknown", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const registryPath = join(
       TEST_ROOT,
@@ -1014,20 +1080,16 @@ describe("CmuxLayerDaemon", () => {
     });
 
     await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
-    );
+    await delay(20);
     await daemon.shutdown();
 
     expect(client.readScreen).not.toHaveBeenCalled();
     expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      state: "collapsed",
-      collapsed_reason: "owner-not-alive",
+      state: "alive",
     });
   });
 
-  it("does not probe an unowned UUID-less monitor row when the current observer is unknown", async () => {
+  it("defers an unowned UUID-less monitor row when the current observer is unknown", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const registryPath = join(
       TEST_ROOT,
@@ -1092,16 +1154,12 @@ describe("CmuxLayerDaemon", () => {
     });
 
     await daemon.start();
-    await waitUntil(
-      () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
-    );
+    await delay(20);
     await daemon.shutdown();
 
     expect(client.readScreen).not.toHaveBeenCalled();
     expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
-      state: "collapsed",
-      collapsed_reason: "owner-not-alive",
+      state: "alive",
     });
   });
 

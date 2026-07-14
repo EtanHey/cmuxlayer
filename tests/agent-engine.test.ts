@@ -746,6 +746,63 @@ describe("AgentEngine", () => {
       expect(state!.task_summary).toBe("Fix gap F");
     });
 
+    it("cleans the created surface when initial state persistence fails before commit", async () => {
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
+        throw new Error("state disk unavailable");
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Fail before durable binding",
+        }),
+      ).rejects.toThrow("state disk unavailable");
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:new",
+        expect.objectContaining({
+          workspace: "ws:1",
+          collapsePane: false,
+          beforeMutation: expect.any(Function),
+        }),
+      );
+      expect(stateMgr.listStates()).toHaveLength(0);
+      expect(mockClient.renameTab).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
+    it("preserves an exact durable binding when state persistence fails after commit", async () => {
+      const writeState = stateMgr.writeState.bind(stateMgr);
+      vi.spyOn(stateMgr, "writeState").mockImplementationOnce((record) => {
+        writeState(record);
+        throw new Error("post-commit telemetry failed");
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Retain durable binding",
+        }),
+      ).rejects.toThrow("post-commit telemetry failed");
+
+      const durableRecord = stateMgr.listStates()[0];
+      expect(durableRecord).toMatchObject({
+        surface_id: "surface:new",
+        surface_uuid: SPAWN_SURFACE_UUID,
+        workspace_id: "ws:1",
+        state: "booting",
+      });
+      expect(engine.getAgentState(durableRecord!.agent_id)).toMatchObject({
+        surface_id: "surface:new",
+        surface_uuid: SPAWN_SURFACE_UUID,
+      });
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.renameTab).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+    });
+
     it("persists the spawning registry's surface observer", async () => {
       engine.dispose();
       const ownerId = "cmux:/tmp/prod.sock#socket=1:2:3:4";
@@ -1872,8 +1929,8 @@ describe("AgentEngine", () => {
                 title: "",
                 type: "terminal",
               });
-              // `createAgentSurface` has resumed and checked the old observer,
-              // but `spawnAgent` has not yet resumed to persist or launch.
+              // The created handle has returned, but `spawnAgent` has not yet
+              // resumed to validate ownership, persist, or launch.
               queueMicrotask(() => {
                 currentObserverId = "cmux:/tmp/cmux-secondary.sock";
               });
@@ -1895,6 +1952,218 @@ describe("AgentEngine", () => {
       expect(mockClient.renameTab).not.toHaveBeenCalled();
       expect(mockClient.send).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.log).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /agent-placement: refusing cleanup.*11111111-2222-4333-8444-555555555555.*ownership changed/i,
+        ),
+        { level: "warning", source: "cmuxlayer" },
+      );
+      expect(stateMgr.listStates()).toHaveLength(0);
+    });
+
+    it("cleans a created tab when the transport epoch changes before placement returns", async () => {
+      engine.dispose();
+      const ownerId = "cmux:/tmp/cmux.sock#socket=1:2:3:4";
+      let observerEpoch = `${ownerId}@socket:1`;
+      let created = false;
+      const scopedRegistry = new AgentRegistry(
+        stateMgr,
+        async () => liveSurfaces,
+        {
+          observerIdProvider: () => ownerId,
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      engine = new AgentEngine(stateMgr, scopedRegistry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [
+          {
+            ref: "ws:1",
+            title: "cmuxlayer",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:left"],
+              surface_ids: ["uuid-left"],
+            },
+            {
+              ref: "pane:right",
+              index: 1,
+              focused: false,
+              surface_count: created ? 2 : 1,
+              surface_refs: created
+                ? ["surface:right", "surface:created-tab"]
+                : ["surface:right"],
+              surface_ids: created
+                ? ["uuid-right", SPAWN_SURFACE_UUID]
+                : ["uuid-right"],
+            },
+          ],
+        }),
+      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [
+                { ...makeSurface("surface:right"), id: "uuid-right" },
+                ...(created
+                  ? [
+                      {
+                        ...makeSurface("surface:created-tab"),
+                        id: SPAWN_SURFACE_UUID,
+                      },
+                    ]
+                  : []),
+              ]
+            : [{ ...makeSurface("surface:left"), id: "uuid-left" }],
+      }));
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          created = true;
+          observerEpoch = `${ownerId}@socket:2`;
+          return {
+            workspace: "ws:1",
+            surface: "surface:created-tab",
+            surface_id: SPAWN_SURFACE_UUID,
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Clean a tab created across reconnect",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(/surface observer changed.*placement/i);
+
+      expect(mockClient.newSurface).toHaveBeenCalledTimes(1);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:created-tab",
+        expect.objectContaining({
+          workspace: "ws:1",
+          collapsePane: false,
+          beforeMutation: expect.any(Function),
+        }),
+      );
+      expect(stateMgr.listStates()).toHaveLength(0);
+    });
+
+    it("cleans a fallback split when its post-create epoch assertion fails", async () => {
+      engine.dispose();
+      const ownerId = "cmux:/tmp/cmux.sock#socket=1:2:3:4";
+      let observerEpoch = `${ownerId}@socket:1`;
+      const scopedRegistry = new AgentRegistry(
+        stateMgr,
+        async () => liveSurfaces,
+        {
+          observerIdProvider: () => ownerId,
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      engine = new AgentEngine(stateMgr, scopedRegistry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      (mockClient.listWorkspaces as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspaces: [
+          {
+            ref: "ws:1",
+            title: "cmuxlayer",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error("placement listing failed"))
+        .mockResolvedValue({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:fallback",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:fallback-created"],
+              surface_ids: [SPAWN_SURFACE_UUID],
+            },
+          ],
+        });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: "pane:fallback",
+        surfaces: [
+          {
+            ...makeSurface("surface:fallback-created"),
+            id: SPAWN_SURFACE_UUID,
+          },
+        ],
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          observerEpoch = `${ownerId}@socket:2`;
+          return {
+            workspace: "ws:1",
+            surface: "surface:fallback-created",
+            surface_id: SPAWN_SURFACE_UUID,
+            pane: "pane:fallback",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Clean a fallback split across reconnect",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(/surface observer changed.*placement/i);
+
+      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:fallback-created",
+        expect.objectContaining({
+          workspace: "ws:1",
+          collapsePane: false,
+          beforeMutation: expect.any(Function),
+        }),
+      );
       expect(stateMgr.listStates()).toHaveLength(0);
     });
 
