@@ -495,4 +495,46 @@ describe("Booting agent advancement (SDLC-87)", () => {
     expect(engine.getAgentState("auto-brainlayer-1")?.state).toBe("booting");
     expect(mockClient.send).not.toHaveBeenCalled();
   });
+
+  it("keeps a booting agent retry-safe (not stranded ready) when prompt delivery throws", async () => {
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      IDLE_CLAUDE_SCREEN,
+    );
+    (mockClient.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("socket dropped mid-send"),
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        model: "sonnet",
+        task_summary: "design handoff",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    // A transient send failure must not persist "ready" ahead of delivery —
+    // otherwise the top-of-function "state !== booting" guard would skip
+    // this agent on every future sweep and the prompt would never be
+    // retried (SDLC-87 Codex review finding).
+    const afterFailure = engine.getAgentState("a1");
+    expect(afterFailure?.state).toBe("booting");
+    expect(afterFailure?.prompt_delivered).not.toBe(true);
+
+    // Next sweep, with the transient failure resolved, must retry and
+    // succeed rather than being permanently skipped.
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(
+      WORKING_CLAUDE_SCREEN,
+    );
+    await engine.runSweep();
+
+    const afterRetry = engine.getAgentState("a1");
+    expect(afterRetry?.state).toBe("ready");
+    expect(afterRetry?.prompt_delivered).toBe(true);
+    expect(mockClient.send).toHaveBeenCalledTimes(2);
+  });
 });

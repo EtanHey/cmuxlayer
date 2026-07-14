@@ -437,8 +437,15 @@ export class AgentEngine {
     }
 
     try {
-      this.stateMgr.transition(agent.agent_id, "ready", {});
-
+      // SDLC-87 review fix: compute + persist prompt-delivery/model fields
+      // FIRST, while the record is still "booting", and only flip to "ready"
+      // as the final write. If send/sendKey/recheck throws anywhere above,
+      // the record never leaves "booting" and the next sweep retries safely
+      // (prompt_delivered stays false on disk until delivery actually
+      // completed). Flipping to "ready" before delivery would let a failure
+      // strand the record as ready-but-never-prompted, since the "state !==
+      // booting" guard at the top of this method would then skip every
+      // future retry.
       const parsedModel = parsed.model;
       const modelMismatch = computeModelMismatch(agent.model, parsedModel);
       let promptDelivered = agent.prompt_delivered ?? false;
@@ -470,12 +477,15 @@ export class AgentEngine {
         }
       }
 
-      const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      const patched = this.stateMgr.updateRecord(agent.agent_id, {
         parsed_model: parsedModel,
         model_mismatch: modelMismatch,
         prompt_delivered: promptDelivered,
         submit_verified: submitVerified,
       });
+      this.registry.set(agent.agent_id, patched);
+
+      const updated = this.stateMgr.transition(agent.agent_id, "ready", {});
       this.registry.set(agent.agent_id, updated);
       return updated;
     } catch {
