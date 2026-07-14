@@ -124,8 +124,13 @@ function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
   };
 }
 
-function surface(ref: string, title = `cmuxlayerCodex [${ref}]`): CmuxSurface {
+function surface(
+  ref: string,
+  title = `cmuxlayerCodex [${ref}]`,
+  id?: string,
+): CmuxSurface {
   return {
+    ...(id ? { id } : {}),
     ref,
     title,
     type: "terminal",
@@ -188,22 +193,30 @@ function engineFixture(): {
               },
             ],
     })),
-    listPanes: vi.fn().mockImplementation(async () => ({
-      workspace_ref: "workspace:fleet",
-      window_ref: "window:fleet",
-      panes:
-        liveSurfaces.length === 0
-          ? []
-          : [
-              {
-                ref: "pane:fleet",
-                index: 0,
-                focused: true,
-                surface_count: liveSurfaces.length,
-                surface_refs: liveSurfaces.map((entry) => entry.ref),
-              },
-            ],
-    })),
+    listPanes: vi.fn().mockImplementation(async () => {
+      const surfaceIds = liveSurfaces
+        .map((entry) => entry.id)
+        .filter((id): id is string => Boolean(id));
+      return {
+        workspace_ref: "workspace:fleet",
+        window_ref: "window:fleet",
+        panes:
+          liveSurfaces.length === 0
+            ? []
+            : [
+                {
+                  ref: "pane:fleet",
+                  index: 0,
+                  focused: true,
+                  surface_count: liveSurfaces.length,
+                  surface_refs: liveSurfaces.map((entry) => entry.ref),
+                  ...(surfaceIds.length === liveSurfaces.length
+                    ? { surface_ids: surfaceIds }
+                    : {}),
+                },
+              ],
+      };
+    }),
     listPaneSurfaces: vi.fn().mockImplementation(async () => ({
       workspace_ref: "workspace:fleet",
       window_ref: "window:fleet",
@@ -316,8 +329,8 @@ describe("topology contract: authoritative ghost eviction", () => {
     fixture.setTopology([surface("surface:notes", "notes")]);
     await fixture.engine.runSweep();
     expect(fixture.engine.getAgentState("ghost-agent")).toMatchObject({
-      state: "error",
-      error: "Surface surface:ghost disappeared",
+      state: "working",
+      error: null,
     });
 
     vi.setSystemTime(new Date("2026-07-14T09:00:07.000Z"));
@@ -397,12 +410,15 @@ describe("topology contract: first paint", () => {
 });
 
 describe("topology contract: seat binding", () => {
-  it("binds each first-render seat to its own surface identity and screen parse", async () => {
+  it("binds each first-render seat to its stable UUID, current ref, and own screen parse", async () => {
+    const alphaUuid = "11111111-2222-4333-8444-555555555555";
+    const betaUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
     const fixture = engineFixture();
     fixture.stateManager.writeState(
       record({
         agent_id: "alpha-worker",
-        surface_id: "surface:alpha",
+        surface_id: "surface:slot-a",
+        surface_uuid: alphaUuid,
         workspace_id: "workspace:fleet",
         seat_lane: "cmuxlayer",
         seat_id: "alpha",
@@ -411,20 +427,21 @@ describe("topology contract: seat binding", () => {
     fixture.stateManager.writeState(
       record({
         agent_id: "beta-worker",
-        surface_id: "surface:beta",
+        surface_id: "surface:slot-b",
+        surface_uuid: betaUuid,
         workspace_id: "workspace:fleet",
         seat_lane: "cmuxlayer",
         seat_id: "beta",
       }),
     );
     fixture.setTopology([
-      surface("surface:alpha", "cmuxlayerCodex alpha"),
-      surface("surface:beta", "cmuxlayerCodex beta"),
+      surface("surface:slot-a", "cmuxlayerCodex beta", betaUuid),
+      surface("surface:slot-b", "cmuxlayerCodex alpha", alphaUuid),
     ]);
     fixture.client.readScreen.mockImplementation(async (surfaceRef: string) => ({
       surface: surfaceRef,
       text:
-        surfaceRef === "surface:alpha"
+        surfaceRef === "surface:slot-b"
           ? "✻ Working (1m 2s • esc to interrupt)\n  Reading src/alpha.ts"
           : "✻ Working (2m 3s • esc to interrupt)\n  Editing src/beta.ts",
       lines: 20,
@@ -434,29 +451,51 @@ describe("topology contract: seat binding", () => {
 
     await fixture.engine.runSweep();
 
-    const seats = fixture.publications
-      .at(-1)
-      ?.snapshot.lanes.flatMap((lane) => lane.seats);
+    const publication = fixture.publications.at(-1);
+    const seats = publication?.snapshot.lanes.flatMap((lane) => lane.seats);
     expect(seats).toHaveLength(2);
     expect(seats).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           agentId: "alpha-worker",
-          surfaceRef: "surface:alpha",
+          surfaceUuid: alphaUuid,
+          surfaceRef: "surface:slot-b",
           name: "cmuxlayerCodex alpha",
           status: "Reading src/alpha.ts",
         }),
         expect.objectContaining({
           agentId: "beta-worker",
-          surfaceRef: "surface:beta",
+          surfaceUuid: betaUuid,
+          surfaceRef: "surface:slot-a",
           name: "cmuxlayerCodex beta",
           status: "Editing src/beta.ts",
         }),
       ]),
     );
     expect(new Set(seats?.map((seat) => seat.surfaceRef))).toEqual(
-      new Set(["surface:alpha", "surface:beta"]),
+      new Set(["surface:slot-a", "surface:slot-b"]),
     );
+    expect(new Set(seats?.map((seat) => seat.surfaceUuid))).toEqual(
+      new Set([alphaUuid, betaUuid]),
+    );
+    expect(new Set(publication?.observedLiveSurfaceUuids)).toEqual(
+      new Set([alphaUuid, betaUuid]),
+    );
+    expect(fixture.stateManager.readState("alpha-worker")).toMatchObject({
+      surface_uuid: alphaUuid,
+      surface_id: "surface:slot-b",
+    });
+    expect(fixture.stateManager.readState("beta-worker")).toMatchObject({
+      surface_uuid: betaUuid,
+      surface_id: "surface:slot-a",
+    });
+
+    const source = renderFleetSidebar(publication!.snapshot);
+    expect(source).toContain(
+      'cmux("surface.focus", surface_id: seat.surfaceUuid)',
+    );
+    expect(source).toContain(`"surfaceUuid": "${alphaUuid}"`);
+    expect(source).toContain(`"surfaceUuid": "${betaUuid}"`);
   });
 });
 
