@@ -209,6 +209,8 @@ const CLAUDE_GLYPH_ACTION_RE =
 const CLAUDE_INDENTED_ACTIVITY_RE =
   /^\s{2,}((?:Reading|Running|Editing|Writing|Searching|Planning|Analyzing|Calling|Generating|Preparing|Updating|Sending|Receiving)\b.*)$/i;
 const CLAUDE_ACTIVE_BANNER_RE = /^\s*[✻✢✳✶]\s+.*(?:working|thinking|esc to interrupt)/i;
+const CLAUDE_ACTIVE_SPINNER_RE =
+  /^\s*[✻✢✳✶]\s+(.+?)(?:…|\.{3})\s*\((?=[^)\n]*(?:\b\d+(?:\.\d+)?[hms]\b|[↑↓]\s*\d|think|thought))[^)\n]+\)\s*$/i;
 const CODEX_UPDATE_MENU_RE =
   /(?:^|\n)\s*(?:[✨\u2728]\s*)?Update available!(?:\s+[^\n]+)?\s*(?:\n|$)/i;
 const CODEX_UPDATE_MENU_SKIP_RE =
@@ -932,12 +934,29 @@ function parseCodexActions(text: string): string[] {
   return Array.from(text.matchAll(CODEX_ACTION_RE), (match) => match[1].trim());
 }
 
-function parseCurrentAction(text: string): string | null {
+function latestClaudeSpinnerAction(text: string): string | null {
+  const lines = text.split("\n").slice(-16);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const action = lines[index]?.match(CLAUDE_ACTIVE_SPINNER_RE)?.[1]?.trim();
+    if (action) return action;
+  }
+  return null;
+}
+
+function parseCurrentAction(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): string | null {
   const codexAction = parseCodexActions(text)
     .filter((action) => CODEX_CURRENT_ACTION_RE.test(action))
     .at(-1);
   if (codexAction) {
     return codexAction;
+  }
+
+  if (agentType === "claude") {
+    const spinnerAction = latestClaudeSpinnerAction(text);
+    if (spinnerAction) return spinnerAction;
   }
 
   const lines = text.split("\n");
@@ -1135,6 +1154,10 @@ function inferStatus(
     return "working";
   }
 
+  if (agentType === "claude" && latestClaudeSpinnerAction(text) !== null) {
+    return "working";
+  }
+
   // AIDEV-NOTE: do NOT add "bypass permissions on" here — it is a PERSISTENT
   // status-bar footer shown in both ready AND working states, so it made a
   // ready claude composer parse as "working", wedging spawn_agent at "booting"
@@ -1228,7 +1251,7 @@ export function parseScreen(text: string): ParsedScreenResult {
     context_window: contextWindow,
     done_signal: doneSignal,
     response: parseResponse(normalized),
-    current_action: parseCurrentAction(normalized),
+    current_action: parseCurrentAction(normalized, agentType),
     errors,
     model,
     cost,
