@@ -1624,10 +1624,14 @@ describe("CmuxLayerDaemon", () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("shared");
     const dir = stateDir("shared-state");
-    const daemon = new CmuxLayerDaemon({
-      socketPath: path,
+    const context = createServerContext({
       exec: createLifecycleExec(),
       stateDir: dir,
+      disableSpawnPreflight: true,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: path,
+      context,
       disableSpawnPreflight: true,
     });
 

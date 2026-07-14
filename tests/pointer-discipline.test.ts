@@ -9,13 +9,26 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const previousMaxInlineChars = process.env.CMUXLAYER_MAX_INLINE_CHARS;
 let testDir = "";
 
 async function loadServerModule() {
   vi.resetModules();
-  return import("../src/server.js");
+  const serverModule = await import("../src/server.js");
+  return {
+    ...serverModule,
+    createServerContext: (
+      opts: Parameters<typeof serverModule.createServerContext>[0] = {},
+    ) => serverModule.createServerContext(withTestSurfaceObserver(opts)),
+    createServer: (
+      opts: Parameters<typeof serverModule.createServer>[0] = {},
+    ) =>
+      serverModule.createServer(
+        opts.context ? opts : withTestSurfaceObserver(opts),
+      ),
+  };
 }
 
 function parseToolResult(result: any) {

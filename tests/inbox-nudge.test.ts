@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import { agentDir, writeHeartbeat, readInbox } from "../src/inbox.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
 
@@ -130,6 +131,17 @@ function sendCalls(exec: ExecFn): string[][] {
     .map(([, args]: [string, string[]]) => args);
 }
 
+function createInboxServer(exec: ExecFn, inboxDir: string) {
+  return createServer(
+    withTestSurfaceObserver({
+      exec,
+      stateDir: STATE_DIR,
+      disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir,
+    }),
+  );
+}
+
 async function spawnTestAgent(server: any): Promise<string> {
   const tool = server._registeredTools["spawn_agent"];
   const result = await tool.handler(
@@ -157,12 +169,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     mkdirSync(STATE_DIR, { recursive: true });
     inboxDir = mkdtempSync(join(tmpdir(), "cmux-inbox-nudge-"));
     exec = makeExec();
-    server = createServer({
-      exec,
-      stateDir: STATE_DIR,
-      disableSpawnPreflight: true,
-      inboxBaseDir: inboxDir,
-    });
+    server = createInboxServer(exec, inboxDir);
   });
 
   afterEach(async () => {
@@ -274,12 +281,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
       ].join("\n"),
       "agenthtmlhostClaude",
     );
-    server = createServer({
-      exec,
-      stateDir: STATE_DIR,
-      disableSpawnPreflight: true,
-      inboxBaseDir: inboxDir,
-    });
+    server = createInboxServer(exec, inboxDir);
 
     const agentId = "auto-claude-surface-new";
     const before = sendCalls(exec).length;
@@ -318,12 +320,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
       "utf8",
     );
     exec = makeExec(pickerText, "agenthtmlhostClaude");
-    server = createServer({
-      exec,
-      stateDir: STATE_DIR,
-      disableSpawnPreflight: true,
-      inboxBaseDir: inboxDir,
-    });
+    server = createInboxServer(exec, inboxDir);
 
     const agentId = "auto-claude-surface-new";
     const before = sendCalls(exec).length;
