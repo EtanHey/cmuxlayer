@@ -6816,6 +6816,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: args.workspace,
           collapsePane,
         });
+        for (const record of stateMgr.listStates()) {
+          if (
+            record.surface_id !== args.surface &&
+            record.surface_uuid !== args.surface
+          ) {
+            continue;
+          }
+          const terminal = stateMgr.updateRecord(record.agent_id, {
+            user_killed: true,
+          });
+          context.lifecycleRegistry?.set(record.agent_id, terminal);
+        }
         appendCloseEvent({
           event: "close_surface",
           target: args.surface,

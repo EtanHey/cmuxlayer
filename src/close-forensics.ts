@@ -389,15 +389,20 @@ export interface CloseForensicsDeps {
   deltaMs: number;
 }
 
+export interface CloseForensicsSweepResult {
+  emitted: number;
+  events: CloseForensicsEvent[];
+}
+
 /**
  * Run one forensics ingest pass. Fully best-effort: ANY failure (missing file,
  * malformed lines, cursor I/O error, append error) is swallowed — this is
  * forensics, never a critical path, and it must never throw into the sweep.
  * Returns the count emitted for observability/tests.
  */
-export function runCloseForensicsSweep(deps: CloseForensicsDeps): {
-  emitted: number;
-} {
+export function runCloseForensicsSweep(
+  deps: CloseForensicsDeps,
+): CloseForensicsSweepResult {
   try {
     const cursorState =
       safe(() => deps.cursor.readState?.(), undefined) ?? undefined;
@@ -439,7 +444,7 @@ export function runCloseForensicsSweep(deps: CloseForensicsDeps): {
           }
         }
       }
-      return { emitted: 0 };
+      return { emitted: 0, events: [] };
     }
     const cmuxEvents =
       safe(() => parseCmuxEvents(text), [] as CmuxEvent[]) ?? [];
@@ -497,9 +502,9 @@ export function runCloseForensicsSweep(deps: CloseForensicsDeps): {
         // by cursor advances, so we log at-most-once per successful advance.
       }
     }
-    return { emitted: events.length };
+    return { emitted: events.length, events };
   } catch {
-    return { emitted: 0 };
+    return { emitted: 0, events: [] };
   }
 }
 
@@ -680,7 +685,7 @@ export function createDefaultCloseForensicsRunner(config: {
   listSurfacesForRefMap?: SurfaceRefMapLister;
   surfaceRefMapTtlMs?: number;
   surfaceRefMapTimeoutMs?: number;
-}): () => Promise<{ emitted: number }> {
+}): () => Promise<CloseForensicsSweepResult> {
   const eventsPath = config.eventsPath ?? defaultCmuxEventsPath();
   const deltaMs = config.deltaMs ?? DEFAULT_DELTA_MS;
   const now = config.now ?? (() => new Date().toISOString());

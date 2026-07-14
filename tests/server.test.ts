@@ -9732,6 +9732,64 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("close_surface makes a forced managed-agent close terminal for crash recovery", async () => {
+    const stateDir = processScopedTmpDir(
+      "cmuxlayer-close-surface-crash-recovery-terminal",
+    );
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "worker-crash-recoverable",
+      surface_id: "surface:worker-crash-recoverable",
+      state: "working",
+      repo: "brainlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      task_summary: "mid task",
+      pid: null,
+      version: 1,
+      created_at: "2026-07-14T00:00:00Z",
+      updated_at: "2026-07-14T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: true,
+      respawn_attempts: 0,
+      user_killed: false,
+    });
+
+    const mockClient = {
+      identify: vi.fn().mockResolvedValue({ caller: {} }),
+      closeSurface: vi.fn().mockResolvedValue(undefined),
+    };
+    const server = createServer({
+      client: mockClient as any,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["close_surface"];
+
+    const result = await tool.handler(
+      { surface: "surface:worker-crash-recoverable", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(mockClient.closeSurface).toHaveBeenCalled();
+    expect(stateMgr.readState("worker-crash-recoverable")).toMatchObject({
+      user_killed: true,
+      crash_recover: true,
+    });
+
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
   it("close_surface logs a durable close entry with caller, force, and target", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-close-surface-eventlog");
     rmSync(stateDir, { recursive: true, force: true });
