@@ -9892,6 +9892,31 @@ describe("tool handler integration", () => {
       crash_recover: true,
     });
 
+    const degradedRecord = stateMgr.readState("worker-stale-ref-owner")!;
+    stateMgr.writeState({
+      ...degradedRecord,
+      agent_id: "worker-degraded-ref-owner",
+      surface_id: "surface:degraded-worker",
+      surface_uuid: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
+      version: 1,
+      user_killed: false,
+    });
+    mockClient.listWorkspaces.mockRejectedValueOnce(
+      new Error("surface enumeration unavailable"),
+    );
+
+    const degradedResult = await tool.handler(
+      { surface: "surface:degraded-worker", force: true },
+      {} as any,
+    );
+
+    expect(degradedResult.isError).not.toBe(true);
+    expect(stateMgr.readState("worker-degraded-ref-owner")).toMatchObject({
+      user_killed: true,
+      crash_recover: true,
+    });
+
     rmSync(stateDir, { recursive: true, force: true });
   });
 

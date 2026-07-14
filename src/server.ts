@@ -6823,9 +6823,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           collapsePane,
         });
         for (const record of stateMgr.listStates()) {
+          // Stable identity wins whenever cmux exposes it. On a ref-only or
+          // unavailable observation, preserve the explicit close intent by
+          // falling back to the mutable ref instead of treating it as a crash.
           const matchesClosedSurface = record.surface_uuid
             ? record.surface_uuid.toLowerCase() === requestedSurfaceKey ||
-              record.surface_uuid.toLowerCase() === observedSurfaceUuid
+              record.surface_uuid.toLowerCase() === observedSurfaceUuid ||
+              (observedSurfaceUuid === undefined &&
+                record.surface_id === args.surface)
             : record.surface_id === args.surface;
           if (!matchesClosedSurface) {
             continue;
