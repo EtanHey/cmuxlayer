@@ -632,6 +632,10 @@ export class StateManager {
       crash_recover: false,
       respawn_attempts: 0,
       user_killed: false,
+      submit_verified: null,
+      prompt_delivered: true,
+      parsed_model: discovered.model ?? null,
+      model_mismatch: null,
     };
     this.writeState(record);
     return record;

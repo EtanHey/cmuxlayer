@@ -8870,17 +8870,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   task_summary: bootPromptDelivery.prompt_text,
                   boot_prompt_pending: false,
+                  prompt_delivered:
+                    bootPromptDelivery.submit_verified === true,
+                  submit_verified: bootPromptDelivery.submit_verified,
                 });
                 registry.set(result.agent_id, updated);
               } else {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   boot_prompt_pending: false,
+                  prompt_delivered: false,
+                  submit_verified: null,
                 });
                 registry.set(result.agent_id, updated);
               }
 
               const current = engine.getAgentState(result.agent_id);
-              if (current?.state === "booting") {
+              if (
+                current?.state === "booting" &&
+                bootPromptDelivery.submit_verified === true
+              ) {
                 const ready = stateMgr.transition(result.agent_id, "ready");
                 registry.set(result.agent_id, ready);
                 result.state = "ready";
@@ -8898,6 +8906,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const agentId = record?.agent_id ?? result.agent_id;
               const updated = stateMgr.updateRecord(agentId, {
                 boot_prompt_pending: false,
+                prompt_delivered: false,
+                submit_verified:
+                  e instanceof BootPromptDeliveryError ? false : null,
               });
               registry.set(agentId, updated);
               result.agent_id = updated.agent_id;

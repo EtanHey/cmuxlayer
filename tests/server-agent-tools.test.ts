@@ -2616,6 +2616,8 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.boot_prompt_pending).toBe(false);
+    expect(persisted.prompt_delivered).toBe(true);
+    expect(persisted.submit_verified).toBe(true);
     expect(persisted.task_summary).toBe("probe renamed state");
   });
 

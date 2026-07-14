@@ -45,6 +45,8 @@ describe("agent facade projections", () => {
       state: "ready",
       session_id: "session-1",
       resumable: true,
+      submit_verified: null,
+      model_mismatch: null,
       resume_command: "brainlayerClaude -s --resume session-1",
     });
     expect((projected as any).surface_id).toBeUndefined();
@@ -60,6 +62,22 @@ describe("agent facade projections", () => {
       state: "ready",
       session_id: null,
       resumable: false,
+      submit_verified: null,
+      model_mismatch: null,
+    });
+  });
+
+  it("preserves boot submit verification and model mismatch in the public projection", () => {
+    const projected = toPublicAgent(
+      makeRecord({
+        submit_verified: false,
+        model_mismatch: true,
+      }),
+    );
+
+    expect(projected).toMatchObject({
+      submit_verified: false,
+      model_mismatch: true,
     });
   });
 });
