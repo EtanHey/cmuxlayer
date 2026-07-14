@@ -12,11 +12,22 @@ interface ObserverIdentityClient {
   currentObserverTransportEpoch?: () => string | null | undefined;
 }
 
+function isPropertyContainer(
+  value: unknown,
+): value is Record<PropertyKey, unknown> {
+  return (
+    (typeof value === "object" && value !== null) ||
+    typeof value === "function"
+  );
+}
+
 function currentSocketPath(
   client: unknown,
   fallbackSocketPath: string | null | undefined,
 ): string | null {
-  const candidate = client as ObserverIdentityClient | null | undefined;
+  const candidate = isPropertyContainer(client)
+    ? (client as ObserverIdentityClient)
+    : null;
   if (candidate && "currentSocketPath" in candidate) {
     if (typeof candidate.currentSocketPath !== "function") return null;
     try {
@@ -29,7 +40,9 @@ function currentSocketPath(
 }
 
 function currentTransportEpoch(client: unknown): string | null {
-  const candidate = client as ObserverIdentityClient | null | undefined;
+  const candidate = isPropertyContainer(client)
+    ? (client as ObserverIdentityClient)
+    : null;
   if (!candidate || !("currentObserverTransportEpoch" in candidate)) {
     return "static";
   }

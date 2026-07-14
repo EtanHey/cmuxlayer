@@ -1991,6 +1991,39 @@ describe("AgentEngine", () => {
       expect(launchedSurface).toBeNull();
     });
 
+    it("refuses a launch target that already disagrees with the registry route", async () => {
+      const record = makeRecord({
+        agent_id: "agent-launch-route-mismatch",
+        surface_id: "surface:registry-target",
+        workspace_id: "ws:1",
+        state: "booting",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      const internals = engine as unknown as {
+        sendLaunchCommand(
+          surface: string,
+          workspace: string | undefined,
+          command: string,
+          agentId: string,
+          observerEpoch: undefined,
+        ): Promise<void>;
+      };
+
+      await expect(
+        internals.sendLaunchCommand(
+          "surface:stale-target",
+          "ws:1",
+          "brainlayerCodex",
+          record.agent_id,
+          undefined,
+        ),
+      ).rejects.toThrow(/launch target.*registry.*surface/i);
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+    });
+
     it("persists explicit role on spawned agents", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
@@ -3204,6 +3237,7 @@ describe("AgentEngine", () => {
       expect(currentObserverId).toBe("cmux:/tmp/cmux-secondary.sock");
       expect(mockClient.send).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
       expect(engine.getAgentState(record.agent_id)).toMatchObject({
         state: "error",
         surface_id: "surface:dead-observer",
@@ -3212,6 +3246,47 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState(record.agent_id)?.error).toMatch(
         /crash recovery failed:.*surface observer changed/i,
       );
+    });
+
+    it("closes an unbound recovery surface when the resume gate rejects it", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        beforeCrashRecoveryMutation: async (input) => {
+          if (input.phase === "resume") {
+            throw new Error("resume denied");
+          }
+        },
+      });
+      const record = makeRecord({
+        agent_id: "agent-crash-resume-denied",
+        state: "error",
+        surface_id: "surface:dead-resume-denied",
+        workspace_id: "ws:1",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        crash_recover: true,
+        error: "Surface surface:dead-resume-denied disappeared",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [makeSurface("surface:witness")];
+      await registry.reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:new",
+        expect.objectContaining({
+          workspace: "ws:1",
+          collapsePane: false,
+        }),
+      );
+      expect(engine.getAgentState(record.agent_id)).toMatchObject({
+        state: "error",
+        surface_id: record.surface_id,
+        error: "Crash recovery failed: resume denied",
+      });
     });
 
     it("sends crash recovery resume commands to the actual cmux workspace on placement mismatch", async () => {
@@ -4592,6 +4667,52 @@ To continue this session, run codex resume ${sessionId}`,
         state: "ready",
         surface_uuid: targetUuid,
       });
+    });
+
+    it("does not re-emit spawned when one authoritative scan briefly omits a UUID", async () => {
+      const targetUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+      const witnessUuid = "033F0B64-780F-4F0B-BCF1-3B8E085A7383";
+      const target = {
+        ...makeSurface("surface:target"),
+        id: targetUuid,
+        workspace_ref: "workspace:sidebar",
+      };
+      const witness = {
+        ...makeSurface("surface:witness"),
+        id: witnessUuid,
+        workspace_ref: "workspace:sidebar",
+      };
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "sidebar-brief-uuid-miss",
+          surface_id: target.ref,
+          surface_uuid: targetUuid,
+          workspace_id: "workspace:sidebar",
+          state: "ready",
+        }),
+      );
+      liveSurfaces = [target, witness];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(mockClient.log).toHaveBeenCalledWith(
+        "spawned: brainlayer",
+        expect.anything(),
+      );
+      (mockClient.log as ReturnType<typeof vi.fn>).mockClear();
+
+      liveSurfaces = [witness];
+      await engine.runSweep();
+      liveSurfaces = [target, witness];
+      await engine.runSweep();
+
+      expect(mockClient.log).not.toHaveBeenCalledWith(
+        "spawned: brainlayer",
+        expect.anything(),
+      );
+      expect(engine.getAgentState("sidebar-brief-uuid-miss")?.state).toBe(
+        "ready",
+      );
     });
 
     it("does not use a UUID mapping from a contradictory topology snapshot", async () => {
@@ -7434,11 +7555,13 @@ To continue this session, run codex resume ${sessionId}`,
         async (surface: string) => {
           liveSurfaces = liveSurfaces.filter((item) => item.ref !== surface);
           if (liveSurfaces.length === 0) {
-            liveSurfaces = [makeSurface("surface:post-close-witness")];
+            liveSurfaces = [
+              {
+                ...makeSurface("surface:post-close-witness"),
+                workspace_ref: "workspace:post-close-witness",
+              },
+            ];
           }
-          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
-            panes: [],
-          });
         },
       );
     });
@@ -7473,11 +7596,25 @@ To continue this session, run codex resume ${sessionId}`,
           surface_uuid: stableUuid,
         }),
       );
-      liveSurfaces = [{ ...makeSurface("surface:old"), id: stableUuid }];
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:old"),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
       await engine.getRegistry().reconstitute();
       liveSurfaces = [
-        { ...makeSurface("surface:old"), id: "uuid-foreign" },
-        { ...makeSurface("surface:new-route"), id: stableUuid },
+        {
+          ...makeSurface("surface:old"),
+          id: "uuid-foreign",
+          workspace_ref: "ws:1",
+        },
+        {
+          ...makeSurface("surface:new-route"),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
       ];
       const beforeSurfaceMutation = vi.fn(async (route: AgentRoute) => {
         expect(route).toMatchObject({
@@ -7742,6 +7879,126 @@ To continue this session, run codex resume ${sessionId}`,
         "surface:stop-old",
         expect.anything(),
       );
+    });
+
+    it("treats UUID disappearance caused by Ctrl+C as an already-closed surface", async () => {
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const witnessUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const record = makeRecord({
+        agent_id: "agent-stop-signal-closed",
+        state: "working",
+        surface_id: "surface:signal-closed",
+        surface_uuid: stableUuid,
+        workspace_id: "ws:1",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface(record.surface_id),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
+        {
+          ...makeSurface("surface:witness"),
+          id: witnessUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await engine.getRegistry().reconstitute();
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async () => {
+          liveSurfaces = liveSurfaces.filter(
+            (surface) => surface.id !== stableUuid,
+          );
+        },
+      );
+
+      await engine.stopAgent(record.agent_id);
+
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(engine.getAgentState(record.agent_id)?.state).toBe("done");
+    });
+
+    it("does not accept UUID absence observed by a different surface owner", async () => {
+      engine.dispose();
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      let observerId = "cmux:/tmp/cmux-primary.sock";
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
+        observerIdProvider: () => observerId,
+      });
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        stopPostConditionTimeoutMs: 20,
+      });
+      const record = makeRecord({
+        agent_id: "agent-stop-foreign-absence",
+        state: "working",
+        surface_id: "surface:owned",
+        surface_uuid: stableUuid,
+        surface_observer_id: observerId,
+        workspace_id: "ws:1",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface(record.surface_id),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await registry.reconstitute();
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async () => {
+          observerId = "cmux:/tmp/cmux-secondary.sock";
+          liveSurfaces = [
+            {
+              ...makeSurface("surface:foreign-witness"),
+              id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              workspace_ref: "ws:1",
+            },
+          ];
+        },
+      );
+
+      await expect(engine.stopAgent(record.agent_id)).rejects.toThrow(
+        /stable surface UUID|fresh topology/i,
+      );
+
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(engine.getAgentState(record.agent_id)?.state).toBe("working");
+    });
+
+    it("does not treat an empty post-signal topology as authoritative UUID absence", async () => {
+      const stableUuid = "11111111-2222-4333-8444-555555555555";
+      const record = makeRecord({
+        agent_id: "agent-stop-empty-absence",
+        state: "working",
+        surface_id: "surface:empty-absence",
+        surface_uuid: stableUuid,
+        workspace_id: "ws:1",
+      });
+      stateMgr.writeState(record);
+      liveSurfaces = [
+        {
+          ...makeSurface(record.surface_id),
+          id: stableUuid,
+          workspace_ref: "ws:1",
+        },
+      ];
+      await engine.getRegistry().reconstitute();
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async () => {
+          liveSurfaces = [];
+        },
+      );
+
+      await expect(engine.stopAgent(record.agent_id)).rejects.toThrow(
+        /stable surface UUID|fresh topology/i,
+      );
+
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(engine.getAgentState(record.agent_id)?.state).toBe("working");
     });
 
     it("accepts UUID disappearance even when the cached ref is recycled", async () => {
@@ -8080,11 +8337,24 @@ To continue this session, run codex resume ${sessionId}`,
         surface_ids: [targetUuid, coTenantUuid],
         selected_surface_ref: "surface:dying",
       };
-      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
-        workspace_ref: "ws:1",
-        window_ref: "window:1",
-        panes: [pane],
-      });
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          panes:
+            liveSurfaces.length === 0
+              ? []
+              : [
+                  {
+                    ...pane,
+                    surface_count: liveSurfaces.length,
+                    surface_refs: liveSurfaces.map((surface) => surface.ref),
+                    surface_ids: liveSurfaces.map((surface) => surface.id),
+                    selected_surface_ref: liveSurfaces[0]?.ref,
+                  },
+                ],
+        }),
+      );
       (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>)
         .mockResolvedValueOnce({
           workspace_ref: "ws:1",
@@ -8100,7 +8370,13 @@ To continue this session, run codex resume ${sessionId}`,
           window_ref: "window:1",
           pane_ref: pane.ref,
           surfaces: [{ ...makeSurface("surface:dying"), id: targetUuid }],
-        });
+        })
+        .mockImplementation(async () => ({
+          workspace_ref: "ws:1",
+          window_ref: "window:1",
+          pane_ref: pane.ref,
+          surfaces: liveSurfaces,
+        }));
       const target = makeRecord({
         agent_id: "agent-dying-moved-cotenant",
         state: "working",

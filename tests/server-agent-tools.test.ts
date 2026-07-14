@@ -5460,6 +5460,58 @@ codex>
     );
   });
 
+  it("records managed send failures against the stable UUID instead of its mutable ref", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const otherUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const surfaceRef = "surface:shared-liveness-ref";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: surfaceRef,
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const tracker = new SurfaceWriteLivenessTracker({ now: () => 1_000 });
+    const record = makeServerAgentRecord({
+      agent_id: "uuid-write-liveness-agent",
+      surface_id: surfaceRef,
+      surface_uuid: stableUuid,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(record);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      surfaceWriteLiveness: tracker,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    routeClient.client.send.mockRejectedValue(
+      Object.assign(new Error("broken pipe"), { code: "EPIPE" }),
+    );
+
+    for (const text of ["first failed write", "second failed write"]) {
+      const result = await registeredTestTool(server, "send_to").handler(
+        {
+          agent_id: record.agent_id,
+          text,
+          press_enter: false,
+        },
+        {},
+      );
+      expect(result.isError).toBe(true);
+    }
+
+    expect(tracker.observe(surfaceRef, stableUuid)?.pty_dead).toBe(true);
+    expect(tracker.observe(surfaceRef, otherUuid)).toBeNull();
+  });
+
   it("send_to fails closed before Return when the stable UUID moves after a chunk", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([

@@ -111,4 +111,30 @@ describe("SurfaceWriteLivenessTracker", () => {
 
     expect(tracker.observe("surface:1")?.pty_dead).toBe(false);
   });
+
+  it("does not transfer a dead-PTY verdict between stable identities that reuse one ref", () => {
+    const tracker = new SurfaceWriteLivenessTracker({
+      failureThreshold: 2,
+      now: () => 1_000,
+    });
+
+    tracker.recordFailure("surface:1", new Error("EPIPE"), "uuid:old");
+    tracker.recordFailure("surface:1", new Error("EPIPE"), "uuid:old");
+
+    expect(tracker.observe("surface:1", "uuid:old")?.pty_dead).toBe(true);
+    expect(tracker.observe("surface:1", "uuid:new")).toBeNull();
+  });
+
+  it("does not transfer UUID-less ref liveness between surface observers", () => {
+    const tracker = new SurfaceWriteLivenessTracker({
+      failureThreshold: 2,
+      now: () => 1_000,
+    });
+
+    tracker.recordFailure("surface:1", new Error("EPIPE"), null, "owner:a");
+    tracker.recordFailure("surface:1", new Error("EPIPE"), null, "owner:a");
+
+    expect(tracker.observe("surface:1", null, "owner:a")?.pty_dead).toBe(true);
+    expect(tracker.observe("surface:1", null, "owner:b")).toBeNull();
+  });
 });

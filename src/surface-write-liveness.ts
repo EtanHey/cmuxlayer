@@ -43,7 +43,7 @@ export class SurfaceWriteLivenessTracker {
   private readonly now: () => number;
   private readonly failureThreshold: number;
   private readonly failureWindowMs: number;
-  private readonly stateBySurface = new Map<string, SurfaceWriteState>();
+  private readonly stateByBinding = new Map<string, SurfaceWriteState>();
 
   constructor(options: SurfaceWriteLivenessTrackerOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -53,19 +53,53 @@ export class SurfaceWriteLivenessTracker {
       options.failureWindowMs ?? DEFAULT_PTY_DEAD_FAILURE_WINDOW_MS;
   }
 
-  recordSuccess(surface: string): void {
-    this.stateBySurface.set(surface, {
-      consecutiveBrokenPipeFailures: 0,
-      firstBrokenPipeFailureAt: null,
-      lastAttemptAt: this.now(),
-    });
+  private bindingKey(
+    surface: string,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): string {
+    const stableKey = stableSurfaceIdentity?.trim().toLowerCase();
+    if (stableKey) return `identity:${stableKey}`;
+    const observerKey = surfaceObserverIdentity?.trim().toLowerCase();
+    return observerKey
+      ? `observer:${observerKey}:ref:${surface}`
+      : `ref:${surface}`;
   }
 
-  recordFailure(surface: string, error: unknown): void {
+  recordSuccess(
+    surface: string,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): void {
+    this.stateByBinding.set(
+      this.bindingKey(
+        surface,
+        stableSurfaceIdentity,
+        surfaceObserverIdentity,
+      ),
+      {
+        consecutiveBrokenPipeFailures: 0,
+        firstBrokenPipeFailureAt: null,
+        lastAttemptAt: this.now(),
+      },
+    );
+  }
+
+  recordFailure(
+    surface: string,
+    error: unknown,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): void {
     const at = this.now();
-    const previous = this.stateBySurface.get(surface);
+    const key = this.bindingKey(
+      surface,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
+    const previous = this.stateByBinding.get(key);
     if (!isBrokenPipeError(error)) {
-      this.stateBySurface.set(surface, {
+      this.stateByBinding.set(key, {
         consecutiveBrokenPipeFailures: 0,
         firstBrokenPipeFailureAt: null,
         lastAttemptAt: at,
@@ -77,7 +111,7 @@ export class SurfaceWriteLivenessTracker {
       previous.consecutiveBrokenPipeFailures > 0 &&
       previous.firstBrokenPipeFailureAt !== null &&
       at - previous.firstBrokenPipeFailureAt <= this.failureWindowMs;
-    this.stateBySurface.set(surface, {
+    this.stateByBinding.set(key, {
       consecutiveBrokenPipeFailures: continuesChain
         ? previous.consecutiveBrokenPipeFailures + 1
         : 1,
@@ -88,8 +122,18 @@ export class SurfaceWriteLivenessTracker {
     });
   }
 
-  observe(surface: string): SurfaceWriteLivenessObservation | null {
-    const state = this.stateBySurface.get(surface);
+  observe(
+    surface: string,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): SurfaceWriteLivenessObservation | null {
+    const state = this.stateByBinding.get(
+      this.bindingKey(
+        surface,
+        stableSurfaceIdentity,
+        surfaceObserverIdentity,
+      ),
+    );
     if (!state) return null;
     const withinWindow =
       state.firstBrokenPipeFailureAt !== null &&

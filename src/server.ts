@@ -2910,8 +2910,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
-  const recordSurfaceWriteSuccess = (surface: string): void => {
-    surfaceWriteLiveness.recordSuccess(surface);
+  const recordSurfaceWriteSuccess = (
+    surface: string,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
+  ): void => {
+    surfaceWriteLiveness.recordSuccess(
+      surface,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
+    if (stableSurfaceIdentity || surfaceObserverIdentity) {
+      // Preserve ref-only telemetry for control-health consumers. Mutating
+      // decisions use the identity-scoped observation and never fall back.
+      surfaceWriteLiveness.recordSuccess(surface);
+    }
     surfaceWriteLivenessCandidates.delete(surface);
     surfacePtyDeadSince.delete(surface);
   };
@@ -2919,10 +2932,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const recordSurfaceWriteFailure = (
     surface: string,
     error: unknown,
+    stableSurfaceIdentity?: string | null,
+    surfaceObserverIdentity?: string | null,
   ): void => {
     if (!isBrokenPipeError(error)) return;
-    surfaceWriteLiveness.recordFailure(surface, error);
-    const observation = surfaceWriteLiveness.observe(surface);
+    surfaceWriteLiveness.recordFailure(
+      surface,
+      error,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
+    if (stableSurfaceIdentity || surfaceObserverIdentity) {
+      surfaceWriteLiveness.recordFailure(surface, error);
+    }
+    const observation = surfaceWriteLiveness.observe(
+      surface,
+      stableSurfaceIdentity,
+      surfaceObserverIdentity,
+    );
     if (!observation || observation.consecutive_broken_pipe_failures === 0) {
       surfaceWriteLivenessCandidates.delete(surface);
       surfacePtyDeadSince.delete(surface);
@@ -2947,22 +2974,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       workspace?: string;
       owner?: string;
       observePtyWrite?: boolean;
+      stableSurfaceIdentity?: string | null;
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
       await assertSurfaceMutationAllowed(opts.toolName, surface, opts.workspace);
     }
     const owner = opts.owner ?? `surface-write:${randomUUID()}`;
+    // Capture the ref-only provenance before the async write. A reconnect or
+    // socket replacement after the attempt must not relabel its liveness.
+    const surfaceObserverIdentity = context.surfaceObserverId;
     acquireSurfaceWrite(surface, owner);
     try {
       const result = await fn();
       if (opts.observePtyWrite) {
-        recordSurfaceWriteSuccess(surface);
+        recordSurfaceWriteSuccess(
+          surface,
+          opts.stableSurfaceIdentity,
+          surfaceObserverIdentity,
+        );
       }
       return result;
     } catch (error) {
       if (opts.observePtyWrite) {
-        recordSurfaceWriteFailure(surface, error);
+        recordSurfaceWriteFailure(
+          surface,
+          error,
+          opts.stableSurfaceIdentity,
+          surfaceObserverIdentity,
+        );
       }
       throw error;
     } finally {
@@ -4061,6 +4101,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const sendLauncherCommandToSurface = async (opts: {
     surface: string;
+    stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
     relaunch?: boolean;
@@ -4195,6 +4236,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       toolName: "send_command",
       workspace: opts.workspace,
       observePtyWrite: true,
+      stableSurfaceIdentity: opts.stableSurfaceIdentity,
     });
   };
 
@@ -4753,7 +4795,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : (parsedSurface?.parsed.actions ?? null)
         : null,
       surface_write_liveness: binding
-        ? surfaceWriteLiveness.observe(binding.surfaceRef)
+        ? surfaceWriteLiveness.observe(
+            binding.surfaceRef,
+            agent.surface_uuid,
+            agent.surface_observer_id,
+          )
         : null,
     };
     const input = await buildAgentHealthInput(
@@ -7262,7 +7308,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           readScreen: (surface, readOpts) =>
             client.readScreen(surface, readOpts),
           send: (surface, text, sendOpts) => {
-            const { beforeMutation, ...clientOpts } = sendOpts ?? {};
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = sendOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7273,11 +7323,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 toolName: "agent_engine",
                 workspace: sendOpts?.workspace,
                 observePtyWrite: true,
+                stableSurfaceIdentity,
               },
             );
           },
           sendKey: (surface, key, keyOpts) => {
-            const { beforeMutation, ...clientOpts } = keyOpts ?? {};
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = keyOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7288,6 +7343,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 toolName: "send_key",
                 workspace: keyOpts?.workspace,
                 observePtyWrite: true,
+                stableSurfaceIdentity,
               },
             );
           },
@@ -7357,6 +7413,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           inboxOpts,
           launchCommandSender: async ({
             surface,
+            stableSurfaceIdentity,
             workspace,
             command,
             assertSurfaceBindingCurrent,
@@ -7365,6 +7422,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             try {
               await sendLauncherCommandToSurface({
                 surface,
+                stableSurfaceIdentity,
                 workspace,
                 command,
                 assertSurfaceBindingCurrent,
@@ -7725,7 +7783,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         route.state === "error" &&
         (await registry.isSurfaceAlive(route, {
           ptyDead:
-            surfaceWriteLiveness.observe(route.surface_id)?.pty_dead === true,
+            surfaceWriteLiveness.observe(
+              route.surface_id,
+              route.surface_uuid,
+              context.surfaceObserverId,
+            )?.pty_dead === true,
         }));
       if (
         !args.allow_busy &&
@@ -7797,6 +7859,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           toolName: args.source_event,
           workspace: deliveryRoute.workspace_id ?? undefined,
           observePtyWrite: true,
+          stableSurfaceIdentity: deliveryRoute.surface_uuid,
         },
       );
     };
@@ -9046,8 +9109,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (
           await registry.isSurfaceAlive(livenessTarget, {
             ptyDead:
-              surfaceWriteLiveness.observe(livenessTarget.surface_id)
-                ?.pty_dead === true,
+              surfaceWriteLiveness.observe(
+                livenessTarget.surface_id,
+                livenessTarget.surface_uuid,
+                context.surfaceObserverId,
+              )?.pty_dead === true,
           })
         ) {
           return null;

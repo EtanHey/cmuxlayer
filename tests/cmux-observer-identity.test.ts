@@ -104,4 +104,17 @@ describe("cmux observer identity", () => {
       }),
     ).toBeNull();
   });
+
+  it("treats truthy primitive clients as hook-free instead of applying in to them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cmux-observer-primitive-"));
+    tempDirs.push(dir);
+    const socketPath = join(dir, "cmux.sock");
+    await listen(socketPath);
+
+    for (const client of ["client", 42, true, Symbol("client")]) {
+      expect(deriveCmuxObserverIdentity(client, socketPath)).toMatchObject({
+        epoch: expect.stringMatching(/@static$/),
+      });
+    }
+  });
 });

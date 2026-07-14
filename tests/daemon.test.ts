@@ -1152,10 +1152,10 @@ describe("CmuxLayerDaemon", () => {
     });
     context.surfaceWriteLiveness.recordFailure("surface:caller", {
       code: "EPIPE",
-    });
+    }, null, context.surfaceObserverId);
     context.surfaceWriteLiveness.recordFailure("surface:caller", {
       code: "EPIPE",
-    });
+    }, null, context.surfaceObserverId);
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);
     const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
@@ -1195,6 +1195,110 @@ describe("CmuxLayerDaemon", () => {
     );
     expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toEqual([]);
     expect(guardedRelay).not.toHaveBeenCalled();
+  });
+
+  it("does not collapse a fresh UUID owner from stale failures on its recycled ref", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "pty-recycled-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "pty-recycled-collab.md");
+    const inboxBaseDir = join(TEST_ROOT, "pty-recycled-inbox");
+    const oldUuid = "11111111-2222-4333-8444-555555555555";
+    const currentUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "pty-recycled-monitor",
+        owner_seat: "worker-current",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const client = createPlacementClient([]);
+    const context = createServerContext({
+      client: client as any,
+      stateDir: stateDir("pty-recycled-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-current",
+      surface_id: "surface:caller",
+      surface_uuid: currentUuid,
+      surface_observer_id: context.surfaceObserverId,
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-current",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    context.lifecycleSweepEngine = {
+      resolveAgentIoRoute: vi.fn().mockResolvedValue({
+        agent_id: "worker-current",
+        surface_id: "surface:caller",
+        surface_uuid: currentUuid,
+        workspace_id: "workspace:1",
+        state: "working",
+        session_id: "session-current",
+        resumable: true,
+      }),
+      dispose: vi.fn(),
+    } as any;
+    const brokenPipe = Object.assign(new Error("broken pipe"), {
+      code: "EPIPE",
+    });
+    context.surfaceWriteLiveness.recordFailure(
+      "surface:caller",
+      brokenPipe,
+      oldUuid,
+      context.surfaceObserverId,
+    );
+    context.surfaceWriteLiveness.recordFailure(
+      "surface:caller",
+      brokenPipe,
+      oldUuid,
+      context.surfaceObserverId,
+    );
+    const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-owner-recycled-pty"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      monitorOwnerPtyDeadNotify,
+      inboxBaseDir,
+    });
+
+    await daemon.start();
+    await waitUntil(
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
+    );
+    await daemon.shutdown();
+
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      monitor_id: "pty-recycled-monitor",
+      state: "rearming",
+    });
+    expect(client.readScreen).toHaveBeenCalledWith("surface:caller", {
+      workspace: "workspace:1",
+    });
+    expect(monitorOwnerPtyDeadNotify).not.toHaveBeenCalled();
   });
 
   it("collapses and loudly escalates a pane-alive owner that never acknowledges re-arm", async () => {

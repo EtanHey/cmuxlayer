@@ -217,6 +217,7 @@ type CreatedAgentSurface = AgentSurfacePlacement & {
   actual_workspace?: string;
   warnings?: string[];
   observerEpoch: SurfaceObserverEpoch;
+  observerId: string | null;
 };
 
 export interface CapturedSessionIdentity {
@@ -279,6 +280,7 @@ export interface AgentEngineOptions {
   ) => RoleSurfaceIds;
   launchCommandSender?: (input: {
     surface: string;
+    stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
     assertSurfaceBindingCurrent: () => Promise<void>;
@@ -528,12 +530,19 @@ interface AgentEngineClient {
   send(
     surface: string,
     text: string,
-    opts?: CmuxSendOptions & { beforeMutation?: () => Promise<void> },
+    opts?: CmuxSendOptions & {
+      beforeMutation?: () => Promise<void>;
+      stableSurfaceIdentity?: string | null;
+    },
   ): Promise<void>;
   sendKey(
     surface: string,
     key: string,
-    opts?: { workspace?: string; beforeMutation?: () => Promise<void> },
+    opts?: {
+      workspace?: string;
+      beforeMutation?: () => Promise<void>;
+      stableSurfaceIdentity?: string | null;
+    },
   ): Promise<void>;
   clearStatus(key: string, opts?: { workspace?: string }): Promise<void>;
   setProgress(
@@ -1486,6 +1495,7 @@ export class AgentEngine {
     },
   ): Promise<CreatedAgentSurface> {
     const observerEpoch = this.captureSurfaceObserverEpoch();
+    const observerId = this.registry.getObserverId();
     this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent placement");
     // Pin a child worker to the parent orchestrator's ACTUAL workspace before
     // falling back to repo-name resolution. Without this a worker re-resolves
@@ -1648,6 +1658,7 @@ export class AgentEngine {
       return {
         ...this.withWorkspacePlacementWarning(surface, workspace),
         observerEpoch,
+        observerId,
       };
     } catch (error) {
       if (
@@ -1666,6 +1677,7 @@ export class AgentEngine {
       return {
         ...this.withWorkspacePlacementWarning(surface, workspace),
         observerEpoch,
+        observerId,
       };
     }
   }
@@ -1710,6 +1722,12 @@ export class AgentEngine {
     observerEpoch: SurfaceObserverEpoch,
   ): Promise<void> {
     const expectedRoute = this.resolveAgentRoute(agentId);
+    if (surface !== expectedRoute.surface_id) {
+      throw new Error(
+        `Agent launch target ${surface} does not match registry surface ` +
+          `${expectedRoute.surface_id} for "${agentId}"; refusing terminal mutation.`,
+      );
+    }
     const assertSurfaceBindingCurrent = async (): Promise<void> => {
       this.assertSurfaceObserverEpochCurrent(observerEpoch, "agent launch");
       const current = this.registry.get(agentId);
@@ -1734,6 +1752,7 @@ export class AgentEngine {
     if (this.launchCommandSender) {
       await this.launchCommandSender({
         surface,
+        ...this.stableSurfaceWriteOptions(expectedRoute.surface_uuid),
         workspace,
         command,
         assertSurfaceBindingCurrent,
@@ -1742,9 +1761,15 @@ export class AgentEngine {
     }
 
     await assertSurfaceBindingCurrent();
-    await this.client.send(surface, command, { workspace });
+    await this.client.send(surface, command, {
+      workspace,
+      ...this.stableSurfaceWriteOptions(expectedRoute.surface_uuid),
+    });
     await assertSurfaceBindingCurrent();
-    await this.client.sendKey(surface, "return", { workspace });
+    await this.client.sendKey(surface, "return", {
+      workspace,
+      ...this.stableSurfaceWriteOptions(expectedRoute.surface_uuid),
+    });
   }
 
   private isBootCaptureWindowOpen(agent: AgentRecord): boolean {
@@ -2401,6 +2426,87 @@ export class AgentEngine {
     );
   }
 
+  private async cleanupUnboundCrashRecoverySurface(
+    surface: CreatedAgentSurface,
+  ): Promise<void> {
+    let surfaceRef = surface.surface;
+    let workspace = surface.actual_workspace ?? surface.workspace;
+    let cleanupEpoch = surface.observerEpoch;
+
+    if (!this.isSurfaceObserverEpochCurrent(cleanupEpoch)) {
+      const currentObserverId = this.registry.getObserverId();
+      if (
+        !surface.surface_id ||
+        !surface.observerId ||
+        currentObserverId !== surface.observerId
+      ) {
+        await this.logCrashRecoveryCleanupWarning(
+          `crash-recovery: refusing cleanup of unbound ${surface.surface}; ` +
+            `surface observer ownership changed`,
+        );
+        return;
+      }
+
+      const topology = await this.collectObservedSurfaceTopology();
+      if (
+        topology?.complete !== true ||
+        topology.workspaceBySurface.size === 0
+      ) {
+        await this.logCrashRecoveryCleanupWarning(
+          `crash-recovery: could not prove unbound surface ${surface.surface_id} ` +
+            `for cleanup after reconnect`,
+        );
+        return;
+      }
+      const binding = resolveAgentSurfaceBinding(
+        {
+          surface_id: surface.surface,
+          surface_uuid: surface.surface_id,
+        },
+        topology,
+      );
+      if (!binding || binding.provenance !== "uuid") {
+        await this.logCrashRecoveryCleanupWarning(
+          `crash-recovery: stable surface ${surface.surface_id} was not uniquely ` +
+            `resolvable for cleanup`,
+        );
+        return;
+      }
+      surfaceRef = binding.surfaceRef;
+      workspace = binding.workspaceId ?? workspace;
+      cleanupEpoch = this.captureSurfaceObserverEpoch();
+    }
+
+    try {
+      await this.client.closeSurface(surfaceRef, {
+        workspace,
+        collapsePane: false,
+        beforeMutation: async () => {
+          this.assertSurfaceObserverEpochCurrent(
+            cleanupEpoch,
+            "crash recovery cleanup",
+          );
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.logCrashRecoveryCleanupWarning(
+        `crash-recovery: failed to clean unbound surface ${surfaceRef}: ${message}`,
+      );
+    }
+  }
+
+  private async logCrashRecoveryCleanupWarning(message: string): Promise<void> {
+    try {
+      await this.client.log(message, {
+        level: "warning",
+        source: "cmuxlayer",
+      });
+    } catch {
+      // Cleanup diagnostics must never mask the original recovery failure.
+    }
+  }
+
   private async recoverCrashedAgents(): Promise<void> {
     const erroredAgents = this.registry.list({ state: "error" });
     for (const agent of erroredAgents) {
@@ -2420,6 +2526,8 @@ export class AgentEngine {
         continue;
       }
 
+      let createdSurface: CreatedAgentSurface | null = null;
+      let createdSurfaceBound = false;
       try {
         await this.beforeCrashRecoveryMutation?.({
           phase: "placement",
@@ -2441,6 +2549,7 @@ export class AgentEngine {
             repo: agent.repo,
           },
         );
+        createdSurface = surface;
         this.assertSurfaceObserverEpochCurrent(
           surface.observerEpoch,
           "crash recovery",
@@ -2479,6 +2588,7 @@ export class AgentEngine {
           pid: null,
         });
         this.registry.set(agent.agent_id, patched);
+        createdSurfaceBound = true;
 
         const booting = this.stateMgr.transition(agent.agent_id, "booting", {
           error: null,
@@ -2506,6 +2616,9 @@ export class AgentEngine {
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (createdSurface && !createdSurfaceBound) {
+          await this.cleanupUnboundCrashRecoverySurface(createdSurface);
+        }
         await this.persistCrashRecoveryFailure(agent.agent_id, message);
       }
     }
@@ -2883,7 +2996,9 @@ export class AgentEngine {
           }
         }
         this.sidebarSnapshot.delete(registryAgent.agent_id);
-        this.clearAgentLifecycleMemory(registryAgent.agent_id);
+        // The registry row still exists. Keep once-only lifecycle delivery
+        // memory so a recovered binding cannot re-emit "spawned" or terminal
+        // notifications merely because one topology snapshot omitted its UUID.
         continue;
       }
 
@@ -3229,13 +3344,21 @@ export class AgentEngine {
               await this.client.send(
                 compactRoute.surface_id,
                 "/compact",
-                { workspace: compactRoute.workspace_id ?? undefined },
+                {
+                  workspace: compactRoute.workspace_id ?? undefined,
+                  ...this.stableSurfaceWriteOptions(
+                    compactRoute.surface_uuid,
+                  ),
+                },
               );
               const returnRoute = await this.resolveAgentIoRoute(agentId);
               await this.client.sendKey(
                 returnRoute.surface_id,
                 "return",
-                { workspace: returnRoute.workspace_id ?? undefined },
+                {
+                  workspace: returnRoute.workspace_id ?? undefined,
+                  ...this.stableSurfaceWriteOptions(returnRoute.surface_uuid),
+                },
               );
             } else {
               await this.client.log(
@@ -4372,6 +4495,14 @@ export class AgentEngine {
     );
   }
 
+  private stableSurfaceWriteOptions(
+    surfaceUuid: string | null | undefined,
+  ): { stableSurfaceIdentity?: string } {
+    return this.registry.isObserverOwnershipEnforced() && surfaceUuid
+      ? { stableSurfaceIdentity: surfaceUuid }
+      : {};
+  }
+
   private async resolveUnchangedAgentIoRoute(
     agentId: string,
     expectedRoute: AgentRoute,
@@ -4468,15 +4599,25 @@ export class AgentEngine {
   }
 
   private async isAgentSurfaceGone(
-    agent: Pick<AgentRecord, "surface_id" | "surface_uuid">,
+    agent: Pick<
+      AgentRecord,
+      "surface_id" | "surface_uuid" | "surface_observer_id"
+    >,
   ): Promise<boolean> {
     if (!agent.surface_uuid) {
       return this.isSurfaceGone(agent.surface_id);
     }
 
     try {
+      if (!this.registry.canControlSurface(agent)) return false;
       const topology = await this.collectObservedSurfaceTopology();
-      if (topology?.complete !== true) return false;
+      if (
+        topology?.complete !== true ||
+        topology.workspaceBySurface.size === 0 ||
+        !this.registry.canControlSurface(agent)
+      ) {
+        return false;
+      }
       return resolveAgentSurfaceBinding(agent, topology) === null;
     } catch {
       return false;
@@ -4679,6 +4820,7 @@ export class AgentEngine {
       };
       await this.client.sendKey(route.surface_id, "c-c", {
         workspace: route.workspace_id ?? undefined,
+        ...this.stableSurfaceWriteOptions(route.surface_uuid),
         beforeMutation: assertSignalRouteCurrent,
       });
     }
@@ -4686,49 +4828,59 @@ export class AgentEngine {
     // Ctrl+C and process teardown can move the stable UUID to a replacement
     // ref before close runs. Re-resolve both the route and pane-collapse policy
     // after the signal so a recycled ref is never closed by mistake.
-    let closeRoute = await this.resolveAgentIoRoute(canonicalAgentId);
-    stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
-      closeRoute.surface_id,
-      closeRoute.workspace_id,
-    );
-    let confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
-    if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
-      closeRoute = confirmedCloseRoute;
+    let closeRoute: AgentRoute | null = null;
+    try {
+      closeRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+    } catch (error) {
+      if (!(await this.isAgentSurfaceGone(agent))) {
+        throw error;
+      }
+    }
+
+    let closeError: string | null = null;
+    if (closeRoute) {
       stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
         closeRoute.surface_id,
         closeRoute.workspace_id,
       );
-      confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+      let confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
-        throw new Error(
-          `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +
-            `preparing close; refusing terminal mutation.`,
+        closeRoute = confirmedCloseRoute;
+        stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
+          closeRoute.surface_id,
+          closeRoute.workspace_id,
         );
+        confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+        if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
+          throw new Error(
+            `Agent "${canonicalAgentId}" surface route changed repeatedly while ` +
+              `preparing close; refusing terminal mutation.`,
+          );
+        }
       }
-    }
-    route = confirmedCloseRoute;
-    agent = this.registry.get(canonicalAgentId);
-    if (!agent) {
-      throw new Error(`Agent not found: ${agentId}`);
-    }
+      route = confirmedCloseRoute;
+      agent = this.registry.get(canonicalAgentId);
+      if (!agent) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
 
-    const assertCloseRouteCurrent = async (): Promise<void> => {
-      await this.resolveUnchangedAgentIoRoute(
-        canonicalAgentId,
-        route,
-        "surface close",
-      );
-    };
+      const assertCloseRouteCurrent = async (): Promise<void> => {
+        await this.resolveUnchangedAgentIoRoute(
+          canonicalAgentId,
+          route,
+          "surface close",
+        );
+      };
 
-    let closeError: string | null = null;
-    try {
-      await this.client.closeSurface(route.surface_id, {
-        workspace: route.workspace_id ?? undefined,
-        collapsePane: stopClosePolicy.collapsePane,
-        beforeMutation: assertCloseRouteCurrent,
-      });
-    } catch (error) {
-      closeError = error instanceof Error ? error.message : String(error);
+      try {
+        await this.client.closeSurface(route.surface_id, {
+          workspace: route.workspace_id ?? undefined,
+          collapsePane: stopClosePolicy.collapsePane,
+          beforeMutation: assertCloseRouteCurrent,
+        });
+      } catch (error) {
+        closeError = error instanceof Error ? error.message : String(error);
+      }
     }
 
     const stopResult = await this.waitForStopPostCondition(
@@ -4822,6 +4974,7 @@ export class AgentEngine {
     };
     await this.client.send(route.surface_id, sanitizeTerminalInput(text), {
       workspace,
+      ...this.stableSurfaceWriteOptions(route.surface_uuid),
       beforeMutation: assertSurfaceBindingCurrent,
     });
     if (pressEnter) {
@@ -4840,6 +4993,7 @@ export class AgentEngine {
       }
       await this.client.sendKey(route.surface_id, "return", {
         workspace,
+        ...this.stableSurfaceWriteOptions(route.surface_uuid),
         beforeMutation: assertSurfaceBindingCurrent,
       });
     }

@@ -682,6 +682,8 @@ export class CmuxLayerDaemon {
           const route = await engine.resolveAgentIoRoute(owner.agent_id);
           return {
             surfaceId: route.surface_id,
+            stableSurfaceIdentity: route.surface_uuid ?? null,
+            surfaceObserverIdentity: context.surfaceObserverId,
             workspaceId: route.workspace_id,
           };
         } catch {
@@ -707,6 +709,8 @@ export class CmuxLayerDaemon {
       }
       return {
         surfaceId: owner.surface_id,
+        stableSurfaceIdentity: null,
+        surfaceObserverIdentity: observerId,
         workspaceId: owner.workspace_id ?? null,
       };
     };
@@ -727,8 +731,11 @@ export class CmuxLayerDaemon {
           const route = await resolveOwnerSurface(ownerSeat);
           return (
             route !== null &&
-            context.surfaceWriteLiveness.observe(route.surfaceId)?.pty_dead ===
-              true
+            context.surfaceWriteLiveness.observe(
+              route.surfaceId,
+              route.stableSurfaceIdentity,
+              route.surfaceObserverIdentity,
+            )?.pty_dead === true
           );
         },
         ownerAlive: async (ownerSeat) => {
