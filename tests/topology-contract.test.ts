@@ -309,11 +309,20 @@ describe("topology contract: authoritative ghost eviction", () => {
       surface("surface:ghost"),
       surface("surface:notes", "notes"),
     ]);
-    await fixture.engine.getRegistry().reconstitute();
+    const registry = fixture.engine.getRegistry();
+    await registry.reconstitute();
+    const runRegistrySweep = async () => {
+      const confirmation = {
+        confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
+        now: Date.now(),
+      };
+      await registry.reconcile(confirmation);
+      await registry.evictSurfaceless(confirmation);
+    };
 
     vi.setSystemTime(new Date("2026-07-14T09:00:01.000Z"));
     fixture.setTopology([]);
-    await fixture.engine.runSweep();
+    await runRegistrySweep();
     expect(fixture.engine.getAgentState("ghost-agent")).toMatchObject({
       state: "working",
       surface_id: "surface:ghost",
@@ -327,7 +336,7 @@ describe("topology contract: authoritative ghost eviction", () => {
       ),
     );
     fixture.setTopology([surface("surface:notes", "notes")]);
-    await fixture.engine.runSweep();
+    await runRegistrySweep();
     expect(fixture.engine.getAgentState("ghost-agent")).toMatchObject({
       state: "working",
       error: null,
@@ -338,22 +347,25 @@ describe("topology contract: authoritative ghost eviction", () => {
       surface("surface:ghost"),
       surface("surface:notes", "notes"),
     ]);
-    await fixture.engine.runSweep();
+    await runRegistrySweep();
     expect(fixture.engine.getAgentState("ghost-agent")).not.toBeNull();
 
-    vi.setSystemTime(new Date("2026-07-14T09:00:10.000Z"));
+    vi.setSystemTime(new Date("2026-07-14T09:00:12.000Z"));
     fixture.setTopology([surface("surface:notes", "notes")]);
-    await fixture.engine.runSweep();
-    expect(fixture.engine.getAgentState("ghost-agent")).not.toBeNull();
+    await runRegistrySweep();
+    expect(fixture.engine.getAgentState("ghost-agent")).toMatchObject({
+      state: "working",
+      error: null,
+    });
 
     vi.setSystemTime(
       new Date(
-        Date.parse("2026-07-14T09:00:10.000Z") +
+        Date.parse("2026-07-14T09:00:12.000Z") +
           SURFACE_EVICTION_CONFIRMATION_MS +
           1,
       ),
     );
-    await fixture.engine.runSweep();
+    await runRegistrySweep();
     expect(fixture.engine.getAgentState("ghost-agent")).toBeNull();
   });
 });
