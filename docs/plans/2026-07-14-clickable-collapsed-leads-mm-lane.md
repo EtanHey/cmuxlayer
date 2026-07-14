@@ -61,3 +61,11 @@
 2. Generate a fixture-backed sidebar through an injected temporary `outputPath`; render it as a uniquely named staging sidebar and inspect the screenshot pixels for a collapsed clickable lead and an `mm` lane. Never create or mutate `fleet.swift` or `fleet-dev.swift` in the live sidebar directory, and remove the staging output immediately after capture.
 3. Review the diff against the brief, commit the scoped files, push the worker branch, and open `fix(sidebar): clickable collapsed leads + mm lane normalization`.
 4. Post the PR URL to the driver-buddy hub tagged `@cmuxlayerRethink-lead`, then store WHAT changed and WHY in BrainLayer.
+
+### Task 5: Lock fleet-wide reconnect preservation
+
+**Files:**
+- Modify: `tests/fleet-sidebar.test.ts`
+
+1. Publish a 16-seat authoritative last-good snapshot, then simulate every seat entering reconnect at once as a discovering/zero-active publication while all 16 surfaces remain observed.
+2. Assert the publisher preserves the byte-identical 16-seat source and never emits the zero-seat discovery placeholder.
