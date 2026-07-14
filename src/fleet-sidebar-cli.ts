@@ -105,17 +105,18 @@ function readRenderedLaneState(
 ): boolean | undefined {
   try {
     const source = readFileSync(sidebarPath, "utf8");
-    const label = JSON.stringify(fleetLaneLabel(lane));
-    const match = source.match(
-      new RegExp(
-        `fleetLane\\(${escapeRegExp(label)},\\s*\\d+,\\s*\\d+,\\s*(true|false),`,
-      ),
-    );
-    return match?.[1] === "true"
-      ? true
-      : match?.[1] === "false"
-        ? false
-        : undefined;
+    const renderedLabels = new Set([fleetLaneLabel(lane), lane]);
+    for (const renderedLabel of renderedLabels) {
+      const label = JSON.stringify(renderedLabel);
+      const match = source.match(
+        new RegExp(
+          `fleetLane\\(${escapeRegExp(label)},\\s*\\d+,\\s*\\d+,\\s*(true|false),`,
+        ),
+      );
+      if (match?.[1] === "true") return true;
+      if (match?.[1] === "false") return false;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
