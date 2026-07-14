@@ -608,7 +608,12 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
 
   it("renders exact counts and click-to-focus actions for the final live rows", () => {
     const snapshot = buildFleetSidebarSnapshot(
-      [candidate({ surfaceRef: "surface:7" })],
+      [
+        candidate({
+          surfaceUuid: "11111111-2222-4333-8444-555555555555",
+          surfaceRef: "surface:7",
+        }),
+      ],
       { liveSurfaceRefs: new Set(["surface:7"]) },
     );
 
@@ -616,9 +621,41 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
 
     expect(source).toContain('fleetLane("cmuxlayer", 1, 1, false, 0, [');
     expect(source).toContain(
-      'cmux("surface.focus", surface_id: seat.surfaceRef)',
+      'cmux("surface.focus", surface_id: seat.surfaceUuid)',
+    );
+    expect(source).toContain(
+      '"surfaceUuid": "11111111-2222-4333-8444-555555555555"',
     );
     expect(source).toContain('"surfaceRef": "surface:7"');
+  });
+
+  it("renders a never-active seat as stalled but immediately focusable by UUID", () => {
+    const surfaceUuid = "078D1A5B-A3F4-40A5-8A59-A6C840BAF832";
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          surfaceUuid,
+          surfaceRef: "surface:591",
+          screenStatus: null,
+          taskSummary: "",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:591"]),
+        liveSurfaceUuids: new Set([surfaceUuid]),
+      },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]).toMatchObject({
+      surfaceUuid,
+      surfaceRef: "surface:591",
+      screenState: "stalled",
+    });
+    const source = renderFleetSidebar(snapshot);
+    expect(source).toContain(
+      'cmux("surface.focus", surface_id: seat.surfaceUuid)',
+    );
+    expect(source).toContain(`"surfaceUuid": "${surfaceUuid}"`);
   });
 
   it("emits row data as Swift dictionaries instead of JSON object closures", () => {
@@ -811,6 +848,24 @@ describe("fleet sidebar atomic publisher", () => {
       state,
       snapshot: snapshotWithSurfaces(surfaceRefs),
       observedLiveSurfaceRefs,
+    };
+  }
+
+  function uuidPublication(
+    surfaceRef: string,
+    surfaceUuid: string,
+  ) {
+    return {
+      state: "populated" as const,
+      snapshot: buildFleetSidebarSnapshot(
+        [candidate({ surfaceRef, surfaceUuid })],
+        {
+          liveSurfaceRefs: new Set([surfaceRef]),
+          liveSurfaceUuids: new Set([surfaceUuid]),
+        },
+      ),
+      observedLiveSurfaceRefs: [surfaceRef],
+      observedLiveSurfaceUuids: [surfaceUuid],
     };
   }
 
@@ -1079,6 +1134,67 @@ writeFileSync(process.argv[3], "released");`,
     await new Promise((resolve) => setTimeout(resolve, 550));
 
     expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("preserves the last-good UUID topology when a complete scan has mixed identity coverage", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    const firstUuid = "033F0B64-780F-4F0B-BCF1-3B8E085A7383";
+    const secondUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    publisher.publish({
+      state: "populated",
+      snapshot: buildFleetSidebarSnapshot(
+        [
+          candidate({ surfaceRef: "surface:594", surfaceUuid: firstUuid }),
+          candidate({
+            agentId: "agent-2",
+            surfaceRef: "surface:595",
+            surfaceUuid: secondUuid,
+          }),
+        ],
+        {
+          liveSurfaceRefs: new Set(["surface:594", "surface:595"]),
+          liveSurfaceUuids: new Set([firstUuid, secondUuid]),
+        },
+      ),
+      observedLiveSurfaceRefs: ["surface:594", "surface:595"],
+      observedLiveSurfaceUuids: [firstUuid, secondUuid],
+    });
+    const lastGood = readFileSync(outputPath, "utf8");
+
+    publisher.publish({
+      state: "populated",
+      snapshot: buildFleetSidebarSnapshot(
+        [candidate({ surfaceRef: "surface:594", surfaceUuid: firstUuid })],
+        {
+          liveSurfaceRefs: new Set(["surface:594", "surface:595"]),
+          liveSurfaceUuids: new Set([firstUuid]),
+        },
+      ),
+      observedLiveSurfaceRefs: ["surface:594", "surface:595"],
+      observedLiveSurfaceUuids: [firstUuid],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("replaces a populated row when a ref is recycled for a new UUID", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    const oldUuid = "033F0B64-780F-4F0B-BCF1-3B8E085A7383";
+    const newUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    publisher.publish(uuidPublication("surface:594", oldUuid));
+    expect(readFileSync(outputPath, "utf8")).toContain(oldUuid);
+
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    publisher.publish(uuidPublication("surface:594", newUuid));
+
+    const source = readFileSync(outputPath, "utf8");
+    expect(source).toContain(newUuid);
+    expect(source).not.toContain(oldUuid);
     publisher.dispose();
   });
 

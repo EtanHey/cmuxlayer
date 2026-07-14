@@ -1,0 +1,27 @@
+{
+  "verified_at": "2026-07-14T12:41:04+03:00",
+  "result": "pass",
+  "method": "native cmux Swift sidebar button clicked through macOS accessibility, with cmux tree queried before and after",
+  "sidebar_validation": {
+    "valid_count": 1,
+    "error_count": 0
+  },
+  "before": {
+    "surface_uuid": "9C583367-85C1-4118-950C-49C09AD2958E",
+    "surface_ref": "surface:619",
+    "surface_type": "customSidebar"
+  },
+  "clicked_row": {
+    "state": "stalled",
+    "label": "never-active seat",
+    "surface_uuid": "033F0B64-780F-4F0B-BCF1-3B8E085A7383",
+    "expected_surface_ref": "surface:594",
+    "action": "cmux(\"surface.focus\", surface_id: stable UUID)"
+  },
+  "after": {
+    "surface_uuid": "033F0B64-780F-4F0B-BCF1-3B8E085A7383",
+    "surface_ref": "surface:594",
+    "surface_type": "terminal"
+  },
+  "assertion": "the first click moved focus to the row's stable UUID without requiring terminal activity"
+}

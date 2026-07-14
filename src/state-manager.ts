@@ -485,7 +485,11 @@ export class StateManager {
     rmSync(agentDir, { recursive: true, force: true });
   }
 
-  ensureAutoRecord(agentId: string, discovered: DiscoveredAgent): AgentRecord {
+  ensureAutoRecord(
+    agentId: string,
+    discovered: DiscoveredAgent,
+    surfaceObserverId?: string | null,
+  ): AgentRecord {
     const existing = this.readState(agentId);
     if (existing) {
       return existing;
@@ -495,6 +499,8 @@ export class StateManager {
     const record: AgentRecord = {
       agent_id: agentId,
       surface_id: discovered.surface_id,
+      surface_uuid: discovered.surface_uuid ?? null,
+      surface_observer_id: surfaceObserverId?.trim() || null,
       workspace_id: discovered.workspace_id ?? null,
       state: discoveredStatusToAgentState(discovered.parsed_status),
       repo: inferRepoFromTitle(discovered.surface_title),

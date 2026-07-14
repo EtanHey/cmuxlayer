@@ -6,6 +6,8 @@ import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-recycled-surface-identity-test");
+const TEST_OBSERVER_OWNER =
+  "cmux:/tmp/cmux-recycled-surface-identity-test.sock";
 
 function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -202,6 +204,8 @@ function createRelayServer(client: any) {
     client,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
+    surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
+    surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
 }
 
@@ -214,6 +218,7 @@ function registerClaudeAgentOnSurface1(server: any): AgentRecord {
   const record: AgentRecord = {
     agent_id: "agent-1",
     surface_id: "surface:1",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "ready",
     repo: "brainlayer",

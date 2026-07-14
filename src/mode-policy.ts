@@ -22,6 +22,7 @@ const MUTATING_TOOLS = new Set([
   "move_surface",
   "send_input",
   "send_command",
+  "boot_prompt",
   "send_key",
   "rename_tab",
   "close_surface",

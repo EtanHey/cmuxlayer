@@ -7,6 +7,7 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { StateManager } from "../src/state-manager.js";
+import type { CmuxSurface } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-crash-resume-index-test");
 
@@ -41,7 +42,10 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   };
 }
 
-function makeClient(): CmuxClient {
+function makeClient(
+  liveSurfaces: CmuxSurface[],
+  workspaceId = "workspace:old",
+): CmuxClient {
   return {
     newSplit: vi.fn().mockResolvedValue({
       workspace: "workspace:new",
@@ -62,9 +66,43 @@ function makeClient(): CmuxClient {
     renameTab: vi.fn(),
     setStatus: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn(),
-    listWorkspaces: vi.fn().mockResolvedValue({ workspaces: [] }),
-    listPanes: vi.fn().mockResolvedValue({ panes: [] }),
-    listPaneSurfaces: vi.fn().mockResolvedValue({ surfaces: [] }),
+    listWorkspaces: vi.fn().mockResolvedValue({
+      workspaces: [
+        {
+          ref: workspaceId,
+          title: workspaceId,
+          index: 0,
+          selected: true,
+          pinned: false,
+        },
+      ],
+    }),
+    listPanes: vi.fn().mockImplementation(
+      async ({ workspace }: { workspace?: string } = {}) => ({
+        workspace_ref: workspace ?? workspaceId,
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: liveSurfaces.length,
+            surface_refs: liveSurfaces.map((surface) => surface.ref),
+            selected_surface_ref:
+              liveSurfaces.find((surface) => surface.selected)?.ref ??
+              liveSurfaces[0]?.ref,
+          },
+        ],
+      }),
+    ),
+    listPaneSurfaces: vi.fn().mockImplementation(
+      async ({ workspace, pane }: { workspace?: string; pane?: string } = {}) => ({
+        workspace_ref: workspace ?? workspaceId,
+        window_ref: "window:1",
+        pane_ref: pane ?? "pane:1",
+        surfaces: liveSurfaces,
+      }),
+    ),
     selectWorkspace: vi.fn(),
     clearStatus: vi.fn().mockResolvedValue(undefined),
     setProgress: vi.fn().mockResolvedValue(undefined),
@@ -128,10 +166,11 @@ describe("surface session crash-resume index", () => {
         workspace_id: "workspace:old",
       }),
     );
-    const registry = new AgentRegistry(stateMgr, async () => [
+    const liveSurfaces: CmuxSurface[] = [
       { ref: "surface:42", title: "", type: "terminal", index: 0, selected: true },
-    ]);
-    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+    ];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(liveSurfaces), {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => sessionId,
     });
@@ -187,7 +226,7 @@ describe("surface session crash-resume index", () => {
         workspace_id: "workspace:old",
       }),
     );
-    const registry = new AgentRegistry(stateMgr, async () => [
+    const liveSurfaces: CmuxSurface[] = [
       {
         ref: "surface:final",
         title: "",
@@ -202,8 +241,9 @@ describe("surface session crash-resume index", () => {
         index: 1,
         selected: true,
       },
-    ]);
-    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+    ];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(liveSurfaces), {
       spawnPreflight: async () => {},
       sessionIdentityResolver: (agent) =>
         agent.agent_id === pendingAgentId
@@ -261,7 +301,7 @@ describe("surface session crash-resume index", () => {
         workspace_id: "workspace:old",
       }),
     );
-    const registry = new AgentRegistry(stateMgr, async () => [
+    const liveSurfaces: CmuxSurface[] = [
       {
         ref: "surface:final",
         title: "",
@@ -276,8 +316,9 @@ describe("surface session crash-resume index", () => {
         index: 1,
         selected: true,
       },
-    ]);
-    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+    ];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(liveSurfaces), {
       spawnPreflight: async () => {},
       sessionIdentityResolver: (agent) =>
         agent.agent_id === pendingAgentId ? sessionId : null,
@@ -323,7 +364,7 @@ describe("surface session crash-resume index", () => {
         workspace_id: "workspace:old",
       }),
     );
-    const registry = new AgentRegistry(stateMgr, async () => [
+    const liveSurfaces: CmuxSurface[] = [
       {
         ref: "surface:final",
         title: "",
@@ -338,8 +379,9 @@ describe("surface session crash-resume index", () => {
         index: 1,
         selected: true,
       },
-    ]);
-    const engine = new AgentEngine(stateMgr, registry, makeClient(), {
+    ];
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    const engine = new AgentEngine(stateMgr, registry, makeClient(liveSurfaces), {
       spawnPreflight: async () => {},
       sessionIdentityResolver: (agent) =>
         agent.agent_id === pendingAgentId ? capturedSessionId : null,

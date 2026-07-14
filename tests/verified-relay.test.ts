@@ -6,6 +6,7 @@ import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-verified-relay-test");
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-verified-relay-test.sock";
 
 function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -120,6 +121,8 @@ function createRelayServer(client: any) {
     client,
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
+    surfaceObserverOwnerIdProvider: () => TEST_OBSERVER_OWNER,
+    surfaceObserverEpochProvider: () => `${TEST_OBSERVER_OWNER}@test`,
   });
 }
 
@@ -135,6 +138,7 @@ function registerAgent(
   const record: AgentRecord = {
     agent_id: "agent-1",
     surface_id: "surface:agent",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     workspace_id: "workspace:1",
     state: "ready",
     repo: "brainlayer",

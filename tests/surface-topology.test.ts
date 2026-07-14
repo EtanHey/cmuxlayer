@@ -3,7 +3,10 @@ import { evaluateAgentHealth } from "../src/agent-health.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import {
   collectSurfaceTopology,
+  enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
+  resolveAgentSurfaceBinding,
+  SurfaceIdentityConflictError,
 } from "../src/surface-topology.js";
 import type {
   CmuxPane,
@@ -126,7 +129,209 @@ function healthFor(
   });
 }
 
+describe("enrichSurfaceIdsFromPanes", () => {
+  it("rejects a surface UUID that contradicts the pane membership UUID", () => {
+    const panes = [
+      {
+        ref: "workspace:1",
+        panes: {
+          panes: [
+            {
+              ...pane("pane:1", 0, ["surface:1"]),
+              surface_ids: ["11111111-2222-4333-8444-555555555555"],
+            },
+          ],
+        },
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [
+          {
+            ...surface("surface:1"),
+            id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+          },
+        ],
+      },
+    ];
+
+    expect(() => enrichSurfaceIdsFromPanes(panes, groups)).toThrow(
+      SurfaceIdentityConflictError,
+    );
+  });
+
+  it("rejects one stable UUID observed on two mutable refs", () => {
+    const duplicateUuid = "11111111-2222-4333-8444-555555555555";
+    const panes = [
+      {
+        ref: "workspace:1",
+        panes: {
+          panes: [
+            {
+              ...pane("pane:1", 0, ["surface:1", "surface:2"]),
+              surface_ids: [duplicateUuid, duplicateUuid],
+            },
+          ],
+        },
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:1",
+        surfaces: [surface("surface:1"), surface("surface:2")],
+      },
+    ];
+
+    expect(() => enrichSurfaceIdsFromPanes(panes, groups)).toThrow(
+      SurfaceIdentityConflictError,
+    );
+  });
+});
+
 describe("collectSurfaceTopology", () => {
+  it("returns null when a configured surface observer is unknown", async () => {
+    const client = makeTopologyClient(
+      [pane("pane:right", 0, ["surface:1"])],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [surface("surface:1")],
+        },
+      ],
+    );
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => null,
+    );
+
+    expect(snapshot).toBeNull();
+    expect(client.listPanes).not.toHaveBeenCalled();
+    expect(client.listPaneSurfaces).not.toHaveBeenCalled();
+  });
+
+  it("returns null when the surface observer changes mid-enumeration", async () => {
+    let observerId = "cmux:/tmp/cmux-primary.sock";
+    const client = makeTopologyClient(
+      [
+        {
+          ...pane("pane:right", 0, ["surface:1"]),
+          surface_ids: ["11111111-2222-4333-8444-555555555555"],
+        },
+      ],
+      [
+        {
+          workspace_ref: "workspace:1",
+          pane_ref: "pane:right",
+          surfaces: [
+            {
+              ...surface("surface:1"),
+              id: "11111111-2222-4333-8444-555555555555",
+            },
+          ],
+        },
+      ],
+    );
+    const listPaneSurfaces = client.listPaneSurfaces.getMockImplementation()!;
+    client.listPaneSurfaces.mockImplementation(async (opts) => {
+      const result = await listPaneSurfaces(opts);
+      observerId = "cmux:/tmp/cmux-secondary.sock";
+      return result;
+    });
+
+    const snapshot = await collectSurfaceTopology(
+      client,
+      "workspace:1",
+      () => observerId,
+    );
+
+    expect(observerId).toBe("cmux:/tmp/cmux-secondary.sock");
+    expect(snapshot).toBeNull();
+  });
+
+  it("resolves a stale ref through the stable UUID from the same topology observation", async () => {
+    const surfaceUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    const panes = [
+      {
+        ...pane("pane:right", 0, ["surface:595"]),
+        surface_ids: [surfaceUuid],
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:right",
+        surfaces: [surface("surface:595", "cmuxlayerCodex [surface:595]")],
+      },
+    ];
+    const snapshot = await collectSurfaceTopology(
+      makeTopologyClient(panes, groups),
+      "workspace:1",
+    );
+    const agent = makeRecord({
+      surface_id: "surface:594",
+      surface_uuid: surfaceUuid,
+    });
+
+    expect(snapshot?.surfaceIdByRef.get("surface:595")).toBe(surfaceUuid);
+    expect(snapshot?.surfaceRefById.get(surfaceUuid)).toBe("surface:595");
+    expect(resolveAgentSurfaceBinding(agent, snapshot)).toEqual({
+      surfaceUuid,
+      surfaceRef: "surface:595",
+      workspaceId: "workspace:1",
+      title: "cmuxlayerCodex [surface:595]",
+      provenance: "uuid",
+    });
+  });
+
+  it("resolves a stable UUID case-insensitively", async () => {
+    const observedUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    const persistedUuid = observedUuid.toLowerCase();
+    const panes = [
+      {
+        ...pane("pane:right", 0, ["surface:595"]),
+        surface_ids: [observedUuid],
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:right",
+        surfaces: [surface("surface:595", "cmuxlayerCodex")],
+      },
+    ];
+    const snapshot = await collectSurfaceTopology(
+      makeTopologyClient(panes, groups),
+      "workspace:1",
+    );
+
+    expect([...snapshot!.surfaceRefById]).toEqual([
+      [observedUuid, "surface:595"],
+    ]);
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({
+          surface_id: "surface:stale",
+          surface_uuid: persistedUuid,
+        }),
+        snapshot,
+      ),
+    ).toMatchObject({
+      surfaceUuid: observedUuid,
+      surfaceRef: "surface:595",
+      provenance: "uuid",
+    });
+  });
+
   it("keeps usable pane topology when another pane surface lookup fails", async () => {
     const panes = [pane("pane:ok", 0, ["surface:ok"]), pane("pane:gone", 1, [])];
     const client = {
@@ -162,6 +367,136 @@ describe("collectSurfaceTopology", () => {
       column: 0,
       column_count: 2,
     });
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({ surface_id: "surface:ok" }),
+        snapshot,
+      ),
+    ).toBeNull();
+  });
+
+  it("marks a successful but truncated pane-surface enumeration incomplete", async () => {
+    const firstUuid = "11111111-2222-4333-8444-555555555555";
+    const missingUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+    const panes = [
+      {
+        ...pane("pane:two-seats", 0, ["surface:first", "surface:missing"]),
+        surface_ids: [firstUuid, missingUuid],
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:two-seats",
+        // The command succeeded, but cmux returned only one of the two surfaces
+        // advertised by the same pane observation.
+        surfaces: [
+          { ...surface("surface:first"), id: firstUuid },
+        ],
+      },
+    ];
+
+    const snapshot = await collectSurfaceTopology(
+      makeTopologyClient(panes, groups),
+      "workspace:1",
+    );
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.complete).toBe(false);
+    expect(snapshot?.workspaceBySurface.has("surface:first")).toBe(true);
+    expect(snapshot?.workspaceBySurface.has("surface:missing")).toBe(false);
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({
+          surface_id: "surface:first",
+          surface_uuid: firstUuid,
+        }),
+        snapshot,
+      ),
+    ).toBeNull();
+  });
+
+  it("removes both sides of a contradictory UUID mapping", async () => {
+    const duplicateUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    const panes = [
+      pane("pane:first", 0, ["surface:first"]),
+      pane("pane:second", 1, ["surface:second"]),
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:first",
+        surfaces: [
+          { ...surface("surface:first", "first"), id: duplicateUuid },
+        ],
+      },
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:second",
+        surfaces: [
+          { ...surface("surface:second", "second"), id: duplicateUuid },
+        ],
+      },
+    ];
+
+    const snapshot = await collectSurfaceTopology(
+      makeTopologyClient(panes, groups),
+      "workspace:1",
+    );
+
+    expect(snapshot?.complete).toBe(false);
+    expect(snapshot?.surfaceRefById.has(duplicateUuid)).toBe(false);
+    expect(snapshot?.surfaceIdByRef.has("surface:first")).toBe(false);
+    expect(snapshot?.surfaceIdByRef.has("surface:second")).toBe(false);
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({
+          surface_id: "surface:first",
+          surface_uuid: duplicateUuid,
+        }),
+        snapshot,
+      ),
+    ).toBeNull();
+  });
+
+  it("treats mixed stable-identity coverage as an incomplete snapshot", async () => {
+    const stableUuid = "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B";
+    const panes = [
+      {
+        ...pane("pane:mixed", 0, ["surface:identified", "surface:ref-only"]),
+        surface_ids: [stableUuid],
+      },
+    ];
+    const groups: CmuxPaneSurfaces[] = [
+      {
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        pane_ref: "pane:mixed",
+        surfaces: [
+          { ...surface("surface:identified"), id: stableUuid },
+          surface("surface:ref-only"),
+        ],
+      },
+    ];
+
+    const snapshot = await collectSurfaceTopology(
+      makeTopologyClient(panes, groups),
+      "workspace:1",
+    );
+
+    expect(snapshot?.complete).toBe(false);
+    expect(
+      resolveAgentSurfaceBinding(
+        makeRecord({
+          surface_id: "surface:identified",
+          surface_uuid: stableUuid,
+        }),
+        snapshot,
+      ),
+    ).toBeNull();
   });
 
   it("turns live pane placement into blocking role-zone health", async () => {

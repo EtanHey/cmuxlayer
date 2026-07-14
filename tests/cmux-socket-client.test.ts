@@ -97,6 +97,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
   },
   "surface.split": {
     workspace_ref: "workspace:1",
+    surface_id: "11111111-2222-4333-8444-555555555555",
     surface_ref: "surface:2",
     pane_ref: "pane:2",
     title: "",
@@ -460,6 +461,15 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(result).toBe(true);
   });
 
+  it("exposes the persistent connection as a transient observer epoch", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    expect(client.currentObserverTransportEpoch()).toBe("0:0");
+    await expect(client.ping()).resolves.toBe(true);
+    expect(client.currentObserverTransportEpoch()).toBe("0:1");
+    client.disconnect();
+  });
+
   it("listWorkspaces returns same shape as CmuxClient", async () => {
     const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
     const result = await client.listWorkspaces();
@@ -549,6 +559,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     });
     expect(result).toHaveProperty("workspace");
     expect(result).toHaveProperty("surface");
+    expect(result.surface_id).toBe("11111111-2222-4333-8444-555555555555");
     expect(result).toHaveProperty("pane");
     expect(result).toHaveProperty("type");
     expect(result.type).toBe("terminal");
@@ -1243,7 +1254,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
     expect(lastV2Request).toBeNull();
     expect(execCalls).toHaveLength(2);
     expect(execCalls[0].args).toEqual([
-      "--json",
+      "--json", "--id-format", "both",
       "set-buffer",
       "--name",
       expect.stringMatching(/^cmuxlayer-workspace-1-surface-1-/),
@@ -1251,10 +1262,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       "line one\nline two",
     ]);
     expect(execCalls[1].args).toEqual([
-      "--json",
+      "--json", "--id-format", "both",
       "paste-buffer",
       "--name",
-      execCalls[0].args[3],
+      execCalls[0].args[5],
       "--surface",
       "surface:1",
       "--workspace",
@@ -1709,10 +1720,13 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("createCmuxClient factory", () => {
         },
       });
 
+      expect(client.currentObserverTransportEpoch()).toBe("0:0");
+
       await expect(Promise.all([client.ping(), client.ping()])).resolves.toEqual(
         [true, true],
       );
       expect(resolverCalls).toBe(1);
+      expect(client.currentObserverTransportEpoch()).toBe("1:1");
     } finally {
       await stopSocketServer(secondServer, secondSocketPath);
       fs.rmSync(stateDir, { recursive: true, force: true });

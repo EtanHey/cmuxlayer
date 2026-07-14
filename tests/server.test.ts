@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createServer as createServerImpl,
-  createServerContext,
+  createServerContext as createServerContextImpl,
   __submitEvidenceTestHooks,
+  type CreateServerOptions,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
@@ -33,11 +34,30 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
 };
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmuxlayer-server-test.sock";
+
+function withTestObserver(opts: CreateServerOptions = {}): CreateServerOptions {
+  if (opts.context) return opts;
+  return {
+    ...opts,
+    surfaceObserverOwnerIdProvider:
+      opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
+    surfaceObserverEpochProvider:
+      opts.surfaceObserverEpochProvider ??
+      (() => `${TEST_OBSERVER_OWNER}@test`),
+  };
+}
+
+function createServerContext(
+  opts: Omit<CreateServerOptions, "context"> = {},
+) {
+  return createServerContextImpl(withTestObserver(opts));
+}
 
 function createServer(
   ...args: Parameters<typeof createServerImpl>
 ): ReturnType<typeof createServerImpl> {
-  const server = createServerImpl(...args);
+  const server = createServerImpl(withTestObserver(args[0]));
   const close = server.close.bind(server);
   server.close = async () => {
     try {
@@ -94,6 +114,43 @@ const processScopedTmpDir = (name: string): string =>
   join(tmpdir(), `${name}-${TEST_PROCESS_SCOPE}`);
 const CHANNEL_TEST_DIR = processScopedTmpDir("cmuxlayer-channels-server-test");
 const BOOT_PROMPT_READY_POLL_MS_FOR_TESTS = 250;
+const SPAWN_UPDATE_SURFACE = "surface:2";
+
+function spawnUpdatePanes(surfaceCreated: boolean) {
+  return {
+    workspace_ref: "workspace:1",
+    window_ref: "window:1",
+    panes: surfaceCreated
+      ? [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: [SPAWN_UPDATE_SURFACE],
+            selected_surface_ref: SPAWN_UPDATE_SURFACE,
+          },
+        ]
+      : [],
+  };
+}
+
+function spawnUpdatePaneSurfaces() {
+  return {
+    workspace_ref: "workspace:1",
+    window_ref: "window:1",
+    pane_ref: "pane:1",
+    surfaces: [
+      {
+        ref: SPAWN_UPDATE_SURFACE,
+        title: "cmuxlayerCodex",
+        type: "terminal",
+        index: 0,
+        selected: true,
+      },
+    ],
+  };
+}
 const REAL_SET_IMMEDIATE = setImmediate;
 const REAL_CLAUDE_SUBMIT_EVIDENCE_SCREEN = [
   "✻ Cogitated for 15s",
@@ -253,6 +310,29 @@ function setFakeSystemTime(now: Date): void {
 }
 
 describe("createServer", () => {
+  it("reports the client socket currently observed after runtime failover", () => {
+    const stateDir = processScopedTmpDir("cmuxlayer-observer-context");
+    rmSync(stateDir, { recursive: true, force: true });
+    let socketPath = "/tmp/cmux-primary.sock";
+    const context = createServerContext({
+      client: { currentSocketPath: () => socketPath } as any,
+      surfaceObserverOwnerIdProvider: () => `cmux:${socketPath}`,
+      surfaceObserverEpochProvider: () => `cmux:${socketPath}@test`,
+      stateDir,
+      skipAgentLifecycle: true,
+      controlHealthIntervalMs: 0,
+    });
+
+    try {
+      expect(context.surfaceObserverId).toBe("cmux:/tmp/cmux-primary.sock");
+      socketPath = "/tmp/cmux-secondary.sock";
+      expect(context.surfaceObserverId).toBe("cmux:/tmp/cmux-secondary.sock");
+    } finally {
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns an McpServer with a connect method", async () => {
     const server = createServer({ skipAgentLifecycle: true });
     expect(server).toBeDefined();
@@ -499,6 +579,8 @@ describe("Claude channels", () => {
     stateMgr.writeState({
       agent_id: "a1",
       surface_id: "surface:42",
+      surface_observer_id: TEST_OBSERVER_OWNER,
+      workspace_id: "workspace:1",
       state: "working",
       repo: "brainlayer",
       model: "codex",
@@ -526,7 +608,16 @@ describe("Claude channels", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:42"],
+            selected_surface_ref: "surface:42",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -627,6 +718,7 @@ describe("Claude channels", () => {
     stateMgr.writeState({
       agent_id: "wedged-holder",
       surface_id: "surface:42",
+      surface_observer_id: TEST_OBSERVER_OWNER,
       workspace_id: "workspace:1",
       state: "working",
       repo: "brainlayer",
@@ -654,7 +746,16 @@ describe("Claude channels", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:42"],
+            selected_surface_ref: "surface:42",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -801,7 +902,7 @@ describe("tool handler integration", () => {
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
-        "--json",
+        "--json", "--id-format", "both",
         "select-workspace",
         "--workspace",
         "workspace:3",
@@ -1161,13 +1262,13 @@ describe("tool handler integration", () => {
     const result = await tool.handler({}, {} as any);
 
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "list-panes",
       "--workspace",
       "workspace:1",
     ]);
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "list-panes",
       "--workspace",
       "workspace:2",
@@ -1951,7 +2052,16 @@ describe("tool handler integration", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:1"],
+            selected_surface_ref: "surface:1",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -2019,7 +2129,16 @@ describe("tool handler integration", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:1"],
+            selected_surface_ref: "surface:1",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -2090,7 +2209,16 @@ describe("tool handler integration", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:1"],
+            selected_surface_ref: "surface:1",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -5336,6 +5464,101 @@ describe("tool handler integration", () => {
     });
   });
 
+  it("refuses role-based new_split when the surface observer changes after placement observation", async () => {
+    const stateDir = processScopedTmpDir("new-split-observer-epoch");
+    rmSync(stateDir, { recursive: true, force: true });
+    let socketPath = "/tmp/cmux-primary.sock";
+    const mockClient = {
+      currentSocketPath: () => socketPath,
+      listWorkspaces: vi.fn().mockResolvedValue({
+        workspaces: [
+          {
+            ref: "workspace:1",
+            title: "Main",
+            index: 0,
+            selected: true,
+            pinned: false,
+          },
+        ],
+      }),
+      listPanes: vi.fn().mockResolvedValue({
+        workspace_ref: "workspace:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:lead"],
+          },
+        ],
+      }),
+      listPaneSurfaces: vi.fn().mockImplementation(async () => {
+        socketPath = "/tmp/cmux-secondary.sock";
+        return {
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:left",
+          surfaces: [
+            {
+              ref: "surface:lead",
+              title: "cmuxlayerClaude",
+              type: "terminal",
+              index: 0,
+              selected: true,
+            },
+          ],
+        };
+      }),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      renameTab: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const context = createServerContext({
+      client: mockClient as any,
+      surfaceObserverOwnerIdProvider: () => `cmux:${socketPath}`,
+      surfaceObserverEpochProvider: () => `cmux:${socketPath}@test`,
+      stateDir,
+      skipAgentLifecycle: true,
+      controlHealthIntervalMs: 0,
+    });
+    context.lifecycleRegistry = new AgentRegistry(
+      context.stateMgr,
+      async () => [],
+      {
+        observerIdProvider: () => context.surfaceObserverId,
+        observerEpochProvider: () => context.surfaceObserverEpoch,
+      },
+    );
+    const server = createServer({ context, skipAgentLifecycle: true });
+
+    try {
+      const tool = (server as any)._registeredTools["new_split"];
+      const result = await tool.handler(
+        {
+          direction: "right",
+          role: "worker",
+          workspace: "workspace:1",
+        },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toMatch(/surface observer changed.*new_split/i);
+      expect(socketPath).toBe("/tmp/cmux-secondary.sock");
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("new_split with role=worker reuses the existing worker pane", async () => {
     const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-state");
     rmSync(stateDir, { recursive: true, force: true });
@@ -5996,6 +6219,161 @@ describe("tool handler integration", () => {
     expect(secondParsed.surface).toBe("surface:worker-tab");
     expect(secondParsed.placement).toBe("surface");
     expect(secondParsed.direction).toBeNull();
+  });
+
+  it("new_split follows a remembered role surface UUID instead of its recycled ref", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    let moved = false;
+    let splitCount = 0;
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: moved
+              ? [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: false,
+                    surface_count: 1,
+                    surface_refs: ["surface:moved-worker"],
+                    surface_ids: [stableUuid],
+                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+                  },
+                  {
+                    ref: "pane:right-recycled",
+                    index: 1,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:remembered-worker"],
+                    surface_ids: ["uuid-recycled"],
+                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+                  },
+                ]
+              : [
+                  {
+                    ref: "pane:left",
+                    index: 0,
+                    focused: true,
+                    surface_count: 1,
+                    surface_refs: ["surface:manual"],
+                    surface_ids: ["uuid-manual"],
+                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+                  },
+                ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        const surface = moved
+          ? pane === "pane:left"
+            ? {
+                ref: "surface:moved-worker",
+                id: stableUuid,
+                title: "worker",
+              }
+            : {
+                ref: "surface:remembered-worker",
+                id: "uuid-recycled",
+                title: "foreign shell",
+              }
+          : {
+              ref: "surface:manual",
+              id: "uuid-manual",
+              title: "manual",
+            };
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces: [
+              {
+                ...surface,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split")) {
+        splitCount += 1;
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface:
+              splitCount === 1
+                ? "surface:remembered-worker"
+                : "surface:second-worker",
+            surface_id:
+              splitCount === 1 ? stableUuid : "uuid-second-worker",
+            pane: splitCount === 1 ? "pane:right" : "pane:new-right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:wrong-recycled-tab",
+            surface_id: "uuid-wrong-tab",
+            pane: "pane:right-recycled",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir: join(CHANNEL_TEST_DIR, "new-split-role-uuid-memory"),
+    });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      { direction: "right", role: "worker", workspace: "workspace:1" },
+      {} as any,
+    );
+    moved = true;
+    const second = await tool.handler(
+      { direction: "right", role: "ic", workspace: "workspace:1" },
+      {} as any,
+    );
+    const parsed =
+      second.structuredContent ?? JSON.parse(second.content[0].text);
+
+    expect(parsed.surface).toBe("surface:second-worker");
+    expect(parsed.placement).toBe("split");
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "new-split",
+        "up",
+        "--surface",
+        "surface:moved-worker",
+      ]),
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "new-surface",
+        "--pane",
+        "pane:right-recycled",
+      ]),
+    );
   });
 
   it("new_split does not prune role overrides from other workspaces", async () => {
@@ -6679,6 +7057,7 @@ describe("tool handler integration", () => {
       let promptSent = false;
       let returnPresses = 0;
       let readsAfterFirstLaunch = 0;
+      let surfaceCreated = false;
       const sentTexts: string[] = [];
 
       mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -6700,15 +7079,18 @@ describe("tool handler integration", () => {
         }
         if (args.includes("list-panes")) {
           return {
-            stdout: JSON.stringify({
-              workspace_ref: "workspace:1",
-              window_ref: "window:1",
-              panes: [],
-            }),
+            stdout: JSON.stringify(spawnUpdatePanes(surfaceCreated)),
+            stderr: "",
+          };
+        }
+        if (args.includes("list-pane-surfaces")) {
+          return {
+            stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
             stderr: "",
           };
         }
         if (args.includes("new-split")) {
+          surfaceCreated = true;
           return {
             stdout: JSON.stringify({
               workspace: "workspace:1",
@@ -7289,6 +7671,7 @@ describe("tool handler integration", () => {
     let readsAfterFirstLaunch = 0;
     let updateReads = 0;
     let updateMenuSeen = false;
+    let surfaceCreated = false;
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
     const updateMenuKeys: string[] = [];
@@ -7312,15 +7695,18 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-panes")) {
         return {
-          stdout: JSON.stringify({
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            panes: [],
-          }),
+          stdout: JSON.stringify(spawnUpdatePanes(surfaceCreated)),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
           stderr: "",
         };
       }
       if (args.includes("new-split")) {
+        surfaceCreated = true;
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
@@ -7472,6 +7858,7 @@ describe("tool handler integration", () => {
     let updateMenuSeen = false;
     let promptSent = false;
     let postDismissMenuReads = 0;
+    let surfaceCreated = false;
     const sentTexts: string[] = [];
     const sentKeys: string[] = [];
 
@@ -7494,15 +7881,18 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-panes")) {
         return {
-          stdout: JSON.stringify({
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            panes: [],
-          }),
+          stdout: JSON.stringify(spawnUpdatePanes(surfaceCreated)),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
           stderr: "",
         };
       }
       if (args.includes("new-split")) {
+        surfaceCreated = true;
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
@@ -7636,6 +8026,7 @@ describe("tool handler integration", () => {
     writeFileSync(promptPath, "boot that should be blocked", "utf8");
 
     let launcherSent = false;
+    let surfaceCreated = false;
     const sentKeys: string[] = [];
 
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -7657,15 +8048,18 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-panes")) {
         return {
-          stdout: JSON.stringify({
-            workspace_ref: "workspace:1",
-            window_ref: "window:1",
-            panes: [],
-          }),
+          stdout: JSON.stringify(spawnUpdatePanes(surfaceCreated)),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify(spawnUpdatePaneSurfaces()),
           stderr: "",
         };
       }
       if (args.includes("new-split")) {
+        surfaceCreated = true;
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
@@ -9122,7 +9516,7 @@ describe("tool handler integration", () => {
     );
 
     expect(mockExec).toHaveBeenNthCalledWith(1, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "identify",
       "--surface",
       "surface:52",
@@ -9821,7 +10215,7 @@ describe("tool handler integration", () => {
     );
 
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "notify",
       "--subtitle",
       "Build",
@@ -9855,7 +10249,7 @@ describe("tool handler integration", () => {
     await tool.handler({ title: "Done" }, {} as any);
 
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "notify",
       "--title",
       "Done",
@@ -9901,7 +10295,7 @@ describe("tool handler integration", () => {
     );
 
     expect(mockExec).toHaveBeenNthCalledWith(1, "cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "identify",
       "--surface",
       "surface:52",
@@ -9953,7 +10347,7 @@ describe("tool handler integration", () => {
     );
 
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "browser",
       "--surface",
       "surface:9",
@@ -10092,9 +10486,7 @@ describe("tool handler integration", () => {
         state: "working",
         error: null,
       });
-      expect(mockClient.listPanes).toHaveBeenCalledWith({
-        workspace: "workspace:1",
-      });
+      expect(mockClient.listPanes).not.toHaveBeenCalled();
     } finally {
       await server.close();
     }

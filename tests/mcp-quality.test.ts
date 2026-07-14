@@ -70,7 +70,7 @@ describe("rename_tab persistence — socket V1 command format", () => {
 
     // CLI path: the exec mock captures the args
     expect(mockExec).toHaveBeenCalledWith("cmux", [
-      "--json",
+      "--json", "--id-format", "both",
       "rename-tab",
       "--surface",
       "surface:1",

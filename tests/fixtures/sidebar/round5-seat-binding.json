@@ -1,0 +1,59 @@
+{
+  "captured_at": "2026-07-14T06:21:57.000Z",
+  "source": "sanitized live round-5 topology",
+  "workspace": "workspace:2",
+  "surfaces": [
+    {
+      "surface_uuid": "033F0B64-780F-4F0B-BCF1-3B8E085A7383",
+      "surface_ref": "surface:594",
+      "title": "cmuxlayerCodex [surface:594]",
+      "screen": "gpt-5.6-sol xhigh\n› Write tests for @filename",
+      "parsed_status": "idle"
+    },
+    {
+      "surface_uuid": "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B",
+      "surface_ref": "surface:595",
+      "title": "cmuxlayerCodex [surface:595]",
+      "screen": "Working (15m 57s • esc to interrupt)\n› Explain this codebase",
+      "parsed_status": "working"
+    },
+    {
+      "surface_uuid": "078D1A5B-A3F4-40A5-8A59-A6C840BAF832",
+      "surface_ref": "surface:591",
+      "title": "skillcreatorCodex [surface:591]",
+      "screen": "$ ",
+      "parsed_status": "idle"
+    }
+  ],
+  "registry": [
+    {
+      "agent_id": "cmuxlayer-working-seat",
+      "surface_uuid": "369F3724-02E9-4ACF-9F23-5CBA7AFCCF9B",
+      "stale_surface_ref": "surface:594",
+      "expected_surface_ref": "surface:595",
+      "expected_state": "working"
+    },
+    {
+      "agent_id": "cmuxlayer-idle-seat",
+      "surface_uuid": "033F0B64-780F-4F0B-BCF1-3B8E085A7383",
+      "stale_surface_ref": "surface:595",
+      "expected_surface_ref": "surface:594",
+      "expected_state": "idle"
+    },
+    {
+      "agent_id": "skillcreator-never-active-seat",
+      "surface_uuid": "078D1A5B-A3F4-40A5-8A59-A6C840BAF832",
+      "stale_surface_ref": "surface:591",
+      "expected_surface_ref": "surface:591",
+      "expected_state": "stalled",
+      "expected_rendered": true,
+      "never_active": true
+    },
+    {
+      "agent_id": "cmuxlayer-ghost-seat",
+      "surface_uuid": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+      "stale_surface_ref": "surface:595",
+      "expected_rendered": false
+    }
+  ]
+}

@@ -86,9 +86,7 @@ export type MonitorOwnerPtyDeadNotification = MonitorOwnerCollapseNotification;
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
 export type DaemonRetirementReason = "stale-build" | "irrecoverable-transport";
 export type DaemonShutdownReason =
-  | NodeJS.Signals
-  | "manual"
-  | DaemonRetirementReason;
+  NodeJS.Signals | "manual" | DaemonRetirementReason;
 
 export class SocketJsonRpcTransport implements Transport {
   onclose?: () => void;
@@ -246,9 +244,7 @@ export interface CmuxLayerDaemonOptions extends Omit<
   createClient?: (
     opts: Pick<CreateCmuxClientOptions, "onIrrecoverableTransport">,
   ) => Promise<CmuxLayerClient>;
-  detectStaleBuild?: (
-    deps?: DetectStaleBuildDeps,
-  ) => StaleBuildResult | null;
+  detectStaleBuild?: (deps?: DetectStaleBuildDeps) => StaleBuildResult | null;
   staleCheckIntervalMs?: number;
   monitorReconcile?: (options?: {
     rearmClaimTimeoutMs?: number;
@@ -404,9 +400,7 @@ export class CmuxLayerDaemon {
     | ((options?: {
         rearmClaimTimeoutMs?: number;
         monitorIds?: readonly string[];
-      }) =>
-        | Promise<unknown>
-        | unknown)
+      }) => Promise<unknown> | unknown)
     | null;
   private readonly monitorRelayReadyListener = () => {
     void this.retryFailedMonitorRearmsWhenRelayReady();
@@ -678,6 +672,45 @@ export class CmuxLayerDaemon {
             record.agent_id === ownerSeat || record.seat_id === ownerSeat,
         ) ?? null;
 
+    const resolveOwnerSurface = async (ownerSeat: string) => {
+      const owner = findOwner(ownerSeat);
+      if (!owner) return null;
+
+      const engine = context.lifecycleSweepEngine;
+      if (engine) {
+        try {
+          const route = await engine.resolveAgentIoRoute(owner.agent_id);
+          return {
+            surfaceId: route.surface_id,
+            workspaceId: route.workspace_id,
+          };
+        } catch {
+          // A UUID-backed owner that is absent, ambiguous, or only visible in
+          // incomplete topology is not safely addressable. Treat its pane
+          // liveness as unknown/dead instead of probing a recycled ref.
+          return null;
+        }
+      }
+
+      // Lifecycle-disabled compatibility is restricted to UUID-less legacy
+      // records explicitly owned by the current known observer. Active
+      // unowned rows stay quarantined because their mutable ref may belong to
+      // a replacement cmux instance. A known UUID likewise requires fresh
+      // lifecycle resolution.
+      const observerId = context.surfaceObserverId;
+      if (
+        owner.surface_uuid ||
+        !observerId ||
+        owner.surface_observer_id !== observerId
+      ) {
+        return null;
+      }
+      return {
+        surfaceId: owner.surface_id,
+        workspaceId: owner.workspace_id ?? null,
+      };
+    };
+
     return (options) =>
       reconcileMonitorRegistry({
         registryPath,
@@ -690,11 +723,11 @@ export class CmuxLayerDaemon {
           ? { rearmClaimTimeoutMs: options.rearmClaimTimeoutMs }
           : {}),
         ...(options?.monitorIds ? { monitorIds: options.monitorIds } : {}),
-        ownerPtyDead: (ownerSeat) => {
-          const owner = findOwner(ownerSeat);
+        ownerPtyDead: async (ownerSeat) => {
+          const route = await resolveOwnerSurface(ownerSeat);
           return (
-            owner !== null &&
-            context.surfaceWriteLiveness.observe(owner.surface_id)?.pty_dead ===
+            route !== null &&
+            context.surfaceWriteLiveness.observe(route.surfaceId)?.pty_dead ===
               true
           );
         },
@@ -703,11 +736,11 @@ export class CmuxLayerDaemon {
           if (!owner || owner.state === "done" || owner.state === "error") {
             return false;
           }
+          const route = await resolveOwnerSurface(ownerSeat);
+          if (!route) return false;
           try {
-            await context.client.readScreen(owner.surface_id, {
-              ...(owner.workspace_id
-                ? { workspace: owner.workspace_id }
-                : {}),
+            await context.client.readScreen(route.surfaceId, {
+              ...(route.workspaceId ? { workspace: route.workspaceId } : {}),
             });
             return true;
           } catch {
@@ -782,10 +815,8 @@ export class CmuxLayerDaemon {
         escalate: async (record) => {
           const ownerWedged = record.collapsed_reason === "owner-wedged";
           const notify = ownerWedged
-            ? (this.opts.monitorOwnerWedgedNotify ??
-              (async () => false))
-            : (this.opts.monitorOwnerPtyDeadNotify ??
-              (async () => false));
+            ? (this.opts.monitorOwnerWedgedNotify ?? (async () => false))
+            : (this.opts.monitorOwnerPtyDeadNotify ?? (async () => false));
           await notify({
             title: ownerWedged
               ? "Monitor owner wedged"
@@ -866,7 +897,8 @@ export class CmuxLayerDaemon {
   }
 
   private startMonitorReconcileWatcher(): void {
-    if (!this.monitorReconcileFn || this.monitorReconcileIntervalMs <= 0) return;
+    if (!this.monitorReconcileFn || this.monitorReconcileIntervalMs <= 0)
+      return;
     this.monitorReconcileTimer = setInterval(() => {
       void this.runMonitorReconcile();
     }, this.monitorReconcileIntervalMs);

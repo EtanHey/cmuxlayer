@@ -8,6 +8,8 @@ import type {
 
 export interface DiscoveredAgent {
   surface_id: string;
+  /** Stable cmux surface UUID paired with the mutable `surface_id` ref. */
+  surface_uuid?: string | null;
   surface_title: string;
   workspace_id?: string | null;
   cli: CliType | "unknown";
@@ -20,6 +22,8 @@ export interface DiscoveredAgent {
 }
 
 export interface DiscoveryDeps {
+  /** Resolve the cmux topology identity that produced a discovery snapshot. */
+  observerIdProvider?: () => string | null | undefined;
   listSurfaces: () => Promise<CmuxSurface[]>;
   readScreen: (
     surface: string,
@@ -63,8 +67,19 @@ export function makeAutoAgentId(cli: CliType, surfaceId: string): string {
   return `auto-${cli}-${surfaceId.replace(/[^a-zA-Z0-9-]/g, "-")}`;
 }
 
+export class SurfaceBindingChangedDuringDiscoveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SurfaceBindingChangedDuringDiscoveryError";
+  }
+}
+
 export class AgentDiscovery {
-  private cache: { at: number; result: DiscoveredAgent[] } | null = null;
+  private cache: {
+    at: number;
+    observerId: string | null;
+    result: DiscoveredAgent[];
+  } | null = null;
   private deps: DiscoveryDeps;
   private ttlMs: number;
 
@@ -77,7 +92,18 @@ export class AgentDiscovery {
     this.cache = null;
   }
 
+  private getObserverId(): string | null {
+    return this.deps.observerIdProvider?.()?.trim() || null;
+  }
+
   async scan(force = false): Promise<DiscoveredAgent[]> {
+    const observerScoped =
+      typeof this.deps.observerIdProvider === "function";
+    const observerId = this.getObserverId();
+    const canCache = !observerScoped || observerId !== null;
+    if (!canCache || (this.cache && this.cache.observerId !== observerId)) {
+      this.cache = null;
+    }
     if (!force && this.cache && Date.now() - this.cache.at < this.ttlMs) {
       return this.cache.result;
     }
@@ -102,6 +128,7 @@ export class AgentDiscovery {
 
           return {
             surface_id: surface.ref,
+            surface_uuid: surface.id ?? null,
             surface_title: surface.title,
             workspace_id: workspaceId,
             cli,
@@ -119,6 +146,7 @@ export class AgentDiscovery {
           );
           return {
             surface_id: surface.ref,
+            surface_uuid: surface.id ?? null,
             surface_title: surface.title,
             workspace_id: workspaceId,
             cli: "unknown",
@@ -133,7 +161,52 @@ export class AgentDiscovery {
       }),
     );
 
-    this.cache = { at: Date.now(), result };
+    const completedObserverId = this.getObserverId();
+    if (completedObserverId !== observerId) {
+      this.cache = null;
+      throw new Error(
+        `Surface observer changed during discovery (${observerId ?? "unknown"} -> ${completedObserverId ?? "unknown"})`,
+      );
+    }
+
+    const completedSurfaces = (await this.deps.listSurfaces()).filter(
+      (surface) => surface.type === "terminal",
+    );
+    const uuidKey = (value: string | null | undefined): string | null =>
+      value?.trim().toLowerCase() || null;
+    for (const surface of surfaces) {
+      const expectedUuid = uuidKey(surface.id);
+      const currentMatches = expectedUuid
+        ? completedSurfaces.filter(
+            (candidate) => uuidKey(candidate.id) === expectedUuid,
+          )
+        : completedSurfaces.filter(
+            (candidate) =>
+              candidate.ref === surface.ref && uuidKey(candidate.id) === null,
+          );
+      const current = currentMatches[0];
+      if (
+        currentMatches.length !== 1 ||
+        current?.ref !== surface.ref ||
+        (current.workspace_ref ?? null) !== (surface.workspace_ref ?? null)
+      ) {
+        this.cache = null;
+        throw new SurfaceBindingChangedDuringDiscoveryError(
+          `Surface binding changed during discovery for ${surface.ref}` +
+            `${surface.id ? ` (UUID ${surface.id})` : ""}; refusing stale screen evidence`,
+        );
+      }
+    }
+
+    const validatedObserverId = this.getObserverId();
+    if (validatedObserverId !== observerId) {
+      this.cache = null;
+      throw new Error(
+        `Surface observer changed during discovery (${observerId ?? "unknown"} -> ${validatedObserverId ?? "unknown"})`,
+      );
+    }
+
+    this.cache = canCache ? { at: Date.now(), observerId, result } : null;
     return result;
   }
 }

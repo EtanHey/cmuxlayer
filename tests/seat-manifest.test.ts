@@ -40,6 +40,7 @@ describe("seat manifest", () => {
     const writer = createFileSystemSeatManifestWriter({ directory: dir });
     const manifest: SeatManifest = {
       surface_id: "surface:42",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
       agent_id: "cmuxlayer-codex",
       tab_name: "cmuxlayerCodex [surface:42]",
       session_name: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",

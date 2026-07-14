@@ -52,6 +52,7 @@ export function buildRouteTable(
     const nextRoute: AgentRoute = {
       agent_id: record.agent_id,
       surface_id: record.surface_id,
+      surface_uuid: record.surface_uuid ?? null,
       workspace_id: record.workspace_id ?? null,
       state: record.state,
       session_id: record.cli_session_id,

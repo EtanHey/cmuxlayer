@@ -8,6 +8,8 @@ export type SeatPermissionMode = "skip-permissions" | "default";
 
 export interface SeatManifest {
   surface_id: string;
+  /** Stable cmux surface UUID when the creating transport supplied it. */
+  surface_uuid?: string | null;
   agent_id: string;
   tab_name: string;
   session_name: string | null;

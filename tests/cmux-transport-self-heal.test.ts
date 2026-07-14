@@ -407,6 +407,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     });
     const socket = {
       currentSocketPath: () => socketPath,
+      currentObserverTransportEpoch: () => "socket:7",
       disconnect: vi.fn(),
       listWorkspaces: vi.fn(() => request),
     } as unknown as CmuxSocketClient;
@@ -782,7 +783,10 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
       factoryOpts: { socketPath },
     });
 
+    const socketEpoch = client.currentObserverTransportEpoch();
+
     await expect(client.ping()).rejects.toThrow(/EPIPE/);
+    expect(client.currentObserverTransportEpoch()).not.toBe(socketEpoch);
     expect(getTransportHealth(client)).toEqual({
       mode: "cli",
       degraded: true,
@@ -792,7 +796,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
     expect(exec).toHaveBeenCalledWith(
       "cmux",
-      ["--json", "list-workspaces"],
+      ["--json", "--id-format", "both", "list-workspaces"],
       expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
     );
     expect(logger.error).toHaveBeenCalledWith(
@@ -894,7 +898,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     expect(exec).toHaveBeenCalledWith(
       "cmux",
       [
-        "--json",
+        "--json", "--id-format", "both",
         "send",
         "--surface",
         "surface:1",
@@ -1136,7 +1140,7 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     await expect(client.listWorkspaces()).resolves.toEqual({ workspaces: [] });
     expect(exec).toHaveBeenCalledWith(
       "cmux",
-      ["--json", "list-workspaces"],
+      ["--json", "--id-format", "both", "list-workspaces"],
       expect.objectContaining({ CMUX_SOCKET_PATH: socketPath }),
     );
 

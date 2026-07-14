@@ -477,4 +477,34 @@ describe("CmuxPersistentSocket V1 demux", () => {
     });
     socket.disconnect();
   });
+
+  it("increments its connection generation when it reconnects to the same socket", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("connection-generation");
+    await startLineServer(path, (line, conn) => {
+      const request = JSON.parse(line) as { id: string };
+      conn.end(
+        `${JSON.stringify({
+          id: request.id,
+          ok: true,
+          result: { pong: true },
+        })}\n`,
+      );
+    });
+    const socket = new CmuxPersistentSocket({ socketPath: path, timeoutMs: 500 });
+
+    try {
+      expect(socket.currentConnectionGeneration()).toBe(0);
+      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      expect(socket.currentConnectionGeneration()).toBe(1);
+      while (socket.isConnected()) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+
+      await expect(socket.call("system.ping")).resolves.toEqual({ pong: true });
+      expect(socket.currentConnectionGeneration()).toBe(2);
+    } finally {
+      socket.disconnect();
+    }
+  });
 });

@@ -304,6 +304,7 @@ describe("StateManager", () => {
 
       const record = mgr.ensureAutoRecord("auto-codex", {
         surface_id: "surface:auto-codex",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
         surface_title: "brainlayerCodex",
         cli: "codex",
         parsed_status: "idle",
@@ -316,6 +317,9 @@ describe("StateManager", () => {
 
       expect(record.role).toBe("worker");
       expect(record.auto_archive_on_done).toBe(false);
+      expect(record.surface_uuid).toBe(
+        "11111111-2222-4333-8444-555555555555",
+      );
     });
 
     it("assigns orchestrator role for auto-discovered Claude agents", () => {

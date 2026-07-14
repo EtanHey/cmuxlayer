@@ -310,7 +310,8 @@ describe("Phase 0 painpoint replay corpus", () => {
         const keys: string[] = [];
         const sentTexts: string[] = [];
         const exec: ExecFn = async (_cmd, args) => {
-          const command = args[1];
+          const idFormatIndex = args.indexOf("--id-format");
+          const command = args[idFormatIndex >= 0 ? idFormatIndex + 2 : 1];
           if (command === "read-screen") {
             return {
               stdout: JSON.stringify({

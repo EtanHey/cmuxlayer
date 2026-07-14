@@ -12,7 +12,11 @@ import {
   daemonExitCode,
   SocketJsonRpcTransport,
 } from "../src/daemon.js";
-import { createServer, createServerContext } from "../src/server.js";
+import {
+  createServer as createProductionServer,
+  createServerContext as createProductionServerContext,
+  type CreateServerOptions,
+} from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import {
   readMonitorRegistry,
@@ -21,6 +25,32 @@ import {
 import { ack, readInbox } from "../src/inbox.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
+const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
+
+function withTestObserver<T extends Omit<CreateServerOptions, "context">>(
+  opts: T,
+): T & Omit<CreateServerOptions, "context"> {
+  return {
+    ...opts,
+    surfaceObserverOwnerIdProvider:
+      opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
+    surfaceObserverEpochProvider:
+      opts.surfaceObserverEpochProvider ??
+      (() => `${TEST_OBSERVER_OWNER}@test`),
+  };
+}
+
+function createServerContext(
+  opts: Omit<CreateServerOptions, "context"> = {},
+) {
+  return createProductionServerContext(withTestObserver(opts));
+}
+
+function createServer(opts: CreateServerOptions = {}) {
+  return createProductionServer(
+    opts.context ? opts : withTestObserver(opts),
+  );
+}
 
 function socketPath(name: string): string {
   return join(TEST_ROOT, `${name}-${process.pid}-${Date.now()}.sock`);
@@ -183,6 +213,7 @@ function createPlacementClient(
 ) {
   let surfaceIndex = 0;
   return {
+    currentSocketPath: vi.fn(() => "/tmp/cmux-daemon-test.sock"),
     createWorkspace: vi.fn(),
     selectWorkspace: vi.fn().mockImplementation(async (workspace: string) => {
       calls.push(`select:${workspace}`);
@@ -190,19 +221,23 @@ function createPlacementClient(
     listWorkspaces: vi.fn().mockResolvedValue({ workspaces }),
     listPanes: vi
       .fn()
-      .mockImplementation(async ({ workspace }: { workspace?: string } = {}) => ({
-        workspace_ref: workspace ?? "workspace:focused",
-        window_ref: "window:1",
-        panes: [],
-      })),
+      .mockImplementation(
+        async ({ workspace }: { workspace?: string } = {}) => ({
+          workspace_ref: workspace ?? "workspace:focused",
+          window_ref: "window:1",
+          panes: [],
+        }),
+      ),
     listPaneSurfaces: vi
       .fn()
-      .mockImplementation(async ({ workspace }: { workspace?: string } = {}) => ({
-        workspace_ref: workspace ?? "workspace:focused",
-        window_ref: "window:1",
-        pane_ref: "pane:1",
-        surfaces: [],
-      })),
+      .mockImplementation(
+        async ({ workspace }: { workspace?: string } = {}) => ({
+          workspace_ref: workspace ?? "workspace:focused",
+          window_ref: "window:1",
+          pane_ref: "pane:1",
+          surfaces: [],
+        }),
+      ),
     newSplit: vi
       .fn()
       .mockImplementation(
@@ -506,14 +541,11 @@ describe("CmuxLayerDaemon", () => {
   it("does not retire for null or matching stale-build checks", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("not-stale");
-    const detectStaleBuild = vi
-      .fn()
-      .mockReturnValueOnce(null)
-      .mockReturnValue({
-        stale: false,
-        running: "0.3.33",
-        installed: "0.3.33",
-      });
+    const detectStaleBuild = vi.fn().mockReturnValueOnce(null).mockReturnValue({
+      stale: false,
+      running: "0.3.33",
+      installed: "0.3.33",
+    });
     const onRetire = vi.fn();
     const daemon = new CmuxLayerDaemon({
       socketPath: path,
@@ -609,13 +641,15 @@ describe("CmuxLayerDaemon", () => {
       .fn()
       .mockImplementationOnce(() => firstPass.promise)
       .mockResolvedValue(undefined);
-    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-reconcile-overlap"),
-      exec: createListSurfacesExec(),
-      skipAgentLifecycle: true,
-      monitorReconcile,
-      monitorReconcileIntervalMs: 5,
-    }));
+    const daemon = trackIntervalDaemon(
+      new CmuxLayerDaemon({
+        socketPath: socketPath("monitor-reconcile-overlap"),
+        exec: createListSurfacesExec(),
+        skipAgentLifecycle: true,
+        monitorReconcile,
+        monitorReconcileIntervalMs: 5,
+      }),
+    );
 
     await daemon.start();
     await delay(20);
@@ -649,7 +683,9 @@ describe("CmuxLayerDaemon", () => {
 
     await daemon.start();
     await waitUntil(() => monitorReconcile.mock.calls.length === 1);
-    context.setLifecycleAgentInputDeliverer(vi.fn().mockResolvedValue(undefined));
+    context.setLifecycleAgentInputDeliverer(
+      vi.fn().mockResolvedValue(undefined),
+    );
     finishFirst?.({ rearmed: ["monitor-a"], collapsed: [], failed: [] });
     await delay(20);
 
@@ -684,7 +720,9 @@ describe("CmuxLayerDaemon", () => {
 
     await daemon.start();
     await waitUntil(() => monitorReconcile.mock.calls.length === 1);
-    context.setLifecycleAgentInputDeliverer(vi.fn().mockResolvedValue(undefined));
+    context.setLifecycleAgentInputDeliverer(
+      vi.fn().mockResolvedValue(undefined),
+    );
     finishFirst?.({
       rearmed: ["monitor-b"],
       collapsed: [],
@@ -702,13 +740,15 @@ describe("CmuxLayerDaemon", () => {
   it("clears the monitor reconciliation timer during shutdown", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const monitorReconcile = vi.fn().mockResolvedValue(undefined);
-    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-reconcile-clear"),
-      exec: createListSurfacesExec(),
-      skipAgentLifecycle: true,
-      monitorReconcile,
-      monitorReconcileIntervalMs: 5,
-    }));
+    const daemon = trackIntervalDaemon(
+      new CmuxLayerDaemon({
+        socketPath: socketPath("monitor-reconcile-clear"),
+        exec: createListSurfacesExec(),
+        skipAgentLifecycle: true,
+        monitorReconcile,
+        monitorReconcileIntervalMs: 5,
+      }),
+    );
 
     await daemon.start();
     await waitUntil(() => monitorReconcile.mock.calls.length >= 2);
@@ -756,6 +796,7 @@ describe("CmuxLayerDaemon", () => {
         context.stateMgr.writeState({
           agent_id: "worker-a",
           surface_id: "surface:caller",
+          surface_observer_id: context.surfaceObserverId,
           workspace_id: "workspace:1",
           state: "working",
           repo: "cmuxlayer",
@@ -826,6 +867,244 @@ describe("CmuxLayerDaemon", () => {
     expect(clients[0]?.sendKey).not.toHaveBeenCalled();
   });
 
+  it("resolves a monitor owner's stable UUID before probing pane liveness", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(TEST_ROOT, "uuid-owner-monitor-registry.json");
+    const watchedFile = join(TEST_ROOT, "uuid-owner-collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "uuid-owner-monitor",
+        owner_seat: "worker-moved",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const client = createPlacementClient([]);
+    const context = createServerContext({
+      client: client as any,
+      stateDir: stateDir("uuid-owner-state"),
+      skipAgentLifecycle: true,
+    });
+    context.stateMgr.writeState({
+      agent_id: "worker-moved",
+      surface_id: "surface:recycled",
+      surface_uuid: "surface-uuid-owner",
+      workspace_id: "workspace:stale",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-moved",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const resolveAgentIoRoute = vi.fn().mockResolvedValue({
+      agent_id: "worker-moved",
+      surface_id: "surface:moved",
+      surface_uuid: "surface-uuid-owner",
+      workspace_id: "workspace:fresh",
+      state: "working",
+      session_id: "session-moved",
+      resumable: true,
+    });
+    context.lifecycleSweepEngine = {
+      resolveAgentIoRoute,
+      dispose: vi.fn(),
+    } as any;
+
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-uuid-owner"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir: join(TEST_ROOT, "uuid-owner-inbox"),
+    });
+
+    await daemon.start();
+    await waitUntil(() => client.readScreen.mock.calls.length > 0);
+    await daemon.shutdown();
+
+    expect(resolveAgentIoRoute).toHaveBeenCalledWith("worker-moved");
+    expect(client.readScreen).toHaveBeenCalledWith("surface:moved", {
+      workspace: "workspace:fresh",
+    });
+    expect(client.readScreen).not.toHaveBeenCalledWith(
+      "surface:recycled",
+      expect.anything(),
+    );
+  });
+
+  it("does not probe an owned UUID-less monitor row when the current observer is unknown", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(
+      TEST_ROOT,
+      "unknown-observer-owner-monitor-registry.json",
+    );
+    const watchedFile = join(TEST_ROOT, "unknown-observer-owner-collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "unknown-observer-owner-monitor",
+        owner_seat: "worker-prior-observer",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const client = {
+      ...createPlacementClient([]),
+      currentSocketPath: vi.fn().mockReturnValue(" "),
+    };
+    const context = createServerContext({
+      client: client as any,
+      stateDir: stateDir("unknown-observer-owner-state"),
+      skipAgentLifecycle: true,
+      surfaceObserverOwnerIdProvider: () => null,
+      surfaceObserverEpochProvider: () => null,
+    });
+    expect(context.surfaceObserverId).toBeNull();
+    context.stateMgr.writeState({
+      agent_id: "worker-prior-observer",
+      surface_id: "surface:recycled",
+      surface_uuid: null,
+      surface_observer_id: "cmux:/tmp/prior.sock",
+      workspace_id: "workspace:stale",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-prior-observer",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-unknown-observer-owner"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir: join(TEST_ROOT, "unknown-observer-owner-inbox"),
+    });
+
+    await daemon.start();
+    await waitUntil(
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
+    );
+    await daemon.shutdown();
+
+    expect(client.readScreen).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-not-alive",
+    });
+  });
+
+  it("does not probe an unowned UUID-less monitor row when the current observer is unknown", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const registryPath = join(
+      TEST_ROOT,
+      "unknown-observer-unowned-monitor-registry.json",
+    );
+    const watchedFile = join(TEST_ROOT, "unknown-observer-unowned-collab.md");
+    writeFileSync(watchedFile, "# collab\n", "utf8");
+    await registerMonitor(
+      {
+        monitor_id: "unknown-observer-unowned-monitor",
+        owner_seat: "worker-unowned-legacy",
+        watch_targets: [watchedFile],
+        mechanism: "event",
+        deadman_timeout_s: 60,
+        rearm_command: `tail -n0 -F ${watchedFile}`,
+      },
+      { registryPath, now: () => 1_000 },
+    );
+
+    const client = {
+      ...createPlacementClient([]),
+      currentSocketPath: vi.fn().mockReturnValue(" "),
+    };
+    const context = createServerContext({
+      client: client as any,
+      stateDir: stateDir("unknown-observer-unowned-state"),
+      skipAgentLifecycle: true,
+      surfaceObserverOwnerIdProvider: () => null,
+      surfaceObserverEpochProvider: () => null,
+    });
+    expect(context.surfaceObserverId).toBeNull();
+    context.stateMgr.writeState({
+      agent_id: "worker-unowned-legacy",
+      surface_id: "surface:recycled",
+      surface_uuid: null,
+      surface_observer_id: null,
+      workspace_id: "workspace:stale",
+      state: "working",
+      repo: "cmuxlayer",
+      model: "codex",
+      cli: "codex",
+      cli_session_id: "session-unowned-legacy",
+      task_summary: "watch collab",
+      pid: 123,
+      version: 1,
+      created_at: new Date(1_000).toISOString(),
+      updated_at: new Date(1_000).toISOString(),
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "verified",
+      max_cost_per_agent: null,
+    });
+    const daemon = new CmuxLayerDaemon({
+      socketPath: socketPath("monitor-unknown-observer-unowned"),
+      context,
+      monitorRegistryPath: registryPath,
+      monitorRegistryNow: () => 62_000,
+      monitorReconcileIntervalMs: 0,
+      inboxBaseDir: join(TEST_ROOT, "unknown-observer-unowned-inbox"),
+    });
+
+    await daemon.start();
+    await waitUntil(
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
+    );
+    await daemon.shutdown();
+
+    expect(client.readScreen).not.toHaveBeenCalled();
+    expect(readMonitorRegistry({ registryPath }).monitors[0]).toMatchObject({
+      state: "collapsed",
+      collapsed_reason: "owner-not-alive",
+    });
+  });
+
   it("collapses and loudly escalates a pty-dead monitor owner without inbox re-arm", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const registryPath = join(TEST_ROOT, "pty-dead-monitor-registry.json");
@@ -852,6 +1131,7 @@ describe("CmuxLayerDaemon", () => {
     context.stateMgr.writeState({
       agent_id: "worker-wedged",
       surface_id: "surface:caller",
+      surface_observer_id: context.surfaceObserverId,
       workspace_id: "workspace:1",
       state: "working",
       repo: "cmuxlayer",
@@ -879,19 +1159,22 @@ describe("CmuxLayerDaemon", () => {
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);
     const monitorOwnerPtyDeadNotify = vi.fn().mockResolvedValue(true);
-    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-owner-pty-dead"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => 62_000,
-      monitorReconcileIntervalMs: 5,
-      monitorOwnerPtyDeadNotify,
-      inboxBaseDir,
-    }));
+    const daemon = trackIntervalDaemon(
+      new CmuxLayerDaemon({
+        socketPath: socketPath("monitor-owner-pty-dead"),
+        context,
+        monitorRegistryPath: registryPath,
+        monitorRegistryNow: () => 62_000,
+        monitorReconcileIntervalMs: 5,
+        monitorOwnerPtyDeadNotify,
+        inboxBaseDir,
+      }),
+    );
 
     await daemon.start();
     await waitUntil(
-      () => readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state !== "alive",
     );
     await delay(20);
     await daemon.shutdown();
@@ -941,6 +1224,7 @@ describe("CmuxLayerDaemon", () => {
     context.stateMgr.writeState({
       agent_id: "worker-wedged",
       surface_id: "surface:caller",
+      surface_observer_id: context.surfaceObserverId,
       workspace_id: "workspace:1",
       state: "working",
       repo: "cmuxlayer",
@@ -962,23 +1246,28 @@ describe("CmuxLayerDaemon", () => {
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);
     const monitorOwnerWedgedNotify = vi.fn().mockResolvedValue(true);
-    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-owner-wedged"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-      monitorReconcileIntervalMs: 5,
-      monitorOwnerWedgedNotify,
-      inboxBaseDir,
-    }));
+    const daemon = trackIntervalDaemon(
+      new CmuxLayerDaemon({
+        socketPath: socketPath("monitor-owner-wedged"),
+        context,
+        monitorRegistryPath: registryPath,
+        monitorRegistryNow: () => now,
+        monitorReconcileIntervalMs: 5,
+        monitorOwnerWedgedNotify,
+        inboxBaseDir,
+      }),
+    );
 
     await daemon.start();
     await waitUntil(
-      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
     );
     now = 72_001;
     await waitUntil(
-      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "collapsed",
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state ===
+        "collapsed",
     );
     await delay(20);
     await daemon.shutdown();
@@ -997,7 +1286,9 @@ describe("CmuxLayerDaemon", () => {
         dedupe_key: "wedged-monitor:owner-wedged",
       }),
     );
-    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toHaveLength(1);
+    expect(readInbox("worker-wedged", { baseDir: inboxBaseDir })).toHaveLength(
+      1,
+    );
     expect(guardedRelay).toHaveBeenCalledTimes(1);
   });
 
@@ -1028,6 +1319,7 @@ describe("CmuxLayerDaemon", () => {
     context.stateMgr.writeState({
       agent_id: "worker-live",
       surface_id: "surface:caller",
+      surface_observer_id: context.surfaceObserverId,
       workspace_id: "workspace:1",
       state: "working",
       repo: "cmuxlayer",
@@ -1049,19 +1341,22 @@ describe("CmuxLayerDaemon", () => {
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);
     const monitorOwnerWedgedNotify = vi.fn();
-    const daemon = trackIntervalDaemon(new CmuxLayerDaemon({
-      socketPath: socketPath("monitor-owner-acked"),
-      context,
-      monitorRegistryPath: registryPath,
-      monitorRegistryNow: () => now,
-      monitorReconcileIntervalMs: 5,
-      monitorOwnerWedgedNotify,
-      inboxBaseDir,
-    }));
+    const daemon = trackIntervalDaemon(
+      new CmuxLayerDaemon({
+        socketPath: socketPath("monitor-owner-acked"),
+        context,
+        monitorRegistryPath: registryPath,
+        monitorRegistryNow: () => now,
+        monitorReconcileIntervalMs: 5,
+        monitorOwnerWedgedNotify,
+        inboxBaseDir,
+      }),
+    );
 
     await daemon.start();
     await waitUntil(
-      () => readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
+      () =>
+        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
     );
     now = 65_000;
     ack(
@@ -1115,6 +1410,7 @@ describe("CmuxLayerDaemon", () => {
     context.stateMgr.writeState({
       agent_id: "worker-a",
       surface_id: "surface:caller",
+      surface_observer_id: context.surfaceObserverId,
       workspace_id: "workspace:1",
       state: "working",
       repo: "cmuxlayer",
@@ -1146,8 +1442,7 @@ describe("CmuxLayerDaemon", () => {
     await daemon.start();
     await waitUntil(
       () =>
-        readMonitorRegistry({ registryPath }).monitors[0]?.state ===
-        "rearming",
+        readMonitorRegistry({ registryPath }).monitors[0]?.state === "rearming",
     );
     const guardedRelay = vi.fn().mockResolvedValue(undefined);
     context.setLifecycleAgentInputDeliverer(guardedRelay);

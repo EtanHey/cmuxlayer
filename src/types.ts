@@ -77,6 +77,8 @@ export interface CmuxTerminalMetadata {
 export interface CmuxNewSplitResult {
   workspace: string;
   surface: string;
+  /** Stable cmux surface UUID; `surface` remains the mutable process-local ref. */
+  surface_id?: string;
   pane: string;
   title: string;
   type: "terminal" | "browser";
@@ -85,6 +87,8 @@ export interface CmuxNewSplitResult {
 export interface CmuxNewSurfaceResult {
   workspace: string;
   surface: string;
+  /** Stable cmux surface UUID; `surface` remains the mutable process-local ref. */
+  surface_id?: string;
   pane: string;
   title: string;
   type: "terminal" | "browser";

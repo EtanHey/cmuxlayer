@@ -31,6 +31,8 @@ export type FleetLaneKey =
 
 export interface FleetSidebarCandidate {
   agentId: string;
+  /** Stable cmux UUID. Absent only for legacy/ref-only compatibility. */
+  surfaceUuid?: string;
   surfaceRef: string;
   surfaceTitle: string | null;
   repo: string;
@@ -55,6 +57,8 @@ export interface FleetSidebarCandidate {
 
 export interface FleetSidebarSeat {
   agentId: string;
+  /** Stable focus and deduplication handle (ref fallback for legacy clients). */
+  surfaceUuid: string;
   surfaceRef: string;
   name: string;
   lane: FleetLaneKey;
@@ -94,6 +98,8 @@ export interface FleetSidebarPublication {
   snapshot: FleetSidebarSnapshot;
   /** Null means surface enumeration was inconclusive. */
   observedLiveSurfaceRefs: string[] | null;
+  /** Stable identities from the same observation; omitted by legacy callers. */
+  observedLiveSurfaceUuids?: string[] | null;
 }
 
 export type FleetSidebarCollapseState = Partial<
@@ -243,6 +249,7 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
       : "worker";
   return {
     agentId: candidate.agentId,
+    surfaceUuid: candidate.surfaceUuid ?? candidate.surfaceRef,
     surfaceRef: candidate.surfaceRef,
     name,
     lane: inferLane(candidate),
@@ -269,14 +276,25 @@ function compareSeats(left: FleetSidebarSeat, right: FleetSidebarSeat): number {
 
 export function buildFleetSidebarSnapshot(
   candidates: FleetSidebarCandidate[],
-  opts: { liveSurfaceRefs: ReadonlySet<string> },
+  opts: {
+    liveSurfaceRefs: ReadonlySet<string>;
+    liveSurfaceUuids?: ReadonlySet<string>;
+  },
 ): FleetSidebarSnapshot {
   const candidateBySurface = new Map<string, FleetSidebarCandidate>();
   for (const candidate of candidates) {
     if (!opts.liveSurfaceRefs.has(candidate.surfaceRef)) continue;
-    const existing = candidateBySurface.get(candidate.surfaceRef);
+    if (
+      candidate.surfaceUuid &&
+      opts.liveSurfaceUuids &&
+      !opts.liveSurfaceUuids.has(candidate.surfaceUuid)
+    ) {
+      continue;
+    }
+    const bindingKey = candidate.surfaceUuid ?? candidate.surfaceRef;
+    const existing = candidateBySurface.get(bindingKey);
     candidateBySurface.set(
-      candidate.surfaceRef,
+      bindingKey,
       existing ? preferCandidate(existing, candidate) : candidate,
     );
   }
@@ -316,6 +334,7 @@ function swiftString(value: string): string {
 function renderSeat(seat: FleetSidebarSeat): string {
   return `    [
       "agentId": ${swiftString(seat.agentId)},
+      "surfaceUuid": ${swiftString(seat.surfaceUuid)},
       "surfaceRef": ${swiftString(seat.surfaceRef)},
       "name": ${swiftString(seat.name)},
       "role": ${swiftString(seat.role)},
@@ -380,7 +399,7 @@ func fleetState(_ state) -> some View {
 }
 
 func fleetRow(_ seat) -> some View {
-  Button(action: { cmux("surface.focus", surface_id: seat.surfaceRef) }) {
+  Button(action: { cmux("surface.focus", surface_id: seat.surfaceUuid) }) {
     VStack(alignment: .leading, spacing: 3) {
       HStack(alignment: .firstTextBaseline, spacing: 6) {
         fleetState(seat.screenState)
@@ -542,8 +561,11 @@ export function renderFleetSidebar(
   const renderedSurfaceRefs = snapshot.lanes.flatMap((lane) =>
     lane.seats.map((seat) => seat.surfaceRef),
   );
+  const renderedSurfaceUuids = snapshot.lanes.flatMap((lane) =>
+    lane.seats.map((seat) => seat.surfaceUuid),
+  );
 
-  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata} surfaces=${JSON.stringify(renderedSurfaceRefs)}
+  return `// cmuxlayer-fleet-state: ${state} rendered=${snapshot.seatCount} observed=${observedMetadata} surfaces=${JSON.stringify(renderedSurfaceRefs)} surfaceIds=${JSON.stringify(renderedSurfaceUuids)}
 ${FLEET_SWIFT_HELPERS}
 
 ScrollView {
@@ -908,7 +930,38 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       state: input.seatCount > 0 ? "populated" : "empty",
       snapshot: input,
       observedLiveSurfaceRefs: surfaceRefs,
+      observedLiveSurfaceUuids: input.lanes.flatMap((lane) =>
+        lane.seats.map((seat) => seat.surfaceUuid),
+      ),
     };
+  }
+
+  private observedBindingKeys(
+    publication: FleetSidebarPublication,
+  ): Set<string> | null {
+    if (publication.observedLiveSurfaceUuids === null) return null;
+    if (publication.observedLiveSurfaceUuids !== undefined) {
+      const surfaceUuids = new Set(publication.observedLiveSurfaceUuids);
+      const surfaceRefs = publication.observedLiveSurfaceRefs;
+      if (
+        surfaceRefs === null ||
+        surfaceUuids.size !== new Set(surfaceRefs).size
+      ) {
+        return null;
+      }
+      return surfaceUuids;
+    }
+    return publication.observedLiveSurfaceRefs === null
+      ? null
+      : new Set(publication.observedLiveSurfaceRefs);
+  }
+
+  private snapshotBindingKeys(snapshot: FleetSidebarSnapshot): Set<string> {
+    return new Set(
+      snapshot.lanes.flatMap((lane) =>
+        lane.seats.map((seat) => seat.surfaceUuid || seat.surfaceRef),
+      ),
+    );
   }
 
   private shouldPublish(
@@ -922,18 +975,26 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     ) {
       return false;
     }
+    if (
+      previous.state === "populated" &&
+      this.observedBindingKeys(publication) === null
+    ) {
+      return false;
+    }
 
     if (publication.state === "empty") {
-      if (publication.observedLiveSurfaceRefs === null) return false;
+      const observedBindingKeys = this.observedBindingKeys(publication);
+      if (observedBindingKeys === null) return false;
       if (previous.state !== "populated") return true;
-      if (previous.surfaceRefs.size === 0) {
-        return publication.observedLiveSurfaceRefs.length === 0;
+      const previousBindingKeys =
+        previous.surfaceUuids.size > 0
+          ? previous.surfaceUuids
+          : previous.surfaceRefs;
+      if (previousBindingKeys.size === 0) {
+        return observedBindingKeys.size === 0;
       }
-      const observedLiveSurfaceRefs = new Set(
-        publication.observedLiveSurfaceRefs,
-      );
-      for (const previousSurfaceRef of previous.surfaceRefs) {
-        if (observedLiveSurfaceRefs.has(previousSurfaceRef)) return false;
+      for (const previousBindingKey of previousBindingKeys) {
+        if (observedBindingKeys.has(previousBindingKey)) return false;
       }
       return true;
     }
@@ -941,20 +1002,18 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     if (
       previous.state === "populated" &&
       publication.state === "populated" &&
-      publication.observedLiveSurfaceRefs !== null
+      this.observedBindingKeys(publication) !== null
     ) {
-      const nextSurfaceRefs = new Set(
-        publication.snapshot.lanes.flatMap((lane) =>
-          lane.seats.map((seat) => seat.surfaceRef),
-        ),
-      );
-      const observedLiveSurfaceRefs = new Set(
-        publication.observedLiveSurfaceRefs,
-      );
-      for (const previousSurfaceRef of previous.surfaceRefs) {
+      const nextBindingKeys = this.snapshotBindingKeys(publication.snapshot);
+      const observedBindingKeys = this.observedBindingKeys(publication)!;
+      const previousBindingKeys =
+        previous.surfaceUuids.size > 0
+          ? previous.surfaceUuids
+          : previous.surfaceRefs;
+      for (const previousBindingKey of previousBindingKeys) {
         if (
-          !nextSurfaceRefs.has(previousSurfaceRef) &&
-          observedLiveSurfaceRefs.has(previousSurfaceRef)
+          !nextBindingKeys.has(previousBindingKey) &&
+          observedBindingKeys.has(previousBindingKey)
         ) {
           return false;
         }
@@ -971,13 +1030,11 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     const newer = inspectFleetSidebarSource(newerSource);
     if (newer.state === "populated") {
       if (publication.state !== "populated") return false;
-      const nextSurfaceRefs = new Set(
-        publication.snapshot.lanes.flatMap((lane) =>
-          lane.seats.map((seat) => seat.surfaceRef),
-        ),
-      );
-      for (const newerSurfaceRef of newer.surfaceRefs) {
-        if (!nextSurfaceRefs.has(newerSurfaceRef)) return false;
+      const nextBindingKeys = this.snapshotBindingKeys(publication.snapshot);
+      const newerBindingKeys =
+        newer.surfaceUuids.size > 0 ? newer.surfaceUuids : newer.surfaceRefs;
+      for (const newerBindingKey of newerBindingKeys) {
+        if (!nextBindingKeys.has(newerBindingKey)) return false;
       }
     }
     return this.shouldPublish(publication, newerSource);
@@ -988,31 +1045,31 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   ): boolean {
     if (
       this.pendingPublication === null ||
-      publication.observedLiveSurfaceRefs === null
+      this.observedBindingKeys(publication) === null
     ) {
       return false;
     }
     const baseline = inspectFleetSidebarSource(this.pendingBaselineSource);
     if (baseline.state !== "populated") return false;
 
-    const pendingSurfaceRefs = new Set(
-      this.pendingPublication.snapshot.lanes.flatMap((lane) =>
-        lane.seats.map((seat) => seat.surfaceRef),
-      ),
+    const pendingBindingKeys = this.snapshotBindingKeys(
+      this.pendingPublication.snapshot,
     );
-    const observedLiveSurfaceRefs = new Set(
-      publication.observedLiveSurfaceRefs,
-    );
-    if (baseline.surfaceRefs.size === 0) {
+    const observedBindingKeys = this.observedBindingKeys(publication)!;
+    const baselineBindingKeys =
+      baseline.surfaceUuids.size > 0
+        ? baseline.surfaceUuids
+        : baseline.surfaceRefs;
+    if (baselineBindingKeys.size === 0) {
       return (
         this.pendingPublication.state === "empty" &&
-        observedLiveSurfaceRefs.size > 0
+        observedBindingKeys.size > 0
       );
     }
-    for (const baselineSurfaceRef of baseline.surfaceRefs) {
+    for (const baselineBindingKey of baselineBindingKeys) {
       if (
-        !pendingSurfaceRefs.has(baselineSurfaceRef) &&
-        observedLiveSurfaceRefs.has(baselineSurfaceRef)
+        !pendingBindingKeys.has(baselineBindingKey) &&
+        observedBindingKeys.has(baselineBindingKey)
       ) {
         return true;
       }
@@ -1055,10 +1112,14 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
 function inspectFleetSidebarSource(source: string | null): {
   state: FleetSidebarPublicationState | null;
   surfaceRefs: Set<string>;
+  surfaceUuids: Set<string>;
 } {
-  if (!source) return { state: null, surfaceRefs: new Set() };
+  if (!source) {
+    return { state: null, surfaceRefs: new Set(), surfaceUuids: new Set() };
+  }
 
   const surfaceRefs = new Set<string>();
+  const surfaceUuids = new Set<string>();
   const surfaceRefPattern = /"surfaceRef":\s*("(?:\\.|[^"\\])*")/g;
   for (const match of source.matchAll(surfaceRefPattern)) {
     try {
@@ -1067,8 +1128,16 @@ function inspectFleetSidebarSource(source: string | null): {
       // Ignore malformed legacy rows; the rendered count remains a fallback.
     }
   }
+  const surfaceUuidPattern = /"surfaceUuid":\s*("(?:\\.|[^"\\])*")/g;
+  for (const match of source.matchAll(surfaceUuidPattern)) {
+    try {
+      surfaceUuids.add(JSON.parse(match[1]!) as string);
+    } catch {
+      // Ignore malformed rows and retain ref compatibility.
+    }
+  }
   const topologyMetadata = source.match(
-    /^\/\/ cmuxlayer-fleet-state:[^\n]* surfaces=(\[[^\n]*\])/,
+    /^\/\/ cmuxlayer-fleet-state:[^\n]* surfaces=(\[[^\n]*?\])(?:\s|$)/,
   );
   if (topologyMetadata) {
     try {
@@ -1076,6 +1145,19 @@ function inspectFleetSidebarSource(source: string | null): {
       if (Array.isArray(metadataSurfaceRefs)) {
         for (const surfaceRef of metadataSurfaceRefs) {
           if (typeof surfaceRef === "string") surfaceRefs.add(surfaceRef);
+        }
+      }
+    } catch {
+      // Ignore malformed metadata and retain the rendered-row fallback.
+    }
+  }
+  const topologyIdMetadata = source.match(/\bsurfaceIds=(\[[^\n]*\])/);
+  if (topologyIdMetadata) {
+    try {
+      const metadataSurfaceIds = JSON.parse(topologyIdMetadata[1]!) as unknown;
+      if (Array.isArray(metadataSurfaceIds)) {
+        for (const surfaceId of metadataSurfaceIds) {
+          if (typeof surfaceId === "string") surfaceUuids.add(surfaceId);
         }
       }
     } catch {
@@ -1090,6 +1172,7 @@ function inspectFleetSidebarSource(source: string | null): {
     return {
       state: metadata[1] as FleetSidebarPublicationState,
       surfaceRefs,
+      surfaceUuids,
     };
   }
 
@@ -1100,5 +1183,6 @@ function inspectFleetSidebarSource(source: string | null): {
         ? "populated"
         : null,
     surfaceRefs,
+    surfaceUuids,
   };
 }

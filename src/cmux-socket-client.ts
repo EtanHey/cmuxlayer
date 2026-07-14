@@ -68,6 +68,7 @@ export class CmuxSocketClient {
   private maxInFlight?: number;
   private socketPathResolver?: () => Promise<string | null>;
   private reconnecting?: Promise<void>;
+  private transportSerial = 0;
 
   constructor(opts?: CmuxSocketClientOptions) {
     this.socketPath =
@@ -185,6 +186,7 @@ export class CmuxSocketClient {
 
   private replaceTransport(socketPath: string): void {
     this.transport.disconnect();
+    this.transportSerial++;
     this.socketPath = socketPath;
     this.password = this.authPassword;
     this.syncCliFallbackSocketEnv();
@@ -237,6 +239,10 @@ export class CmuxSocketClient {
 
   currentSocketPath(): string {
     return this.socketPath;
+  }
+
+  currentObserverTransportEpoch(): string {
+    return `${this.transportSerial}:${this.transport.currentConnectionGeneration()}`;
   }
 
   // ── Public API (mirrors CmuxClient interface) ──────────────────────
@@ -882,6 +888,8 @@ export class CmuxSocketClient {
         (parsed.workspace_ref as string) ?? (parsed.workspace as string) ?? "",
       surface:
         (parsed.surface_ref as string) ?? (parsed.surface as string) ?? "",
+      surface_id:
+        typeof parsed.surface_id === "string" ? parsed.surface_id : undefined,
       pane: (parsed.pane_ref as string) ?? (parsed.pane as string) ?? "",
       title: (parsed.title as string) ?? "",
       type: (parsed.type as "terminal" | "browser") ?? fallbackType,
