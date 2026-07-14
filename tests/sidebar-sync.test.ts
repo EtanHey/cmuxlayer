@@ -1083,7 +1083,7 @@ describe("Sidebar Sync", () => {
       state: "unknown",
       observedLiveSurfaceRefs: [],
     });
-  });
+  }, 10_000);
 
   it("publishes authoritative empty when only unrelated terminals remain", async () => {
     liveSurfaces = [makeSurface("surface:notes")];

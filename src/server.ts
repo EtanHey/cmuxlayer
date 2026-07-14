@@ -7004,6 +7004,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
           inboxOpts,
         );
+        context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
         const monitor_alive = monitorAlive(
           args.agent_id,
           INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,

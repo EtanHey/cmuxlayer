@@ -74,6 +74,30 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.current_action).toBe("Reading src/server.ts");
   });
 
+  it("treats a timed Claude spinner phrase as working", () => {
+    const parsed = parseScreen(`
+✳ Boondoggling… (4m 12s · ↓ 571 tokens · thinking some more with high effort)
+  ⎿  Monitoring the render-polish gate
+🤖 Opus 4.8 (1M context) | 💰 $10.51 | ⏱️  2hr 43m
+⏵⏵ bypass permissions on · 2 monitors · ← for agents
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+    expect(parsed.current_action).toBe("Boondoggling");
+  });
+
+  it.each([
+    "* Waiting for deploy... (5m left)",
+    "* Building the release (2m elapsed)",
+  ])("does not treat a Claude output bullet as a spinner: %s", (line) => {
+    const parsed = parseScreen(`Claude Code\n${line}\nCompleted status note.`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.current_action).toBeNull();
+  });
+
   it("treats a Claude ready composer with bypass-permissions footer as idle", () => {
     const parsed = parseScreen(`
                                                                                     0 tokens

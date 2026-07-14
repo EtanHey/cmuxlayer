@@ -335,6 +335,7 @@ const WAIT_FOR_SWEEP_INTERVAL_MS = 1000;
 const DEFAULT_SWEEP_ACTIVE_INTERVAL_MS = 5_000;
 const DEFAULT_SWEEP_IDLE_INTERVAL_MS = 15_000;
 const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
+const FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS = 500;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
@@ -736,6 +737,8 @@ export class AgentEngine {
   private hasCustomSessionIdentityResolver: boolean;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private fleetSidebarWakeRepublishTimer: ReturnType<typeof setTimeout> | null =
+    null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
   private sweepTiming: SweepTimingOptions | null = null;
   private lastSweepSignature: string | null = null;
@@ -3590,6 +3593,30 @@ export class AgentEngine {
     await this.runLifecycleMutation(() => this.runSweepOnce());
   }
 
+  requestFleetSidebarRepublish(): void {
+    if (this.fleetSidebarWakeRepublishTimer !== null) return;
+    const timer = setTimeout(() => {
+      void (this.startupInitializePromise ?? Promise.resolve())
+        .then(() => {
+          if (this.fleetSidebarWakeRepublishTimer !== timer) return;
+          return this.runLifecycleMutation(() => this.syncSidebar());
+        })
+        .catch((error) => {
+          console.error(
+            "[cmuxlayer] wake sidebar republish failed (will retry on sweep):",
+            error,
+          );
+        })
+        .finally(() => {
+          if (this.fleetSidebarWakeRepublishTimer === timer) {
+            this.fleetSidebarWakeRepublishTimer = null;
+          }
+        });
+    }, FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS);
+    this.fleetSidebarWakeRepublishTimer = timer;
+    timer.unref?.();
+  }
+
   private async runSweepOnce(): Promise<void> {
     this.currentSweepScreenSignatures = new Map();
     // Reuse the resync path's authoritative-safe ghost eviction on every sweep,
@@ -3766,6 +3793,10 @@ export class AgentEngine {
     if (this.sweepTimer) {
       clearTimeout(this.sweepTimer);
       this.sweepTimer = null;
+    }
+    if (this.fleetSidebarWakeRepublishTimer) {
+      clearTimeout(this.fleetSidebarWakeRepublishTimer);
+      this.fleetSidebarWakeRepublishTimer = null;
     }
     for (const timer of this.postSpawnLivenessTimers) {
       clearTimeout(timer);

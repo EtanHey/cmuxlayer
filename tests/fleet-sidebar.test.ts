@@ -20,6 +20,7 @@ import type {
 import {
   applyFleetSidebarCollapseState,
   buildFleetSidebarSnapshot,
+  defaultFleetSidebarDevPath,
   defaultFleetSidebarCollapseStatePath,
   defaultFleetSidebarPath,
   FleetSidebarCollapseStore,
@@ -484,7 +485,9 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(collapsed.lanes.every((lane) => lane.activeCount > 0)).toBe(true);
   });
 
-  it("renders a collapsed lane as counts, hidden seats, and lead summary without worker cards", () => {
+  it("always renders a collapsed lane's lead identity, one-line status, counts, and hidden-seat total", () => {
+    const leadAction =
+      "Coordinating the complete sidebar render-polish delivery across Claude wake detection, full-topology republishing, isolated fleet-dev preview output, collapsed-lane lead summaries, and final verification without allowing this intentionally overflowing status to add another row";
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
@@ -493,7 +496,8 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
           surfaceTitle: "cmuxlayerClaude LEAD",
           repo: "cmuxlayer",
           role: "orchestrator",
-          taskSummary: "Coordinate sidebar delivery",
+          taskSummary: null,
+          screenCurrentAction: leadAction,
         }),
         candidate({
           agentId: "worker",
@@ -513,9 +517,17 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
 
     expect(source).toContain('fleetLane("cmuxlayer", 2, 2, true, 2, [');
     expect(source).toContain('"name": "cmuxlayerClaude LEAD"');
-    expect(source).toContain('"status": "Coordinate sidebar delivery"');
+    expect(leadAction.length).toBeGreaterThan(200);
+    expect(source).toContain(`"status": ${JSON.stringify(leadAction)}`);
+    expect(source).toContain('Text("\\(liveCount) live · \\(activeCount) active")');
     expect(source).toContain('Text("\\(hiddenSeatCount) seats hidden")');
     expect(source).toContain("fleetLeadSummary(lead)");
+    const leadStatusBlock = source.slice(
+      source.indexOf("Text(lead.status)"),
+      source.indexOf("      Spacer()", source.indexOf("Text(lead.status)")),
+    );
+    expect(leadStatusBlock).toContain(".lineLimit(1)");
+    expect(leadStatusBlock).toContain(".truncationMode(.tail)");
     expect(source).not.toContain('"surfaceRef": "surface:lead"');
     expect(source).not.toContain('"surfaceRef": "surface:worker"');
   });
@@ -697,6 +709,31 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).not.toContain("Gauge");
   });
 
+  it("renders lane collapse state without a clickable-looking caret", () => {
+    const source = renderFleetSidebar(
+      buildFleetSidebarSnapshot([candidate()], {
+        liveSurfaceRefs: new Set(["surface:1"]),
+      }),
+    );
+
+    expect(source).toContain(
+      'Text(collapsed ? "collapsed" : "expanded")',
+    );
+    expect(source).toContain(
+      '.help(collapsed ? "Run cmuxlayer fleet-sidebar expand \\(name)" : "Run cmuxlayer fleet-sidebar collapse \\(name)")',
+    );
+    expect(source).toContain(
+      'Text(collapsed ? "CLI · cmuxlayer fleet-sidebar expand \\(name)" : "CLI · cmuxlayer fleet-sidebar collapse \\(name)")',
+    );
+    const laneHeaderBlock = source.slice(
+      source.indexOf("func fleetLaneHeader"),
+      source.indexOf("func fleetLane("),
+    );
+    expect(laneHeaderBlock).not.toContain("Button(");
+    expect(source).not.toContain("▸");
+    expect(source).not.toContain("▾");
+  });
+
   it("preserves Swift interpolation escapes inside the generated helper source", () => {
     const source = renderFleetSidebar({
       seatCount: 0,
@@ -712,30 +749,57 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).toContain('Text("\\(hiddenSeatCount) seats hidden")');
   });
 
-  it("caps normal status at one line while leaving actionable health multiline", () => {
-    const status = 'Review "quoted" \\ path\nnext line';
+  it("caps a long screen-derived action while leaving actionable health multiline", () => {
+    const screenCurrentAction =
+      "Analyzing the sidebar wake-republish path across every active fleet lane while preserving the last populated snapshot through coalesced writes, first-paint discovery protection, and delayed screen-state reconciliation without allowing the status row to grow taller";
     const health = "בריאות מלאה — reason must wrap";
     const snapshot = buildFleetSidebarSnapshot(
       [
         candidate({
-          taskSummary: status,
+          taskSummary: "(unknown)",
+          screenCurrentAction,
           healthStatus: "unhealthy",
           healthIssueCodes: ["agent_wedged"],
           healthReasons: [health],
           healthIssueSeverities: { agent_wedged: "blocking" },
         }),
+        candidate({
+          agentId: "lead-1",
+          surfaceRef: "surface:2",
+          surfaceTitle: "cmuxlayer lead",
+          role: "orchestrator",
+          taskSummary: null,
+          screenCurrentAction,
+        }),
       ],
-      { liveSurfaceRefs: new Set(["surface:1"]) },
+      { liveSurfaceRefs: new Set(["surface:1", "surface:2"]) },
     );
 
     const source = renderFleetSidebar(snapshot);
 
-    expect(source).toContain(`"status": ${JSON.stringify(status)}`);
+    expect(screenCurrentAction.length).toBeGreaterThan(200);
+    expect(
+      snapshot.lanes[0]?.seats.every(
+        (seat) => seat.status === screenCurrentAction,
+      ),
+    ).toBe(true);
+    expect(source).toContain(
+      `"status": ${JSON.stringify(screenCurrentAction)}`,
+    );
     expect(source).toContain(`"health": ${JSON.stringify(health)}`);
     expect(source).not.toContain(".fixedSize");
-    expect(source).toContain("Text(seat.status)");
-    expect(source).toContain(".lineLimit(1)");
-    expect(source).toContain(".truncationMode(.tail)");
+    const seatStatusBlock = source.slice(
+      source.indexOf("Text(seat.status)"),
+      source.indexOf("if seat.healthVisible"),
+    );
+    const leadStatusBlock = source.slice(
+      source.indexOf("Text(lead.status)"),
+      source.indexOf("      Spacer()", source.indexOf("Text(lead.status)")),
+    );
+    for (const statusBlock of [seatStatusBlock, leadStatusBlock]) {
+      expect(statusBlock).toContain(".lineLimit(1)");
+      expect(statusBlock).toContain(".truncationMode(.tail)");
+    }
     const healthBlock = source.slice(
       source.indexOf("if seat.healthVisible"),
       source.indexOf("    }\n    .padding(6)"),
@@ -875,6 +939,20 @@ describe("fleet sidebar atomic publisher", () => {
     );
   });
 
+  it("uses a separate discoverable fleet-dev path for development previews", () => {
+    expect(defaultFleetSidebarDevPath("/tmp/example-home")).toBe(
+      "/tmp/example-home/.config/cmux/sidebars/fleet-dev.swift",
+    );
+  });
+
+  it("requires tests to inject a non-production publisher output path", () => {
+    expect(() => new FleetSidebarPublisher()).toThrow(/explicit outputPath/i);
+    expect(
+      () =>
+        new FleetSidebarPublisher({ outputPath: defaultFleetSidebarPath() }),
+    ).toThrow(/non-production outputPath/i);
+  });
+
   it("keeps collapse preferences outside cmux's discoverable sidebars directory", () => {
     expect(defaultFleetSidebarCollapseStatePath("/tmp/example-home")).toBe(
       "/tmp/example-home/.local/state/cmuxlayer/fleet-sidebar-collapse.json",
@@ -893,14 +971,6 @@ describe("fleet sidebar atomic publisher", () => {
     );
     publisher.dispose();
 
-    const canonicalPublisher = new FleetSidebarPublisher();
-    const canonicalHarness = canonicalPublisher as unknown as {
-      collapseStore: FleetSidebarCollapseStore;
-    };
-    expect(canonicalHarness.collapseStore.getStatePath()).toBe(
-      defaultFleetSidebarCollapseStatePath(),
-    );
-    canonicalPublisher.dispose();
   });
 
   it("persists independent lane choices across collapse-store instances", () => {
@@ -1510,6 +1580,17 @@ writeFileSync(process.argv[3], "released");`,
 });
 
 describe("fleet sidebar opt-in distribution", () => {
+  it("pins the development runtime to the fleet-dev picker entry", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(process.cwd(), "package.json"), "utf8"),
+    ) as { scripts?: Record<string, string> };
+
+    expect(packageJson.scripts?.dev).toContain(
+      "CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH=$HOME/.config/cmux/sidebars/fleet-dev.swift",
+    );
+    expect(packageJson.scripts?.dev).not.toMatch(/sidebars\/fleet\.swift/);
+  });
+
   it("keeps the committed fallback asset identical to the empty generator output", () => {
     const assetPath = join(process.cwd(), "assets", "sidebars", "fleet.swift");
 
@@ -1543,5 +1624,34 @@ describe("fleet sidebar opt-in distribution", () => {
     ).toBe(readFileSync(join(process.cwd(), "assets", "sidebars", "fleet.swift"), "utf8"));
     expect(readFileSync(settingsPath, "utf8")).toBe(settings);
     expect(existsSync(join(configDir, "cmux.json"))).toBe(false);
+  });
+
+  it("installs development previews only as fleet-dev.swift", () => {
+    const home = mkdtempSync(join(tmpdir(), "cmuxlayer-fleet-dev-install-"));
+    tempDirs.push(home);
+    const configDir = join(home, ".config", "cmux");
+    mkdirSync(configDir, { recursive: true });
+    const settingsPath = join(configDir, "settings.json");
+    const settings = '{"selectedSidebar":"fleet"}\n';
+    writeFileSync(settingsPath, settings, "utf8");
+
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), "scripts", "install-fleet-sidebar-dev.mjs")],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      readFileSync(join(configDir, "sidebars", "fleet-dev.swift"), "utf8"),
+    ).toBe(
+      readFileSync(join(process.cwd(), "assets", "sidebars", "fleet.swift"), "utf8"),
+    );
+    expect(existsSync(join(configDir, "sidebars", "fleet.swift"))).toBe(false);
+    expect(readFileSync(settingsPath, "utf8")).toBe(settings);
   });
 });
