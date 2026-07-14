@@ -405,6 +405,34 @@ I only have 42 tokens
     expect(parsed.status).toBe("idle");
   });
 
+  it("does not report working for a session sitting at a context-limit / auto-compact banner (AC4)", () => {
+    const parsed = parseScreen(`
+  Context low · Run /compact to compact & continue
+
+──────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens
+  🤖 Sonnet 4.6 | 💰 $0.10                                    current: 2.1.81 · latest…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+  });
+
+  it("does not report working for an auto-compacting banner even when it co-occurs with a busy marker", () => {
+    // The banner text can appear alongside "esc to interrupt" while the CLI
+    // compacts — that marker must not win and report "working" (AC4).
+    const parsed = parseScreen(`
+⏺ Auto-compacting conversation… (esc to interrupt)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("idle");
+  });
+
   // --- context_pct and context_window tests ---
 
   describe("context_pct computation", () => {

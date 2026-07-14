@@ -107,6 +107,14 @@ const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
+// AIDEV-NOTE: Claude Code's context-limit/auto-compact banner wording isn't a single
+// stable string, so this matches several known phrasings ("Context low", "Context
+// window is almost full", "auto-compact", "compacting conversation") rather than one
+// exact banner. A session sitting at this banner must read as not-working (idle),
+// even though the banner line itself can co-occur with a busy-looking marker like
+// "esc to interrupt" — see AC4 (SDLC-87).
+const CONTEXT_LIMIT_BANNER_RE =
+  /\bcontext\s+(?:low|window\s+is\s+almost\s+full|limit\s+reached)\b|\bauto-compact(?:ing)?\b|\bcompacting\s+conversation\b/i;
 const THINKING_RE =
   /(?:^|\n)\s*(?:(?:[✻✢✳✶]\s*)?thinking(?:\s+with\s+[a-z-]+\s+effort)?(?:\s*(?:\.{3,}|…))?|(?:Reticulating splines|Perambulating|Cooked|Crunched|Razzmatazzing|Schlepping|Nucleating|Seasoning)(?:\s*(?:\.{3,}|…))?|(?:⬡\s*)?(?:Running|Generating)(?:\s*(?:\.{3,}|…))?\s+[0-9][0-9,]*(?:\.[0-9]+)?[km]?\s+tokens)\s*$/im;
 
@@ -431,6 +439,15 @@ function inferStatus(
 
   if (errors.length > 0) {
     return "frozen";
+  }
+
+  // AC4 (SDLC-87): a context-limit/auto-compact banner must never read as
+  // "working", even if it co-occurs with a busy-looking marker such as
+  // "esc to interrupt" — checked ahead of every working/thinking signal.
+  // There is no dedicated "blocked" status in the state model, so this
+  // mirrors the idle-prompt precedent below.
+  if (CONTEXT_LIMIT_BANNER_RE.test(joined)) {
+    return "idle";
   }
 
   if (THINKING_RE.test(text)) {

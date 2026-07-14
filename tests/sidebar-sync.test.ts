@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { toPublicAgent } from "../src/agent-facade.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
@@ -353,6 +354,23 @@ describe("Booting agent advancement (SDLC-87)", () => {
     scrollback_used: false,
   };
 
+  // Recheck screen for a send that visually "landed" (text sitting at the
+  // prompt) but never actually submitted — Enter didn't register, so the
+  // typed text is still literally visible and the CLI never left idle.
+  const STUCK_INPUT_SCREEN = {
+    surface: "surface:42",
+    text: `
+❯ design handoff
+
+──────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +1273,-196 | 🔧 11                                           418310 tokens
+  🤖 Sonnet 4.6 | 💰 $0.10                                    current: 2.1.81 · latest…
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+`,
+    lines: 40,
+    scrollback_used: false,
+  };
+
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -536,5 +554,45 @@ describe("Booting agent advancement (SDLC-87)", () => {
     expect(afterRetry?.state).toBe("ready");
     expect(afterRetry?.prompt_delivered).toBe(true);
     expect(mockClient.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces submit_verified: false (not swallowed) when the recheck shows the prompt never actually submitted (AC1)", async () => {
+    let calls = 0;
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        calls += 1;
+        // Call 1: initial interactive check. Call 2+: post-send recheck,
+        // where the typed text is still sitting unsent at the prompt —
+        // Enter never registered.
+        return calls === 1 ? IDLE_CLAUDE_SCREEN : STUCK_INPUT_SCREEN;
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "a1",
+        state: "booting",
+        surface_id: "surface:42",
+        model: "sonnet",
+        task_summary: "design handoff",
+      }),
+    );
+    liveSurfaces = [makeSurface("surface:42")];
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    // send()/sendKey() were both attempted, so delivery is recorded — but
+    // the recheck must not silently coerce a failed verification to
+    // true/null. AC1 requires the false result to be surfaced.
+    const record = engine.getAgentState("a1");
+    expect(record?.prompt_delivered).toBe(true);
+    expect(record?.submit_verified).toBe(false);
+    expect(record?.state).toBe("ready");
+
+    // And it must survive the record -> public-shape projection unchanged,
+    // not dropped/coerced to null — this is the "surfaced, not swallowed"
+    // contract the caller (e.g. wait_for/get_agent_state) relies on.
+    const publicAgent = toPublicAgent(record!);
+    expect(publicAgent.submit_verified).toBe(false);
   });
 });
