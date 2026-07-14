@@ -6831,7 +6831,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               record.surface_uuid.toLowerCase() === observedSurfaceUuid ||
               (observedSurfaceUuid === undefined &&
                 record.surface_id === args.surface)
-            : record.surface_id === args.surface;
+            : observedSurfaceUuid === undefined &&
+              record.surface_id === args.surface;
           if (!matchesClosedSurface) {
             continue;
           }

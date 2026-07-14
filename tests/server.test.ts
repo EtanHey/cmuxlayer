@@ -9846,6 +9846,14 @@ describe("tool handler integration", () => {
       respawn_attempts: 0,
       user_killed: false,
     });
+    stateMgr.writeState({
+      ...stateMgr.readState("worker-stale-ref-owner")!,
+      agent_id: "worker-legacy-stale-ref-owner",
+      surface_uuid: undefined,
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f5f",
+      version: 1,
+      user_killed: false,
+    });
 
     const mockClient = {
       identify: vi.fn().mockResolvedValue({ caller: {} }),
@@ -9888,6 +9896,10 @@ describe("tool handler integration", () => {
     expect(result.isError).not.toBe(true);
     expect(mockClient.closeSurface).toHaveBeenCalled();
     expect(stateMgr.readState("worker-stale-ref-owner")).toMatchObject({
+      user_killed: false,
+      crash_recover: true,
+    });
+    expect(stateMgr.readState("worker-legacy-stale-ref-owner")).toMatchObject({
       user_killed: false,
       crash_recover: true,
     });
