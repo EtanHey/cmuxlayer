@@ -17,10 +17,11 @@ import {
   type AgentHealthIssueSeverity,
   type AgentHealthStatus,
 } from "./agent-health.js";
-import type { AgentRole, CliType } from "./agent-types.js";
+import type { AgentRole, AgentState, CliType } from "./agent-types.js";
 import type { ParsedScreenStatus } from "./types.js";
 
 export type FleetScreenState = "working" | "idle" | "stalled";
+export const DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS = 120_000;
 export type FleetLaneKey =
   | "orc"
   | "golems"
@@ -33,6 +34,9 @@ export type FleetLaneKey =
 export interface FleetSidebarCandidate {
   agentId: string;
   agentType: CliType;
+  agentState: AgentState;
+  /** Latest transcript/output progress, not the registry heartbeat. */
+  lastProgressAtMs: number | null;
   /** Stable cmux UUID. Absent only for legacy/ref-only compatibility. */
   surfaceUuid?: string;
   surfaceRef: string;
@@ -150,8 +154,36 @@ const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
 
 export function toFleetScreenState(
   status: ParsedScreenStatus | null | undefined,
+  evidence: {
+    agentState?: AgentState;
+    lastProgressAtMs?: number | null;
+    nowMs?: number;
+    workingNoProgressTimeoutMs?: number;
+  } = {},
 ): FleetScreenState {
-  if (status === "thinking" || status === "working") return "working";
+  const hasWorkingEvidence =
+    status === "thinking" ||
+    status === "working" ||
+    (status === "idle" &&
+      evidence.agentState === "working" &&
+      evidence.lastProgressAtMs !== null &&
+      evidence.lastProgressAtMs !== undefined);
+  if (hasWorkingEvidence) {
+    const lastProgressAtMs = evidence.lastProgressAtMs;
+    const nowMs = evidence.nowMs ?? Date.now();
+    const timeoutMs =
+      evidence.workingNoProgressTimeoutMs ??
+      DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS;
+    if (
+      lastProgressAtMs !== null &&
+      lastProgressAtMs !== undefined &&
+      Number.isFinite(lastProgressAtMs) &&
+      nowMs - lastProgressAtMs > timeoutMs
+    ) {
+      return "stalled";
+    }
+    return "working";
+  }
   if (status === "idle" || status === "done") return "idle";
   return "stalled";
 }
@@ -257,7 +289,13 @@ function candidateName(candidate: FleetSidebarCandidate): string {
   );
 }
 
-function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
+function seatFor(
+  candidate: FleetSidebarCandidate,
+  opts: {
+    nowMs: number;
+    workingNoProgressTimeoutMs: number;
+  },
+): FleetSidebarSeat {
   const { status, statusMissing } = statusFor(candidate);
   const createdAt = Date.parse(candidate.createdAt);
   const name = candidateName(candidate);
@@ -275,7 +313,12 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
     name,
     lane: inferLane(candidate),
     role,
-    screenState: toFleetScreenState(candidate.screenStatus),
+    screenState: toFleetScreenState(candidate.screenStatus, {
+      agentState: candidate.agentState,
+      lastProgressAtMs: candidate.lastProgressAtMs,
+      nowMs: opts.nowMs,
+      workingNoProgressTimeoutMs: opts.workingNoProgressTimeoutMs,
+    }),
     status,
     statusMissing,
     healthStatus: candidate.healthStatus,
@@ -300,6 +343,8 @@ export function buildFleetSidebarSnapshot(
   opts: {
     liveSurfaceRefs: ReadonlySet<string>;
     liveSurfaceUuids?: ReadonlySet<string>;
+    nowMs?: number;
+    workingNoProgressTimeoutMs?: number;
   },
 ): FleetSidebarSnapshot {
   const candidateBySurface = new Map<string, FleetSidebarCandidate>();
@@ -320,7 +365,15 @@ export function buildFleetSidebarSnapshot(
     );
   }
 
-  const seats = [...candidateBySurface.values()].map(seatFor);
+  const seatOptions = {
+    nowMs: opts.nowMs ?? Date.now(),
+    workingNoProgressTimeoutMs:
+      opts.workingNoProgressTimeoutMs ??
+      DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
+  };
+  const seats = [...candidateBySurface.values()].map((candidate) =>
+    seatFor(candidate, seatOptions),
+  );
   const lanes = LANE_ORDER.flatMap((key): FleetSidebarLane[] => {
     const laneSeats = seats
       .filter((seat) => seat.lane === key)

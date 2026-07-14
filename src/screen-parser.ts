@@ -943,6 +943,24 @@ function latestClaudeSpinnerAction(text: string): string | null {
   return null;
 }
 
+function hasInFlightClaudeTool(text: string): boolean {
+  const lines = text.split("\n").slice(-16);
+  let actionIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (CLAUDE_GLYPH_ACTION_RE.test(lines[index] ?? "")) {
+      actionIndex = index;
+      break;
+    }
+  }
+  if (actionIndex < 0) return false;
+
+  return !lines.slice(actionIndex + 1).some((line) =>
+    /^\s*❯(?:\s|$)/.test(line) ||
+    CLAUDE_DONE_LINE_RE.test(line) ||
+    CLAUDE_COUNTER_RE.test(line),
+  );
+}
+
 function parseCurrentAction(
   text: string,
   agentType: ParsedScreenAgentType,
@@ -1155,6 +1173,10 @@ function inferStatus(
   }
 
   if (agentType === "claude" && latestClaudeSpinnerAction(text) !== null) {
+    return "working";
+  }
+
+  if (agentType === "claude" && hasInFlightClaudeTool(text)) {
     return "working";
   }
 
