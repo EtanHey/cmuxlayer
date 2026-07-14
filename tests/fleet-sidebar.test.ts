@@ -52,6 +52,8 @@ function candidate(
   return {
     agentId: "agent-1",
     agentType: "codex",
+    agentState: "idle",
+    lastProgressAtMs: null,
     surfaceRef: "surface:1",
     surfaceTitle: "cmuxlayerCodex [surface:1]",
     repo: "cmuxlayer",
@@ -83,6 +85,55 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(toFleetScreenState("frozen")).toBe("stalled");
     expect(toFleetScreenState(null)).toBe("stalled");
     expect(toFleetScreenState(undefined)).toBe("stalled");
+  });
+
+  it("keeps a recently progressing registry-working lead active when screen parsing briefly reports idle", () => {
+    const nowMs = Date.parse("2026-07-14T16:00:00.000Z");
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "orc-lead",
+          surfaceTitle: "orcClaude LEAD",
+          repo: "orc",
+          role: "orchestrator",
+          screenCurrentAction: "Bash(cat >> orchestra.md)",
+          screenStatus: "idle",
+          agentState: "working",
+          lastProgressAtMs: nowMs - 5_000,
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:1"]),
+        nowMs,
+      },
+    );
+
+    expect(snapshot.lanes[0]).toMatchObject({
+      key: "orc",
+      activeCount: 1,
+      collapsed: false,
+    });
+    expect(snapshot.lanes[0]?.seats[0]?.screenState).toBe("working");
+  });
+
+  it("renders working with no progress past the timeout as stalled", () => {
+    const nowMs = Date.parse("2026-07-14T16:00:00.000Z");
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          screenStatus: "working",
+          agentState: "working",
+          lastProgressAtMs: nowMs - 120_001,
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:1"]),
+        nowMs,
+        workingNoProgressTimeoutMs: 120_000,
+      },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]?.screenState).toBe("stalled");
   });
 
   it("excludes dead-surface ghosts before computing lane counts", () => {
