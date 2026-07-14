@@ -7,6 +7,12 @@ func fleetSeatAge(_ createdAtEpoch, _ nowEpoch) -> String {
   return "seat \(age / 86400)d"
 }
 
+func fleetAgentTint(_ agentType) -> String {
+  if agentType == "claude" { return "#F59E0B" }
+  if agentType == "codex" { return "#3B82F6" }
+  return "#6B7280"
+}
+
 func fleetState(_ state) -> some View {
   HStack(spacing: 4) {
     if state == "working" {
@@ -51,13 +57,13 @@ func fleetRow(_ seat) -> some View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .background {
       RoundedRectangle(cornerRadius: 6)
-        .foregroundColor(seat.role == "lead" ? "#3B82F6" : "#6B7280")
+        .foregroundColor(fleetAgentTint(seat.agentType))
         .opacity(seat.role == "lead" ? 0.10 : 0.05)
     }
   }
 }
 
-func fleetLeadSummary(_ lead) -> some View {
+func fleetLeadSummaryContent(_ lead) -> some View {
   HStack(spacing: 4) {
     if lead.present {
       if lead.screenState == "working" {
@@ -94,8 +100,18 @@ func fleetLeadSummary(_ lead) -> some View {
   .padding(4)
   .background {
     RoundedRectangle(cornerRadius: 5)
-      .foregroundColor("#3B82F6")
+      .foregroundColor(fleetAgentTint(lead.agentType))
       .opacity(0.07)
+  }
+}
+
+func fleetLeadSummary(_ lead) -> some View {
+  if lead.present && !lead.surfaceUuid.isEmpty {
+    Button(action: { cmux("surface.focus", surface_id: lead.surfaceUuid) }) {
+      fleetLeadSummaryContent(lead)
+    }
+  } else {
+    fleetLeadSummaryContent(lead)
   }
 }
 

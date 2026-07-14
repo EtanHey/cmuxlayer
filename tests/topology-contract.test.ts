@@ -48,6 +48,7 @@ function candidate(
 ): FleetSidebarCandidate {
   return {
     agentId: `agent-${surfaceRef}`,
+    agentType: "codex",
     surfaceRef,
     surfaceTitle: `cmuxlayerCodex [${surfaceRef}]`,
     repo: "cmuxlayer",
@@ -508,6 +509,44 @@ describe("topology contract: seat binding", () => {
     );
     expect(source).toContain(`"surfaceUuid": "${alphaUuid}"`);
     expect(source).toContain(`"surfaceUuid": "${betaUuid}"`);
+  });
+
+  it("keeps a legacy ref-only collapsed lead non-interactive", async () => {
+    const fixture = engineFixture();
+    fixture.stateManager.writeState(
+      record({
+        agent_id: "legacy-lead",
+        surface_id: "surface:legacy",
+        surface_uuid: undefined,
+        workspace_id: "workspace:fleet",
+        seat_lane: "cmuxlayer",
+        seat_id: "lead",
+        role: "orchestrator",
+        cli: "claude",
+        model: "claude-sonnet-4-5",
+        state: "ready",
+      }),
+    );
+    fixture.setTopology([
+      surface("surface:legacy", "cmuxlayerClaude LEAD"),
+    ]);
+    await fixture.engine.getRegistry().reconstitute();
+
+    await fixture.engine.runSweep();
+
+    const publication = fixture.publications.at(-1);
+    const lane = publication?.snapshot.lanes[0];
+    expect(lane).toMatchObject({ key: "cmuxlayer", collapsed: true });
+    expect(lane?.seats[0]).toMatchObject({
+      agentId: "legacy-lead",
+      surfaceRef: "surface:legacy",
+      resolvedSurfaceUuid: null,
+    });
+    const source = renderFleetSidebar(publication!.snapshot);
+    expect(source).toContain('"surfaceUuid": ""');
+    expect(source).not.toContain(
+      '"surfaceUuid": "surface:legacy"',
+    );
   });
 });
 

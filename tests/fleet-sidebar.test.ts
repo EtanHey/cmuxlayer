@@ -51,6 +51,7 @@ function candidate(
 ): ContentDietCandidate {
   return {
     agentId: "agent-1",
+    agentType: "codex",
     surfaceRef: "surface:1",
     surfaceTitle: "cmuxlayerCodex [surface:1]",
     repo: "cmuxlayer",
@@ -204,6 +205,56 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(snapshot.lanes.map((lane) => [lane.key, lane.liveCount])).toEqual([
       ["voicelayer", 1],
       ["skillCreator", 2],
+    ]);
+  });
+
+  it("normalizes mm launcher, repo, seat lane, and worktree identities into the mm lane", () => {
+    const candidates = [
+      candidate({
+        agentId: "mm-launcher",
+        surfaceRef: "surface:mm-launcher",
+        surfaceTitle: "MM launcher worker",
+        repo: "unknown",
+        launcherName: "mmClaude",
+      }),
+      candidate({
+        agentId: "mm-repo",
+        surfaceRef: "surface:mm-repo",
+        surfaceTitle: "repo worker",
+        repo: "mm",
+        launcherName: "mmCodex",
+      }),
+      candidate({
+        agentId: "mm-seat",
+        surfaceRef: "surface:mm-seat",
+        surfaceTitle: "seat worker",
+        repo: "unknown",
+        seatLane: "mm",
+        launcherName: null,
+      }),
+      candidate({
+        agentId: "mm-worktree",
+        surfaceRef: "surface:mm-worktree",
+        surfaceTitle: "worktree worker",
+        repo: "/Users/etanheyman/Gits/mm.wt/clickable-leads",
+        launcherName: null,
+      }),
+      candidate({
+        agentId: "contains-mm-only",
+        surfaceRef: "surface:contains-mm-only",
+        surfaceTitle: "summary worker",
+        repo: "summary-tools",
+        launcherName: null,
+      }),
+    ];
+
+    const snapshot = buildFleetSidebarSnapshot(candidates, {
+      liveSurfaceRefs: new Set(candidates.map((item) => item.surfaceRef)),
+    });
+
+    expect(snapshot.lanes.map((lane) => [lane.key, lane.liveCount])).toEqual([
+      ["mm", 4],
+      ["other", 1],
     ]);
   });
 
@@ -532,6 +583,66 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
     expect(source).not.toContain('"surfaceRef": "surface:worker"');
   });
 
+  it("focuses a collapsed present lead by its stable surface UUID", () => {
+    const surfaceUuid = "7A8B9C0D-1111-4222-8333-444455556666";
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "lead",
+          surfaceUuid,
+          surfaceRef: "surface:lead",
+          surfaceTitle: "cmuxlayerClaude LEAD",
+          role: "orchestrator",
+          screenStatus: "idle",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:lead"]),
+        liveSurfaceUuids: new Set([surfaceUuid]),
+      },
+    );
+
+    const source = renderFleetSidebar(snapshot);
+    expect(snapshot.lanes[0]?.collapsed).toBe(true);
+    expect(source).toContain(`"surfaceUuid": "${surfaceUuid}"`);
+    const leadSummaryBlock = source.slice(
+      source.indexOf("func fleetLeadSummary"),
+      source.indexOf("func fleetLaneHeader"),
+    );
+    expect(leadSummaryBlock).toContain(
+      'Button(action: { cmux("surface.focus", surface_id: lead.surfaceUuid) })',
+    );
+  });
+
+  it("keeps a collapsed lead without a stable UUID non-interactive", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "legacy-lead",
+          surfaceRef: "surface:legacy-lead",
+          surfaceTitle: "cmuxlayerClaude LEAD",
+          role: "orchestrator",
+          screenStatus: "idle",
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:legacy-lead"]) },
+    );
+
+    const source = renderFleetSidebar(snapshot);
+    expect(snapshot.lanes[0]?.collapsed).toBe(true);
+    expect(source).toContain('"surfaceUuid": ""');
+    const leadSummaryBlock = source.slice(
+      source.indexOf("func fleetLeadSummary"),
+      source.indexOf("func fleetLaneHeader"),
+    );
+    expect(leadSummaryBlock).toContain(
+      "if lead.present && !lead.surfaceUuid.isEmpty",
+    );
+    expect(source).not.toContain(
+      'cmux("surface.focus", surface_id: "")',
+    );
+  });
+
   it("renders every card for the same lane when explicitly expanded", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [
@@ -639,6 +750,105 @@ describe("fleet sidebar snapshot to interpreted Swift", () => {
       '"surfaceUuid": "11111111-2222-4333-8444-555555555555"',
     );
     expect(source).toContain('"surfaceRef": "surface:7"');
+  });
+
+  it("tints Claude rows orange, Codex rows blue, and other engines neutral without changing state dots", () => {
+    const candidates = [
+      candidate({
+        agentId: "claude-worker",
+        surfaceRef: "surface:claude",
+        surfaceTitle: "cmuxlayerClaude",
+        agentType: "claude",
+        screenStatus: "working",
+      }),
+      candidate({
+        agentId: "codex-worker",
+        surfaceRef: "surface:codex",
+        surfaceTitle: "cmuxlayerCodex",
+        agentType: "codex",
+        screenStatus: "idle",
+      }),
+      candidate({
+        agentId: "gemini-worker",
+        surfaceRef: "surface:gemini",
+        surfaceTitle: "cmuxlayerGemini",
+        agentType: "gemini",
+        screenStatus: "frozen",
+      }),
+    ];
+    const snapshot = buildFleetSidebarSnapshot(candidates, {
+      liveSurfaceRefs: new Set(candidates.map((item) => item.surfaceRef)),
+    });
+    const source = renderFleetSidebar(
+      applyFleetSidebarCollapseState(snapshot, { cmuxlayer: false }),
+    );
+
+    expect(source).toContain('"agentType": "claude"');
+    expect(source).toContain('"agentType": "codex"');
+    expect(source).toContain('"agentType": "gemini"');
+    const tintBlock = source.slice(
+      source.indexOf("func fleetAgentTint"),
+      source.indexOf("func fleetState"),
+    );
+    expect(tintBlock).toContain(
+      'if agentType == "claude" { return "#F59E0B" }',
+    );
+    expect(tintBlock).toContain(
+      'if agentType == "codex" { return "#3B82F6" }',
+    );
+    expect(tintBlock).toContain('return "#6B7280"');
+    const rowBlock = source.slice(
+      source.indexOf("func fleetRow"),
+      source.indexOf("func fleetLeadSummaryContent"),
+    );
+    expect(rowBlock).toContain(
+      ".foregroundColor(fleetAgentTint(seat.agentType))",
+    );
+    const stateBlock = source.slice(
+      source.indexOf("func fleetState"),
+      source.indexOf("func fleetRow"),
+    );
+    expect(stateBlock).toContain(
+      'Text("●").foregroundColor("#3B82F6")',
+    );
+    expect(stateBlock).toContain(
+      'Text("●").foregroundColor("#6B7280")',
+    );
+    expect(stateBlock).toContain(
+      'Text("●").foregroundColor("#EF4444")',
+    );
+  });
+
+  it("projects agent type into collapsed leads and tints their background", () => {
+    const surfaceUuid = "3A4B5C6D-7777-4888-8999-AAAABBBBCCCC";
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "claude-lead",
+          surfaceUuid,
+          surfaceRef: "surface:claude-lead",
+          surfaceTitle: "cmuxlayerClaude LEAD",
+          agentType: "claude",
+          role: "orchestrator",
+          screenStatus: "idle",
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:claude-lead"]),
+        liveSurfaceUuids: new Set([surfaceUuid]),
+      },
+    );
+
+    const source = renderFleetSidebar(snapshot);
+    expect(snapshot.lanes[0]?.collapsed).toBe(true);
+    expect(source).toContain('"agentType": "claude"');
+    const leadSummaryBlock = source.slice(
+      source.indexOf("func fleetLeadSummaryContent"),
+      source.indexOf("func fleetLaneHeader"),
+    );
+    expect(leadSummaryBlock).toContain(
+      ".foregroundColor(fleetAgentTint(lead.agentType))",
+    );
   });
 
   it("renders a never-active seat as stalled but immediately focusable by UUID", () => {
