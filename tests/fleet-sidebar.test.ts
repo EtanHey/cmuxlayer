@@ -309,6 +309,44 @@ describe("fleet sidebar reconciled snapshot", () => {
     ]);
   });
 
+  it("attributes coachClaude to a dedicated coach lane", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "coach-lead",
+          surfaceTitle: "coachClaude",
+          repo: "coach",
+          launcherName: "coachClaude",
+          role: "orchestrator",
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes).toEqual([
+      expect.objectContaining({ key: "coach", label: "coach" }),
+    ]);
+    expect(snapshot.lanes.map((lane) => lane.key)).not.toContain("other");
+  });
+
+  it("labels the compatibility mm lane with the canonical matchmat repo", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "matchmat-worker",
+          surfaceTitle: "mmCodex",
+          repo: "matchmat",
+          launcherName: "mmCodex",
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes).toEqual([
+      expect.objectContaining({ key: "mm", label: "matchmat" }),
+    ]);
+  });
+
   it("sorts leads before workers and collapses only all-idle lanes", () => {
     const snapshot = buildFleetSidebarSnapshot(
       [

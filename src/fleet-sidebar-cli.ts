@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   defaultFleetSidebarPath,
+  fleetLaneLabel,
   FleetSidebarCollapseStore,
   type FleetLaneKey,
 } from "./fleet-sidebar.js";
@@ -14,15 +15,19 @@ const LANE_KEYS: FleetLaneKey[] = [
   "voicelayer",
   "skillCreator",
   "cmuxlayer",
+  "coach",
   "mm",
   "other",
 ];
 
 const LANE_BY_INPUT = new Map<string, FleetLaneKey>(
-  LANE_KEYS.flatMap((key) => {
-    const normalized = normalizeLaneInput(key);
-    return [[normalized, key] as const];
-  }),
+  [
+    ...LANE_KEYS.flatMap((key) => {
+      const normalized = normalizeLaneInput(key);
+      return [[normalized, key] as const];
+    }),
+    ["matchmat", "mm"] as const,
+  ],
 );
 
 export interface FleetSidebarCommandResult {
@@ -100,17 +105,18 @@ function readRenderedLaneState(
 ): boolean | undefined {
   try {
     const source = readFileSync(sidebarPath, "utf8");
-    const label = JSON.stringify(lane);
-    const match = source.match(
-      new RegExp(
-        `fleetLane\\(${escapeRegExp(label)},\\s*\\d+,\\s*\\d+,\\s*(true|false),`,
-      ),
-    );
-    return match?.[1] === "true"
-      ? true
-      : match?.[1] === "false"
-        ? false
-        : undefined;
+    const renderedLabels = new Set([fleetLaneLabel(lane), lane]);
+    for (const renderedLabel of renderedLabels) {
+      const label = JSON.stringify(renderedLabel);
+      const match = source.match(
+        new RegExp(
+          `fleetLane\\(${escapeRegExp(label)},\\s*\\d+,\\s*\\d+,\\s*(true|false),`,
+        ),
+      );
+      if (match?.[1] === "true") return true;
+      if (match?.[1] === "false") return false;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
