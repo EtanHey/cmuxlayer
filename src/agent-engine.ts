@@ -49,7 +49,7 @@ import {
   type WaitResult,
 } from "./agent-types.js";
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
-import { parseScreen } from "./screen-parser.js";
+import { cleanScreenText, parseScreen } from "./screen-parser.js";
 import {
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
@@ -131,6 +131,7 @@ import {
 import type { InboxOpts } from "./inbox.js";
 import {
   buildFleetSidebarSnapshot,
+  DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
   type FleetSidebarCandidate,
   type FleetSidebarPublisherLike,
 } from "./fleet-sidebar.js";
@@ -329,6 +330,8 @@ export interface AgentEngineOptions {
    * Defaults to a NO-OP so bare engines never write operator configuration.
    */
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
+  /** Render-only timeout for a working seat whose transcript/output stops advancing. */
+  fleetWorkingNoProgressTimeoutMs?: number;
 }
 
 export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
@@ -389,6 +392,11 @@ interface SidebarStatusSnapshot {
   surfaceId: string | null;
   workspaceId: string | null;
   healthSignature: string;
+}
+
+interface FleetScreenProgressSnapshot {
+  signature: string;
+  lastProgressAtMs: number;
 }
 
 export interface SweepTimingOptions {
@@ -748,6 +756,8 @@ export class AgentEngine {
   private lastSweepSignature: string | null = null;
   private unchangedSweepCount = 0;
   private currentSweepScreenSignatures = new Map<string, string>();
+  /** agentId → last material (de-chromed) screen output change. */
+  private fleetScreenProgress = new Map<string, FleetScreenProgressSnapshot>();
   /** agentId → last-pushed status target/value */
   private sidebarSnapshot = new Map<string, SidebarStatusSnapshot>();
   /** e.g. "a1:spawned", "a1:done", "a1:error" */
@@ -772,6 +782,7 @@ export class AgentEngine {
     | Promise<CloseForensicsSweepResult>) | null;
   private closeForensicsSweepInFlight = false;
   private fleetSidebarPublisher: FleetSidebarPublisherLike;
+  private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
   constructor(
@@ -813,6 +824,12 @@ export class AgentEngine {
       publish: () => {},
       dispose: () => {},
     };
+    this.fleetWorkingNoProgressTimeoutMs =
+      opts?.fleetWorkingNoProgressTimeoutMs ??
+      parseNonNegativeInteger(
+        process.env.CMUXLAYER_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
+        DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
+      );
     this.spawnGuard = opts?.spawnGuard ?? new SpawnGuard();
     this.postSpawnLivenessMs =
       opts?.postSpawnLivenessMs ??
@@ -1324,6 +1341,24 @@ export class AgentEngine {
     return agent.cli_session_id
       ? loadHarnessSessionWithMeta(harness, agent.cli_session_id)
       : null;
+  }
+
+  private lastAgentProgressAtMs(agent: AgentRecord): number | null {
+    let transcriptProgressAtMs = 0;
+    if (agent.cli_session_path) {
+      const mtimeMs = safeMtimeMs(agent.cli_session_path);
+      if (mtimeMs > 0) transcriptProgressAtMs = mtimeMs;
+    } else {
+      transcriptProgressAtMs =
+        this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
+    }
+    const screenProgressAtMs =
+      this.fleetScreenProgress.get(agent.agent_id)?.lastProgressAtMs ?? 0;
+    const lastProgressAtMs = Math.max(
+      transcriptProgressAtMs,
+      screenProgressAtMs,
+    );
+    return lastProgressAtMs > 0 ? lastProgressAtMs : null;
   }
 
   private transcriptHasSettledDone(agent: AgentRecord): boolean {
@@ -2024,6 +2059,11 @@ export class AgentEngine {
       nextAgentId,
     );
     this.rekeyAgentMapEntry(
+      this.fleetScreenProgress,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentMapEntry(
       this.readyPatternMatches,
       previousAgentId,
       nextAgentId,
@@ -2137,9 +2177,27 @@ export class AgentEngine {
         agent.agent_id,
         `${route.surface_id}:${screenTextSignature(screen.text)}`,
       );
+      this.recordFleetScreenProgress(agent.agent_id, screen.text);
       return screen;
     });
     return ctx.screen;
+  }
+
+  private recordFleetScreenProgress(agentId: string, screenText: string): void {
+    const parsed = parseScreen(screenText);
+    const materialOutput = cleanScreenText(
+      screenText,
+      BOOT_SESSION_CAPTURE_LINES,
+    );
+    const signature = screenTextSignature(
+      `${parsed.current_action ?? ""}\n${materialOutput}`,
+    );
+    const previous = this.fleetScreenProgress.get(agentId);
+    if (previous?.signature === signature) return;
+    this.fleetScreenProgress.set(agentId, {
+      signature,
+      lastProgressAtMs: Date.now(),
+    });
   }
 
   private async sweepReadMatchesBinding(
@@ -2766,6 +2824,7 @@ export class AgentEngine {
       }
     }
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
+    this.fleetScreenProgress.delete(agentId);
   }
 
   private isLeadWatchBlind(
@@ -3278,6 +3337,8 @@ export class AgentEngine {
         fleetCandidates.push({
           agentId: agent.agent_id,
           agentType: agent.cli,
+          agentState: state,
+          lastProgressAtMs: this.lastAgentProgressAtMs(agent),
           surfaceUuid: observedSurfaceUuid ?? undefined,
           surfaceRef: boundSurfaceRef,
           surfaceTitle:
@@ -3444,6 +3505,11 @@ export class AgentEngine {
     const currentAgentIds = new Set(
       this.registry.list().map((a) => a.agent_id),
     );
+    for (const agentId of this.fleetScreenProgress.keys()) {
+      if (!currentAgentIds.has(agentId)) {
+        this.fleetScreenProgress.delete(agentId);
+      }
+    }
     for (const [agentId, snapshot] of this.sidebarSnapshot) {
       if (!currentAgentIds.has(agentId)) {
         try {
@@ -3469,6 +3535,7 @@ export class AgentEngine {
       ...(observedLiveSurfaceUuids
         ? { liveSurfaceUuids: new Set(observedLiveSurfaceUuids) }
         : {}),
+      workingNoProgressTimeoutMs: this.fleetWorkingNoProgressTimeoutMs,
     });
     const publicationState =
       !topologyIsAuthoritative

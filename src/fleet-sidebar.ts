@@ -17,22 +17,27 @@ import {
   type AgentHealthIssueSeverity,
   type AgentHealthStatus,
 } from "./agent-health.js";
-import type { AgentRole, CliType } from "./agent-types.js";
+import type { AgentRole, AgentState, CliType } from "./agent-types.js";
 import type { ParsedScreenStatus } from "./types.js";
 
 export type FleetScreenState = "working" | "idle" | "stalled";
+export const DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS = 120_000;
 export type FleetLaneKey =
   | "orc"
   | "golems"
   | "voicelayer"
   | "skillCreator"
   | "cmuxlayer"
+  | "coach"
   | "mm"
   | "other";
 
 export interface FleetSidebarCandidate {
   agentId: string;
   agentType: CliType;
+  agentState: AgentState;
+  /** Latest transcript/output progress, not the registry heartbeat. */
+  lastProgressAtMs: number | null;
   /** Stable cmux UUID. Absent only for legacy/ref-only compatibility. */
   surfaceUuid?: string;
   surfaceRef: string;
@@ -117,6 +122,7 @@ const LANE_ORDER: FleetLaneKey[] = [
   "voicelayer",
   "skillCreator",
   "cmuxlayer",
+  "coach",
   "mm",
   "other",
 ];
@@ -132,9 +138,14 @@ const LANE_LABELS: Record<FleetLaneKey, string> = {
   voicelayer: "voicelayer",
   skillCreator: "skillCreator",
   cmuxlayer: "cmuxlayer",
-  mm: "mm",
+  coach: "coach",
+  mm: "matchmat",
   other: "other",
 };
+
+export function fleetLaneLabel(key: FleetLaneKey): string {
+  return LANE_LABELS[key];
+}
 
 const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
   "auto_discovered_agent",
@@ -150,8 +161,36 @@ const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
 
 export function toFleetScreenState(
   status: ParsedScreenStatus | null | undefined,
+  evidence: {
+    agentState?: AgentState;
+    lastProgressAtMs?: number | null;
+    nowMs?: number;
+    workingNoProgressTimeoutMs?: number;
+  } = {},
 ): FleetScreenState {
-  if (status === "thinking" || status === "working") return "working";
+  const hasWorkingEvidence =
+    status === "thinking" ||
+    status === "working" ||
+    (status === "idle" &&
+      evidence.agentState === "working" &&
+      evidence.lastProgressAtMs !== null &&
+      evidence.lastProgressAtMs !== undefined);
+  if (hasWorkingEvidence) {
+    const lastProgressAtMs = evidence.lastProgressAtMs;
+    const nowMs = evidence.nowMs ?? Date.now();
+    const timeoutMs =
+      evidence.workingNoProgressTimeoutMs ??
+      DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS;
+    if (
+      lastProgressAtMs !== null &&
+      lastProgressAtMs !== undefined &&
+      Number.isFinite(lastProgressAtMs) &&
+      nowMs - lastProgressAtMs > timeoutMs
+    ) {
+      return "stalled";
+    }
+    return "working";
+  }
   if (status === "idle" || status === "done") return "idle";
   return "stalled";
 }
@@ -160,13 +199,14 @@ function normalizedIdentity(value: string | null | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function isMmIdentity(value: string | null | undefined): boolean {
+function isMatchmatIdentity(value: string | null | undefined): boolean {
   const identity = value?.trim().toLowerCase();
   if (!identity) return false;
   return (
-    /^(?:mm|mm(?:claude|codex|gemini|cursor|kiro))(?:$|[^a-z0-9])/.test(
+    /^(?:(?:mm|matchmat)|(?:mm|matchmat)(?:claude|codex|gemini|cursor|kiro))(?:$|[^a-z0-9])/.test(
       identity,
-    ) || /(?:^|[/\\])mm(?:\.wt)?(?:[/\\]|$)/.test(identity)
+    ) ||
+    /(?:^|[/\\])(?:mm|matchmat)(?:\.wt)?(?:[/\\]|$)/.test(identity)
   );
 }
 
@@ -179,7 +219,7 @@ function inferLane(candidate: FleetSidebarCandidate): FleetLaneKey {
     candidate.agentId,
     candidate.surfaceTitle,
   ];
-  if (rawIdentities.some(isMmIdentity)) return "mm";
+  if (rawIdentities.some(isMatchmatIdentity)) return "mm";
   const identities = rawIdentities.map(normalizedIdentity);
 
   for (const value of identities) {
@@ -187,6 +227,7 @@ function inferLane(candidate: FleetSidebarCandidate): FleetLaneKey {
     if (value.includes("voicelayer")) return "voicelayer";
     if (value.includes("skillcreator")) return "skillCreator";
     if (value.includes("cmuxlayer")) return "cmuxlayer";
+    if (value === "coach" || value.startsWith("coach")) return "coach";
     if (value === "orc" || value.startsWith("orc")) return "orc";
   }
   return "other";
@@ -257,7 +298,13 @@ function candidateName(candidate: FleetSidebarCandidate): string {
   );
 }
 
-function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
+function seatFor(
+  candidate: FleetSidebarCandidate,
+  opts: {
+    nowMs: number;
+    workingNoProgressTimeoutMs: number;
+  },
+): FleetSidebarSeat {
   const { status, statusMissing } = statusFor(candidate);
   const createdAt = Date.parse(candidate.createdAt);
   const name = candidateName(candidate);
@@ -275,7 +322,12 @@ function seatFor(candidate: FleetSidebarCandidate): FleetSidebarSeat {
     name,
     lane: inferLane(candidate),
     role,
-    screenState: toFleetScreenState(candidate.screenStatus),
+    screenState: toFleetScreenState(candidate.screenStatus, {
+      agentState: candidate.agentState,
+      lastProgressAtMs: candidate.lastProgressAtMs,
+      nowMs: opts.nowMs,
+      workingNoProgressTimeoutMs: opts.workingNoProgressTimeoutMs,
+    }),
     status,
     statusMissing,
     healthStatus: candidate.healthStatus,
@@ -300,6 +352,8 @@ export function buildFleetSidebarSnapshot(
   opts: {
     liveSurfaceRefs: ReadonlySet<string>;
     liveSurfaceUuids?: ReadonlySet<string>;
+    nowMs?: number;
+    workingNoProgressTimeoutMs?: number;
   },
 ): FleetSidebarSnapshot {
   const candidateBySurface = new Map<string, FleetSidebarCandidate>();
@@ -320,7 +374,15 @@ export function buildFleetSidebarSnapshot(
     );
   }
 
-  const seats = [...candidateBySurface.values()].map(seatFor);
+  const seatOptions = {
+    nowMs: opts.nowMs ?? Date.now(),
+    workingNoProgressTimeoutMs:
+      opts.workingNoProgressTimeoutMs ??
+      DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
+  };
+  const seats = [...candidateBySurface.values()].map((candidate) =>
+    seatFor(candidate, seatOptions),
+  );
   const lanes = LANE_ORDER.flatMap((key): FleetSidebarLane[] => {
     const laneSeats = seats
       .filter((seat) => seat.lane === key)
@@ -332,7 +394,7 @@ export function buildFleetSidebarSnapshot(
     return [
       {
         key,
-        label: LANE_LABELS[key],
+        label: fleetLaneLabel(key),
         liveCount: laneSeats.length,
         activeCount,
         collapsed: activeCount === 0,

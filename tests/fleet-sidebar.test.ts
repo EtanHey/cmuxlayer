@@ -52,6 +52,8 @@ function candidate(
   return {
     agentId: "agent-1",
     agentType: "codex",
+    agentState: "idle",
+    lastProgressAtMs: null,
     surfaceRef: "surface:1",
     surfaceTitle: "cmuxlayerCodex [surface:1]",
     repo: "cmuxlayer",
@@ -83,6 +85,55 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(toFleetScreenState("frozen")).toBe("stalled");
     expect(toFleetScreenState(null)).toBe("stalled");
     expect(toFleetScreenState(undefined)).toBe("stalled");
+  });
+
+  it("keeps a recently progressing registry-working lead active when screen parsing briefly reports idle", () => {
+    const nowMs = Date.parse("2026-07-14T16:00:00.000Z");
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "orc-lead",
+          surfaceTitle: "orcClaude LEAD",
+          repo: "orc",
+          role: "orchestrator",
+          screenCurrentAction: "Bash(cat >> orchestra.md)",
+          screenStatus: "idle",
+          agentState: "working",
+          lastProgressAtMs: nowMs - 5_000,
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:1"]),
+        nowMs,
+      },
+    );
+
+    expect(snapshot.lanes[0]).toMatchObject({
+      key: "orc",
+      activeCount: 1,
+      collapsed: false,
+    });
+    expect(snapshot.lanes[0]?.seats[0]?.screenState).toBe("working");
+  });
+
+  it("renders working with no progress past the timeout as stalled", () => {
+    const nowMs = Date.parse("2026-07-14T16:00:00.000Z");
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          screenStatus: "working",
+          agentState: "working",
+          lastProgressAtMs: nowMs - 120_001,
+        }),
+      ],
+      {
+        liveSurfaceRefs: new Set(["surface:1"]),
+        nowMs,
+        workingNoProgressTimeoutMs: 120_000,
+      },
+    );
+
+    expect(snapshot.lanes[0]?.seats[0]?.screenState).toBe("stalled");
   });
 
   it("excludes dead-surface ghosts before computing lane counts", () => {
@@ -255,6 +306,44 @@ describe("fleet sidebar reconciled snapshot", () => {
     expect(snapshot.lanes.map((lane) => [lane.key, lane.liveCount])).toEqual([
       ["mm", 4],
       ["other", 1],
+    ]);
+  });
+
+  it("attributes coachClaude to a dedicated coach lane", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "coach-lead",
+          surfaceTitle: "coachClaude",
+          repo: "coach",
+          launcherName: "coachClaude",
+          role: "orchestrator",
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes).toEqual([
+      expect.objectContaining({ key: "coach", label: "coach" }),
+    ]);
+    expect(snapshot.lanes.map((lane) => lane.key)).not.toContain("other");
+  });
+
+  it("labels the compatibility mm lane with the canonical matchmat repo", () => {
+    const snapshot = buildFleetSidebarSnapshot(
+      [
+        candidate({
+          agentId: "matchmat-worker",
+          surfaceTitle: "mmCodex",
+          repo: "matchmat",
+          launcherName: "mmCodex",
+        }),
+      ],
+      { liveSurfaceRefs: new Set(["surface:1"]) },
+    );
+
+    expect(snapshot.lanes).toEqual([
+      expect.objectContaining({ key: "mm", label: "matchmat" }),
     ]);
   });
 
@@ -1414,6 +1503,28 @@ writeFileSync(process.argv[3], "released");`,
     await new Promise((resolve) => setTimeout(resolve, 550));
 
     expect(readFileSync(outputPath, "utf8")).toBe(lastGood);
+    publisher.dispose();
+  });
+
+  it("preserves all 16 last-good seats through a fleet-wide reconnect", async () => {
+    const outputPath = tempOutputPath();
+    const publisher = new FleetSidebarPublisher({ outputPath });
+    const surfaceRefs = Array.from(
+      { length: 16 },
+      (_, index) => `surface:${index + 1}`,
+    );
+    publisher.publish(
+      publication("populated", surfaceRefs, surfaceRefs),
+    );
+    const lastGood = readFileSync(outputPath, "utf8");
+    expect(lastGood).toContain("16 live seats · 16 active");
+
+    publisher.publish(publication("discovering", [], surfaceRefs));
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    const afterReconnect = readFileSync(outputPath, "utf8");
+    expect(afterReconnect).toBe(lastGood);
+    expect(afterReconnect).not.toContain("0 live seats · 0 active");
     publisher.dispose();
   });
 

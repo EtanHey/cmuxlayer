@@ -1153,6 +1153,74 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
+  it("marks a registry-working screen stalled after de-chromed output stops progressing", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-07-14T16:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "no-transcript-progress",
+        surface_id: "surface:no-progress",
+        workspace_id: "workspace:cmuxlayer",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        state: "working",
+        cli_session_id: null,
+        cli_session_path: null,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:no-progress"),
+        title: "cmuxlayerCodex [surface:no-progress]",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:no-progress",
+      text:
+        "Claude Code\n✻ Baking… (1s · ↑ 4)\n🤖 Opus 4.8 | ⏱️ 1s\n⏵⏵ bypass permissions on",
+      lines: 4,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(
+      publishedFleetPublications.at(-1)?.snapshot.lanes.flatMap(
+        (lane) => lane.seats,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        agentId: "no-transcript-progress",
+        screenState: "working",
+      }),
+    ]);
+
+    vi.setSystemTime(startedAt.getTime() + 120_001);
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:no-progress",
+      text:
+        "Claude Code\n✻ Baking… (2m 1s · ↑ 99)\n🤖 Opus 4.8 | ⏱️ 2m\n⏵⏵ bypass permissions on",
+      lines: 4,
+      scrollback_used: false,
+    });
+
+    await engine.runSweep();
+
+    expect(
+      publishedFleetPublications.at(-1)?.snapshot.lanes.flatMap(
+        (lane) => lane.seats,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        agentId: "no-transcript-progress",
+        screenState: "stalled",
+      }),
+    ]);
+  });
+
   afterEach(() => {
     engine.dispose();
     vi.useRealTimers();

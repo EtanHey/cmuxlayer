@@ -87,6 +87,36 @@ Token usage: total=12,345 input=10,000 output=2,345
     expect(parsed.current_action).toBe("Boondoggling");
   });
 
+  it("treats an in-flight Claude Bash tool block as working", () => {
+    const parsed = parseScreen(`
+Claude Code
+⏺ Bash(cat >> /tmp/orchestra.md <<'EOF')
+  ⎿  Running command…
+🤖 Opus 4.8 (1M context) | 💰 $21.76 | ⏱️  9m | 📚 68.1%
+⏵⏵ bypass permissions on · 3 monitors · ← for agents
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.status).toBe("working");
+    expect(parsed.current_action).toBe("Bash(cat >> /tmp/orchestra.md <<'EOF')");
+  });
+
+  it.each(["❯", ">", ">>>", "$"])(
+    "does not revive a completed Claude tool block above a %s ready prompt",
+    (readyPrompt) => {
+      const parsed = parseScreen(`
+Claude Code
+⏺ Bash(bun run test)
+  ⎿  Test Files 104 passed
+${readyPrompt}
+🤖 Opus 4.8 (1M context) | 💰 $21.76 | ⏱️  9m | 📚 68.1%
+⏵⏵ bypass permissions on · 3 monitors · ← for agents
+`);
+
+      expect(parsed.status).toBe("idle");
+    },
+  );
+
   it.each([
     "* Waiting for deploy... (5m left)",
     "* Building the release (2m elapsed)",

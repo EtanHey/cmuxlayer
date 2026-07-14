@@ -77,6 +77,46 @@ describe("fleet-sidebar CLI fallback", () => {
     expect(store.read()).toEqual({ mm: true });
   });
 
+  it("accepts matchmat as the canonical alias for the mm collapse key", () => {
+    const { store, sidebarPath } = fixture();
+
+    expect(
+      runFleetSidebarCommand(["expand", "matchmat"], { store, sidebarPath }),
+    ).toEqual({ ok: true, message: "mm lane expanded" });
+    expect(store.read()).toEqual({ mm: false });
+  });
+
+  it("toggles the mm key from the rendered matchmat lane state", () => {
+    const { store, sidebarPath } = fixture();
+    writeFileSync(
+      sidebarPath,
+      'fleetLane("matchmat", 2, 0, true, 2, [\n',
+      "utf8",
+    );
+
+    expect(
+      runFleetSidebarCommand(["toggle", "mm"], { store, sidebarPath }),
+    ).toEqual({ ok: true, message: "mm lane expanded" });
+    expect(store.read()).toEqual({ mm: false });
+  });
+
+  it("toggles matchmat from a legacy rendered mm lane state", () => {
+    const { store, sidebarPath } = fixture();
+    writeFileSync(
+      sidebarPath,
+      'fleetLane("mm", 2, 0, true, 2, [\n',
+      "utf8",
+    );
+
+    expect(
+      runFleetSidebarCommand(["toggle", "matchmat"], {
+        store,
+        sidebarPath,
+      }),
+    ).toEqual({ ok: true, message: "mm lane expanded" });
+    expect(store.read()).toEqual({ mm: false });
+  });
+
   it("toggles from the currently rendered state when no preference exists", () => {
     const { store, sidebarPath } = fixture();
     writeFileSync(

@@ -49,6 +49,8 @@ function candidate(
   return {
     agentId: `agent-${surfaceRef}`,
     agentType: "codex",
+    agentState: "working",
+    lastProgressAtMs: null,
     surfaceRef,
     surfaceTitle: `cmuxlayerCodex [${surfaceRef}]`,
     repo: "cmuxlayer",
