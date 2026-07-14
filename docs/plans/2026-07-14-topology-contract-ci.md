@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Build shared contract fixtures
+## Task 1: Build shared contract fixtures
 
 **Files:**
 - Create: `tests/topology-contract.test.ts`
@@ -24,7 +24,7 @@
 3. Run `bunx vitest run tests/topology-contract.test.ts` and confirm the empty
    scaffold is discoverable before adding assertions.
 
-### Task 2: Lock publisher monotonicity RED-first
+## Task 2: Lock publisher monotonicity RED-first
 
 **Files:**
 - Modify temporarily, then restore: `src/fleet-sidebar.ts`
@@ -40,7 +40,7 @@
 3. Run `bunx vitest run tests/topology-contract.test.ts`, capture the expected
    failing assertion, restore the guard, and rerun to green.
 
-### Task 3: Lock sweep, first-paint, and binding behavior
+## Task 3: Lock sweep, first-paint, and binding behavior
 
 **Files:**
 - Modify: `tests/topology-contract.test.ts`
@@ -56,7 +56,7 @@
 3. Reconstitute two managed seats and return distinct screen parses for each
    surface; assert each rendered seat keeps its own id, surface, and action.
 
-### Task 4: Lock content and collapse contracts
+## Task 4: Lock content and collapse contracts
 
 **Files:**
 - Modify: `tests/topology-contract.test.ts`
@@ -70,7 +70,7 @@
 3. Persist collapse for one lane, republish the same live surfaces, and assert
    only that lane folds while topology metadata retains every live surface.
 
-### Task 5: Wire and document the contract
+## Task 5: Wire and document the contract
 
 **Files:**
 - Modify: `package.json`
@@ -83,7 +83,7 @@
    confirmation window, the CI path, and the local RED-proof procedure.
 3. Run `bun run test:topology` and `git diff --check`.
 
-### Task 6: Verify and deliver the PR
+## Task 6: Verify and deliver the PR
 
 **Files:**
 - All scoped test, script, and documentation files.

@@ -1,5 +1,4 @@
 import {
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -152,7 +151,6 @@ function engineFixture(): {
 } {
   const root = mkdtempSync(join(tmpdir(), "cmuxlayer-topology-engine-"));
   tempDirs.push(root);
-  mkdirSync(root, { recursive: true });
   const stateManager = new StateManager(root);
   let liveSurfaces: CmuxSurface[] = [];
   const publications: FleetSidebarPublication[] = [];
@@ -224,6 +222,7 @@ function engineFixture(): {
   const registry = new AgentRegistry(stateManager, async () => liveSurfaces);
   const engine = new AgentEngine(stateManager, registry, client, {
     spawnPreflight: async () => {},
+    sessionIdentityResolver: () => null,
     fleetSidebarPublisher: {
       publish: (input) => {
         if (!("snapshot" in input)) {
