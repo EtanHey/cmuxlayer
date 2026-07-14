@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   defaultFleetSidebarPath,
+  fleetLaneLabel,
   FleetSidebarCollapseStore,
   type FleetLaneKey,
 } from "./fleet-sidebar.js";
@@ -14,15 +15,19 @@ const LANE_KEYS: FleetLaneKey[] = [
   "voicelayer",
   "skillCreator",
   "cmuxlayer",
+  "coach",
   "mm",
   "other",
 ];
 
 const LANE_BY_INPUT = new Map<string, FleetLaneKey>(
-  LANE_KEYS.flatMap((key) => {
-    const normalized = normalizeLaneInput(key);
-    return [[normalized, key] as const];
-  }),
+  [
+    ...LANE_KEYS.flatMap((key) => {
+      const normalized = normalizeLaneInput(key);
+      return [[normalized, key] as const];
+    }),
+    ["matchmat", "mm"] as const,
+  ],
 );
 
 export interface FleetSidebarCommandResult {
@@ -100,7 +105,7 @@ function readRenderedLaneState(
 ): boolean | undefined {
   try {
     const source = readFileSync(sidebarPath, "utf8");
-    const label = JSON.stringify(lane);
+    const label = JSON.stringify(fleetLaneLabel(lane));
     const match = source.match(
       new RegExp(
         `fleetLane\\(${escapeRegExp(label)},\\s*\\d+,\\s*\\d+,\\s*(true|false),`,

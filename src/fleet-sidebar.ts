@@ -27,6 +27,7 @@ export type FleetLaneKey =
   | "voicelayer"
   | "skillCreator"
   | "cmuxlayer"
+  | "coach"
   | "mm"
   | "other";
 
@@ -117,6 +118,7 @@ const LANE_ORDER: FleetLaneKey[] = [
   "voicelayer",
   "skillCreator",
   "cmuxlayer",
+  "coach",
   "mm",
   "other",
 ];
@@ -132,9 +134,14 @@ const LANE_LABELS: Record<FleetLaneKey, string> = {
   voicelayer: "voicelayer",
   skillCreator: "skillCreator",
   cmuxlayer: "cmuxlayer",
-  mm: "mm",
+  coach: "coach",
+  mm: "matchmat",
   other: "other",
 };
+
+export function fleetLaneLabel(key: FleetLaneKey): string {
+  return LANE_LABELS[key];
+}
 
 const NON_ACTIONABLE_SIDEBAR_HEALTH_CODES = new Set<AgentHealthIssueCode>([
   "auto_discovered_agent",
@@ -160,13 +167,14 @@ function normalizedIdentity(value: string | null | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function isMmIdentity(value: string | null | undefined): boolean {
+function isMatchmatIdentity(value: string | null | undefined): boolean {
   const identity = value?.trim().toLowerCase();
   if (!identity) return false;
   return (
-    /^(?:mm|mm(?:claude|codex|gemini|cursor|kiro))(?:$|[^a-z0-9])/.test(
+    /^(?:(?:mm|matchmat)|(?:mm|matchmat)(?:claude|codex|gemini|cursor|kiro))(?:$|[^a-z0-9])/.test(
       identity,
-    ) || /(?:^|[/\\])mm(?:\.wt)?(?:[/\\]|$)/.test(identity)
+    ) ||
+    /(?:^|[/\\])(?:mm|matchmat)(?:\.wt)?(?:[/\\]|$)/.test(identity)
   );
 }
 
@@ -179,7 +187,7 @@ function inferLane(candidate: FleetSidebarCandidate): FleetLaneKey {
     candidate.agentId,
     candidate.surfaceTitle,
   ];
-  if (rawIdentities.some(isMmIdentity)) return "mm";
+  if (rawIdentities.some(isMatchmatIdentity)) return "mm";
   const identities = rawIdentities.map(normalizedIdentity);
 
   for (const value of identities) {
@@ -187,6 +195,7 @@ function inferLane(candidate: FleetSidebarCandidate): FleetLaneKey {
     if (value.includes("voicelayer")) return "voicelayer";
     if (value.includes("skillcreator")) return "skillCreator";
     if (value.includes("cmuxlayer")) return "cmuxlayer";
+    if (value === "coach" || value.startsWith("coach")) return "coach";
     if (value === "orc" || value.startsWith("orc")) return "orc";
   }
   return "other";
@@ -332,7 +341,7 @@ export function buildFleetSidebarSnapshot(
     return [
       {
         key,
-        label: LANE_LABELS[key],
+        label: fleetLaneLabel(key),
         liveCount: laneSeats.length,
         activeCount,
         collapsed: activeCount === 0,
