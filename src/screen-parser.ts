@@ -955,7 +955,7 @@ function hasInFlightClaudeTool(text: string): boolean {
   if (actionIndex < 0) return false;
 
   return !lines.slice(actionIndex + 1).some((line) =>
-    /^\s*❯(?:\s|$)/.test(line) ||
+    /^\s*(?:❯|>>>|\$|>)\s*$/.test(line) ||
     CLAUDE_DONE_LINE_RE.test(line) ||
     CLAUDE_COUNTER_RE.test(line),
   );

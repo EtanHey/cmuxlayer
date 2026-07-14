@@ -1178,8 +1178,9 @@ describe("Sidebar Sync", () => {
     ];
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:no-progress",
-      text: "gpt-5.6 xhigh · 99% left\nWorking (1s • esc to interrupt)",
-      lines: 2,
+      text:
+        "Claude Code\n✻ Baking… (1s · ↑ 4)\n🤖 Opus 4.8 | ⏱️ 1s\n⏵⏵ bypass permissions on",
+      lines: 4,
       scrollback_used: false,
     });
     await engine.getRegistry().reconstitute();
@@ -1200,8 +1201,9 @@ describe("Sidebar Sync", () => {
     vi.setSystemTime(startedAt.getTime() + 120_001);
     mockClient.readScreen.mockResolvedValue({
       surface: "surface:no-progress",
-      text: "gpt-5.6 xhigh · 98% left\nWorking (2m 1s • esc to interrupt)",
-      lines: 2,
+      text:
+        "Claude Code\n✻ Baking… (2m 1s · ↑ 99)\n🤖 Opus 4.8 | ⏱️ 2m\n⏵⏵ bypass permissions on",
+      lines: 4,
       scrollback_used: false,
     });
 
