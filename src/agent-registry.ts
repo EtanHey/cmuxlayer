@@ -42,6 +42,25 @@ interface SurfaceAbsenceOptions {
   now?: number;
 }
 
+export interface LiveSeatDiscoveryProof {
+  observer_id: string;
+  observer_epoch: string;
+  seats: Array<{
+    surface_id: string;
+    surface_uuid: string | null;
+    seat_id: string;
+  }>;
+}
+
+interface SurfacelessEvictionOptions extends SurfaceAbsenceOptions {
+  /**
+   * Same-cycle, observer-pinned screen proof for role-classified live seats.
+   * Surface enumeration alone proves topology, not that the expected agent
+   * still owns the shell, so crash-recovery rows may only yield to this proof.
+   */
+  liveSeatProof?: LiveSeatDiscoveryProof | null;
+}
+
 export interface AgentRegistryOptions {
   /** Static identity for a client that never changes cmux socket topology. */
   observerId?: string | null;
@@ -323,16 +342,6 @@ function recordIdentityKeys(record: AgentRecord): string[] {
       ? `launcher:${pendingBaseAgentId(record.agent_id)}`
       : null,
   ].filter((key): key is string => Boolean(key));
-}
-
-function primaryRecordIdentityKey(record: AgentRecord): string | null {
-  if (record.seat_id) return `seat:${record.seat_id}`;
-  if (record.launcher_name) return `launcher:${record.launcher_name}`;
-  return null;
-}
-
-function canonicalIdentityName(record: AgentRecord): string | null {
-  return record.seat_id ?? record.launcher_name ?? null;
 }
 
 function repairCandidateIdentityKeys(
@@ -922,6 +931,10 @@ export class AgentRegistry {
       nonDestructive?: boolean;
     },
   ): Promise<MergedAgent[]> {
+    // Pin both scanned and caller-injected discovery to the observer that was
+    // current when this ingestion began. Reconciliation/purge awaits must not
+    // let an old snapshot cross a reconnect epoch and mutate the replacement.
+    const discoveryObserverSnapshot = this.captureObserverSnapshot();
     if (!opts?.nonDestructive) {
       const surfacelessConfirmation = {
         confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
@@ -931,7 +944,6 @@ export class AgentRegistry {
       await this.purgeTerminal(surfacelessConfirmation);
     }
 
-    const discoveryObserverSnapshot = this.captureObserverSnapshot();
     const discovered =
       opts?.discovered ?? (await discovery.scan(opts?.force ?? false));
     if (!this.isObserverSnapshotCurrent(discoveryObserverSnapshot)) {
@@ -1228,7 +1240,22 @@ export class AgentRegistry {
   ): void {
     if (candidates.length === 0) return;
 
-    const claimedSurfaceRefs = new Set<string>();
+    // Reserve every surface already bound to a managed record before attempting
+    // identity-based relocation. Otherwise filesystem/map iteration order lets
+    // an absent canonical ghost steal a live drifted record's surface.
+    const claimedSurfaceRefs = new Set(
+      candidates.flatMap((entry) => {
+        const occupied = [...this.agents.values()].some(
+          (record) =>
+            !isAutoAgentId(record.agent_id) &&
+            !isPendingAgentId(record.agent_id) &&
+            record.surface_id === entry.discovered.surface_id &&
+            !hasSurfaceUuidConflict(record, entry.discovered) &&
+            this.canUseObservedBinding(record, entry.discovered.surface_uuid),
+        );
+        return occupied ? [entry.discovered.surface_id] : [];
+      }),
+    );
     for (const record of [...this.agents.values()]) {
       if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
         continue;
@@ -1547,10 +1574,7 @@ export class AgentRegistry {
   }
 
   async evictSurfaceless(
-    opts: {
-      confirmationMs?: number;
-      now?: number;
-    } = {},
+    opts: SurfacelessEvictionOptions = {},
   ): Promise<string[]> {
     const observerSnapshot = this.captureObserverSnapshot();
     let surfaces: CmuxSurface[];
@@ -1593,7 +1617,15 @@ export class AgentRegistry {
       ) {
         continue;
       }
-      if (isCrashRecoveryEligible(agent)) {
+      if (
+        isCrashRecoveryEligible(agent) &&
+        !this.hasLiveManagedSeatSibling(
+          agent,
+          surfaces,
+          opts.liveSeatProof,
+          observerSnapshot,
+        )
+      ) {
         continue;
       }
 
@@ -1607,6 +1639,97 @@ export class AgentRegistry {
     }
 
     return evicted;
+  }
+
+  private hasLiveManagedSeatSibling(
+    agent: AgentRecord,
+    surfaces: readonly CmuxSurface[],
+    liveSeatProof: LiveSeatDiscoveryProof | null | undefined,
+    observerSnapshot: RegistryObserverSnapshot,
+  ): boolean {
+    const seatId = agent.seat_id?.trim();
+    if (!seatId) return false;
+    if (
+      !liveSeatProof ||
+      !observerSnapshot.ownerId ||
+      !observerSnapshot.epoch ||
+      liveSeatProof.observer_id !== observerSnapshot.ownerId ||
+      liveSeatProof.observer_epoch !== observerSnapshot.epoch
+    ) {
+      return false;
+    }
+
+    return [...this.agents.values()].some((candidate) => {
+      if (
+        candidate.agent_id === agent.agent_id ||
+        isAutoAgentId(candidate.agent_id) ||
+        isPendingAgentId(candidate.agent_id) ||
+        TERMINAL_STATES.has(candidate.state) ||
+        candidate.seat_id !== seatId
+      ) {
+        return false;
+      }
+      const liveSurface = this.matchingLiveSurface(candidate, surfaces);
+      return Boolean(
+        liveSurface &&
+          this.canUseObservedBinding(candidate, liveSurface.id) &&
+          liveSeatProof.seats.some(
+            (entry) =>
+              entry.seat_id === seatId &&
+              entry.surface_id === liveSurface.ref &&
+              surfaceUuidKey(entry.surface_uuid) ===
+                surfaceUuidKey(liveSurface.id),
+          ),
+      );
+    });
+  }
+
+  createLiveSeatDiscoveryProof(
+    discovered: readonly DiscoveredAgent[],
+    opts: {
+      seatRegistry?: SeatRegistry | null;
+      expectedObserverId: string | null;
+      expectedObserverEpoch: string | null;
+    },
+  ): LiveSeatDiscoveryProof | null {
+    const observerSnapshot = this.captureObserverSnapshot();
+    if (
+      !observerSnapshot.ownerId ||
+      !observerSnapshot.epoch ||
+      observerSnapshot.ownerId !== opts.expectedObserverId ||
+      observerSnapshot.epoch !== opts.expectedObserverEpoch ||
+      !this.isObserverSnapshotCurrent(observerSnapshot) ||
+      !hasBijectiveDiscoveryIdentity(discovered) ||
+      hasMixedDiscoveryIdentityCoverage(discovered)
+    ) {
+      return null;
+    }
+
+    const seats = discovered.flatMap((entry) => {
+      if (!entry.has_agent || entry.read_error) return [];
+      const candidate = repairCandidateForSurface(entry, opts.seatRegistry);
+      const seatId = candidate?.seat.seat_id?.trim();
+      if (
+        !seatId ||
+        candidate?.cli !== entry.cli ||
+        candidate.seat.seat_identity_status !== "ok"
+      ) {
+        return [];
+      }
+      return [
+        {
+          surface_id: entry.surface_id,
+          surface_uuid: entry.surface_uuid ?? null,
+          seat_id: seatId,
+        },
+      ];
+    });
+
+    return {
+      observer_id: observerSnapshot.ownerId,
+      observer_epoch: observerSnapshot.epoch,
+      seats,
+    };
   }
 
   private isSurfacelessConfirmed(
@@ -1690,9 +1813,7 @@ export class AgentRegistry {
     const evicted = new Set<string>();
     const skipped: RegistryRepairSkip[] = [];
     const liveSurfaceRefs = new Set(
-      discovered
-        .filter((entry) => !entry.read_error)
-        .map((entry) => entry.surface_id),
+      discovered.map((entry) => entry.surface_id),
     );
 
     for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
@@ -1729,10 +1850,6 @@ export class AgentRegistry {
           reason: error.message,
         });
       }
-    }
-
-    for (const removed of this.evictDuplicateManagedRegistrations(liveSurfaceRefs)) {
-      evicted.add(removed);
     }
 
     for (const removed of this.evictPendingGhostRegistrations(liveSurfaceRefs)) {
@@ -1782,52 +1899,6 @@ export class AgentRegistry {
 
       if (!liveBackingSurface || supersededByRealRecord || supersededByManagedSeat) {
         const removedAgentId = this.evict(id);
-        if (removedAgentId) {
-          evicted.push(removedAgentId);
-        }
-      }
-    }
-
-    return evicted;
-  }
-
-  private evictDuplicateManagedRegistrations(
-    liveSurfaceRefs: ReadonlySet<string>,
-  ): string[] {
-    const byIdentity = new Map<string, AgentRecord[]>();
-    for (const record of this.agents.values()) {
-      if (isAutoAgentId(record.agent_id) || isPendingAgentId(record.agent_id)) {
-        continue;
-      }
-      const key = primaryRecordIdentityKey(record);
-      if (!key) continue;
-      byIdentity.set(key, [...(byIdentity.get(key) ?? []), record]);
-    }
-
-    const evicted: string[] = [];
-    for (const records of byIdentity.values()) {
-      if (records.length <= 1) continue;
-      const sorted = [...records].sort((left, right) => {
-        const leftCanonical =
-          left.agent_id === canonicalIdentityName(left) ? 0 : 1;
-        const rightCanonical =
-          right.agent_id === canonicalIdentityName(right) ? 0 : 1;
-        if (leftCanonical !== rightCanonical) {
-          return leftCanonical - rightCanonical;
-        }
-        const leftLive = liveSurfaceRefs.has(left.surface_id) ? 0 : 1;
-        const rightLive = liveSurfaceRefs.has(right.surface_id) ? 0 : 1;
-        if (leftLive !== rightLive) {
-          return leftLive - rightLive;
-        }
-        return left.agent_id.localeCompare(right.agent_id);
-      });
-      const keep = sorted[0];
-      for (const duplicate of sorted.slice(1)) {
-        if (!this.canMutateForObservedAbsence(duplicate)) {
-          continue;
-        }
-        const removedAgentId = this.evict(duplicate.agent_id);
         if (removedAgentId) {
           evicted.push(removedAgentId);
         }
