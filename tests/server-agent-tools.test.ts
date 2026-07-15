@@ -5306,6 +5306,44 @@ codex>
     expect(result.content[0].text).toMatch(/not in an interactive state/);
   });
 
+  it("send_to_agent leaves an idle agent idle when submitted delivery fails", async () => {
+    let failReturn = false;
+    const base = makeLifecycleExec({
+      surfaceUuid: "11111111-2222-4333-8444-555555555555",
+    });
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (failReturn && args.includes("send-key") && args.includes("return")) {
+        throw new Error("Return delivery failed");
+      }
+      return base(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to_agent"];
+    const spawnResult = await spawn.handler(
+      { repo: "test", model: "sonnet", cli: "claude" },
+      {} as any,
+    );
+    const agentId = parseToolResult(spawnResult).agent_id as string;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const idle = engine.stateMgr.resetState(
+      agentId,
+      "idle",
+      {},
+      "test delivery precondition",
+    );
+    engine.getRegistry().set(agentId, idle);
+    failReturn = true;
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: "continue", press_enter: true },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(engine.getAgentState(agentId)?.state).toBe("idle");
+  });
+
   it.each(["send_to", "send_to_agent"] as const)(
     "RC3: %s delivers to an error-state agent whose surface is alive",
     async (toolName) => {
@@ -5875,7 +5913,7 @@ codex>
     expect(parsed.agent_id).toBe(agentId);
   });
 
-  it("send_to returns post-delivery screen evidence and health disagreement", async () => {
+  it("send_to reserves an idle agent as working before health evidence", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -5894,8 +5932,13 @@ codex>
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
-    const agent = registry.get(agentId);
-    registry.set(agentId, { ...agent, state: "ready" });
+    const idle = engine.stateMgr.resetState(
+      agentId,
+      "idle",
+      {},
+      "test delivery precondition",
+    );
+    registry.set(agentId, idle);
 
     const result = await sendTo.handler(
       { agent_id: agentId, text: "begin work", press_enter: true },
@@ -5906,13 +5949,15 @@ codex>
 
     expect(result.isError).toBeFalsy();
     expect(parsed.ok).toBe(true);
-    expect(parsed.registry_state).toBe("ready");
+    expect(parsed.registry_state).toBe("working");
     expect(parsed.screen).toMatchObject({
       agent_type: "claude",
       status: "working",
     });
-    expect(parsed.state_conflict).toBe(true);
-    expect(parsed.health.issue_codes).toContain("registry_screen_disagreement");
+    expect(parsed.state_conflict).toBe(false);
+    expect(parsed.health.issue_codes).not.toContain(
+      "registry_screen_disagreement",
+    );
   });
 
   it("send_to omits post-delivery evidence when the stable UUID disappears", async () => {

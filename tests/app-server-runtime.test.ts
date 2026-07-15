@@ -589,6 +589,7 @@ describe("CmuxAppServerRuntime", () => {
     });
     const record = {
       ...makeRecord(),
+      state: "idle" as const,
       surface_observer_id: (runtime as any).registry.getObserverId(),
     };
     (runtime as any).stateMgr.writeState(record);
@@ -611,6 +612,9 @@ describe("CmuxAppServerRuntime", () => {
       workspace: "workspace:app",
       lines: 40,
     });
+    expect((runtime as any).engine.getAgentState("agent-1")?.state).toBe(
+      "working",
+    );
 
     runtime.dispose();
     rmSync(TEST_DIR, { recursive: true, force: true });
@@ -665,6 +669,57 @@ describe("CmuxAppServerRuntime", () => {
       ).rejects.toThrow(/manual mode/i);
       expect(client.send).not.toHaveBeenCalled();
       expect(client.sendKey).not.toHaveBeenCalled();
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an idle bridge agent idle when Return delivery fails", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [{ ref: "workspace:app" }],
+    });
+    client.listPanes.mockResolvedValue({
+      workspace_ref: "workspace:app",
+      panes: [
+        {
+          ref: "pane:1",
+          surface_count: 1,
+          surface_refs: ["surface:1"],
+        },
+      ],
+    });
+    client.listPaneSurfaces.mockResolvedValue({
+      workspace_ref: "workspace:app",
+      pane_ref: "pane:1",
+      surfaces: [
+        {
+          ref: "surface:1",
+          title: "agent",
+          type: "terminal",
+        },
+      ],
+    });
+    client.sendKey.mockRejectedValueOnce(new Error("Return delivery failed"));
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const record = {
+      ...makeRecord(),
+      state: "idle" as const,
+      surface_observer_id: (runtime as any).registry.getObserverId(),
+    };
+    (runtime as any).stateMgr.writeState(record);
+    (runtime as any).registry.set(record.agent_id, record);
+
+    try {
+      await expect(
+        runtime.sendTurn({ threadId: record.agent_id, text: "continue" }),
+      ).rejects.toThrow(/Return delivery failed/);
+      expect((runtime as any).engine.getAgentState(record.agent_id)?.state).toBe(
+        "idle",
+      );
     } finally {
       runtime.dispose();
       rmSync(TEST_DIR, { recursive: true, force: true });

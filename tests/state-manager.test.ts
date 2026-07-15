@@ -317,6 +317,7 @@ describe("StateManager", () => {
 
       expect(record.role).toBe("worker");
       expect(record.auto_archive_on_done).toBe(false);
+      expect(record.surface_provenance).toBe("unknown");
       expect(record.surface_uuid).toBe(
         "11111111-2222-4333-8444-555555555555",
       );

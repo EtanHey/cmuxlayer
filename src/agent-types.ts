@@ -16,6 +16,7 @@ export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 export type AgentRole = "orchestrator" | "ic" | "worker";
+export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 
 export const MAX_SPAWN_DEPTH = 2;
@@ -29,6 +30,8 @@ export interface AgentRecord {
   surface_uuid?: string | null;
   /** cmux app/socket instance that is authoritative for surface absence. */
   surface_observer_id?: string | null;
+  /** Durable authority for automated role-placement mutations. */
+  surface_provenance?: SurfaceProvenance;
   workspace_id?: string | null;
   state: AgentState;
   repo: string;

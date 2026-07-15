@@ -1,7 +1,7 @@
 import type { AgentRecord } from "./agent-types.js";
 import type { AgentTopologyHealthInput } from "./agent-health.js";
 import type { AgentHealthInputOverrides } from "./agent-health-input.js";
-import { deriveColumnIndex } from "./layout-policy.js";
+import { deriveRoleColumnIndex } from "./layout-policy.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import type {
   CmuxPane,
@@ -310,7 +310,7 @@ export async function collectSurfaceTopology(
       const panes = await client.listPanes({ workspace: workspaceRef });
       if (!panes.panes || panes.panes.length === 0) continue;
 
-      const columnIndex = deriveColumnIndex(panes.panes);
+      const columnIndex = deriveRoleColumnIndex(panes.panes);
       const columnCount = new Set(columnIndex.values()).size;
       for (const pane of panes.panes) {
         for (const [index, surfaceRef] of pane.surface_refs.entries()) {

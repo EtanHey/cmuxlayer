@@ -129,6 +129,7 @@ import {
   deriveColumnIndex,
   inferAgentRole,
   inferRecordRoleOrNull,
+  topPaneInRoleColumn,
   isAgentRoleInferenceError,
   launcherNameForCli,
 } from "./layout-policy.js";
@@ -2089,6 +2090,7 @@ export interface CmuxServerContext {
   lifecycleRegistry: AgentRegistry | null;
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
+  lifecycleStartError: Error | null;
   lifecycleSweepEngine: AgentEngine | null;
   lifecycleAgentInputDeliverer: LifecycleAgentInputDeliverer | null;
   lifecycleAgentInputDelivererReadyListeners: Set<() => void>;
@@ -2209,6 +2211,7 @@ export function createServerContext(
     lifecycleRegistry: null,
     lifecycleStarted: false,
     lifecycleStartPromise: null,
+    lifecycleStartError: null,
     lifecycleSweepEngine: null,
     lifecycleAgentInputDeliverer: null,
     lifecycleAgentInputDelivererReadyListeners: new Set(),
@@ -2240,6 +2243,7 @@ export function createServerContext(
       context.originalLaunchCommandsBySurface.clear();
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
+      context.lifecycleStartError = null;
       if (autoVitestStateDir) {
         removeAutoVitestStateDir(autoVitestStateDir);
       }
@@ -2975,6 +2979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       owner?: string;
       observePtyWrite?: boolean;
       stableSurfaceIdentity?: string | null;
+      lockKey?: string;
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
@@ -2984,7 +2989,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Capture the ref-only provenance before the async write. A reconnect or
     // socket replacement after the attempt must not relabel its liveness.
     const surfaceObserverIdentity = context.surfaceObserverId;
-    acquireSurfaceWrite(surface, owner);
+    const lockKey =
+      opts.lockKey ??
+      (opts.stableSurfaceIdentity
+        ? `uuid:${opts.stableSurfaceIdentity.toLowerCase()}`
+        : surface);
+    acquireSurfaceWrite(lockKey, owner);
     try {
       const result = await fn();
       if (opts.observePtyWrite) {
@@ -3006,7 +3016,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       throw error;
     } finally {
-      releaseSurfaceWrite(surface, owner);
+      releaseSurfaceWrite(lockKey, owner);
     }
   };
 
@@ -7299,6 +7309,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (context.lifecycleStartPromise) {
         await context.lifecycleStartPromise;
       }
+      if (context.lifecycleStartError) {
+        throw context.lifecycleStartError;
+      }
     };
     const notifyLifecycleEvent = async (
       event: AgentLifecycleEvent,
@@ -7387,11 +7400,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             client.setProgress(value, progressOpts),
           clearProgress: (progressOpts) => client.clearProgress(progressOpts),
           newSplit: async (direction, splitOpts) => {
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = splitOpts ?? {};
             await assertWorkspaceMutationAllowed(
               "agent_engine",
               splitOpts?.workspace,
             );
-            return client.newSplit(direction, splitOpts);
+            const mutate = async () => {
+              await beforeMutation?.();
+              return client.newSplit(direction, clientOpts);
+            };
+            return splitOpts?.surface
+              ? withSurfaceWrite(splitOpts.surface, mutate, {
+                  toolName: "new_split",
+                  lockKey: stableSurfaceIdentity
+                    ? `uuid:${stableSurfaceIdentity.toLowerCase()}`
+                    : splitOpts.surface,
+                })
+              : mutate();
           },
           newSurface: async (surfaceOpts) => {
             await assertWorkspaceMutationAllowed(
@@ -7418,7 +7447,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           listPaneSurfaces: (surfaceOpts) =>
             client.listPaneSurfaces(surfaceOpts),
           closeSurface: (surface, closeOpts) => {
-            const { beforeMutation, ...clientOpts } = closeOpts ?? {};
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = closeOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7434,7 +7467,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
                 return result;
               },
-              { toolName: "close_surface", workspace: closeOpts?.workspace },
+              {
+                toolName: "close_surface",
+                workspace: closeOpts?.workspace,
+                stableSurfaceIdentity,
+              },
+            );
+          },
+          moveSurface: async (moveOpts) => {
+            const {
+              beforeMutation,
+              stableSurfaceIdentity,
+              ...clientOpts
+            } = moveOpts;
+            await assertWorkspaceMutationAllowed(
+              "move_surface",
+              moveOpts.workspace,
+            );
+            return withSurfaceWrite(
+              moveOpts.surface,
+              async () => {
+                await beforeMutation?.();
+                return client.moveSurface(clientOpts);
+              },
+              {
+                toolName: "move_surface",
+                lockKey: stableSurfaceIdentity
+                  ? `uuid:${stableSurfaceIdentity.toLowerCase()}`
+                  : moveOpts.surface,
+              },
             );
           },
           notify: (notifyOpts) => client.notify(notifyOpts),
@@ -7869,7 +7930,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
-          return deliverInputChunks({
+          await assertDeliveryRouteCurrent();
+          const delivery = await deliverInputChunks({
             surface: deliveryRoute.surface_id,
             workspace: deliveryRoute.workspace_id ?? undefined,
             chunks,
@@ -7890,6 +7952,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             allow_recovery_enter_retry: !args.allow_busy,
             beforeMutation: assertDeliveryRouteCurrent,
           });
+          if (args.press_enter) {
+            engine.markAgentWorking(args.agent_id);
+          }
+          return delivery;
         },
         {
           toolName: args.source_event,
@@ -7908,13 +7974,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // context and may construct more than one MCP server over its lifetime.
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
+      context.lifecycleStartError = null;
       context.lifecycleStartPromise = engine
         .initialize(discovery)
-        .catch((e) =>
-          console.error("[cmuxlayer] lifecycle initialization failed:", e),
-        )
+        .catch((error) => {
+          context.lifecycleStartError =
+            error instanceof Error ? error : new Error(String(error));
+          console.error(
+            "[cmuxlayer] lifecycle initialization failed:",
+            context.lifecycleStartError,
+          );
+        })
         .then(() => {
           if (
+            !context.lifecycleStartError &&
             context.lifecycleStarted &&
             context.lifecycleSweepEngine === engine
           ) {
@@ -7926,7 +7999,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // it only after persisted lifecycle state has been reconstituted so route
     // resolution is ready, then wake any boot-time recovery claim.
     void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
-      if (context.lifecycleStarted && context.lifecycleSweepEngine === engine) {
+      if (
+        !context.lifecycleStartError &&
+        context.lifecycleStarted &&
+        context.lifecycleSweepEngine === engine
+      ) {
         context.setLifecycleAgentInputDeliverer(deliverAgentInput);
       }
     });
@@ -9399,12 +9476,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 reason: error instanceof Error ? error.message : String(error),
               });
             };
+            const assertCurrentReflowAuthority = (
+              agent: AgentRecord,
+              expectedWorkspace: string,
+              operation: ReflowOperation,
+            ): AgentRecord => {
+              const currentAgent =
+                registry.get(agent.agent_id) ??
+                stateMgr.readState(agent.agent_id);
+              const expectedUuid = agent.surface_uuid?.trim().toLowerCase();
+              const currentUuid = currentAgent?.surface_uuid
+                ?.trim()
+                .toLowerCase();
+              if (
+                !currentAgent ||
+                currentAgent.surface_provenance !== "cmuxlayer_spawn" ||
+                inferRecordRoleOrNull(currentAgent) !== "worker" ||
+                (currentAgent.state !== "idle" &&
+                  !TERMINAL_AGENT_STATES.has(currentAgent.state)) ||
+                !expectedUuid ||
+                currentUuid !== expectedUuid ||
+                (currentAgent.workspace_id ?? null) !== expectedWorkspace
+              ) {
+                throw new Error(
+                  `Agent ${agent.agent_id} provenance, role, state, or stable ` +
+                    `binding changed before ${operation}; refusing to move a busy or unowned pane.`,
+                );
+              }
+              return currentAgent;
+            };
             const resolveFreshReflowBinding = async (
               agent: AgentRecord,
               expectedSurfaceRef: string,
               expectedWorkspace: string,
               operation: ReflowOperation,
             ) => {
+              assertCurrentReflowAuthority(
+                agent,
+                expectedWorkspace,
+                operation,
+              );
               assertSurfaceObserverEpochCurrent(
                 reflowObserverEpoch,
                 `resync_agents ${operation}`,
@@ -9419,7 +9530,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   `Fresh topology is incomplete before ${operation}; refusing reflow mutation.`,
                 );
               }
-              const binding = resolveAgentSurfaceBinding(agent, topology);
+              const currentAgent = assertCurrentReflowAuthority(
+                agent,
+                expectedWorkspace,
+                operation,
+              );
+              const binding = resolveAgentSurfaceBinding(
+                currentAgent,
+                topology,
+              );
               if (!binding) {
                 throw new Error(
                   `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} is not uniquely bound before ${operation}; refusing reflow mutation.`,
@@ -9427,7 +9546,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const observedUuid =
                 topology.surfaceIdByRef.get(binding.surfaceRef) ?? null;
-              if (!registry.canUseObservedBinding(agent, observedUuid)) {
+              if (
+                !registry.canUseObservedBinding(currentAgent, observedUuid)
+              ) {
                 throw new Error(
                   `Fresh binding ${binding.surfaceRef} is not owned by the current observer before ${operation}; refusing reflow mutation.`,
                 );
@@ -9462,6 +9583,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
               for (const agent of after) {
                 if (inferRecordRoleOrNull(agent) !== "worker") continue;
+                if (agent.surface_provenance !== "cmuxlayer_spawn") continue;
+                if (
+                  agent.state !== "idle" &&
+                  !TERMINAL_AGENT_STATES.has(agent.state)
+                ) {
+                  continue;
+                }
                 const binding = resolveAgentSurfaceBinding(
                   agent,
                   topologyBeforeReflow,
@@ -9523,6 +9651,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           reflowObserverEpoch,
                           "resync_agents new_split",
                         );
+                        assertCurrentReflowAuthority(
+                          agent,
+                          immediate.workspace ?? workspace!,
+                          attemptedOperation,
+                        );
                         const seed = await client.newSplit("right", {
                           workspace: immediate.workspace,
                           surface: immediate.binding.surfaceRef,
@@ -9538,6 +9671,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       },
                       {
                         owner: `resync-reflow:new_split:${agent.agent_id}`,
+                        stableSurfaceIdentity: agent.surface_uuid,
                       },
                     );
                     panesByWorkspace.delete(workspace);
@@ -9555,16 +9689,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       reflowObserverEpoch,
                       "resync_agents move_surface pane selection",
                     );
-                    const columns = deriveColumnIndex(panes.panes);
-                    targetPane = [...panes.panes]
-                      .filter((pane) => (columns.get(pane.ref) ?? 0) > 0)
-                      .sort((a, b) => {
-                        const columnDelta =
-                          (columns.get(a.ref) ?? 0) -
-                          (columns.get(b.ref) ?? 0);
-                        return columnDelta || a.index - b.index;
-                      })
-                      .at(-1)?.ref ?? null;
+                    targetPane = topPaneInRoleColumn(
+                      panes.panes,
+                      "worker",
+                    )?.ref ?? null;
                   }
                   if (!targetPane) continue;
 
@@ -9593,6 +9721,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         reflowObserverEpoch,
                         "resync_agents move_surface",
                       );
+                      assertCurrentReflowAuthority(
+                        agent,
+                        immediate.workspace ?? workspace!,
+                        attemptedOperation,
+                      );
                       await client.moveSurface({
                         surface: immediate.binding.surfaceRef,
                         pane: targetPane!,
@@ -9608,6 +9741,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       toolName: "move_surface",
                       workspace: freshBeforeMove.workspace ?? workspace,
                       owner: `resync-reflow:move_surface:${agent.agent_id}`,
+                      stableSurfaceIdentity: agent.surface_uuid,
                     },
                   );
                   panesByWorkspace.delete(workspace);
@@ -9635,9 +9769,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   const actual = topologyAfterMove.topologyBySurface.get(
                     bindingAfterMove.surfaceRef,
                   );
-                  if (actual?.column == null || actual.column === 0) {
+                  if (actual?.column !== 1) {
                     throw new Error(
-                      "Post-move topology still places the worker in column 0.",
+                      "Post-move topology does not place the worker in canonical column 1.",
                     );
                   }
 
@@ -9745,6 +9879,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           toolName: "close_surface",
                           workspace: cleanupWorkspace,
                           owner: `resync-reflow:close_surface:${agent.agent_id}`,
+                          stableSurfaceIdentity: cleanupSeedUuid,
                         },
                       );
                     } catch (error) {

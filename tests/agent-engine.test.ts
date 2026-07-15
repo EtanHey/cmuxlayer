@@ -733,6 +733,7 @@ describe("AgentEngine", () => {
     });
 
     it("writes initial state file", async () => {
+      const reconcileSpy = vi.spyOn(engine, "reconcileRolePlacements");
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "sonnet",
@@ -745,6 +746,10 @@ describe("AgentEngine", () => {
       expect(state!.state).toBe("booting");
       expect(state!.repo).toBe("brainlayer");
       expect(state!.task_summary).toBe("Fix gap F");
+      expect(state!.surface_provenance).toBe("cmuxlayer_spawn");
+      expect(reconcileSpy).toHaveBeenCalledWith("spawn", {
+        agentIds: new Set([result.agent_id]),
+      });
     });
 
     it("cleans the created surface when initial state persistence fails before commit", async () => {
@@ -1114,6 +1119,7 @@ describe("AgentEngine", () => {
         "workspace:parent",
       );
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:parent",
         workspace: "workspace:parent",
         type: "terminal",
       });
@@ -1251,7 +1257,7 @@ describe("AgentEngine", () => {
       });
 
       expect(result.workspace_id).toBe("workspace:new");
-      expect(mockClient.newSplit).toHaveBeenCalledWith("down", {
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
         pane: "pane:new-parent",
         workspace: "workspace:new",
         type: "terminal",
@@ -1399,7 +1405,7 @@ describe("AgentEngine", () => {
       expect(mockClient.newSurface).not.toHaveBeenCalled();
     });
 
-    it("seeds a worktree worker to the right without anchoring to the left lead pane", async () => {
+    it("seeds a worktree worker beside the current top left lead pane", async () => {
       const parent = makeRecord({
         agent_id: "parent-claude",
         surface_id: "surface:parent",
@@ -1454,6 +1460,7 @@ describe("AgentEngine", () => {
       });
 
       expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
+        pane: "pane:parent",
         workspace: "workspace:parent",
         type: "terminal",
       });
@@ -2160,7 +2167,7 @@ describe("AgentEngine", () => {
       expect(stateMgr.listStates()).toHaveLength(0);
     });
 
-    it("cleans a fallback split when its post-create epoch assertion fails", async () => {
+    it("refuses an enforced-role spawn when placement topology is unavailable", async () => {
       engine.dispose();
       const ownerId = "cmux:/tmp/cmux.sock#socket=1:2:3:4";
       let observerEpoch = `${ownerId}@socket:1`;
@@ -2187,67 +2194,23 @@ describe("AgentEngine", () => {
           },
         ],
       });
-      (mockClient.listPanes as ReturnType<typeof vi.fn>)
-        .mockRejectedValueOnce(new Error("placement listing failed"))
-        .mockResolvedValue({
-          workspace_ref: "ws:1",
-          window_ref: "window:1",
-          panes: [
-            {
-              ref: "pane:fallback",
-              index: 0,
-              focused: true,
-              surface_count: 1,
-              surface_refs: ["surface:fallback-created"],
-              surface_ids: [SPAWN_SURFACE_UUID],
-            },
-          ],
-        });
-      (
-        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
-      ).mockResolvedValue({
-        workspace_ref: "ws:1",
-        window_ref: "window:1",
-        pane_ref: "pane:fallback",
-        surfaces: [
-          {
-            ...makeSurface("surface:fallback-created"),
-            id: SPAWN_SURFACE_UUID,
-          },
-        ],
-      });
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementation(
-        async () => {
-          observerEpoch = `${ownerId}@socket:2`;
-          return {
-            workspace: "ws:1",
-            surface: "surface:fallback-created",
-            surface_id: SPAWN_SURFACE_UUID,
-            pane: "pane:fallback",
-            title: "",
-            type: "terminal",
-          };
-        },
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("placement listing failed"),
       );
 
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
           cli: "codex",
-          prompt: "Clean a fallback split across reconnect",
+          prompt: "Refuse a blind fallback split",
           workspace: "ws:1",
         }),
-      ).rejects.toThrow(/surface observer changed.*placement/i);
+      ).rejects.toThrow(/placement listing failed/i);
 
-      expect(mockClient.newSplit).toHaveBeenCalledTimes(1);
-      expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        "surface:fallback-created",
-        expect.objectContaining({
-          workspace: "ws:1",
-          collapsePane: false,
-          beforeMutation: expect.any(Function),
-        }),
-      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
       expect(stateMgr.listStates()).toHaveLength(0);
     });
 
@@ -2630,7 +2593,7 @@ describe("AgentEngine", () => {
       warnSpy.mockRestore();
     });
 
-    it("splits a child worker under its parent IC pane", async () => {
+    it("docks a child worker into canonical column 1 without a row split", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "ic-1",
@@ -2682,7 +2645,7 @@ describe("AgentEngine", () => {
         parent_agent_id: "ic-1",
       });
 
-      expect(mockClient.newSplit).toHaveBeenCalledWith("down", {
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
         pane: "pane:ic",
         workspace: "ws:1",
         type: "terminal",
@@ -3778,6 +3741,7 @@ describe("AgentEngine", () => {
         state: "booting",
         surface_id: "surface:new",
         surface_observer_id: createdObserverId,
+        surface_provenance: "cmuxlayer_spawn",
       });
       expect(engine.getAgentState(record.agent_id)).toMatchObject({
         state: "booting",
@@ -5315,6 +5279,577 @@ To continue this session, run codex resume ${sessionId}`,
       expect(engine.getAgentState("contradictory-topology-agent")?.state).toBe(
         "ready",
       );
+    });
+  });
+
+  describe("role placement reconciliation", () => {
+    const leftFrame = { x: 0, y: 0, width: 500, height: 900 };
+    const rightFrame = { x: 500, y: 0, width: 500, height: 900 };
+
+    function installTwoColumnTopology(source: AgentRecord): void {
+      const targetUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      liveSurfaces = [
+        {
+          ...makeSurface(source.surface_id),
+          id: source.surface_uuid ?? undefined,
+          workspace_ref: "ws:placement",
+        },
+        {
+          ...makeSurface("surface:right-target"),
+          id: targetUuid,
+          workspace_ref: "ws:placement",
+        },
+      ];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement",
+        window_ref: "window:placement",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: [source.surface_id],
+            surface_ids: [source.surface_uuid],
+            selected_surface_ref: source.surface_id,
+            pixel_frame: leftFrame,
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:right-target"],
+            surface_ids: [targetUuid],
+            selected_surface_ref: "surface:right-target",
+            pixel_frame: rightFrame,
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:placement",
+        window_ref: "window:placement",
+        pane_ref: pane ?? "pane:left",
+        surfaces:
+          pane === "pane:right"
+            ? [
+                {
+                  ...makeSurface("surface:right-target"),
+                  id: targetUuid,
+                  workspace_ref: "ws:placement",
+                },
+              ]
+            : [
+                {
+                  ...makeSurface(source.surface_id),
+                  id: source.surface_uuid ?? undefined,
+                  workspace_ref: "ws:placement",
+                },
+              ],
+      }));
+    }
+
+    it("never moves an unknown-provenance operator pane", async () => {
+      const record = makeRecord({
+        agent_id: "operator-worker",
+        surface_id: "surface:operator-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "unknown",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+
+      await engine.runSweep();
+
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    });
+
+    it("moves an idle programmatic worker from column 0 to column 1", async () => {
+      const record = makeRecord({
+        agent_id: "idle-worker",
+        surface_id: "surface:idle-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+
+      await engine.runSweep();
+
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(expect.objectContaining({
+        surface: record.surface_id,
+        pane: "pane:right",
+        workspace: "ws:placement",
+        focus: false,
+      }));
+    });
+
+    it("corrects the just-created programmatic surface at the spawn trigger", async () => {
+      const record = makeRecord({
+        agent_id: "booting-spawn-worker",
+        surface_id: "surface:booting-spawn-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "booting",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+
+      await engine.reconcileRolePlacements("spawn", {
+        agentIds: new Set([record.agent_id]),
+      });
+
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(expect.objectContaining({
+        surface: record.surface_id,
+        pane: "pane:right",
+        workspace: "ws:placement",
+        focus: false,
+      }));
+    });
+
+    it("leaves an unknown-provenance leftover untouched during boot sweep", async () => {
+      const record = makeRecord({
+        agent_id: "boot-operator-worker",
+        surface_id: "surface:boot-operator-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "unknown",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+
+      await engine.reconcileRolePlacements("boot");
+
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    });
+
+    it("never moves a mid-work programmatic pane", async () => {
+      const record = makeRecord({
+        agent_id: "working-worker",
+        surface_id: "surface:working-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+
+      await engine.runSweep();
+
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    });
+
+    it("aborts an idle placement when the agent starts working before mutation", async () => {
+      const record = makeRecord({
+        agent_id: "idle-to-working-worker",
+        surface_id: "surface:idle-to-working-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+      let mutated = false;
+      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (opts) => {
+          const working = stateMgr.transition(record.agent_id, "working");
+          engine.getRegistry().set(record.agent_id, working);
+          await opts.beforeMutation?.();
+          mutated = true;
+          return {
+            ok: true,
+            workspace: opts.workspace ?? "ws:placement",
+            surface: opts.surface,
+            pane: opts.pane ?? "pane:right",
+          };
+        },
+      );
+
+      const summary = await engine.reconcileRolePlacements("idle");
+
+      expect(mutated).toBe(false);
+      expect(summary.moved).toEqual([]);
+      expect(summary.skipped).toEqual([
+        expect.objectContaining({
+          agent_id: record.agent_id,
+          reason: expect.stringMatching(/state|busy/i),
+        }),
+      ]);
+    });
+
+    it("aborts placement when the cached ref is recycled before mutation", async () => {
+      const record = makeRecord({
+        agent_id: "recycled-placement-worker",
+        surface_id: "surface:recycled",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      const foreignUuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      const targetUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      installTwoColumnTopology(record);
+      let mutated = false;
+      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (opts) => {
+          liveSurfaces = [
+            {
+              ...makeSurface(record.surface_id),
+              id: foreignUuid,
+              workspace_ref: "ws:placement",
+            },
+            {
+              ...makeSurface("surface:moved-stable-worker"),
+              id: record.surface_uuid ?? undefined,
+              workspace_ref: "ws:placement",
+            },
+            {
+              ...makeSurface("surface:right-target"),
+              id: targetUuid,
+              workspace_ref: "ws:placement",
+            },
+          ];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace_ref: "ws:placement",
+            window_ref: "window:placement",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: [record.surface_id],
+                surface_ids: [foreignUuid],
+                pixel_frame: leftFrame,
+              },
+              {
+                ref: "pane:right",
+                index: 1,
+                focused: false,
+                surface_count: 2,
+                surface_refs: [
+                  "surface:moved-stable-worker",
+                  "surface:right-target",
+                ],
+                surface_ids: [record.surface_uuid, targetUuid],
+                pixel_frame: rightFrame,
+              },
+            ],
+          });
+          (
+            mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+          ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+            workspace_ref: "ws:placement",
+            window_ref: "window:placement",
+            pane_ref: pane,
+            surfaces:
+              pane === "pane:left"
+                ? [liveSurfaces[0]]
+                : [liveSurfaces[1], liveSurfaces[2]],
+          }));
+          await opts.beforeMutation?.();
+          mutated = true;
+          return {
+            ok: true,
+            workspace: opts.workspace ?? "ws:placement",
+            surface: opts.surface,
+            pane: opts.pane ?? "pane:right",
+          };
+        },
+      );
+
+      const summary = await engine.reconcileRolePlacements("idle");
+
+      expect(mutated).toBe(false);
+      expect(summary.moved).toEqual([]);
+      expect(summary.skipped).toEqual([
+        expect.objectContaining({
+          agent_id: record.agent_id,
+          reason: expect.stringMatching(/uniquely bound/i),
+        }),
+      ]);
+    });
+
+    it("serializes worker-column seed cleanup by the seed's stable UUID", async () => {
+      const record = makeRecord({
+        agent_id: "single-column-worker",
+        surface_id: "surface:single-column-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      const leadRef = "surface:lead";
+      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const seedRef = "surface:worker-column-seed";
+      const seedUuid = "33333333-4444-4555-8666-777777777777";
+      let workerPane: "pane:left" | "pane:right" = "pane:left";
+      let seedOpen = false;
+      const refreshLiveSurfaces = () => {
+        liveSurfaces = [
+          {
+            ...makeSurface(leadRef),
+            id: leadUuid,
+            workspace_ref: "ws:placement",
+          },
+          {
+            ...makeSurface(record.surface_id),
+            id: record.surface_uuid ?? undefined,
+            workspace_ref: "ws:placement",
+          },
+          ...(seedOpen
+            ? [
+                {
+                  ...makeSurface(seedRef),
+                  id: seedUuid,
+                  workspace_ref: "ws:placement",
+                },
+              ]
+            : []),
+        ];
+      };
+      refreshLiveSurfaces();
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          const leftRefs = [
+            leadRef,
+            ...(workerPane === "pane:left" ? [record.surface_id] : []),
+          ];
+          const leftIds = [
+            leadUuid,
+            ...(workerPane === "pane:left" ? [record.surface_uuid] : []),
+          ];
+          const rightRefs = [
+            ...(seedOpen ? [seedRef] : []),
+            ...(workerPane === "pane:right" ? [record.surface_id] : []),
+          ];
+          const rightIds = [
+            ...(seedOpen ? [seedUuid] : []),
+            ...(workerPane === "pane:right" ? [record.surface_uuid] : []),
+          ];
+          return {
+            workspace_ref: "ws:placement",
+            window_ref: "window:placement",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: true,
+                surface_count: leftRefs.length,
+                surface_refs: leftRefs,
+                surface_ids: leftIds,
+                pixel_frame: leftFrame,
+              },
+              ...(rightRefs.length > 0
+                ? [
+                    {
+                      ref: "pane:right",
+                      index: 1,
+                      focused: false,
+                      surface_count: rightRefs.length,
+                      surface_refs: rightRefs,
+                      surface_ids: rightIds,
+                      pixel_frame: rightFrame,
+                    },
+                  ]
+                : []),
+            ],
+          };
+        },
+      );
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:placement",
+        window_ref: "window:placement",
+        pane_ref: pane,
+        surfaces:
+          pane === "pane:right"
+            ? [
+                ...(seedOpen
+                  ? [
+                      {
+                        ...makeSurface(seedRef),
+                        id: seedUuid,
+                        workspace_ref: "ws:placement",
+                      },
+                    ]
+                  : []),
+                ...(workerPane === "pane:right"
+                  ? [
+                      {
+                        ...makeSurface(record.surface_id),
+                        id: record.surface_uuid ?? undefined,
+                        workspace_ref: "ws:placement",
+                      },
+                    ]
+                  : []),
+              ]
+            : [
+                {
+                  ...makeSurface(leadRef),
+                  id: leadUuid,
+                  workspace_ref: "ws:placement",
+                },
+                ...(workerPane === "pane:left"
+                  ? [
+                      {
+                        ...makeSurface(record.surface_id),
+                        id: record.surface_uuid ?? undefined,
+                        workspace_ref: "ws:placement",
+                      },
+                    ]
+                  : []),
+              ],
+      }));
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (_direction, opts) => {
+          await opts.beforeMutation?.();
+          seedOpen = true;
+          refreshLiveSurfaces();
+          return {
+            workspace: "ws:placement",
+            surface: seedRef,
+            surface_id: seedUuid,
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (opts) => {
+          await opts.beforeMutation?.();
+          workerPane = "pane:right";
+          return {
+            ok: true,
+            workspace: "ws:placement",
+            surface: opts.surface,
+            pane: "pane:right",
+          };
+        },
+      );
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (_surface, opts) => {
+          await opts.beforeMutation?.();
+          seedOpen = false;
+          refreshLiveSurfaces();
+        },
+      );
+
+      const summary = await engine.reconcileRolePlacements("idle");
+
+      expect(summary.moved).toHaveLength(1);
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        seedRef,
+        expect.objectContaining({
+          workspace: "ws:placement",
+          stableSurfaceIdentity: seedUuid,
+          beforeMutation: expect.any(Function),
+        }),
+      );
+    });
+
+    it("orders boot ingestion before provable-leftover sweep and publication", async () => {
+      const events: string[] = [];
+      const record = makeRecord({
+        agent_id: "boot-leftover-worker",
+        surface_id: "surface:boot-leftover-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "done",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      stateMgr.writeState(record);
+      installTwoColumnTopology(record);
+      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (opts) => {
+          events.push("sweep");
+          return {
+            ok: true,
+            workspace: opts.workspace ?? "ws:placement",
+            surface: opts.surface,
+            pane: opts.pane ?? "pane:right",
+          };
+        },
+      );
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        fleetSidebarPublisher: {
+          publish: ({ state }) => {
+            if (state !== "discovering") events.push("placement-live");
+          },
+          dispose: () => {},
+        },
+      });
+      const discovery = {
+        scan: vi.fn(async () => {
+          events.push("ingest");
+          return [];
+        }),
+      };
+      (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async ({ pane, workspace }) => {
+          events.push("spawn");
+          return {
+            workspace: workspace ?? "ws:placement",
+            surface: "surface:post-boot-worker",
+            surface_id: "99999999-2222-4333-8444-555555555555",
+            pane,
+            title: "",
+            type: "terminal" as const,
+          };
+        },
+      );
+
+      await engine.initialize(discovery as any);
+      await engine.spawnAgent({
+        repo: "cmuxlayer",
+        cli: "codex",
+        prompt: "spawn immediately after boot",
+        workspace: "ws:placement",
+        role: "worker",
+      });
+
+      expect(events).toEqual(["ingest", "sweep", "placement-live", "spawn"]);
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
+        type: "terminal",
+        workspace: "ws:placement",
+      });
     });
   });
 
@@ -9409,15 +9944,16 @@ To continue this session, run codex resume ${sessionId}`,
       expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
-    it("works for agents in idle state", async () => {
+    it("keeps an idle agent idle when text is staged without Return", async () => {
       vi.useFakeTimers();
       const sentAt = new Date("2026-05-25T13:00:00.000Z");
+      const originalUpdatedAt = "2026-05-25T12:00:00.000Z";
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-idle",
           state: "idle",
           surface_id: "surface:42",
-          updated_at: "2026-05-25T12:00:00.000Z",
+          updated_at: originalUpdatedAt,
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];
@@ -9428,12 +9964,59 @@ To continue this session, run codex resume ${sessionId}`,
         await engine.sendToAgent("agent-idle", "continue");
 
         expect(mockClient.send).toHaveBeenCalled();
-        expect(engine.getAgentState("agent-idle")?.updated_at).toBe(
-          sentAt.toISOString(),
-        );
+        expect(engine.getAgentState("agent-idle")).toMatchObject({
+          state: "idle",
+          updated_at: originalUpdatedAt,
+        });
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("marks an idle agent working only after Return is delivered", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-idle-submit",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.sendToAgent("agent-idle-submit", "continue", true);
+
+      expect(mockClient.sendKey).toHaveBeenCalledWith(
+        "surface:42",
+        "return",
+        expect.anything(),
+      );
+      expect(engine.getAgentState("agent-idle-submit")?.state).toBe(
+        "working",
+      );
+    });
+
+    it("leaves an idle agent idle when submitted delivery fails", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-idle-send-failure",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("Return delivery failed"),
+      );
+
+      await expect(
+        engine.sendToAgent("agent-idle-send-failure", "continue", true),
+      ).rejects.toThrow(/Return delivery failed/);
+
+      expect(engine.getAgentState("agent-idle-send-failure")?.state).toBe(
+        "idle",
+      );
     });
 
     it("rejects sending to agents in non-interactive states", async () => {
