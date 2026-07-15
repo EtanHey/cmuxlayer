@@ -3636,6 +3636,9 @@ export class AgentEngine {
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
       if (agent.surface_provenance !== "cmuxlayer_spawn") return false;
       if (trigger === "spawn") {
+        // Spawn reconciliation runs synchronously after registry persistence
+        // and before the launch command is sent, so membership is sufficient:
+        // this new agent cannot have entered a working state yet.
         return opts.agentIds?.has(agent.agent_id) ?? false;
       }
       if (trigger === "idle") return agent.state === "idle";
@@ -3824,10 +3827,6 @@ export class AgentEngine {
             beforeMutation: () =>
               assertFreshAgentBinding(sourceRef, "role placement move"),
           });
-          this.assertSurfaceObserverEpochCurrent(
-            observerEpoch,
-            "role placement",
-          );
           summary.moved.push({
             agent_id: agent.agent_id,
             surface_id: sourceRef,
@@ -3835,6 +3834,10 @@ export class AgentEngine {
             to_column: targetColumn,
             pane: targetPane,
           });
+          this.assertSurfaceObserverEpochCurrent(
+            observerEpoch,
+            "role placement",
+          );
         } finally {
           if (seed) {
             if (!seed.surface_id) {
@@ -3894,6 +3897,11 @@ export class AgentEngine {
           }
         }
       } catch (error) {
+        if (summary.moved.some((moved) => moved.agent_id === agent.agent_id)) {
+          // Seed cleanup is best-effort and must not overwrite a completed move
+          // by counting the same agent as skipped as well.
+          continue;
+        }
         summary.skipped.push({
           agent_id: agent.agent_id,
           surface_id: agent.surface_id,
