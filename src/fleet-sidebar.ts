@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
@@ -695,20 +696,119 @@ ${content}
 `;
 }
 
-export function defaultFleetSidebarPath(home = homedir()): string {
-  return join(home, ".config", "cmux", "sidebars", "fleet.swift");
+function normalizeFleetSidebarInstanceKey(value: string): string | null {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (
+    normalized === "" ||
+    normalized === "stable" ||
+    normalized === "prod" ||
+    normalized === "production"
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function hashedFleetSidebarInstanceKey(
+  label: string | null,
+  identity: string,
+): string {
+  const digest = createHash("sha256")
+    .update(identity)
+    .digest("hex")
+    .slice(0, 12);
+  return `${label ?? "instance"}-${digest}`;
+}
+
+function fleetSidebarInstanceKey(
+  home: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const upstreamSocket = env.CMUX_SOCKET_PATH?.trim();
+  if (upstreamSocket) {
+    const socketName = basename(upstreamSocket);
+    const productionStateSocket =
+      dirname(upstreamSocket) === join(home, ".local", "state", "cmux") &&
+      /^cmux(?:-\d+)?\.sock$/i.test(socketName);
+    const productionTmpSocket =
+      dirname(upstreamSocket) === "/tmp" &&
+      /^(?:cmux|cmux-\d+)\.sock$/i.test(socketName);
+    const productionApplicationSupportSocket =
+      upstreamSocket ===
+      join(home, "Library", "Application Support", "cmux", "cmux.sock");
+    if (
+      productionStateSocket ||
+      productionTmpSocket ||
+      productionApplicationSupportSocket
+    ) {
+      return null;
+    }
+    if (upstreamSocket === "/tmp/cmux-nightly.sock") return "nightly";
+    if (upstreamSocket === "/tmp/cmux-dev.sock") return "dev";
+    const socketStem = socketName
+      .replace(/\.sock$/i, "")
+      .replace(/^cmux(?:[-_.]+)?/i, "");
+    return hashedFleetSidebarInstanceKey(
+      normalizeFleetSidebarInstanceKey(socketStem),
+      upstreamSocket,
+    );
+  }
+
+  const bundleId = env.CMUX_BUNDLE_ID?.trim() ?? "";
+  if (/^com\.cmuxterm\.app$/i.test(bundleId)) {
+    return null;
+  }
+  const bundleMatch = bundleId.match(/^com\.cmuxterm\.app\.(.+)$/i);
+  if (!bundleMatch) return null;
+  const label = normalizeFleetSidebarInstanceKey(bundleMatch[1]);
+  if (label === null) return null;
+  if (label === "nightly" || label === "dev") return label;
+  return hashedFleetSidebarInstanceKey(label, bundleId);
+}
+
+/**
+ * Stable keeps the legacy `~/.config/cmux/sidebars/fleet.swift` contract.
+ * Named socket or bundle instances use `~/.config/cmux-<instance>/sidebars`
+ * so Nightly and development publishers cannot overwrite Stable's source.
+ * Non-canonical identities include a short hash of their complete identity to
+ * prevent distinct socket paths from collapsing onto the same directory.
+ */
+export function defaultFleetSidebarPath(
+  home = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env.CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH?.trim();
+  if (override) return override;
+  const instanceKey = fleetSidebarInstanceKey(home, env);
+  return join(
+    home,
+    ".config",
+    instanceKey ? `cmux-${instanceKey}` : "cmux",
+    "sidebars",
+    "fleet.swift",
+  );
 }
 
 export function defaultFleetSidebarDevPath(home = homedir()): string {
   return join(home, ".config", "cmux", "sidebars", "fleet-dev.swift");
 }
 
-export function defaultFleetSidebarCollapseStatePath(home = homedir()): string {
+export function defaultFleetSidebarCollapseStatePath(
+  home = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const override = env.CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH?.trim();
+  if (override) return `${override}.collapse.json`;
+  const instanceKey = fleetSidebarInstanceKey(home, env);
   return join(
     home,
     ".local",
     "state",
     "cmuxlayer",
+    ...(instanceKey ? [instanceKey] : []),
     "fleet-sidebar-collapse.json",
   );
 }
@@ -898,10 +998,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
 
   constructor(opts: FleetSidebarPublisherOptions = {}) {
     const canonicalOutputPath = defaultFleetSidebarPath();
-    this.outputPath =
-      opts.outputPath ??
-      process.env.CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH ??
-      canonicalOutputPath;
+    this.outputPath = opts.outputPath ?? canonicalOutputPath;
     if (process.env.VITEST === "true" && opts.outputPath === undefined) {
       throw new Error(
         "FleetSidebarPublisher tests must inject an explicit outputPath",
@@ -919,7 +1016,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       opts.collapseStore ??
       new FleetSidebarCollapseStore(
         this.outputPath === canonicalOutputPath
-          ? {}
+          ? { statePath: defaultFleetSidebarCollapseStatePath() }
           : { statePath: `${this.outputPath}.collapse.json` },
       );
     this.minWriteIntervalMs = Math.max(

@@ -1232,10 +1232,103 @@ describe("fleet sidebar atomic publisher", () => {
     };
   }
 
-  it("uses the canonical home-relative output path", () => {
-    expect(defaultFleetSidebarPath("/tmp/example-home")).toBe(
+  it("keeps the canonical stable output path unchanged", () => {
+    expect(defaultFleetSidebarPath("/tmp/example-home", {})).toBe(
       "/tmp/example-home/.config/cmux/sidebars/fleet.swift",
     );
+  });
+
+  it("uses an isolated output path for the Nightly socket", () => {
+    const stablePath = defaultFleetSidebarPath("/tmp/example-home", {});
+    const nightlyPath = defaultFleetSidebarPath("/tmp/example-home", {
+      CMUX_SOCKET_PATH: "/tmp/cmux-nightly.sock",
+    });
+
+    expect(nightlyPath).toBe(
+      "/tmp/example-home/.config/cmux-nightly/sidebars/fleet.swift",
+    );
+    expect(nightlyPath).not.toBe(stablePath);
+  });
+
+  it("derives a separate instance directory from a development socket", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_SOCKET_PATH: "/tmp/cmux-dev.sock",
+      }),
+    ).toBe("/tmp/example-home/.config/cmux-dev/sidebars/fleet.swift");
+  });
+
+  it("does not collapse distinct full socket paths with the same basename", () => {
+    const first = defaultFleetSidebarPath("/tmp/example-home", {
+      CMUX_SOCKET_PATH: "/tmp/instance-a/cmux-dev.sock",
+    });
+    const second = defaultFleetSidebarPath("/tmp/example-home", {
+      CMUX_SOCKET_PATH: "/var/run/instance-b/cmux-dev.sock",
+    });
+
+    expect(first).not.toBe(second);
+  });
+
+  it("does not collapse distinct socket names during sanitization", () => {
+    const dotted = defaultFleetSidebarPath("/tmp/example-home", {
+      CMUX_SOCKET_PATH: "/tmp/cmux-nightly.v2.sock",
+    });
+    const dashed = defaultFleetSidebarPath("/tmp/example-home", {
+      CMUX_SOCKET_PATH: "/tmp/cmux-nightly-v2.sock",
+    });
+
+    expect(dotted).not.toBe(dashed);
+  });
+
+  it("keeps a production socket stable even when the bundle id says Nightly", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_SOCKET_PATH: "/tmp/cmux-501.sock",
+        CMUX_BUNDLE_ID: "com.cmuxterm.app.nightly",
+      }),
+    ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
+  });
+
+  it("keeps the non-UID Stable state socket on the legacy sidebar path", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_SOCKET_PATH:
+          "/tmp/example-home/.local/state/cmux/cmux.sock",
+      }),
+    ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
+  });
+
+  it("uses the bundle id when no socket pin identifies the instance", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_BUNDLE_ID: "com.cmuxterm.app.nightly",
+      }),
+    ).toBe(
+      "/tmp/example-home/.config/cmux-nightly/sidebars/fleet.swift",
+    );
+  });
+
+  it("keeps Stable bundle aliases on the legacy sidebar path", () => {
+    for (const bundleId of [
+      "com.cmuxterm.app.stable",
+      "com.cmuxterm.app.prod",
+      "com.cmuxterm.app.production",
+    ]) {
+      expect(
+        defaultFleetSidebarPath("/tmp/example-home", {
+          CMUX_BUNDLE_ID: bundleId,
+        }),
+      ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
+    }
+  });
+
+  it("lets the explicit sidebar output override win", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_SOCKET_PATH: "/tmp/cmux-nightly.sock",
+        CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: "/custom/fleet.swift",
+      }),
+    ).toBe("/custom/fleet.swift");
   });
 
   it("uses a separate discoverable fleet-dev path for development previews", () => {
@@ -1253,9 +1346,93 @@ describe("fleet sidebar atomic publisher", () => {
   });
 
   it("keeps collapse preferences outside cmux's discoverable sidebars directory", () => {
-    expect(defaultFleetSidebarCollapseStatePath("/tmp/example-home")).toBe(
+    expect(
+      defaultFleetSidebarCollapseStatePath("/tmp/example-home", {}),
+    ).toBe(
       "/tmp/example-home/.local/state/cmuxlayer/fleet-sidebar-collapse.json",
     );
+  });
+
+  it("isolates Nightly collapse preferences from stable", () => {
+    const stablePath = defaultFleetSidebarCollapseStatePath(
+      "/tmp/example-home",
+      {},
+    );
+    const nightlyPath = defaultFleetSidebarCollapseStatePath(
+      "/tmp/example-home",
+      { CMUX_SOCKET_PATH: "/tmp/cmux-nightly.sock" },
+    );
+
+    expect(nightlyPath).toBe(
+      "/tmp/example-home/.local/state/cmuxlayer/nightly/fleet-sidebar-collapse.json",
+    );
+    expect(nightlyPath).not.toBe(stablePath);
+  });
+
+  it("keeps an overridden sidebar's collapse state beside that output", () => {
+    expect(
+      defaultFleetSidebarCollapseStatePath("/tmp/example-home", {
+        CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH: "/custom/fleet.swift",
+      }),
+    ).toBe("/custom/fleet.swift.collapse.json");
+  });
+
+  it("keeps publishers on stable and Nightly output files isolated", () => {
+    const home = mkdtempSync(join(tmpdir(), "cmuxlayer-fleet-instances-"));
+    tempDirs.push(home);
+    const stableOutputPath = defaultFleetSidebarPath(home, {});
+    const nightlyOutputPath = defaultFleetSidebarPath(home, {
+      CMUX_SOCKET_PATH: "/tmp/cmux-nightly.sock",
+    });
+    const stablePublisher = new FleetSidebarPublisher({
+      outputPath: stableOutputPath,
+    });
+    const nightlyPublisher = new FleetSidebarPublisher({
+      outputPath: nightlyOutputPath,
+    });
+
+    stablePublisher.publish(snapshotWithStatus("stable-owner"));
+    nightlyPublisher.publish(snapshotWithStatus("nightly-owner"));
+
+    expect(stableOutputPath).not.toBe(nightlyOutputPath);
+    expect(readFileSync(stableOutputPath, "utf8")).toContain(
+      '"status": "stable-owner"',
+    );
+    expect(readFileSync(nightlyOutputPath, "utf8")).toContain(
+      '"status": "nightly-owner"',
+    );
+    stablePublisher.dispose();
+    nightlyPublisher.dispose();
+  });
+
+  it("keeps publishers with same-named sockets in different directories isolated", () => {
+    const home = mkdtempSync(join(tmpdir(), "cmuxlayer-fleet-collisions-"));
+    tempDirs.push(home);
+    const firstOutputPath = defaultFleetSidebarPath(home, {
+      CMUX_SOCKET_PATH: "/tmp/instance-a/cmux-dev.sock",
+    });
+    const secondOutputPath = defaultFleetSidebarPath(home, {
+      CMUX_SOCKET_PATH: "/var/run/instance-b/cmux-dev.sock",
+    });
+    const firstPublisher = new FleetSidebarPublisher({
+      outputPath: firstOutputPath,
+    });
+    const secondPublisher = new FleetSidebarPublisher({
+      outputPath: secondOutputPath,
+    });
+
+    firstPublisher.publish(snapshotWithStatus("instance-a"));
+    secondPublisher.publish(snapshotWithStatus("instance-b"));
+
+    expect(firstOutputPath).not.toBe(secondOutputPath);
+    expect(readFileSync(firstOutputPath, "utf8")).toContain(
+      '"status": "instance-a"',
+    );
+    expect(readFileSync(secondOutputPath, "utf8")).toContain(
+      '"status": "instance-b"',
+    );
+    firstPublisher.dispose();
+    secondPublisher.dispose();
   });
 
   it("isolates implicit collapse state beside a custom output path", () => {
