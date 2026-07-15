@@ -18,6 +18,7 @@ import {
   type CreateServerOptions,
 } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
+import { AgentDiscovery } from "../src/agent-discovery.js";
 import {
   readMonitorRegistry,
   registerMonitor,
@@ -1711,6 +1712,133 @@ describe("CmuxLayerDaemon", () => {
     });
 
     await daemon.shutdown();
+  });
+
+  it("keeps the first connection paused until boot topology ingestion and sweep finish", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("boot-topology-gate");
+    const bootReady = deferred<void>();
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("boot-topology-gate"),
+      disableSpawnPreflight: true,
+    });
+    context.lifecycleStarted = true;
+    context.lifecycleStartPromise = bootReady.promise;
+    const daemon = new CmuxLayerDaemon({ socketPath: path, context });
+
+    await daemon.start();
+    const socket = net.createConnection(path);
+    await once(socket, "connect");
+    await delay(20);
+
+    expect(daemon.activeConnectionCount()).toBe(0);
+
+    bootReady.resolve();
+    await waitUntil(() => daemon.activeConnectionCount() === 1);
+
+    socket.destroy();
+    await daemon.shutdown();
+  });
+
+  it("does not register a client that disconnects while boot ingestion is pending", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("boot-topology-disconnect");
+    const bootReady = deferred<void>();
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("boot-topology-disconnect"),
+      disableSpawnPreflight: true,
+    });
+    context.lifecycleStarted = true;
+    context.lifecycleStartPromise = bootReady.promise;
+    const daemon = new CmuxLayerDaemon({ socketPath: path, context });
+
+    await daemon.start();
+    const socket = net.createConnection(path);
+    await once(socket, "connect");
+    socket.destroy();
+    await once(socket, "close");
+
+    bootReady.resolve();
+    await delay(20);
+
+    expect(daemon.activeConnectionCount()).toBe(0);
+    await daemon.shutdown();
+  });
+
+  it("keeps the gate closed when production lifecycle initialization failed", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("boot-topology-failed");
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("boot-topology-failed"),
+      disableSpawnPreflight: true,
+    });
+    context.lifecycleStarted = true;
+    context.lifecycleStartPromise = Promise.resolve();
+    context.lifecycleStartError = new Error("boot topology ingest failed");
+    const daemon = new CmuxLayerDaemon({ socketPath: path, context });
+
+    await daemon.start();
+    const socket = net.createConnection(path);
+    await once(socket, "connect");
+    await once(socket, "close");
+
+    expect(daemon.activeConnectionCount()).toBe(0);
+    await daemon.shutdown();
+  });
+
+  it("keeps the gate closed when boot pane discovery rejects", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("boot-topology-discovery-rejects");
+    const scan = vi
+      .spyOn(AgentDiscovery.prototype, "scan")
+      .mockRejectedValueOnce(new Error("boot pane discovery failed"));
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("boot-topology-discovery-rejects"),
+      disableSpawnPreflight: true,
+    });
+    const daemon = new CmuxLayerDaemon({ socketPath: path, context });
+
+    try {
+      await daemon.start();
+      const socket = net.createConnection(path);
+      await once(socket, "connect");
+      await once(socket, "close");
+      await context.lifecycleStartPromise;
+
+      expect(context.lifecycleStartError).toMatchObject({
+        message: "boot pane discovery failed",
+      });
+      expect(daemon.activeConnectionCount()).toBe(0);
+    } finally {
+      scan.mockRestore();
+      await daemon.shutdown();
+    }
+  });
+
+  it("shutdown destroys clients still waiting for boot ingestion", async () => {
+    mkdirSync(TEST_ROOT, { recursive: true });
+    const path = socketPath("boot-topology-shutdown");
+    const bootReady = deferred<void>();
+    const context = createServerContext({
+      exec: createLifecycleExec(),
+      stateDir: stateDir("boot-topology-shutdown"),
+      disableSpawnPreflight: true,
+    });
+    context.lifecycleStarted = true;
+    context.lifecycleStartPromise = bootReady.promise;
+    const daemon = new CmuxLayerDaemon({ socketPath: path, context });
+
+    await daemon.start();
+    const socket = net.createConnection(path);
+    await once(socket, "connect");
+
+    await expect(daemon.shutdown()).resolves.toMatchObject({ forced: false });
+    expect(socket.destroyed).toBe(true);
+    bootReady.resolve();
   });
 
   it("closes the per-connection MCP server when a client disconnects", async () => {

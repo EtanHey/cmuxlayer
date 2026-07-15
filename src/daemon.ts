@@ -387,6 +387,7 @@ export class CmuxLayerDaemon {
   private readonly drainTimeoutMs: number;
   private readonly activeTransports = new Set<SocketJsonRpcTransport>();
   private readonly activeServers = new Set<McpServer>();
+  private readonly pendingBootSockets = new Set<net.Socket>();
   private readonly drainWaiters = new Set<() => void>();
   private inFlightRequests = 0;
   private draining = false;
@@ -535,16 +536,27 @@ export class CmuxLayerDaemon {
       return;
     }
     socket.pause();
+    this.pendingBootSockets.add(socket);
+    const clearPendingSocket = () => {
+      this.pendingBootSockets.delete(socket);
+      socket.off("close", clearPendingSocket);
+      socket.off("error", onPendingSocketError);
+    };
+    const onPendingSocketError = () => {
+      // The connection is not live yet; cleanup is completed after the gate.
+    };
+    socket.once("close", clearPendingSocket);
+    socket.on("error", onPendingSocketError);
 
     let context: CmuxServerContext;
     try {
       context = await this.getContext();
-    } catch (error) {
-      socket.destroy(error instanceof Error ? error : undefined);
+    } catch {
+      clearPendingSocket();
+      socket.destroy();
       return;
     }
 
-    const transport = new SocketJsonRpcTransport(socket);
     const mcpServer = createServer({
       context,
       outboxDrain: this.opts.outboxDrain,
@@ -553,6 +565,25 @@ export class CmuxLayerDaemon {
       monitorRegistryNotify: this.opts.monitorRegistryNotify,
       fleetSidebarPublisher: this.opts.fleetSidebarPublisher,
     });
+    try {
+      await (context.lifecycleStartPromise ?? Promise.resolve());
+      if (context.lifecycleStartError) {
+        throw context.lifecycleStartError;
+      }
+    } catch {
+      clearPendingSocket();
+      socket.destroy();
+      await mcpServer.close().catch(() => {});
+      return;
+    }
+    if (this.draining || socket.destroyed || !socket.readable) {
+      clearPendingSocket();
+      socket.destroy();
+      await mcpServer.close().catch(() => {});
+      return;
+    }
+    clearPendingSocket();
+    const transport = new SocketJsonRpcTransport(socket);
     const pendingRequestIds = new Set<RequestId>();
     this.activeTransports.add(transport);
     this.activeServers.add(mcpServer);
@@ -607,6 +638,10 @@ export class CmuxLayerDaemon {
     reason: DaemonShutdownReason,
   ): Promise<DaemonShutdownResult> {
     this.draining = true;
+    for (const socket of this.pendingBootSockets) {
+      socket.destroy();
+    }
+    this.pendingBootSockets.clear();
     this.pauseActiveTransports();
     const listenerClosed = this.closeListener();
 

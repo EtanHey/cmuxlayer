@@ -748,7 +748,7 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
-  it("degrades a transient first-connect discovery failure to unknown", async () => {
+  it("keeps placement unavailable when first-connect discovery fails", async () => {
     mockClient.listWorkspaces.mockRejectedValue(
       new Error("cmux socket unavailable"),
     );
@@ -759,14 +759,12 @@ describe("Sidebar Sync", () => {
       readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
     });
 
-    await expect(engine.initialize(discovery)).resolves.toBeUndefined();
+    await expect(engine.initialize(discovery)).rejects.toThrow(
+      /cmux socket unavailable/,
+    );
 
     expect(publishedFleetPublications).toEqual([
       expect.objectContaining({ state: "discovering" }),
-      expect.objectContaining({
-        state: "unknown",
-        observedLiveSurfaceRefs: null,
-      }),
     ]);
   });
 

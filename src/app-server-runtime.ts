@@ -282,10 +282,31 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           ),
         setProgress: async () => {},
         clearProgress: async () => {},
-        newSplit: (direction, splitOpts) =>
-          this.runWorkspaceMutation("new_split", splitOpts?.workspace, () =>
-            this.client.newSplit(direction, splitOpts),
-          ),
+        newSplit: (direction, splitOpts) => {
+          const {
+            beforeMutation,
+            stableSurfaceIdentity,
+            ...clientOpts
+          } = splitOpts ?? {};
+          return this.runWorkspaceMutation(
+            "new_split",
+            splitOpts?.workspace,
+            () => {
+              const mutate = async () => {
+                await beforeMutation?.();
+                return this.client.newSplit(direction, clientOpts);
+              };
+              return splitOpts?.surface
+                ? this.withSurfaceWrite(
+                    stableSurfaceIdentity
+                      ? `uuid:${stableSurfaceIdentity.toLowerCase()}`
+                      : splitOpts.surface,
+                    mutate,
+                  )
+                : mutate();
+            },
+          );
+        },
         newSurface: (surfaceOpts) =>
           this.runWorkspaceMutation("new_surface", surfaceOpts?.workspace, () =>
             this.client.newSurface(surfaceOpts),
@@ -301,12 +322,48 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         listPanes: (paneOpts) => this.client.listPanes(paneOpts),
         listPaneSurfaces: (surfaceOpts) =>
           this.client.listPaneSurfaces(surfaceOpts),
-        closeSurface: (surface, closeOpts) =>
-          this.runWorkspaceMutation("close_surface", closeOpts?.workspace, () =>
-            this.withSurfaceWrite(surface, () =>
-              this.client.closeSurface(surface, closeOpts),
-            ),
-          ),
+        closeSurface: (surface, closeOpts) => {
+          const {
+            beforeMutation,
+            stableSurfaceIdentity,
+            ...clientOpts
+          } = closeOpts ?? {};
+          return this.runWorkspaceMutation(
+            "close_surface",
+            closeOpts?.workspace,
+            () =>
+              this.withSurfaceWrite(
+                stableSurfaceIdentity
+                  ? `uuid:${stableSurfaceIdentity.toLowerCase()}`
+                  : surface,
+                async () => {
+                  await beforeMutation?.();
+                  return this.client.closeSurface(surface, clientOpts);
+                },
+              ),
+          );
+        },
+        moveSurface: (moveOpts) => {
+          const {
+            beforeMutation,
+            stableSurfaceIdentity,
+            ...clientOpts
+          } = moveOpts;
+          return this.runWorkspaceMutation(
+            "move_surface",
+            moveOpts.workspace,
+            () =>
+              this.withSurfaceWrite(
+                stableSurfaceIdentity
+                  ? `uuid:${stableSurfaceIdentity.toLowerCase()}`
+                  : moveOpts.surface,
+                async () => {
+                  await beforeMutation?.();
+                  return this.client.moveSurface(clientOpts);
+                },
+              ),
+          );
+        },
         notify: (notifyOpts) => this.client.notify(notifyOpts),
         notifyLifecycleEvent: async () => {},
       },
@@ -409,12 +466,34 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       SEND_INPUT_CHUNK_THRESHOLD,
     );
 
-    await this.withSurfaceWrite(`agent:${agentId}`, async () => {
-      for (const [index, chunk] of chunks.entries()) {
-        const route = await this.resolveFreshMutationRoute(
-          agentId,
-          "send_command",
+    const lockedRoute = await this.resolveFreshMutationRoute(
+      agentId,
+      "send_command",
+    );
+    const resolveLockedRoute = async (toolName: string) => {
+      const route = await this.resolveFreshMutationRoute(agentId, toolName);
+      const lockedUuid = lockedRoute.surface_uuid?.toLowerCase() ?? null;
+      const routeUuid = route.surface_uuid?.toLowerCase() ?? null;
+      const bindingChanged = lockedUuid
+        ? routeUuid !== lockedUuid
+        : route.surface_id !== lockedRoute.surface_id ||
+          (route.workspace_id ?? null) !== (lockedRoute.workspace_id ?? null);
+      if (bindingChanged) {
+        throw new Error(
+          `Agent ${agentId} changed surface binding during ${toolName}; ` +
+            "refusing to continue outside the locked surface.",
         );
+      }
+      return route;
+    };
+
+    const lockKey = lockedRoute.surface_uuid
+      ? `uuid:${lockedRoute.surface_uuid.toLowerCase()}`
+      : lockedRoute.surface_id;
+    await this.withSurfaceWrite(lockKey, async () => {
+      await resolveLockedRoute("send_command");
+      for (const [index, chunk] of chunks.entries()) {
+        const route = await resolveLockedRoute("send_command");
         await this.client.send(route.surface_id, chunk, {
           workspace: route.workspace_id ?? undefined,
         });
@@ -423,16 +502,32 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         }
       }
       await delay(50);
-      const route = await this.resolveFreshMutationRoute(agentId, "send_key");
+      const route = await resolveLockedRoute("send_key");
       await this.client.sendKey(route.surface_id, "return", {
         workspace: route.workspace_id ?? undefined,
       });
+      this.engine.markAgentWorking(agentId);
     });
   }
 
   async interruptTurn(threadId: string): Promise<void> {
-    await this.withSurfaceWrite(`agent:${threadId}`, async () => {
+    const lockedRoute = await this.resolveFreshMutationRoute(
+      threadId,
+      "send_key",
+    );
+    const lockKey = lockedRoute.surface_uuid
+      ? `uuid:${lockedRoute.surface_uuid.toLowerCase()}`
+      : lockedRoute.surface_id;
+    await this.withSurfaceWrite(lockKey, async () => {
       const route = await this.resolveFreshMutationRoute(threadId, "send_key");
+      if (
+        route.surface_id !== lockedRoute.surface_id ||
+        (route.surface_uuid ?? null) !== (lockedRoute.surface_uuid ?? null)
+      ) {
+        throw new Error(
+          `Agent ${threadId} changed surface binding during interrupt; refusing stale surface I/O.`,
+        );
+      }
       await this.client.sendKey(route.surface_id, "c-c", {
         workspace: route.workspace_id ?? undefined,
       });

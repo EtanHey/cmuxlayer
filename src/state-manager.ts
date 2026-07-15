@@ -548,6 +548,7 @@ export class StateManager {
       surface_id: discovered.surface_id,
       surface_uuid: discovered.surface_uuid ?? null,
       surface_observer_id: surfaceObserverId?.trim() || null,
+      surface_provenance: "unknown",
       workspace_id: discovered.workspace_id ?? null,
       state: discoveredStatusToAgentState(discovered.parsed_status),
       repo: inferRepoFromTitle(discovered.surface_title),

@@ -74,6 +74,30 @@ function makeAgentRecord(overrides: Partial<AgentRecord>): AgentRecord {
   };
 }
 
+function writeProgrammaticLeftWorker(
+  overrides: Partial<AgentRecord> = {},
+): void {
+  new StateManager(TEST_DIR).writeState(
+    makeAgentRecord({
+      agent_id: "programmatic-left-worker",
+      surface_id: "surface:worker-left",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
+      workspace_id: "workspace:1",
+      state: "working",
+      role: "worker",
+      cli: "codex",
+      surface_provenance: "cmuxlayer_spawn",
+      ...overrides,
+    }),
+  );
+}
+
+function markProgrammaticLeftWorkerIdle(
+  agentId = "programmatic-left-worker",
+): void {
+  new StateManager(TEST_DIR).transition(agentId, "idle");
+}
+
 function makeDiscoveryExec(): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-workspaces")) {
@@ -916,6 +940,7 @@ function makeLeftColumnWorkerExec(
     stableIds?: boolean;
     workerScreen?: string;
     workerTitle?: string;
+    zeroAreaPhantom?: boolean;
   } = {},
 ): ExecFn & { recycleSeedSurfaceRef(): void } {
   let workerPane = "pane:left";
@@ -998,9 +1023,23 @@ function makeLeftColumnWorkerExec(
           workspace_ref: "workspace:1",
           window_ref: "window:1",
           panes: [
+            ...(opts.zeroAreaPhantom
+              ? [
+                  {
+                    ref: "pane:phantom",
+                    index: 0,
+                    focused: false,
+                    surface_count: 1,
+                    surface_refs: ["surface:phantom"],
+                    surface_ids: ["55555555-6666-4777-8888-999999999999"],
+                    selected_surface_ref: "surface:phantom",
+                    pixel_frame: { x: -500, y: 0, width: 0, height: 0 },
+                  },
+                ]
+              : []),
             {
               ref: "pane:left",
-              index: 0,
+              index: opts.zeroAreaPhantom ? 1 : 0,
               focused: true,
               surface_count: workerPane === "pane:left" ? 2 : 1,
               surface_refs:
@@ -1022,7 +1061,7 @@ function makeLeftColumnWorkerExec(
               ? [
                   {
                     ref: "pane:right",
-                    index: 1,
+                    index: opts.zeroAreaPhantom ? 2 : 1,
                     focused: false,
                     surface_count:
                       (seedSurfaceOpen
@@ -1086,7 +1125,18 @@ function makeLeftColumnWorkerExec(
     if (args.includes("list-pane-surfaces")) {
       const pane = String(args[args.indexOf("--pane") + 1]);
       const base =
-        pane === "pane:left"
+        pane === "pane:phantom"
+          ? [
+              {
+                ref: "surface:phantom",
+                id: "55555555-6666-4777-8888-999999999999",
+                title: "operator phantom",
+                type: "terminal" as const,
+                index: 0,
+                selected: true,
+              },
+            ]
+          : pane === "pane:left"
           ? [
               {
                 ref: "surface:lead",
@@ -1485,7 +1535,7 @@ describe("resync_agents tool", () => {
     expect(parsed.count).toBe(1);
   });
 
-  it("resync_agents moves an auto-discovered worker out of the leftmost lead column", async () => {
+  it("resync_agents never moves an auto-discovered unknown-provenance worker", async () => {
     const exec = makeLeftColumnWorkerExec();
     const server = createServer({ exec, stateDir: TEST_DIR });
 
@@ -1495,7 +1545,7 @@ describe("resync_agents tool", () => {
     );
     const parsed = parseResult(result);
 
-    expect(exec).toHaveBeenCalledWith(
+    expect(exec).not.toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
         "move-surface",
@@ -1505,13 +1555,7 @@ describe("resync_agents tool", () => {
         "pane:right",
       ]),
     );
-    expect(parsed.diff.reflowed).toEqual([
-      expect.objectContaining({
-        surface_id: "surface:worker-left",
-        from_column: 0,
-        to_column: 1,
-      }),
-    ]);
+    expect(parsed.diff.reflowed).toEqual([]);
   });
 
   it("resync_agents never reflows a UUID-less worker owned by another observer", async () => {
@@ -1614,6 +1658,9 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents refuses a seed split when the observer changes after its topology snapshot", async () => {
+    writeProgrammaticLeftWorker({
+      surface_observer_id: "cmux:/tmp/cmux-primary.sock",
+    });
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -1628,6 +1675,7 @@ describe("resync_agents tool", () => {
     });
     const server = createServer({ context });
     await context.lifecycleStartPromise;
+    markProgrammaticLeftWorkerIdle();
     const registry = (server as any)._registeredTools["interact"]._engine.getRegistry() as any;
     let switchOnNextBindingAuthorization = false;
     const originalCanUseObservedBinding =
@@ -1686,6 +1734,8 @@ describe("resync_agents tool", () => {
         workspace_id: "workspace:1",
         role: "worker",
         cli: "codex",
+        state: "working",
+        surface_provenance: "cmuxlayer_spawn",
       }),
     );
     const route = makeMovedUuidReflowExec();
@@ -1701,6 +1751,7 @@ describe("resync_agents tool", () => {
     });
     const server = createServer({ context });
     await context.lifecycleStartPromise;
+    stateMgr.transition("uuid-reflow-worker-after-snapshot", "idle");
     const registry = (server as any)._registeredTools["interact"]._engine.getRegistry();
     armAfterSecondResyncMerge(registry, snapshot.arm);
 
@@ -1730,7 +1781,67 @@ describe("resync_agents tool", () => {
     }
   });
 
+  it("resync_agents never moves an idle worker that starts working before mutation", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const agentId = "idle-worker-starts-working";
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: agentId,
+        surface_id: "surface:worker-left",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "workspace:1",
+        state: "working",
+        role: "worker",
+        cli: "codex",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+    );
+    const base = makeLeftColumnWorkerExec({ stableIds: true });
+    let registry: any;
+    const snapshot = afterNextPaneSnapshot(base, "pane:right", () => {
+      const working = stateMgr.transition(agentId, "working");
+      registry.set(agentId, working);
+    });
+    const context = createServerContext({
+      exec: snapshot.exec,
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context });
+    await context.lifecycleStartPromise;
+    const idle = stateMgr.transition(agentId, "idle");
+    registry = (server as any)._registeredTools["interact"]._engine.getRegistry();
+    registry.set(agentId, idle);
+    armAfterSecondResyncMerge(registry, snapshot.arm);
+
+    try {
+      const result = await (server as any)._registeredTools["resync_agents"].handler(
+        {},
+        {} as any,
+      );
+      const parsed = parseResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(snapshot.exec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["move-surface"]),
+      );
+      expect(parsed.diff.reflowed).toEqual([]);
+      expect(parsed.diff.reflow_skipped).toEqual([
+        expect.objectContaining({
+          agent_id: agentId,
+          operation: "move_surface",
+          reason: expect.stringMatching(/state|busy/i),
+        }),
+      ]);
+    } finally {
+      await server.close();
+      context.dispose();
+    }
+  });
+
   it("resync_agents fresh-resolves a seeded surface UUID before cleanup instead of closing a recycled ref", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -1751,6 +1862,7 @@ describe("resync_agents tool", () => {
       return result;
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1779,6 +1891,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents reports and skips a seed split in a manual workspace", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -1793,6 +1906,7 @@ describe("resync_agents tool", () => {
       return base(cmd, args);
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1818,6 +1932,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents reports and skips moving a manual surface", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({ stableIds: true });
     const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
       if (args.includes("list-status")) {
@@ -1829,6 +1944,7 @@ describe("resync_agents tool", () => {
       return base(cmd, args);
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1850,6 +1966,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents reports and skips seed cleanup when the seed becomes manual", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -1871,6 +1988,7 @@ describe("resync_agents tool", () => {
       return result;
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1893,6 +2011,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents rechecks workspace mode after its final seed topology read", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -1922,6 +2041,7 @@ describe("resync_agents tool", () => {
       return result;
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1943,6 +2063,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents rechecks surface mode after its final move topology read", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({ stableIds: true });
     let armModeFlip = false;
     let manual = false;
@@ -1969,6 +2090,7 @@ describe("resync_agents tool", () => {
       return result;
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -1990,6 +2112,7 @@ describe("resync_agents tool", () => {
   });
 
   it("resync_agents rechecks seed mode after its final cleanup topology read", async () => {
+    writeProgrammaticLeftWorker();
     const base = makeLeftColumnWorkerExec({
       singleColumn: true,
       stableIds: true,
@@ -2020,6 +2143,7 @@ describe("resync_agents tool", () => {
       return result;
     });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -2041,9 +2165,14 @@ describe("resync_agents tool", () => {
     ]);
   });
 
-  it("resync_agents seeds a right column for a single-column auto-discovered worker", async () => {
-    const exec = makeLeftColumnWorkerExec({ singleColumn: true });
+  it("resync_agents seeds a right column for a single-column programmatic worker", async () => {
+    writeProgrammaticLeftWorker();
+    const exec = makeLeftColumnWorkerExec({
+      singleColumn: true,
+      stableIds: true,
+    });
     const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
 
     const result = await (server as any)._registeredTools["resync_agents"].handler(
       {},
@@ -2074,6 +2203,40 @@ describe("resync_agents tool", () => {
     expect(parsed.diff.reflowed).toEqual([
       expect.objectContaining({
         surface_id: "surface:worker-left",
+        from_column: 0,
+        to_column: 1,
+      }),
+    ]);
+  });
+
+  it("resync_agents ignores a zero-area phantom before the two rendered role columns", async () => {
+    writeProgrammaticLeftWorker();
+    const exec = makeLeftColumnWorkerExec({
+      stableIds: true,
+      zeroAreaPhantom: true,
+    });
+    const server = createServer({ exec, stateDir: TEST_DIR });
+    markProgrammaticLeftWorkerIdle();
+
+    const result = await (server as any)._registeredTools["resync_agents"].handler(
+      {},
+      {} as any,
+    );
+    const parsed = parseResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "move-surface",
+        "--surface",
+        "surface:worker-left",
+        "--pane",
+        "pane:right",
+      ]),
+    );
+    expect(parsed.diff.reflowed).toEqual([
+      expect.objectContaining({
         from_column: 0,
         to_column: 1,
       }),

@@ -148,12 +148,51 @@ export function deriveColumnIndex(panes: CmuxPane[]): Map<string, number> {
   );
 }
 
-function isDedicatedOrchestratorPane(layout: PaneLayout): boolean {
+/**
+ * Role columns ignore zero-area phantom panes when cmux also reports rendered
+ * panes. If every pane is backgrounded (all frames are zero-area), preserve
+ * deterministic pane-index ordering so the two logical columns do not collapse.
+ */
+export function deriveRoleColumnIndex(
+  panes: CmuxPane[],
+): Map<string, number> {
+  const hasCompleteGeometry = panes.every((pane) => pane.pixel_frame);
+  const renderedPanes = hasCompleteGeometry
+    ? panes.filter(
+        (pane) =>
+          pane.pixel_frame!.width > 0 && pane.pixel_frame!.height > 0,
+      )
+    : panes;
+  return deriveColumnIndex(renderedPanes.length > 0 ? renderedPanes : panes);
+}
+
+export function canonicalRoleColumn(role: AgentRole): number | null {
+  if (role === "orchestrator") return 0;
+  if (role === "worker") return 1;
+  return null;
+}
+
+/**
+ * Return the current top pane in a role's canonical column. Geometry is the
+ * authority when cmux provides it; pane index is the deterministic fallback.
+ * Pane contents deliberately do not participate in this choice.
+ */
+export function topPaneInRoleColumn(
+  panes: CmuxPane[],
+  role: AgentRole,
+): CmuxPane | null {
+  const targetColumn = canonicalRoleColumn(role);
+  if (targetColumn === null) return null;
+  const columnByPane = deriveRoleColumnIndex(panes);
   return (
-    layout.orchestratorCount > 0 &&
-    layout.icCount === 0 &&
-    layout.workerCount === 0 &&
-    layout.nonRoleCount === 0
+    [...panes]
+      .filter((pane) => columnByPane.get(pane.ref) === targetColumn)
+      .sort((a, b) => {
+        const aY = a.pixel_frame?.y ?? a.index;
+        const bY = b.pixel_frame?.y ?? b.index;
+        return aY - bY || a.index - b.index;
+      })
+      .at(0) ?? null
   );
 }
 
@@ -172,84 +211,6 @@ function isDedicatedWorkerPane(layout: PaneLayout): boolean {
     layout.orchestratorCount === 0 &&
     layout.icCount === 0 &&
     layout.nonRoleCount === 0
-  );
-}
-
-/**
- * A pane workers own for docking. Stricter than "has a worker": it must hold no
- * orchestrators/ICs and workers must be the strict majority of its surfaces, so
- * a real workers pane that also carries a stray non-role tab (a setup shell, a
- * dashboard) still docks new workers as tabs instead of spawning a third pane.
- * A pure dedicated worker pane (nonRoleCount === 0) trivially satisfies this.
- * A lone worker tied with a non-role surface does NOT (1 is not > 1), so an
- * accidental worker in someone's shell pane still splits out to a clean pane.
- */
-function isWorkerDockPane(layout: PaneLayout): boolean {
-  return (
-    layout.orchestratorCount === 0 &&
-    layout.icCount === 0 &&
-    layout.workerCount > 0 &&
-    layout.workerCount > layout.nonRoleCount
-  );
-}
-
-function isWorkerMajorityPane(layout: PaneLayout): boolean {
-  const nonWorkerCount = layout.surfaces.length - layout.workerCount;
-  return layout.workerCount > 0 && layout.workerCount > nonWorkerCount;
-}
-
-function isLeadMajorityPane(layout: PaneLayout): boolean {
-  const leadCount = layout.orchestratorCount + layout.icCount;
-  const nonLeadCount = layout.surfaces.length - leadCount;
-  return leadCount > 0 && leadCount > nonLeadCount;
-}
-
-function isNonLeadWorkerZonePane(
-  layout: PaneLayout,
-  leftPane: PaneLayout | undefined,
-): boolean {
-  const workerZoneCount = layout.workerCount + layout.unknownCount;
-  const nonWorkerZoneCount =
-    layout.surfaces.length -
-    layout.orchestratorCount -
-    layout.icCount -
-    workerZoneCount;
-
-  return (
-    layout.pane.ref !== leftPane?.pane.ref &&
-    layout.orchestratorCount === 0 &&
-    layout.icCount === 0 &&
-    workerZoneCount > 0 &&
-    workerZoneCount > nonWorkerZoneCount
-  );
-}
-
-function isSparseWorkerZoneSeedPane(layout: PaneLayout): boolean {
-  return (
-    layout.orchestratorCount === 0 &&
-    layout.icCount === 0 &&
-    layout.workerCount === 0 &&
-    layout.unknownCount === 0
-  );
-}
-
-function paneContainingSurface(
-  layouts: PaneLayout[],
-  surfaceId?: string | null,
-): PaneLayout | undefined {
-  if (!surfaceId) return undefined;
-  return layouts.find((layout) =>
-    layout.surfaces.some((surface) => surface.ref === surfaceId),
-  );
-}
-
-function paneContainingAnySurface(
-  layouts: PaneLayout[],
-  surfaceIds: ReadonlySet<string>,
-): PaneLayout | undefined {
-  if (surfaceIds.size === 0) return undefined;
-  return layouts.find((layout) =>
-    layout.surfaces.some((surface) => surfaceIds.has(surface.ref)),
   );
 }
 
@@ -412,14 +373,11 @@ export function collectRoleSurfaceIds(
 }
 
 /**
- * Deterministic worker placement:
- * - in a single-column layout, the first worker creates the right split
- * - once at least two columns exist, workers become tabs in the rightmost
- *   non-lead-owned pane; worker-dock and worker-zone predicates only order
- *   which right-column pane wins
- * - if every right-column pane is lead-owned, split within that column instead
- *   of creating another column
- * - single-column layouts may still split right to seed the worker column
+ * Role-deterministic placement:
+ * - orchestrators dock at the current top of column 0
+ * - workers dock at the current top of column 1, independent of pane fill
+ * - a missing worker column is seeded to the right of the top lead pane
+ * - IC placement retains its existing hierarchy-aware policy
  */
 export function chooseAgentSpawnPlacement(
   panes: CmuxPane[],
@@ -436,50 +394,31 @@ export function chooseAgentSpawnPlacement(
     const bColumn = columnByPane.get(b.pane.ref) ?? b.pane.index;
     return aColumn - bColumn || a.pane.index - b.pane.index;
   };
-  const leftmostByColumn = (candidates: PaneLayout[]) =>
-    [...candidates].sort(byColumnThenIndex).at(0);
   const rightmostByColumn = (candidates: PaneLayout[]) =>
     [...candidates].sort(byColumnThenIndex).at(-1);
-  const leftPane = leftmostByColumn(layouts);
 
   if (layouts.length === 0) {
     return { kind: "split", direction: "right" };
   }
 
-  const columnValues = [...new Set(columnByPane.values())];
-  const columnCount = columnValues.length;
-  const rightmostColumn = Math.max(...columnValues);
-  const rightmostColumnPanes = layouts.filter(
-    (layout) => columnByPane.get(layout.pane.ref) === rightmostColumn,
-  );
-
   if (role === "orchestrator") {
-    const leftLeadPane =
-      leftPane && !isWorkerMajorityPane(leftPane) ? leftPane : undefined;
-    const orchestratorPane =
-      leftLeadPane ??
-      leftmostByColumn(layouts.filter(isDedicatedOrchestratorPane));
+    const orchestratorPane = topPaneInRoleColumn(panes, role);
     return orchestratorPane
-      ? { kind: "surface", pane: orchestratorPane.pane.ref }
+      ? { kind: "surface", pane: orchestratorPane.ref }
       : { kind: "split", direction: "left" };
   }
 
-  // Column 0 is reserved for leads. A worker in any single-column workspace
-  // must seed the right worker column, even when the existing pane is already
-  // worker-owned or role classification is sparse. Docking into that pane would
-  // make the bad placement fill-dependent and permanent.
-  if (role === "worker" && columnCount < 2) {
-    const hasLeadColumn =
-      layouts.some(isLeadMajorityPane) ||
-      context.parentRole === "orchestrator" ||
-      context.parentRole === "ic";
-    return hasLeadColumn
-      ? { kind: "split", direction: "right" }
-      : {
-          kind: "split",
-          direction: "right",
-          pane: rightmostByColumn(layouts)?.pane.ref,
-        };
+  if (role === "worker") {
+    const workerPane = topPaneInRoleColumn(panes, role);
+    if (workerPane) {
+      return { kind: "surface", pane: workerPane.ref };
+    }
+    const leadPane = topPaneInRoleColumn(panes, "orchestrator");
+    return {
+      kind: "split",
+      direction: "right",
+      ...(leadPane ? { pane: leadPane.ref } : {}),
+    };
   }
 
   const workerPanes = layouts.filter(isDedicatedWorkerPane);
@@ -501,132 +440,7 @@ export function chooseAgentSpawnPlacement(
     return { kind: "split", direction: "right" };
   }
 
-  if (columnCount >= 2) {
-    const nonLeadRightColumnPanes = rightmostColumnPanes.filter(
-      (layout) => !isLeadMajorityPane(layout),
-    );
-    const structuralWorkerPane =
-      rightmostByColumn(nonLeadRightColumnPanes.filter(isWorkerDockPane)) ??
-      rightmostByColumn(
-        nonLeadRightColumnPanes.filter((layout) =>
-          isNonLeadWorkerZonePane(layout, leftPane),
-        ),
-      ) ??
-      rightmostByColumn(
-        nonLeadRightColumnPanes.filter(isSparseWorkerZoneSeedPane),
-      ) ??
-      rightmostByColumn(nonLeadRightColumnPanes);
-
-    if (structuralWorkerPane) {
-      return { kind: "surface", pane: structuralWorkerPane.pane.ref };
-    }
-
-    const leadOwnedRightPane = rightmostByColumn(rightmostColumnPanes);
-    if (leadOwnedRightPane) {
-      return {
-        kind: "split",
-        direction: "down",
-        pane: leadOwnedRightPane.pane.ref,
-      };
-    }
-  }
-
-  if (context.parentRole === "ic") {
-    const childPane = paneContainingAnySurface(
-      layouts,
-      context.childWorkerSurfaceIds ?? new Set(),
-    );
-    if (childPane && isDedicatedWorkerPane(childPane)) {
-      return { kind: "surface", pane: childPane.pane.ref };
-    }
-
-    const parentPane = paneContainingSurface(layouts, context.parentSurfaceId);
-    if (parentPane) {
-      return {
-        kind: "split",
-        direction: "down",
-        pane: parentPane.pane.ref,
-      };
-    }
-  }
-
-  if (context.parentRole === "orchestrator") {
-    const childPane = paneContainingAnySurface(
-      layouts,
-      context.childWorkerSurfaceIds ?? new Set(),
-    );
-    if (childPane && isWorkerDockPane(childPane)) {
-      return { kind: "surface", pane: childPane.pane.ref };
-    }
-
-    const parentPane = paneContainingSurface(layouts, context.parentSurfaceId);
-    if (parentPane) {
-      return {
-        kind: "split",
-        direction: "right",
-        pane: parentPane.pane.ref,
-      };
-    }
-  }
-
-  // Dock into the rightmost pane workers already own — including one that
-  // carries a stray non-role tab — so a populated workers pane never gets a
-  // redundant third pane split off beside it.
-  const rightmostWorkerPane = rightmostByColumn(
-    layouts.filter(isWorkerDockPane),
-  );
-  if (rightmostWorkerPane) {
-    return { kind: "surface", pane: rightmostWorkerPane.pane.ref };
-  }
-
-  const hasLiveWorkerOrUnknownSurface = layouts.some(
-    (layout) => layout.workerCount > 0 || layout.unknownCount > 0,
-  );
-  if (!hasLiveWorkerOrUnknownSurface) {
-    const sparseWorkerZonePane = rightmostByColumn(
-      layouts.filter(
-        (layout) =>
-          layout.pane.ref !== leftPane?.pane.ref &&
-          isSparseWorkerZoneSeedPane(layout),
-      ),
-    );
-    if (sparseWorkerZonePane) {
-      return { kind: "surface", pane: sparseWorkerZonePane.pane.ref };
-    }
-  }
-
-  const mixedWorkerPane = rightmostByColumn(
-    layouts.filter(
-      (layout) =>
-        (layout.workerCount > 0 || layout.unknownCount > 0) &&
-        !isWorkerDockPane(layout),
-    ),
-  );
-  if (mixedWorkerPane) {
-    if (isNonLeadWorkerZonePane(mixedWorkerPane, leftPane)) {
-      return { kind: "surface", pane: mixedWorkerPane.pane.ref };
-    }
-
-    return {
-      kind: "split",
-      direction: "right",
-      pane: mixedWorkerPane.pane.ref,
-    };
-  }
-
-  const rightmostIcPane = rightmostByColumn(icPanes);
-  if (rightmostIcPane) {
-    return {
-      kind: "split",
-      direction: "down",
-      pane: rightmostIcPane.pane.ref,
-    };
-  }
-
-  const rightmostPane = rightmostByColumn(layouts);
-  return rightmostPane
-    ? { kind: "split", direction: "right", pane: rightmostPane.pane.ref }
-    : { kind: "split", direction: "right" };
+  return { kind: "split", direction: "right" };
 }
 
 /**
