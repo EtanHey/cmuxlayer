@@ -15,6 +15,7 @@ import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
+import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
   SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
@@ -6220,6 +6221,232 @@ describe("tool handler integration", () => {
     expect(secondParsed.placement).toBe("surface");
     expect(secondParsed.direction).toBeNull();
   });
+
+  it.each([
+    {
+      label: "an explicit Claude worker",
+      cli: "claude" as const,
+      title: "fableWeaverClaude",
+      role: "worker" as const,
+      reportsSurfaceUuid: true,
+      expectedSpawnRole: "worker" as const,
+      expectedRole: "worker" as const,
+      expectedSidebarRole: "worker" as const,
+    },
+    {
+      label: "a no-role Claude",
+      cli: "claude" as const,
+      title: "fableWeaverClaude",
+      role: undefined,
+      reportsSurfaceUuid: true,
+      expectedSpawnRole: "orchestrator" as const,
+      expectedRole: "orchestrator" as const,
+      expectedSidebarRole: "lead" as const,
+    },
+    {
+      label: "an explicit Codex orchestrator",
+      cli: "codex" as const,
+      title: "cmuxlayerCodex",
+      role: "orchestrator" as const,
+      reportsSurfaceUuid: true,
+      expectedSpawnRole: "orchestrator" as const,
+      expectedRole: "orchestrator" as const,
+      expectedSidebarRole: "lead" as const,
+    },
+    {
+      label: "a ref-only override after UUID identity appears",
+      cli: "claude" as const,
+      title: "fableWeaverClaude",
+      role: "worker" as const,
+      reportsSurfaceUuid: false,
+      expectedSpawnRole: "worker" as const,
+      expectedRole: "orchestrator" as const,
+      expectedSidebarRole: "lead" as const,
+    },
+  ])(
+    "persists the authoritative new_split role for $label through registry and sidebar",
+    async ({
+      cli,
+      title: initialTitle,
+      role,
+      reportsSurfaceUuid,
+      expectedSpawnRole,
+      expectedRole,
+      expectedSidebarRole,
+    }) => {
+      const stateDir = join(
+        CHANNEL_TEST_DIR,
+        `new-split-role-authority-${cli}-${role ?? "default"}-${reportsSurfaceUuid ? "uuid" : "ref"}`,
+      );
+      const surfaceUuid =
+        cli === "claude"
+          ? "11111111-2222-4333-8444-555555555555"
+          : "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      let created = false;
+      let surfaceTitle = initialTitle;
+      const publications: FleetSidebarPublication[] = [];
+      rmSync(stateDir, { recursive: true, force: true });
+
+      const mockClient = {
+        listWorkspaces: vi.fn().mockResolvedValue({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "cmuxlayer",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        listPanes: vi.fn().mockImplementation(async () => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: created
+            ? [
+                {
+                  ref: "pane:agent",
+                  index: 0,
+                  focused: true,
+                  surface_count: 1,
+                  surface_refs: ["surface:agent"],
+                  surface_ids: [surfaceUuid],
+                  pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+                },
+              ]
+            : [],
+        })),
+        listPaneSurfaces: vi.fn().mockImplementation(async () => ({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: "pane:agent",
+          surfaces: created
+            ? [
+                {
+                  ref: "surface:agent",
+                  id: surfaceUuid,
+                  title: surfaceTitle,
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [],
+        })),
+        readScreen: vi.fn().mockImplementation(async () => ({
+          surface: "surface:agent",
+          text:
+            cli === "claude"
+              ? [
+                  "0 tokens",
+                  "─────────────────────────────────────────────────────────────────────",
+                  "❯ ",
+                  "─────────────────────────────────────────────────────────────────────",
+                  "🤖 Opus 4.8 (1M context) | 💰 $0.00 | ⏱️  0m | 📚 88%",
+                ].join("\n")
+              : [
+                  "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer",
+                  "codex> ",
+                ].join("\n"),
+          lines: 30,
+          scrollback_used: false,
+        })),
+        newSplit: vi.fn().mockImplementation(async () => {
+          created = true;
+          return {
+            workspace: "workspace:1",
+            surface: "surface:agent",
+            ...(reportsSurfaceUuid ? { surface_id: surfaceUuid } : {}),
+            pane: "pane:agent",
+            title: "",
+            type: "terminal" as const,
+          };
+        }),
+        newSurface: vi.fn(),
+        renameTab: vi.fn().mockImplementation(async (_surface, nextTitle) => {
+          surfaceTitle = nextTitle;
+        }),
+        selectWorkspace: vi.fn(),
+        moveSurface: vi.fn(),
+        closeSurface: vi.fn(),
+        send: vi.fn(),
+        sendKey: vi.fn(),
+        log: vi.fn(),
+        setStatus: vi.fn(),
+        clearStatus: vi.fn(),
+        setProgress: vi.fn(),
+        clearProgress: vi.fn(),
+        notify: vi.fn(),
+      };
+      const context = createServerContext({
+        client: mockClient as any,
+        stateDir,
+        skipAgentLifecycle: true,
+        controlHealthIntervalMs: 0,
+      });
+      const splitServer = createServer({
+        context,
+        skipAgentLifecycle: true,
+      });
+      let lifecycleServer: ReturnType<typeof createServer> | null = null;
+
+      try {
+        const splitTool = (splitServer as any)._registeredTools["new_split"];
+        const splitResult = await splitTool.handler(
+          {
+            direction: "right",
+            workspace: "workspace:1",
+            title: initialTitle,
+            ...(role ? { role } : {}),
+          },
+          {} as any,
+        );
+        const parsedSplit =
+          splitResult.structuredContent ??
+          JSON.parse(splitResult.content[0].text);
+
+        expect(parsedSplit.ok).toBe(true);
+        expect(parsedSplit.role).toBe(expectedSpawnRole);
+        expect(context.roleSurfaceOverrides.get("surface:agent")?.role).toBe(
+          expectedSpawnRole,
+        );
+        if (role === "worker") {
+          expect(mockClient.newSplit).toHaveBeenCalledWith(
+            "right",
+            expect.objectContaining({ workspace: "workspace:1" }),
+          );
+        }
+
+        await splitServer.close();
+        lifecycleServer = createServer({
+          context,
+          skipAgentLifecycle: false,
+          fleetSidebarPublisher: {
+            publish: (publication) => publications.push(publication),
+            dispose: vi.fn(),
+          },
+        });
+        await context.lifecycleStartPromise;
+
+        const record = context.lifecycleRegistry
+          ?.list()
+          .find((candidate) => candidate.surface_id === "surface:agent");
+        expect(record).toMatchObject({ cli, role: expectedRole });
+
+        const populated = [...publications]
+          .reverse()
+          .find((publication) => publication.state === "populated");
+        const seat = populated?.snapshot.lanes
+          .flatMap((lane) => lane.seats)
+          .find((candidate) => candidate.surfaceRef === "surface:agent");
+        expect(seat).toMatchObject({ role: expectedSidebarRole });
+      } finally {
+        await lifecycleServer?.close();
+        context.dispose();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("new_split follows a remembered role surface UUID instead of its recycled ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";

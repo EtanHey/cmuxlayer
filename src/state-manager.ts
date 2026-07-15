@@ -19,6 +19,7 @@ import { EventLog } from "./event-log.js";
 import {
   assertValidTransition,
   type AgentRecord,
+  type AgentRole,
   type AgentState,
   type StateTransition,
 } from "./agent-types.js";
@@ -536,6 +537,7 @@ export class StateManager {
     agentId: string,
     discovered: DiscoveredAgent,
     surfaceObserverId?: string | null,
+    explicitRole?: AgentRole | null,
   ): AgentRecord {
     const existing = this.readState(agentId);
     if (existing) {
@@ -565,11 +567,12 @@ export class StateManager {
       parent_agent_id: null,
       spawn_depth: 0,
       role:
-        discovered.cli === "claude"
+        explicitRole ??
+        (discovered.cli === "claude"
           ? "orchestrator"
           : discovered.cli === "unknown"
             ? "orchestrator"
-            : "worker",
+            : "worker"),
       auto_archive_on_done: false,
       deletion_intent: false,
       quality: "unknown",

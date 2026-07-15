@@ -76,6 +76,16 @@ export interface AgentRegistryOptions {
    * never persisted in agent state.
    */
   observerEpochProvider?: () => string | null | undefined;
+  /**
+   * Resolve caller-authoritative role metadata retained by the surface creator.
+   * Returning null/undefined leaves launcher/CLI inference as the fallback.
+   */
+  explicitRoleProvider?: (
+    discovered: Pick<
+      DiscoveredAgent,
+      "surface_id" | "surface_uuid" | "workspace_id"
+    >,
+  ) => AgentRole | null | undefined;
 }
 
 interface RegistryObserverSnapshot {
@@ -480,6 +490,9 @@ export class AgentRegistry {
   private observerId: string | null;
   private observerIdProvider: (() => string | null | undefined) | null;
   private observerEpochProvider: (() => string | null | undefined) | null;
+  private explicitRoleProvider: NonNullable<
+    AgentRegistryOptions["explicitRoleProvider"]
+  > | null;
   private enforceObserverOwnership: boolean;
 
   constructor(
@@ -492,6 +505,7 @@ export class AgentRegistry {
     this.observerId = opts?.observerId?.trim() || null;
     this.observerIdProvider = opts?.observerIdProvider ?? null;
     this.observerEpochProvider = opts?.observerEpochProvider ?? null;
+    this.explicitRoleProvider = opts?.explicitRoleProvider ?? null;
     // Omitted options retain the historical library/test behavior. Production
     // explicitly passes options (including null) so missing instance evidence
     // fails closed instead of treating one topology as globally authoritative.
@@ -521,6 +535,10 @@ export class AgentRegistry {
     } catch {
       return null;
     }
+  }
+
+  private explicitRoleFor(discovered: DiscoveredAgent): AgentRole | null {
+    return this.explicitRoleProvider?.(discovered) ?? null;
   }
 
   /** Capture persisted owner and transient epoch before an awaited scan. */
@@ -1096,6 +1114,7 @@ export class AgentRegistry {
         agentId,
         discoveredEntry,
         this.getObserverId(),
+        this.explicitRoleFor(discoveredEntry),
       );
       this.agents.set(agentId, record);
       if (!this.canUseObservedBinding(record, discoveredEntry.surface_uuid)) {
@@ -1222,7 +1241,7 @@ export class AgentRegistry {
       ) {
         return [];
       }
-      const candidate = repairCandidateForSurface(entry);
+      const candidate = this.repairCandidateForDiscovery(entry);
       if (!candidate) return [];
       return [
         {
@@ -1232,6 +1251,16 @@ export class AgentRegistry {
         },
       ];
     });
+  }
+
+  private repairCandidateForDiscovery(
+    discovered: DiscoveredAgent,
+    seatRegistry?: SeatRegistry | null,
+  ): RegistryRepairCandidate | null {
+    const candidate = repairCandidateForSurface(discovered, seatRegistry);
+    if (!candidate) return null;
+    const explicitRole = this.explicitRoleFor(discovered);
+    return explicitRole ? { ...candidate, role: explicitRole } : candidate;
   }
 
   private selfHealManagedRegistrationsFromDiscovery(
@@ -1376,6 +1405,7 @@ export class AgentRegistry {
     const desiredState = discoveredStatusToAgentState(
       discoveredEntry.parsed_status,
     );
+    const explicitRole = this.explicitRoleFor(discoveredEntry);
 
     const patch: Partial<AgentRecord> = {};
     if (repo !== record.repo) patch.repo = repo;
@@ -1385,6 +1415,9 @@ export class AgentRegistry {
     }
     if (surfaceUuid !== null && (record.surface_uuid ?? null) !== surfaceUuid) {
       patch.surface_uuid = surfaceUuid;
+    }
+    if (explicitRole && record.role !== explicitRole) {
+      patch.role = explicitRole;
     }
     const observerId = this.getObserverId();
     if (observerId && record.surface_observer_id !== observerId) {
@@ -1435,6 +1468,7 @@ export class AgentRegistry {
       return null;
     }
     const patch: Partial<AgentRecord> = {};
+    const explicitRole = this.explicitRoleFor(discoveredEntry);
     const persistedUuid = surfaceUuidKey(record.surface_uuid);
     const discoveredUuid = surfaceUuidKey(discoveredEntry.surface_uuid);
     if (
@@ -1457,6 +1491,9 @@ export class AgentRegistry {
       discoveredEntry.surface_uuid != null
     ) {
       patch.surface_uuid = discoveredEntry.surface_uuid;
+    }
+    if (explicitRole && record.role !== explicitRole) {
+      patch.role = explicitRole;
     }
     const observerId = this.getObserverId();
     if (observerId && record.surface_observer_id !== observerId) {
@@ -1822,7 +1859,10 @@ export class AgentRegistry {
 
     for (const entry of discovered) {
       if (entry.read_error) continue;
-      const candidate = repairCandidateForSurface(entry, opts?.seatRegistry);
+      const candidate = this.repairCandidateForDiscovery(
+        entry,
+        opts?.seatRegistry,
+      );
       if (!candidate) continue;
 
       try {
