@@ -71,6 +71,17 @@ cmux's socket. This is what stops a worker from opening in a *different* cmux ap
 (e.g. stable vs nightly). If it is unset and more than one cmux instance is live,
 the factory logs which socket it bound to and how to pin it.
 
+The fleet sidebar follows the same instance axis. Stable keeps its canonical
+`~/.config/cmux/sidebars/fleet.swift` output unchanged. A named socket or bundle
+instance writes `~/.config/cmux-<instance>/sidebars/fleet.swift`; for example,
+`/tmp/cmux-nightly.sock` writes under `~/.config/cmux-nightly/`. Its collapse
+state is isolated under `~/.local/state/cmuxlayer/<instance>/`. Set
+`CMUXLAYER_FLEET_SIDEBAR_OUTPUT_PATH` to override the generated Swift path
+explicitly; the matching collapse state is stored beside that override. The
+canonical `/tmp/cmux-nightly.sock` and `/tmp/cmux-dev.sock` names stay readable;
+other instance keys include a short hash of the complete socket path or bundle
+ID so distinct identities cannot collide after filename sanitization.
+
 ## Cutting a release (versioning, on the go)
 
 One command does the whole pipeline:
