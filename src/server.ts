@@ -9419,10 +9419,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const repair = registry.repairFromDiscovery(discoveredBeforeRepair, {
               seatRegistry,
             });
+            const liveSeatProofObserverId = registry.getObserverId();
+            const liveSeatProofObserverEpoch = registry.getObserverEpoch();
             discovery.invalidate();
-            await registry.listMerged(discovery, { force: true });
+            const discoveredAfterRepair = await discovery.scan(true);
+            const liveSeatProof = registry.createLiveSeatDiscoveryProof(
+              discoveredAfterRepair,
+              {
+                seatRegistry,
+                expectedObserverId: liveSeatProofObserverId,
+                expectedObserverEpoch: liveSeatProofObserverEpoch,
+              },
+            );
+            await registry.listMerged(discovery, {
+              force: true,
+              discovered: discoveredAfterRepair,
+            });
             const surfacelessEvicted = await registry.evictSurfaceless(
-              surfaceAbsenceConfirmation,
+              {
+                ...surfaceAbsenceConfirmation,
+                liveSeatProof,
+              },
             );
             engine.evictDeadProcessAgents();
             discovery.invalidate();

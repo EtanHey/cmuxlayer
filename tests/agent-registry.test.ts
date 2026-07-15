@@ -67,6 +67,22 @@ function makeDiscovered(
 }
 
 const REPAIR_SEATS: SeatRegistry = {
+  coachClaude: {
+    repo: "coach",
+    launchers: {
+      claude: "coachClaude",
+    },
+    lane: "coach",
+    role: "lead",
+  },
+  golemsCodex: {
+    repo: "golems",
+    launchers: {
+      codex: "golemsCodex",
+    },
+    lane: "golems",
+    role: "worker",
+  },
   driverBuddy: {
     repo: "driverBuddy",
     launchers: {
@@ -1044,6 +1060,72 @@ describe("AgentRegistry", () => {
       expect(registry.get("list-worker-transient-gap")).toBeNull();
     });
 
+    it("rejects injected discovery when the observer epoch changes during listMerged preamble", async () => {
+      const ownerId = "cmux:/tmp/test.sock";
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      let observerEpoch = `${ownerId}@epoch-1`;
+      let changeEpochOnEnumeration = false;
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "epoch-pinned-managed-agent",
+          surface_id: "surface:old",
+          surface_uuid: surfaceUuid,
+          surface_observer_id: ownerId,
+          workspace_id: "workspace:old",
+          state: "working",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => {
+          if (changeEpochOnEnumeration) {
+            observerEpoch = `${ownerId}@epoch-2`;
+          }
+          const surfaceRef = changeEpochOnEnumeration
+            ? "surface:new"
+            : "surface:old";
+          const workspaceRef = changeEpochOnEnumeration
+            ? "workspace:new"
+            : "workspace:old";
+          return [
+            {
+              ...makeSurface(surfaceRef),
+              id: surfaceUuid,
+              workspace_ref: workspaceRef,
+            },
+          ];
+        },
+        {
+          observerIdProvider: () => ownerId,
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      await registry.reconstitute();
+      changeEpochOnEnumeration = true;
+
+      await registry.listMerged(
+        { scan: vi.fn() } as any,
+        {
+          discovered: [
+            makeDiscovered({
+              surface_id: "surface:new",
+              surface_uuid: surfaceUuid,
+              workspace_id: "workspace:new",
+              surface_title: "brainlayerCodex",
+              cli: "codex",
+            }),
+          ],
+        },
+      );
+
+      expect(observerEpoch).toBe(`${ownerId}@epoch-2`);
+      expect(stateMgr.readState("epoch-pinned-managed-agent")).toMatchObject({
+        surface_id: "surface:old",
+        surface_uuid: surfaceUuid,
+        workspace_id: "workspace:old",
+      });
+    });
+
     it("does not evict an owned UUID-less booting row from mixed discovery identity coverage", async () => {
       const agentId = "mixed-discovery-legacy-booting";
       stateMgr.writeState(
@@ -1658,6 +1740,393 @@ describe("AgentRegistry", () => {
       );
     });
 
+    it("repairs a proven-live managed seat in place without losing session metadata", async () => {
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      const observerId = "cmux:/tmp/current.sock";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coach-drifted-record",
+          surface_id: "surface:coach",
+          surface_uuid: surfaceUuid,
+          surface_observer_id: observerId,
+          workspace_id: "workspace:old",
+          repo: "legacy-coach",
+          cli: "codex",
+          launcher_name: "legacyCoachCodex",
+          seat_id: "legacy-seat",
+          seat_lane: "legacy",
+          seat_role: "worker",
+          seat_identity_status: "mismatch",
+          seat_identity_error: "stale metadata",
+          role: "worker",
+          state: "working",
+          cli_session_id: "coach-session-id",
+          cli_session_path: "/tmp/coach-session.jsonl",
+          task_summary: "live coaching session",
+          pid: 4242,
+          surface_provenance: "unknown",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [
+          {
+            ...makeSurface("surface:coach"),
+            id: surfaceUuid,
+          },
+        ],
+        { observerId },
+      );
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_uuid: surfaceUuid,
+            surface_title: "coachClaude",
+            workspace_id: "workspace:coach",
+            cli: "claude",
+            model: "Opus 4.8",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result).toMatchObject({
+        repaired: [
+          {
+            agent_id: "coach-drifted-record",
+            surface_id: "surface:coach",
+            surface_uuid: surfaceUuid,
+            repo: "coach",
+            cli: "claude",
+            launcher_name: "coachClaude",
+            seat_id: "coachClaude",
+            action: "updated",
+          },
+        ],
+        evicted: [],
+        skipped: [],
+      });
+      expect(stateMgr.readState("coachClaude")).toBeNull();
+      expect(stateMgr.readState("coach-drifted-record")).toMatchObject({
+        agent_id: "coach-drifted-record",
+        surface_id: "surface:coach",
+        surface_uuid: surfaceUuid,
+        surface_observer_id: observerId,
+        workspace_id: "workspace:coach",
+        repo: "coach",
+        cli: "claude",
+        launcher_name: "coachClaude",
+        seat_id: "coachClaude",
+        seat_lane: "coach",
+        seat_role: "lead",
+        seat_identity_status: "ok",
+        seat_identity_error: null,
+        role: "orchestrator",
+        state: "working",
+        cli_session_id: "coach-session-id",
+        cli_session_path: "/tmp/coach-session.jsonl",
+        task_summary: "live coaching session",
+        pid: 4242,
+        surface_provenance: "unknown",
+      });
+      expect(registry.list().map((record) => record.agent_id)).toEqual([
+        "coach-drifted-record",
+      ]);
+    });
+
+    it("backfills missing optional seat metadata without renaming a healthy custom managed identity", async () => {
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coach-legacy-record",
+          surface_id: "surface:coach",
+          surface_uuid: surfaceUuid,
+          repo: "coach",
+          cli: "claude",
+          launcher_name: null,
+          seat_id: null,
+          state: "working",
+          cli_session_id: "coach-session-id",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:coach"), id: surfaceUuid },
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_uuid: surfaceUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          agent_id: "coach-legacy-record",
+          seat_id: "coachClaude",
+        }),
+      ]);
+      expect(result.evicted).toEqual([]);
+      expect(result.repaired[0]).not.toHaveProperty("previous_agent_id");
+      expect(stateMgr.readState("coachClaude")).toBeNull();
+      expect(stateMgr.readState("coach-legacy-record")).toMatchObject({
+        agent_id: "coach-legacy-record",
+        launcher_name: "coachClaude",
+        seat_id: "coachClaude",
+        state: "working",
+        cli_session_id: "coach-session-id",
+      });
+    });
+
+    it("skip-reports metadata repair when the drifted state disappears before update", async () => {
+      const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coach-drifted-record",
+          surface_id: "surface:coach",
+          surface_uuid: surfaceUuid,
+          repo: "legacy-coach",
+          cli: "codex",
+          launcher_name: "legacyCoachCodex",
+          seat_identity_status: "mismatch",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:coach"), id: surfaceUuid },
+      ]);
+      await registry.reconstitute();
+      vi.spyOn(stateMgr, "updateRecord").mockImplementation((agentId) => {
+        stateMgr.removeState(agentId);
+        throw new Error(`Agent not found: ${agentId}`);
+      });
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_uuid: surfaceUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result).toEqual({
+        repaired: [],
+        evicted: [],
+        skipped: [
+          expect.objectContaining({
+            surface_id: "surface:coach",
+            surface_uuid: surfaceUuid,
+            agent_id: "coach-drifted-record",
+            seat_id: "coachClaude",
+            reason: "Agent not found: coach-drifted-record",
+          }),
+        ],
+      });
+    });
+
+    it("never evicts a live canonical duplicate when its screen read fails", async () => {
+      const observerId = "cmux:/tmp/current.sock";
+      const driftedUuid = "11111111-2222-4333-8444-555555555555";
+      const canonicalUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coach-drifted-record",
+          surface_id: "surface:coach-drifted",
+          surface_uuid: driftedUuid,
+          surface_observer_id: observerId,
+          repo: "legacy-coach",
+          cli: "codex",
+          launcher_name: "legacyCoachCodex",
+          role: "worker",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          surface_id: "surface:coach-canonical",
+          surface_uuid: canonicalUuid,
+          surface_observer_id: observerId,
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          seat_lane: "coach",
+          seat_role: "lead",
+          seat_identity_status: "ok",
+          role: "orchestrator",
+        }),
+      );
+      const surfaces = [
+        { ...makeSurface("surface:coach-drifted"), id: driftedUuid },
+        { ...makeSurface("surface:coach-canonical"), id: canonicalUuid },
+      ];
+      const registry = new AgentRegistry(stateMgr, async () => surfaces, {
+        observerId,
+      });
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach-drifted",
+            surface_uuid: driftedUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+          }),
+          makeDiscovered({
+            surface_id: "surface:coach-canonical",
+            surface_uuid: canonicalUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+            read_error: true,
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.evicted).toEqual([]);
+      expect(stateMgr.readState("coach-drifted-record")).not.toBeNull();
+      expect(stateMgr.readState("coachClaude")).not.toBeNull();
+      expect(registry.list().map((record) => record.agent_id).sort()).toEqual([
+        "coach-drifted-record",
+        "coachClaude",
+      ]);
+    });
+
+    it("does not evict an unobserved duplicate from a first partial discovery omission", async () => {
+      const firstUuid = "11111111-2222-4333-8444-555555555555";
+      const secondUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+      const makeCoachRecord = (
+        agentId: string,
+        surfaceId: string,
+        surfaceUuid: string,
+      ) =>
+        makeRecord({
+          agent_id: agentId,
+          surface_id: surfaceId,
+          surface_uuid: surfaceUuid,
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          seat_lane: "coach",
+          seat_role: "lead",
+          seat_identity_status: "ok",
+          role: "orchestrator",
+          state: "working",
+        });
+      stateMgr.writeState(
+        makeCoachRecord("coach-session-a", "surface:coach-a", firstUuid),
+      );
+      stateMgr.writeState(
+        makeCoachRecord("coach-session-b", "surface:coach-b", secondUuid),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:coach-a"), id: firstUuid },
+        { ...makeSurface("surface:coach-b"), id: secondUuid },
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach-a",
+            surface_uuid: firstUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.evicted).toEqual([]);
+      expect(stateMgr.readState("coach-session-a")).not.toBeNull();
+      expect(stateMgr.readState("coach-session-b")).not.toBeNull();
+    });
+
+    it("leaves an absent canonical duplicate for confirmation-based ghost eviction", async () => {
+      const observerId = "cmux:/tmp/current.sock";
+      const liveUuid = "11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coach-session-record",
+          surface_id: "surface:coach-live",
+          surface_uuid: liveUuid,
+          surface_observer_id: observerId,
+          repo: "legacy-coach",
+          cli: "codex",
+          launcher_name: "legacyCoachCodex",
+          seat_identity_status: "mismatch",
+          state: "working",
+          cli_session_id: "coach-session-id",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          surface_id: "surface:coach-gone",
+          surface_uuid: "66666666-7777-4888-8999-aaaaaaaaaaaa",
+          surface_observer_id: observerId,
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          seat_lane: "coach",
+          seat_role: "lead",
+          seat_identity_status: "ok",
+          state: "error",
+          error: "Surface surface:coach-gone disappeared",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [
+          { ...makeSurface("surface:coach-live"), id: liveUuid },
+        ],
+        { observerId },
+      );
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach-live",
+            surface_uuid: liveUuid,
+            surface_title: "coachClaude",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          agent_id: "coach-session-record",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+        }),
+      ]);
+      expect(result.evicted).toEqual([]);
+      expect(stateMgr.readState("coach-session-record")).toMatchObject({
+        agent_id: "coach-session-record",
+        state: "working",
+        cli_session_id: "coach-session-id",
+      });
+      expect(stateMgr.readState("coachClaude")).not.toBeNull();
+    });
+
     it("repairs no-suffix auto-discovered panes from parsed cli and title repo evidence", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -2268,6 +2737,392 @@ describe("AgentRegistry", () => {
         registry.evictSurfaceless({ confirmationMs: 0 }),
       ).resolves.toEqual([]);
       expect(registry.get("uuid-agent-on-legacy-topology")).not.toBeNull();
+    });
+
+    it("keeps a recoverable seat ghost when only a terminal same-seat record has a surface", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "stale-coach-duplicate",
+          state: "done",
+          surface_id: "surface:shell",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:shell"),
+      ]);
+      await registry.reconstitute();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        state: "error",
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
+    });
+
+    it("keeps a recoverable seat ghost when a stale working same-seat record has only a shell surface", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "stale-coach-duplicate",
+          state: "working",
+          surface_id: "surface:shell",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          pid: null,
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:shell"), title: "plain shell" },
+      ], {
+        observerId: "cmux:/tmp/test.sock",
+        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+      });
+      await registry.reconstitute();
+
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:shell",
+            surface_title: "plain shell",
+            cli: "unknown",
+            parsed_status: null,
+            has_agent: false,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+
+      await expect(
+        registry.evictSurfaceless({
+          confirmationMs: 0,
+          liveSeatProof: proof,
+        }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        state: "error",
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
+    });
+
+    it("evicts a confirmed recoverable ghost when discovery proves the live same-seat agent", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "live-coach-record",
+          state: "working",
+          surface_id: "surface:coach",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:coach"),
+      ], {
+        observerId: "cmux:/tmp/test.sock",
+        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+      });
+      await registry.reconstitute();
+
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_title: "coachClaude",
+            cli: "claude",
+            has_agent: true,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+
+      await expect(
+        registry.evictSurfaceless({
+          confirmationMs: 0,
+          liveSeatProof: proof,
+        }),
+      ).resolves.toEqual(["coachClaude"]);
+      expect(registry.get("coachClaude")).toBeNull();
+      expect(registry.get("live-coach-record")).not.toBeNull();
+    });
+
+    it("keeps a recoverable seat ghost when the live sibling surface resolves to another seat", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "stale-coach-row",
+          state: "working",
+          surface_id: "surface:other-agent",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:other-agent"),
+      ], {
+        observerId: "cmux:/tmp/test.sock",
+        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+      });
+      await registry.reconstitute();
+
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:other-agent",
+            surface_title: "golemsCodex",
+            cli: "codex",
+            has_agent: true,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+
+      await expect(
+        registry.evictSurfaceless({
+          confirmationMs: 0,
+          liveSeatProof: proof,
+        }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
+    });
+
+    it("keeps a recoverable seat ghost when seat classification returns a mismatch", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "stale-coach-row",
+          state: "working",
+          surface_id: "surface:mismatch",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:mismatch")],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+      await registry.reconstitute();
+
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:mismatch",
+            surface_title: "coachCodex",
+            cli: "codex",
+            has_agent: true,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
+
+      expect(proof?.seats).toEqual([]);
+      await expect(
+        registry.evictSurfaceless({
+          confirmationMs: 0,
+          liveSeatProof: proof,
+        }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
+    });
+
+    it("keeps a recoverable seat ghost when the observer epoch changes after proof", async () => {
+      let observerEpoch = "cmux:/tmp/test.sock@epoch-1";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "coachClaude",
+          state: "error",
+          surface_id: "surface:gone",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          crash_recover: true,
+          cli_session_id: "recover-me",
+          error: "Surface surface:gone disappeared",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "live-coach-record",
+          state: "working",
+          surface_id: "surface:coach",
+          repo: "coach",
+          cli: "claude",
+          launcher_name: "coachClaude",
+          seat_id: "coachClaude",
+          role: "orchestrator",
+          surface_observer_id: "cmux:/tmp/test.sock",
+        }),
+      );
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:coach")],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      await registry.reconstitute();
+      const proof = registry.createLiveSeatDiscoveryProof(
+        [
+          makeDiscovered({
+            surface_id: "surface:coach",
+            surface_title: "coachClaude",
+            cli: "claude",
+            has_agent: true,
+            read_error: false,
+          }),
+        ],
+        {
+          seatRegistry: REPAIR_SEATS,
+          expectedObserverId: "cmux:/tmp/test.sock",
+          expectedObserverEpoch: observerEpoch,
+        },
+      );
+
+      observerEpoch = "cmux:/tmp/test.sock@epoch-2";
+
+      await expect(
+        registry.evictSurfaceless({
+          confirmationMs: 0,
+          liveSeatProof: proof,
+        }),
+      ).resolves.toEqual([]);
+      expect(registry.get("coachClaude")).toMatchObject({
+        cli_session_id: "recover-me",
+        crash_recover: true,
+      });
     });
 
     it("resets the absence window when the same surface is observed live", async () => {

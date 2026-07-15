@@ -755,6 +755,22 @@ function makeEmptySurfaceExec(): ExecFn {
 }
 
 const REGISTRY_REPAIR_SEATS: SeatRegistry = {
+  coachClaude: {
+    repo: "coach",
+    launchers: {
+      claude: "coachClaude",
+    },
+    lane: "coach",
+    role: "lead",
+  },
+  golemsCodex: {
+    repo: "golems",
+    launchers: {
+      codex: "golemsCodex",
+    },
+    lane: "golems",
+    role: "worker",
+  },
   orcClaude: {
     repo: "orc",
     launchers: {
@@ -931,6 +947,125 @@ function makeRegistryRepairExec(
       stderr: "",
     };
   });
+}
+
+function makeSeatRecordRepairExec(): ExecFn & {
+  showCoachAgent(): void;
+  showCoachShell(): void;
+} {
+  let coachHasAgent = true;
+  const exec = vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("list-workspaces")) {
+      return {
+        stdout: JSON.stringify({
+          workspaces: [
+            {
+              ref: "workspace:1",
+              title: "Active",
+              index: 0,
+              selected: true,
+              pinned: false,
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-panes")) {
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          panes: [
+            {
+              ref: "pane:left",
+              index: 0,
+              focused: true,
+              surface_count: 1,
+              surface_refs: ["surface:coach"],
+              selected_surface_ref: "surface:coach",
+              pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+            },
+            {
+              ref: "pane:right",
+              index: 1,
+              focused: false,
+              surface_count: 1,
+              surface_refs: ["surface:golems"],
+              selected_surface_ref: "surface:golems",
+              pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+            },
+          ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("list-pane-surfaces")) {
+      const pane = args.includes("--pane")
+        ? args[args.indexOf("--pane") + 1]
+        : "pane:left";
+      return {
+        stdout: JSON.stringify({
+          workspace_ref: "workspace:1",
+          window_ref: "window:1",
+          pane_ref: pane,
+          surfaces:
+            pane === "pane:left"
+              ? [
+                  {
+                    ref: "surface:coach",
+                    title: "coachClaude",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ]
+              : [
+                  {
+                    ref: "surface:golems",
+                    title: "golemsCodex",
+                    type: "terminal",
+                    index: 0,
+                    selected: true,
+                  },
+                ],
+        }),
+        stderr: "",
+      };
+    }
+
+    if (args.includes("read-screen")) {
+      const surface = args[args.indexOf("--surface") + 1];
+      return {
+        stdout: JSON.stringify({
+          surface,
+          text:
+            surface === "surface:coach"
+              ? coachHasAgent
+                ? "Claude Code\n✻ Working…\n  Coaching session\n🤖 Opus 4.8 | 💰 $0.40 | ⏱️ 2m\n"
+                : "$ "
+              : "gpt-5.5 · 82% left · ~/Gits/golems\nWorking (1m 03s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        }),
+        stderr: "",
+      };
+    }
+
+    return {
+      stdout: JSON.stringify({}),
+      stderr: "",
+    };
+  });
+  exec.showCoachAgent = () => {
+    coachHasAgent = true;
+  };
+  exec.showCoachShell = () => {
+    coachHasAgent = false;
+  };
+  return exec;
 }
 
 function makeLeftColumnWorkerExec(
@@ -3009,6 +3144,176 @@ describe("resync_agents tool", () => {
       launcher_name: "brainlayerClaude",
       seat_id: "brainClaude",
     });
+  });
+
+  it("resync_agents repairs live coach and golems records in place while evicting only a confirmed dead ghost", async () => {
+    const firstObservedAt = Date.parse("2026-07-15T10:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(firstObservedAt);
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "coach-drifted-record",
+        surface_id: "surface:coach",
+        workspace_id: "workspace:1",
+        repo: "legacy-coach",
+        cli: "codex",
+        launcher_name: "legacyCoachCodex",
+        role: "worker",
+        state: "working",
+        cli_session_id: "coach-session-id",
+        task_summary: "live coaching session",
+        pid: 4242,
+        surface_provenance: "unknown",
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "golems-drifted-record",
+        surface_id: "surface:golems",
+        workspace_id: "workspace:1",
+        repo: "legacy-golems",
+        cli: "claude",
+        launcher_name: "legacyGolemsClaude",
+        role: "orchestrator",
+        state: "working",
+        cli_session_id: "golems-session-id",
+        task_summary: "live golems work",
+        pid: 5252,
+        surface_provenance: "unknown",
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "coachClaude",
+        surface_id: "surface:gone",
+        workspace_id: "workspace:1",
+        repo: "coach",
+        cli: "claude",
+        launcher_name: "coachClaude",
+        seat_id: "coachClaude",
+        seat_lane: "coach",
+        seat_role: "lead",
+        seat_identity_status: "ok",
+        role: "orchestrator",
+        state: "error",
+        error: "Surface surface:gone disappeared",
+        cli_session_id: "coach-ghost-session-id",
+        crash_recover: true,
+        surface_provenance: "unknown",
+      }),
+    );
+    vi.spyOn(process, "kill").mockImplementation(() => true);
+    const exec = makeSeatRecordRepairExec();
+    const server = createServer({
+      exec,
+      stateDir: TEST_DIR,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+    const tool = (server as any)._registeredTools["resync_agents"];
+
+    const first = parseResult(await tool.handler({}, {} as any));
+    expect(first.ok).toBe(true);
+    expect(first.diff.repaired).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "coach-drifted-record",
+          surface_id: "surface:coach",
+          seat_id: "coachClaude",
+        }),
+        expect.objectContaining({
+          agent_id: "golems-drifted-record",
+          surface_id: "surface:golems",
+          seat_id: "golemsCodex",
+        }),
+      ]),
+    );
+    expect(first.diff.evicted).not.toEqual(
+      expect.arrayContaining([
+        "coach-drifted-record",
+        "golems-drifted-record",
+      ]),
+    );
+    expect(first.diff.repair_skipped).toEqual([]);
+    expect(first.diff.mismatches).toEqual([]);
+    expect(first.diff.orphaned).toEqual([]);
+    expect(stateMgr.readState("coachClaude")).toMatchObject({
+      surface_id: "surface:gone",
+      state: "error",
+      crash_recover: true,
+    });
+    expect(stateMgr.readState("golemsCodex")).toBeNull();
+    expect(stateMgr.readState("coach-drifted-record")).toMatchObject({
+      agent_id: "coach-drifted-record",
+      surface_id: "surface:coach",
+      repo: "coach",
+      cli: "claude",
+      launcher_name: "coachClaude",
+      role: "orchestrator",
+      state: "working",
+      cli_session_id: "coach-session-id",
+      task_summary: "live coaching session",
+      pid: 4242,
+    });
+    expect(stateMgr.readState("golems-drifted-record")).toMatchObject({
+      agent_id: "golems-drifted-record",
+      surface_id: "surface:golems",
+      repo: "golems",
+      cli: "codex",
+      launcher_name: "golemsCodex",
+      role: "worker",
+      state: "working",
+      cli_session_id: "golems-session-id",
+      task_summary: "live golems work",
+      pid: 5252,
+    });
+    expect(first.diff.evicted).not.toContain("coachClaude");
+
+    const registry = (server as any)._registeredTools[
+      "interact"
+    ]._engine.getRegistry();
+    const originalRepair = registry.repairFromDiscovery.bind(registry);
+    let replaceAgentAfterRepair = true;
+    vi.spyOn(registry, "repairFromDiscovery").mockImplementation(
+      (...args: any[]) => {
+        const result = originalRepair(...args);
+        if (replaceAgentAfterRepair) {
+          replaceAgentAfterRepair = false;
+          exec.showCoachShell();
+        }
+        return result;
+      },
+    );
+    nowSpy.mockReturnValue(
+      firstObservedAt + SURFACE_EVICTION_CONFIRMATION_MS + 1,
+    );
+    const second = parseResult(await tool.handler({}, {} as any));
+
+    expect(second.ok).toBe(true);
+    expect(second.diff.evicted).not.toContain("coachClaude");
+    expect(stateMgr.readState("coachClaude")).toMatchObject({
+      cli_session_id: "coach-ghost-session-id",
+      crash_recover: true,
+    });
+
+    exec.showCoachAgent();
+    const third = parseResult(await tool.handler({}, {} as any));
+
+    expect(third.ok).toBe(true);
+    expect(third.diff.evicted).toContain("coachClaude");
+    expect(stateMgr.readState("coachClaude")).toBeNull();
+    const mutationCommands = new Set([
+      "new-split",
+      "move-surface",
+      "close-surface",
+      "send",
+      "send-key",
+      "paste-text",
+    ]);
+    const observedMutations = (exec as any).mock.calls.flatMap(
+      ([, args]: [unknown, string[]]) =>
+        args.filter((arg) => mutationCommands.has(arg)),
+    );
+    expect(observedMutations).toEqual([]);
   });
 
   it("resync_agents skips a missing-state seat and continues repairs and ghost eviction", async () => {
