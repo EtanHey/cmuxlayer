@@ -5596,6 +5596,86 @@ To continue this session, run codex resume ${sessionId}`,
       ]);
     });
 
+    it("does not count a successful move as skipped when seed cleanup lacks a stable UUID", async () => {
+      const record = makeRecord({
+        agent_id: "missing-seed-uuid-worker",
+        surface_id: "surface:missing-seed-uuid-worker",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "idle",
+        role: "worker",
+        surface_provenance: "cmuxlayer_spawn",
+      });
+      const leadRef = "surface:lead";
+      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      liveSurfaces = [
+        {
+          ...makeSurface(leadRef),
+          id: leadUuid,
+          workspace_ref: "ws:placement",
+        },
+        {
+          ...makeSurface(record.surface_id),
+          id: record.surface_uuid ?? undefined,
+          workspace_ref: "ws:placement",
+        },
+      ];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement",
+        window_ref: "window:placement",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 2,
+            surface_refs: [leadRef, record.surface_id],
+            surface_ids: [leadUuid, record.surface_uuid],
+            pixel_frame: leftFrame,
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        workspace_ref: "ws:placement",
+        window_ref: "window:placement",
+        pane_ref: "pane:left",
+        surfaces: liveSurfaces,
+      });
+      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (_direction, opts) => {
+          await opts.beforeMutation?.();
+          return {
+            workspace: "ws:placement",
+            surface: "surface:worker-column-seed",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          };
+        },
+      );
+      (mockClient.moveSurface as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async (opts) => {
+          await opts.beforeMutation?.();
+          return {
+            ok: true,
+            workspace: "ws:placement",
+            surface: opts.surface,
+            pane: "pane:right",
+          };
+        },
+      );
+
+      const summary = await engine.reconcileRolePlacements("idle");
+
+      expect(summary.moved).toHaveLength(1);
+      expect(summary.skipped).toEqual([]);
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+    });
+
     it("serializes worker-column seed cleanup by the seed's stable UUID", async () => {
       const record = makeRecord({
         agent_id: "single-column-worker",
