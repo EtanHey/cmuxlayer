@@ -1308,6 +1308,20 @@ describe("fleet sidebar atomic publisher", () => {
     );
   });
 
+  it("keeps Stable bundle aliases on the legacy sidebar path", () => {
+    for (const bundleId of [
+      "com.cmuxterm.app.stable",
+      "com.cmuxterm.app.prod",
+      "com.cmuxterm.app.production",
+    ]) {
+      expect(
+        defaultFleetSidebarPath("/tmp/example-home", {
+          CMUX_BUNDLE_ID: bundleId,
+        }),
+      ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
+    }
+  });
+
   it("lets the explicit sidebar output override win", () => {
     expect(
       defaultFleetSidebarPath("/tmp/example-home", {

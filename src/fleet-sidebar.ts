@@ -764,6 +764,7 @@ function fleetSidebarInstanceKey(
   const bundleMatch = bundleId.match(/^com\.cmuxterm\.app\.(.+)$/i);
   if (!bundleMatch) return null;
   const label = normalizeFleetSidebarInstanceKey(bundleMatch[1]);
+  if (label === null) return null;
   if (label === "nightly" || label === "dev") return label;
   return hashedFleetSidebarInstanceKey(label, bundleId);
 }
