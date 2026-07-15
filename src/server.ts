@@ -2311,6 +2311,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const client = context.client;
   const stateMgr = context.stateMgr;
   const roleSurfaceOverrides = context.roleSurfaceOverrides;
+  const explicitRoleForDiscoveredSurface = (
+    discovered: Pick<
+      DiscoveredAgent,
+      "surface_id" | "surface_uuid" | "workspace_id"
+    >,
+  ): AgentRole | null => {
+    const uuid = discovered.surface_uuid?.trim().toLowerCase() || null;
+    const workspace = discovered.workspace_id ?? null;
+    const matchesBinding = (
+      override: {
+        role: AgentRole;
+        workspace: string | null;
+        surfaceUuid: string | null;
+      },
+    ): boolean => {
+      if (workspace && override.workspace && workspace !== override.workspace) {
+        return false;
+      }
+      const overrideUuid = override.surfaceUuid?.trim().toLowerCase() || null;
+      return uuid === null ? true : overrideUuid === uuid;
+    };
+    const direct = roleSurfaceOverrides.get(discovered.surface_id);
+    if (direct && matchesBinding(direct)) {
+      return direct.role;
+    }
+    if (!uuid) return null;
+    const stableMatches = [...roleSurfaceOverrides.values()].filter(
+      (override) =>
+        override.surfaceUuid?.trim().toLowerCase() === uuid &&
+        matchesBinding(override),
+    );
+    return stableMatches.length === 1 ? stableMatches[0]!.role : null;
+  };
   const eventLog = context.eventLog;
   const deliveries = context.deliveries;
   const latestDeliveryBySurface = context.latestDeliveryBySurface;
@@ -7297,6 +7330,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         {
           observerIdProvider: () => context.surfaceObserverId,
           observerEpochProvider: () => context.surfaceObserverEpoch,
+          explicitRoleProvider: explicitRoleForDiscoveredSurface,
         },
       );
     context.lifecycleRegistry = registry;

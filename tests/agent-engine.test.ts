@@ -340,6 +340,39 @@ describe("AgentEngine", () => {
       );
     });
 
+    it.each([
+      {
+        label: "explicit Claude worker",
+        cli: "claude" as const,
+        role: "worker" as const,
+        expectedRole: "worker" as const,
+      },
+      {
+        label: "no-role Claude fallback",
+        cli: "claude" as const,
+        role: undefined,
+        expectedRole: "orchestrator" as const,
+      },
+      {
+        label: "explicit Codex orchestrator",
+        cli: "codex" as const,
+        role: "orchestrator" as const,
+        expectedRole: "orchestrator" as const,
+      },
+    ])(
+      "persists the $label role on managed spawn records",
+      async ({ cli, role, expectedRole }) => {
+        const result = await engine.spawnAgent({
+          repo: "brainlayer",
+          cli,
+          prompt: "Verify authoritative role",
+          ...(role ? { role } : {}),
+        });
+
+        expect(engine.getAgentState(result.agent_id)?.role).toBe(expectedRole);
+      },
+    );
+
     it("assigns each managed surface a launcher-preserving unique seat title", async () => {
       (
         mockClient.newSplit as ReturnType<typeof vi.fn>
