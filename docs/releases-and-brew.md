@@ -92,11 +92,20 @@ One command does the whole pipeline:
 
 It will: verify a clean tree + green build/tests, bump `package.json`, commit,
 push `main`, tag `vX.Y.Z`, then update the Homebrew formula's `url` + `sha256`
-in `~/Gits/homebrew-layers` and push the tap. Afterwards:
+in `~/Gits/homebrew-layers` and push the tap. Afterwards, run the verification
+helper with the released version:
 
 ```bash
-brew update && brew upgrade etanhey/layers/cmuxlayer
+~/Gits/cmuxlayer/scripts/release-verify.sh 0.3.0
 ```
+
+The helper fetches and hard-resets the tap clone Homebrew actually reads at
+`$(brew --repository)/Library/Taps/etanhey/homebrew-layers` to `origin/main`,
+runs `brew upgrade etanhey/layers/cmuxlayer`, and fails unless
+`brew list --versions cmuxlayer` prints exactly the released version. This
+explicit sync is required because that tap's `origin` can be the local
+`~/Gits/homebrew-layers` checkout while its `main` has no upstream tracking, so
+`brew update` alone does not guarantee a fast-forward.
 
 Manual equivalent, if you prefer:
 
@@ -107,7 +116,10 @@ Manual equivalent, if you prefer:
 5. In `~/Gits/homebrew-layers/Formula/cmuxlayer.rb` set `url` to the new tag and
    `sha256` to the value from step 4; `brew audit etanhey/layers/cmuxlayer`;
    commit + push.
-6. `brew upgrade etanhey/layers/cmuxlayer`.
+6. Sync the tap Homebrew reads:
+   `git -C "$(brew --repository)/Library/Taps/etanhey/homebrew-layers" fetch origin && git -C "$(brew --repository)/Library/Taps/etanhey/homebrew-layers" reset --hard origin/main`.
+7. `brew upgrade etanhey/layers/cmuxlayer`.
+8. Assert `brew list --versions cmuxlayer` is exactly `cmuxlayer X.Y.Z`.
 
 The formula also carries a `head` block, so `--HEAD` installs always track
 `main` with **no** sha/tag bump — that is the on-the-go dogfood path.
@@ -197,3 +209,4 @@ explicit `workspace` only when you deliberately want a different one.
 | `~/.golems/bin/cmuxlayer-mcp` | launcher: brew (default) vs live source (`CMUXLAYER_DEV=1`) |
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
 | `scripts/release.sh` | one-command release: bump → tag → formula bump → push |
+| `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version |
