@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -2846,6 +2846,186 @@ describe("resync_agents tool", () => {
       launcher_name: "brainlayerClaude",
       seat_id: "brainClaude",
     });
+  });
+
+  it("resync_agents skips a missing-state seat and continues repairs and ghost eviction", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "brainlayerClaude-pending-1710000000-live",
+        surface_id: "surface:27",
+        workspace_id: "workspace:1",
+        repo: "brainlayer",
+        cli: "claude",
+        role: "orchestrator",
+      }),
+    );
+    stateMgr.writeState(
+      makeAgentRecord({
+        agent_id: "cmuxlayerCodex-pending-1710000000-dead",
+        surface_id: "surface:missing",
+        workspace_id: "workspace:1",
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+      }),
+    );
+
+    const context = createServerContext({
+      exec: makeRegistryRepairExec(),
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({
+      context,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+
+    try {
+      await context.lifecycleStartPromise;
+      const registry = (server as any)._registeredTools[
+        "interact"
+      ]._engine.getRegistry();
+      registry.set(
+        "orcClaude",
+        makeAgentRecord({
+          agent_id: "orcClaude",
+          surface_id: "surface:4",
+          workspace_id: "workspace:1",
+          repo: "stale-orc-metadata",
+          cli: "claude",
+          launcher_name: "staleOrcClaude",
+          role: "worker",
+        }),
+      );
+
+      const result = await (server as any)._registeredTools[
+        "resync_agents"
+      ].handler({}, {} as any);
+      const parsed = parseResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.diff.repair_skipped).toEqual([
+        {
+          surface_id: "surface:4",
+          surface_title: "🎯 orc-driver",
+          agent_id: "orcClaude",
+          seat_id: "orcClaude",
+          reason: "Agent not found: orcClaude",
+        },
+      ]);
+      expect(parsed.diff.repaired).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            surface_id: "surface:27",
+            agent_id: "brainClaude",
+            seat_id: "brainClaude",
+          }),
+        ]),
+      );
+      expect(parsed.diff.evicted).toContain(
+        "cmuxlayerCodex-pending-1710000000-dead",
+      );
+      expect(stateMgr.readState("brainClaude")).toMatchObject({
+        agent_id: "brainClaude",
+        surface_id: "surface:27",
+      });
+    } finally {
+      await server.close();
+      context.dispose();
+    }
+  });
+
+  it("resync_agents aborts on a same-text repair failure when state exists", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const staleRecord = makeAgentRecord({
+      agent_id: "orcClaude",
+      surface_id: "surface:4",
+      workspace_id: "workspace:1",
+      repo: "stale-orc-metadata",
+      cli: "claude",
+      launcher_name: "staleOrcClaude",
+      role: "worker",
+    });
+    stateMgr.writeState(staleRecord);
+
+    const context = createServerContext({
+      exec: makeRegistryRepairExec(),
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({
+      context,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+
+    try {
+      await context.lifecycleStartPromise;
+      const registry = (server as any)._registeredTools[
+        "interact"
+      ]._engine.getRegistry();
+      registry.set("orcClaude", staleRecord);
+      vi.spyOn(context.stateMgr, "updateRecord").mockImplementation(() => {
+        throw new Error("Agent not found: orcClaude");
+      });
+
+      const result = await (server as any)._registeredTools[
+        "resync_agents"
+      ].handler({}, {} as any);
+      const parsed = parseResult(result);
+
+      expect(parsed).toMatchObject({
+        ok: false,
+        error: "Agent not found: orcClaude",
+      });
+      expect(parsed.diff).toBeUndefined();
+    } finally {
+      await server.close();
+      context.dispose();
+    }
+  });
+
+  it("resync_agents aborts when state presence cannot be resolved", async () => {
+    const stateMgr = new StateManager(TEST_DIR);
+    const staleRecord = makeAgentRecord({
+      agent_id: "orcClaude",
+      surface_id: "surface:4",
+      workspace_id: "workspace:1",
+      repo: "stale-orc-metadata",
+      cli: "claude",
+      launcher_name: "staleOrcClaude",
+      role: "worker",
+    });
+    stateMgr.writeState(staleRecord);
+
+    const context = createServerContext({
+      exec: makeRegistryRepairExec(),
+      stateDir: TEST_DIR,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({
+      context,
+      seatRegistry: REGISTRY_REPAIR_SEATS,
+    });
+
+    try {
+      await context.lifecycleStartPromise;
+      const statePath = join(TEST_DIR, "orcClaude", "state.json");
+      rmSync(statePath);
+      symlinkSync("state.json", statePath);
+
+      const result = await (server as any)._registeredTools[
+        "resync_agents"
+      ].handler({}, {} as any);
+      const parsed = parseResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("ELOOP");
+      expect(parsed.diff).toBeUndefined();
+    } finally {
+      await server.close();
+      context.dispose();
+    }
   });
 
   it("RC4: resync_agents keeps a live pending sibling registered and addressable", async () => {

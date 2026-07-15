@@ -1603,6 +1603,7 @@ describe("AgentRegistry", () => {
       expect(registry.repairFromDiscovery(discovered)).toEqual({
         repaired: [],
         evicted: [],
+        skipped: [],
       });
       expect(stateMgr.listStates()).toEqual([
         expect.objectContaining({

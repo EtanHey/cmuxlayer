@@ -9790,6 +9790,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               added: [...afterIds].filter((id) => !beforeIds.has(id)),
               evicted,
               repaired: repair.repaired,
+              repair_skipped: repair.skipped,
               reflowed,
               reflow_skipped: reflowSkipped,
               mismatches: after

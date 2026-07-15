@@ -104,9 +104,19 @@ export interface RegistryRepairEntry {
   action: "created" | "updated";
 }
 
+export interface RegistryRepairSkip {
+  surface_id: string;
+  surface_uuid?: string | null;
+  surface_title: string;
+  agent_id: string;
+  seat_id: string | null;
+  reason: string;
+}
+
 export interface RegistryRepairSummary {
   repaired: RegistryRepairEntry[];
   evicted: string[];
+  skipped: RegistryRepairSkip[];
 }
 
 interface RegistryRepairCandidate {
@@ -1674,10 +1684,11 @@ export class AgentRegistry {
       hasMixedDiscoveryIdentityCoverage(discovered)
     ) {
       this.surfacelessObservations.clear();
-      return { repaired: [], evicted: [] };
+      return { repaired: [], evicted: [], skipped: [] };
     }
     const repaired: RegistryRepairEntry[] = [];
     const evicted = new Set<string>();
+    const skipped: RegistryRepairSkip[] = [];
     const liveSurfaceRefs = new Set(
       discovered
         .filter((entry) => !entry.read_error)
@@ -1693,14 +1704,30 @@ export class AgentRegistry {
       const candidate = repairCandidateForSurface(entry, opts?.seatRegistry);
       if (!candidate) continue;
 
-      const repair = this.repairDiscoveredSurface(
-        entry,
-        candidate,
-        evicted,
-        liveSurfaceRefs,
-      );
-      if (repair) {
-        repaired.push(repair);
+      try {
+        const repair = this.repairDiscoveredSurface(
+          entry,
+          candidate,
+          evicted,
+          liveSurfaceRefs,
+        );
+        if (repair) {
+          repaired.push(repair);
+        }
+      } catch (error) {
+        if (!(error instanceof AgentNotFoundError)) {
+          throw error;
+        }
+        skipped.push({
+          surface_id: entry.surface_id,
+          ...(entry.surface_uuid != null
+            ? { surface_uuid: entry.surface_uuid }
+            : {}),
+          surface_title: entry.surface_title,
+          agent_id: error.agentId,
+          seat_id: candidate.seat.seat_id,
+          reason: error.message,
+        });
       }
     }
 
@@ -1712,7 +1739,7 @@ export class AgentRegistry {
       evicted.add(removed);
     }
 
-    return { repaired, evicted: [...evicted] };
+    return { repaired, evicted: [...evicted], skipped };
   }
 
   private evictPendingGhostRegistrations(
@@ -1908,7 +1935,16 @@ export class AgentRegistry {
       return null;
     }
 
-    const updated = this.stateMgr.updateRecord(record.agent_id, patch);
+    let updated: AgentRecord;
+    try {
+      updated = this.stateMgr.updateRecord(record.agent_id, patch);
+    } catch (error) {
+      const missingState = this.getMissingStateSentinel(record.agent_id);
+      if (missingState) {
+        throw missingState;
+      }
+      throw error;
+    }
     this.agents.delete(record.agent_id);
     this.agents.set(updated.agent_id, updated);
     return updated;
@@ -1993,7 +2029,7 @@ export class AgentRegistry {
   }
 
   private getMissingStateSentinel(agentId: string): AgentNotFoundError | null {
-    if (this.stateMgr.readState(agentId) !== null) {
+    if (this.stateMgr.hasStateFile(agentId)) {
       return null;
     }
 

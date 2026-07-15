@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   existsSync,
+  type Dirent,
 } from "node:fs";
 import { join } from "node:path";
 import { EventLog } from "./event-log.js";
@@ -258,6 +259,52 @@ export class StateManager {
   readState(agentId: string): AgentRecord | null {
     const dirName = this.resolveStateDir(agentId);
     return dirName ? this.readStateFromDir(dirName) : null;
+  }
+
+  hasStateFile(agentId: string): boolean {
+    const readStrict = (dirName: string): string | null => {
+      try {
+        return readFileSync(this.stateFilePath(dirName), "utf-8");
+      } catch (error) {
+        const code =
+          error && typeof error === "object" && "code" in error
+            ? (error as { code?: unknown }).code
+            : null;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+    if (readStrict(agentId) !== null) {
+      return true;
+    }
+
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(this.baseDir, { withFileTypes: true });
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : null;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return false;
+      }
+      throw error;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === agentId) continue;
+      const raw = readStrict(entry.name);
+      if (raw === null) continue;
+      const record = JSON.parse(raw) as AgentRecord;
+      if (record.agent_id === agentId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   transition(
