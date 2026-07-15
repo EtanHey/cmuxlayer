@@ -46,11 +46,41 @@ describe("pre-PR script ladder", () => {
 
   it("runs the opt-in contract lane from the release preflight", () => {
     const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
-    const hermeticGate = release.indexOf('run "bun run test"');
+    const hermeticGate = release.indexOf(
+      'run "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test"',
+    );
     const contractGate = release.indexOf('run "bun run test:contract"');
 
     expect(hermeticGate).toBeGreaterThan(-1);
     expect(contractGate).toBeGreaterThan(hermeticGate);
+  });
+
+  it("removes ambient cmux socket pins from the pre-push regression gate", () => {
+    const hook = readFileSync(
+      join(repoRoot, ".githooks", "pre-push"),
+      "utf8",
+    );
+
+    expect(hook).toContain(
+      "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh",
+    );
+  });
+
+  it("syncs the brew tap clone and verifies the installed release version", () => {
+    const verify = readFileSync(
+      join(repoRoot, "scripts", "release-verify.sh"),
+      "utf8",
+    );
+    const release = readFileSync(join(repoRoot, "scripts", "release.sh"), "utf8");
+
+    expect(verify).toContain(
+      'BREW_TAP_DIR="$(brew --repository)/Library/Taps/etanhey/homebrew-layers"',
+    );
+    expect(verify).toContain('git -C "$BREW_TAP_DIR" fetch origin');
+    expect(verify).toContain('git -C "$BREW_TAP_DIR" reset --hard origin/main');
+    expect(verify).toContain("brew upgrade etanhey/layers/cmuxlayer");
+    expect(verify).toContain("brew list --versions cmuxlayer");
+    expect(release).toContain('scripts/release-verify.sh "$VERSION"');
   });
 
   it("refuses the live harness unless CMUX_LIVE_HARNESS=1 is set", () => {

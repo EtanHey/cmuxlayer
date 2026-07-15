@@ -8,7 +8,7 @@
 #
 # Steps: clean-tree + green build/tests gate → bump package.json → commit +
 # push main → tag vX.Y.Z + push tag → update formula url+sha256 in the
-# homebrew-layers tap → push tap → tell you to `brew upgrade`.
+# homebrew-layers tap → push tap → tell you to run release verification.
 #
 # See docs/releases-and-brew.md.
 set -euo pipefail
@@ -50,7 +50,7 @@ fi
 
 echo "release: gating on typecheck + tests…"
 run "bun run typecheck"
-run "bun run test"
+run "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test"
 echo "release: gating on real-cmux contracts (warn-only skip when no live CMUX_SOCKET_PATH is reachable)…"
 run "bun run test:contract"
 
@@ -98,7 +98,7 @@ cat <<EOF
 
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
 Next:
-  brew update && brew upgrade etanhey/layers/cmuxlayer
+  $REPO_DIR/scripts/release-verify.sh "$VERSION"
 
 # Outbox-semantics releases only (see docs/releases-and-brew.md "Pre-deploy hygiene"):
 #   if this release changes outbox dedup-id derivation or the delivery gate,
