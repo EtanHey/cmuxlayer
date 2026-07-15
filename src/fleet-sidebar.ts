@@ -732,7 +732,7 @@ function fleetSidebarInstanceKey(
     const socketName = basename(upstreamSocket);
     const productionStateSocket =
       dirname(upstreamSocket) === join(home, ".local", "state", "cmux") &&
-      /^cmux-\d+\.sock$/i.test(socketName);
+      /^cmux(?:-\d+)?\.sock$/i.test(socketName);
     const productionTmpSocket =
       dirname(upstreamSocket) === "/tmp" &&
       /^(?:cmux|cmux-\d+)\.sock$/i.test(socketName);

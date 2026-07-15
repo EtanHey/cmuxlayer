@@ -1289,6 +1289,15 @@ describe("fleet sidebar atomic publisher", () => {
     ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
   });
 
+  it("keeps the non-UID Stable state socket on the legacy sidebar path", () => {
+    expect(
+      defaultFleetSidebarPath("/tmp/example-home", {
+        CMUX_SOCKET_PATH:
+          "/tmp/example-home/.local/state/cmux/cmux.sock",
+      }),
+    ).toBe("/tmp/example-home/.config/cmux/sidebars/fleet.swift");
+  });
+
   it("uses the bundle id when no socket pin identifies the instance", () => {
     expect(
       defaultFleetSidebarPath("/tmp/example-home", {
