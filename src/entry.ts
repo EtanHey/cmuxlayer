@@ -8,10 +8,7 @@ import {
   type CmuxLayerProxyOptions,
 } from "./proxy.js";
 import { defaultDaemonSocketPath as resolveDefaultDaemonSocketPath } from "./daemon-socket-path.js";
-import {
-  spawnDaemonProcess,
-  type SpawnDaemonOptions,
-} from "./daemon-spawn.js";
+import { spawnDaemonProcess, type SpawnDaemonOptions } from "./daemon-spawn.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
@@ -138,6 +135,7 @@ export async function startInProcessRuntime(
     { defaultMonitorRegistryPath, httpNotifyMonitorDeadman },
     { ensureNodeMaxOldSpaceEnv, installHeapGuard },
     { FleetSidebarPublisher },
+    { makeSelfRegistrationSessionResolver },
   ] = await Promise.all([
     import("@modelcontextprotocol/sdk/server/stdio.js"),
     import("./stdio-lifecycle.js"),
@@ -147,6 +145,7 @@ export async function startInProcessRuntime(
     import("./monitor-registry.js"),
     import("./heap-guard.js"),
     import("./fleet-sidebar.js"),
+    import("./self-registration.js"),
   ]);
 
   ensureNodeMaxOldSpaceEnv();
@@ -158,6 +157,7 @@ export async function startInProcessRuntime(
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
     enableCloseForensics: true,
+    selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
     fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
     ...(opts.fallbackWarnings

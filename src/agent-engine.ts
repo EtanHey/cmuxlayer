@@ -280,6 +280,15 @@ export interface AgentEngineOptions {
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
   sessionIdentityResolver?: SessionIdentityResolver;
+  /**
+   * PRIMARY session-identity resolver: the self-registration READ side. When
+   * provided (production entrypoints inject
+   * `makeSelfRegistrationSessionResolver()`), it is tried BEFORE the deprecated
+   * transcript scan and only falls through to the scan when it returns null.
+   * Default (bare/test construction): unset, so the engine touches no real
+   * registry file — hermetic like `outboxDrain`/`closeForensicsRunner`.
+   */
+  selfRegistrationSessionResolver?: SessionIdentityResolver;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -326,9 +335,9 @@ export interface AgentEngineOptions {
    * construction never reads the real cmux file; production entrypoints inject
    * the runner. Pass an explicit runner in tests.
    */
-  closeForensicsRunner?: (() =>
-    | CloseForensicsSweepResult
-    | Promise<CloseForensicsSweepResult>) | null;
+  closeForensicsRunner?:
+    | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
+    | null;
   /**
    * Receives the reconciled registry, topology, health, and screen evidence.
    * Defaults to a NO-OP so bare engines never write operator configuration.
@@ -338,10 +347,7 @@ export interface AgentEngineOptions {
   fleetWorkingNoProgressTimeoutMs?: number;
 }
 
-export type RolePlacementReconcileTrigger =
-  | "spawn"
-  | "idle"
-  | "boot";
+export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
 
 export interface RolePlacementReconcileSummary {
   moved: Array<{
@@ -785,6 +791,7 @@ export class AgentEngine {
   private inboxOpts?: InboxOpts;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
+  private selfRegistrationSessionResolver: SessionIdentityResolver | null;
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private fleetSidebarWakeRepublishTimer: ReturnType<typeof setTimeout> | null =
@@ -815,9 +822,9 @@ export class AgentEngine {
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
   /** Best-effort close-forensics ingest; null when disabled. */
-  private closeForensicsRunner: (() =>
-    | CloseForensicsSweepResult
-    | Promise<CloseForensicsSweepResult>) | null;
+  private closeForensicsRunner:
+    | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
+    | null;
   private closeForensicsSweepInFlight = false;
   private fleetSidebarPublisher: FleetSidebarPublisherLike;
   private fleetWorkingNoProgressTimeoutMs: number;
@@ -842,22 +849,31 @@ export class AgentEngine {
         : this.loadSeatRegistry(opts?.seatRegistryPath);
     this.hasCustomSessionIdentityResolver =
       opts?.sessionIdentityResolver !== undefined;
+    // Default DISABLED (null): bare construction (tests, libraries) must never
+    // read the real `~/.cmuxlayer/session-registry.jsonl`. Production entrypoints
+    // inject `makeSelfRegistrationSessionResolver()` (see entry.ts / daemon.ts /
+    // app-server-runtime).
+    this.selfRegistrationSessionResolver =
+      opts?.selfRegistrationSessionResolver ?? null;
     this.sessionIdentityResolver =
       opts?.sessionIdentityResolver ??
-      ((agent) => this.findTranscriptSessionIdentity(agent));
+      ((agent) => this.resolveSessionIdentityWithSelfRegistration(agent));
     // Default no-op: constructing an engine (tests, libraries) must never touch
     // the real outbox or network. Production entrypoints inject the real
     // drainOutbox (see server.ts createServer / app-server-runtime).
     this.outboxDrain = opts?.outboxDrain ?? (async () => {});
     this.monitorRegistryPath = opts?.monitorRegistryPath;
     this.monitorRegistryNow = opts?.monitorRegistryNow;
-    this.monitorRegistryNotify = opts?.monitorRegistryNotify ?? (async () => {});
+    this.monitorRegistryNotify =
+      opts?.monitorRegistryNotify ?? (async () => {});
     // Default DISABLED: bare construction (tests, libraries) must never read the
     // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
     // runner (see app-server-runtime / server.ts createServer). `null` keeps it
     // off; an explicit runner (tests) drives it deterministically.
     this.closeForensicsRunner =
-      opts?.closeForensicsRunner !== undefined ? opts.closeForensicsRunner : null;
+      opts?.closeForensicsRunner !== undefined
+        ? opts.closeForensicsRunner
+        : null;
     this.fleetSidebarPublisher = opts?.fleetSidebarPublisher ?? {
       publish: () => {},
       dispose: () => {},
@@ -907,7 +923,9 @@ export class AgentEngine {
       });
   }
 
-  private loadSeatRegistry(configPath: string | undefined): SeatRegistry | null {
+  private loadSeatRegistry(
+    configPath: string | undefined,
+  ): SeatRegistry | null {
     try {
       return loadSeatRegistryFromConfig(configPath);
     } catch {
@@ -973,7 +991,9 @@ export class AgentEngine {
       reportText !== null &&
       reportFresh === true &&
       reportFinalLine === goal.doneMarker;
-    const keptOpen = reportText ? this.extractKeptOpenContract(reportText) : null;
+    const keptOpen = reportText
+      ? this.extractKeptOpenContract(reportText)
+      : null;
     const prLoopRequired = this.isPrLoopRequired(
       agent,
       goal.goalText,
@@ -1141,9 +1161,8 @@ export class AgentEngine {
         const reportContext =
           /\breport(?:[_ -]?path)?\b/i.test(context) ||
           /\bwrite\s+(?:the\s+)?report\b/i.test(context);
-        const basenameIncludesReport = /(?:^|[/\\])[^/\\]*report[^/\\]*\.md$/i.test(
-          rawPath,
-        );
+        const basenameIncludesReport =
+          /(?:^|[/\\])[^/\\]*report[^/\\]*\.md$/i.test(rawPath);
         candidates.push({
           rawPath,
           score:
@@ -1164,8 +1183,7 @@ export class AgentEngine {
 
   private isMarkdownContractPath(rawPath: string): boolean {
     return (
-      /\.md$/i.test(rawPath) ||
-      /(?:^|[/\\])reports[/\\].+\.md$/i.test(rawPath)
+      /\.md$/i.test(rawPath) || /(?:^|[/\\])reports[/\\].+\.md$/i.test(rawPath)
     );
   }
 
@@ -1183,7 +1201,9 @@ export class AgentEngine {
     }
     candidates.push(resolve(process.cwd(), stripped));
 
-    return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+    return (
+      candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
+    );
   }
 
   private extractDoneMarker(goalText: string): string | null {
@@ -1315,7 +1335,8 @@ export class AgentEngine {
     const reviewOrMergeComplete =
       /\b(?:merged|review(?:ed)?\s+(?:complete|passed|done)|review\/merge loop complete)\b/i.test(
         reportText,
-      ) || /\bPR\s+(?:status|state)\s*:\s*(?:merged|closed)\b/i.test(reportText);
+      ) ||
+      /\bPR\s+(?:status|state)\s*:\s*(?:merged|closed)\b/i.test(reportText);
     return hasPrReference && reviewOrMergeComplete;
   }
 
@@ -1405,10 +1426,7 @@ export class AgentEngine {
     return Date.now() - session.mtime_ms >= DONE_QUIESCENCE_MS;
   }
 
-  private screenContradictsTranscriptDone(
-    cli: CliType,
-    text: string,
-  ): boolean {
+  private screenContradictsTranscriptDone(cli: CliType, text: string): boolean {
     const parsed = parseScreen(text);
     return screenHasActiveAgentMarker(cli, text, parsed);
   }
@@ -1518,8 +1536,7 @@ export class AgentEngine {
         return { agent };
       }
 
-      const count =
-        (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
+      const count = (waitForReadyPatternMatches.get(agent.agent_id) ?? 0) + 1;
       waitForReadyPatternMatches.set(agent.agent_id, count);
       if (count < Math.max(1, evidence.consecutive)) {
         return { agent };
@@ -1532,10 +1549,9 @@ export class AgentEngine {
             })
           : agent;
       if (targetState === "ready" && transitionAgent.boot_prompt_pending) {
-        transitionAgent = this.stateMgr.updateRecord(
-          transitionAgent.agent_id,
-          { boot_prompt_pending: false },
-        );
+        transitionAgent = this.stateMgr.updateRecord(transitionAgent.agent_id, {
+          boot_prompt_pending: false,
+        });
         this.registry.set(transitionAgent.agent_id, transitionAgent);
       }
       let updated = this.stateMgr.transition(
@@ -1707,12 +1723,13 @@ export class AgentEngine {
         : null;
       const parentDefinitelyElsewhere = Boolean(
         parentAgent?.workspace_id &&
-          workspace &&
-          parentAgent.workspace_id !== workspace,
+        workspace &&
+        parentAgent.workspace_id !== workspace,
       );
-      const parentSurfaceId = parentAgent && !parentDefinitelyElsewhere
-        ? resolveObservedAgentSurfaceRef(parentAgent, surfaceObservation)
-        : null;
+      const parentSurfaceId =
+        parentAgent && !parentDefinitelyElsewhere
+          ? resolveObservedAgentSurfaceRef(parentAgent, surfaceObservation)
+          : null;
       if (
         parentAgent?.surface_uuid &&
         !parentSurfaceId &&
@@ -1879,8 +1896,8 @@ export class AgentEngine {
     if (!JSONL_HARNESSES.has(agent.cli)) return false;
     const hasManagedLaunchContext = Boolean(
       agent.launcher_name ||
-        agent.launch_cwd?.trim() ||
-        agent.worktree_path?.trim(),
+      agent.launch_cwd?.trim() ||
+      agent.worktree_path?.trim(),
     );
     if (agent.task_summary.trim().length === 0 && !hasManagedLaunchContext) {
       return false;
@@ -1904,9 +1921,7 @@ export class AgentEngine {
       .map((line) => line.trim())
       .filter(Boolean);
     const promptTailSource = promptLines.at(-1) ?? prompt;
-    const tail = promptTailSource.slice(
-      -Math.min(80, promptTailSource.length),
-    );
+    const tail = promptTailSource.slice(-Math.min(80, promptTailSource.length));
     return this.screenInputRegionContainsPromptTail(
       agent.cli,
       screenText,
@@ -2021,6 +2036,33 @@ export class AgentEngine {
     return join(homedir(), "Gits", agent.repo);
   }
 
+  /**
+   * Default session-identity resolution: self-registration READ (PRIMARY) then
+   * the deprecated transcript scan (last-resort fallback). Self-registration is
+   * the P0 root fix — agents append their real session id to the registry at
+   * boot, so we read it instead of scanning `~/.claude`/`~/.codex` and inferring
+   * by cwd+recency (which breaks with raw spawns + worktrees + many agents per
+   * repo). The scan is only reached when self-registration returns null (unset in
+   * bare construction, or a hook-less agent with no registry entry); #336's
+   * bounded deferred-capture marker still guards that fallback.
+   */
+  private resolveSessionIdentityWithSelfRegistration(
+    agent: AgentRecord,
+  ): CapturedSessionIdentity | null {
+    const selfRegistered = this.selfRegistrationSessionResolver?.(agent);
+    if (selfRegistered) {
+      return this.normalizeCapturedSessionIdentity(selfRegistered);
+    }
+    return this.findTranscriptSessionIdentity(agent);
+  }
+
+  /**
+   * @deprecated Last-resort fallback only. Scans `~/.claude`/`~/.codex`
+   * transcript dirs and infers identity by cwd+recency — fragile with raw
+   * spawns, worktrees, and many-agents-per-repo. Prefer the self-registration
+   * READ side (`makeSelfRegistrationSessionResolver`), which
+   * `resolveSessionIdentityWithSelfRegistration` tries first.
+   */
   private findTranscriptSessionIdentity(
     agent: AgentRecord,
   ): CapturedSessionIdentity | null {
@@ -2039,7 +2081,9 @@ export class AgentEngine {
         ...(process.env.CMUXLAYER_HARNESS_HOME
           ? { home: process.env.CMUXLAYER_HARNESS_HOME }
           : {}),
-        ...(process.env.CODEX_HOME ? { codexHome: process.env.CODEX_HOME } : {}),
+        ...(process.env.CODEX_HOME
+          ? { codexHome: process.env.CODEX_HOME }
+          : {}),
       },
     );
     return identity
@@ -2305,7 +2349,8 @@ export class AgentEngine {
   }
 
   async captureBootSessionId(agentId: string): Promise<AgentRecord | null> {
-    const agent = this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    const agent =
+      this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
     if (!agent) {
       return null;
     }
@@ -2638,7 +2683,9 @@ export class AgentEngine {
     );
   }
 
-  private async logUnboundSurfaceCleanupWarning(message: string): Promise<void> {
+  private async logUnboundSurfaceCleanupWarning(
+    message: string,
+  ): Promise<void> {
     try {
       await this.client.log(message, {
         level: "warning",
@@ -2696,8 +2743,7 @@ export class AgentEngine {
           surface.observerEpoch,
           "crash recovery",
         );
-        const resumeWorkspace =
-          surface.actual_workspace ?? surface.workspace;
+        const resumeWorkspace = surface.actual_workspace ?? surface.workspace;
         await this.beforeCrashRecoveryMutation?.({
           phase: "resume",
           agent_id: agent.agent_id,
@@ -2769,9 +2815,7 @@ export class AgentEngine {
   }
 
   private compactSidebarValue(value: string | null | undefined): string {
-    const normalized = (value ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
+    const normalized = (value ?? "").replace(/\s+/g, " ").trim();
     if (!normalized) return "-";
     return normalized.length > 160
       ? `${normalized.slice(0, 157).trimEnd()}...`
@@ -3086,7 +3130,9 @@ export class AgentEngine {
    * Sync sidebar: diff agents against snapshot, push only changes.
    * Logs lifecycle events (spawned, done, error) once each.
    */
-  private async syncSidebar(opts: { firstConnect?: boolean } = {}): Promise<void> {
+  private async syncSidebar(
+    opts: { firstConnect?: boolean } = {},
+  ): Promise<void> {
     const agents = this.registry.list();
     const total = agents.length;
     const done = agents.filter((a) => a.state === "done").length;
@@ -3154,10 +3200,7 @@ export class AgentEngine {
       const observedSurfaceUuid =
         surfaceTopology?.surfaceIdByRef.get(surfaceBinding.surfaceRef) ?? null;
       if (
-        !this.registry.canUseObservedBinding(
-          registryAgent,
-          observedSurfaceUuid,
-        )
+        !this.registry.canUseObservedBinding(registryAgent, observedSurfaceUuid)
       ) {
         // A live ref without compatible provenance cannot publish, read, or
         // mutate this row. Preserve it for its owning observer.
@@ -3185,10 +3228,7 @@ export class AgentEngine {
         bindingPatch.workspace_id = surfaceBinding.workspaceId;
       }
       const observerId = this.registry.getObserverId();
-      if (
-        observerId &&
-        originalAgent.surface_observer_id !== observerId
-      ) {
+      if (observerId && originalAgent.surface_observer_id !== observerId) {
         bindingPatch.surface_observer_id = observerId;
       }
       if (Object.keys(bindingPatch).length > 0) {
@@ -3277,8 +3317,8 @@ export class AgentEngine {
             const owners = new Set(ownerSeats);
             return readMonitorRegistry({
               registryPath: this.monitorRegistryPath,
-            }).monitors
-              .filter(
+            })
+              .monitors.filter(
                 (monitor) =>
                   monitor.state === "collapsed" &&
                   owners.has(monitor.owner_seat),
@@ -3496,25 +3536,15 @@ export class AgentEngine {
             if (agent.spawn_depth === 0) {
               // Root agent: send /compact
               const compactRoute = await this.resolveAgentIoRoute(agentId);
-              await this.client.send(
-                compactRoute.surface_id,
-                "/compact",
-                {
-                  workspace: compactRoute.workspace_id ?? undefined,
-                  ...this.stableSurfaceWriteOptions(
-                    compactRoute.surface_uuid,
-                  ),
-                },
-              );
+              await this.client.send(compactRoute.surface_id, "/compact", {
+                workspace: compactRoute.workspace_id ?? undefined,
+                ...this.stableSurfaceWriteOptions(compactRoute.surface_uuid),
+              });
               const returnRoute = await this.resolveAgentIoRoute(agentId);
-              await this.client.sendKey(
-                returnRoute.surface_id,
-                "return",
-                {
-                  workspace: returnRoute.workspace_id ?? undefined,
-                  ...this.stableSurfaceWriteOptions(returnRoute.surface_uuid),
-                },
-              );
+              await this.client.sendKey(returnRoute.surface_id, "return", {
+                workspace: returnRoute.workspace_id ?? undefined,
+                ...this.stableSurfaceWriteOptions(returnRoute.surface_uuid),
+              });
             } else {
               await this.client.log(
                 `context-limit: depth ${agent.spawn_depth} agent ${agent.repo} degraded; leaving pane running for orchestrator decision`,
@@ -3593,16 +3623,15 @@ export class AgentEngine {
         : {}),
       workingNoProgressTimeoutMs: this.fleetWorkingNoProgressTimeoutMs,
     });
-    const publicationState =
-      !topologyIsAuthoritative
-        ? "unknown"
-        : snapshot.seatCount > 0
-          ? "populated"
-          : fleetCandidates.length > 0
+    const publicationState = !topologyIsAuthoritative
+      ? "unknown"
+      : snapshot.seatCount > 0
+        ? "populated"
+        : fleetCandidates.length > 0
+          ? "unknown"
+          : opts.firstConnect
             ? "unknown"
-            : opts.firstConnect
-              ? "unknown"
-              : "empty";
+            : "empty";
     try {
       this.fleetSidebarPublisher.publish({
         state: publicationState,
@@ -4084,9 +4113,7 @@ export class AgentEngine {
     }
   }
 
-  private markIntentionalSurfaceCloses(
-    events: CloseForensicsEvent[],
-  ): void {
+  private markIntentionalSurfaceCloses(events: CloseForensicsEvent[]): void {
     const closedSurfaceUuids = new Set(
       events
         .filter(
@@ -4946,7 +4973,9 @@ export class AgentEngine {
             ...(workspaceId ? { workspace: workspaceId } : {}),
             pane: pane.ref,
           });
-          if (paneSurfaces.surfaces.some((surface) => surface.ref === surfaceId)) {
+          if (
+            paneSurfaces.surfaces.some((surface) => surface.ref === surfaceId)
+          ) {
             return paneSurfaces.pane_ref || pane.ref;
           }
         } catch {
@@ -5000,9 +5029,7 @@ export class AgentEngine {
       if (!this.isSurfaceObserverEpochCurrent(observerEpoch)) {
         return failClosedPolicy;
       }
-      const paneSurfaceRefs = panes.panes.flatMap(
-        (pane) => pane.surface_refs,
-      );
+      const paneSurfaceRefs = panes.panes.flatMap((pane) => pane.surface_refs);
       const paneSurfaceRefSet = new Set(paneSurfaceRefs);
       const observationIsComplete =
         (surfaceObservation.coverage === "ref" ||
@@ -5074,9 +5101,9 @@ export class AgentEngine {
     );
   }
 
-  private stableSurfaceWriteOptions(
-    surfaceUuid: string | null | undefined,
-  ): { stableSurfaceIdentity?: string } {
+  private stableSurfaceWriteOptions(surfaceUuid: string | null | undefined): {
+    stableSurfaceIdentity?: string;
+  } {
     return this.registry.isObserverOwnershipEnforced() && surfaceUuid
       ? { stableSurfaceIdentity: surfaceUuid }
       : {};
@@ -5153,10 +5180,7 @@ export class AgentEngine {
         agent.pid !== null &&
         agent.pid !== undefined &&
         this.processLiveness(agent.pid) === "gone";
-      if (
-        !this.isTerminalDeadRegistryGhost(agent) &&
-        !processGone
-      ) {
+      if (!this.isTerminalDeadRegistryGhost(agent) && !processGone) {
         continue;
       }
 
@@ -5422,7 +5446,8 @@ export class AgentEngine {
         closeRoute.surface_id,
         closeRoute.workspace_id,
       );
-      let confirmedCloseRoute = await this.resolveAgentIoRoute(canonicalAgentId);
+      let confirmedCloseRoute =
+        await this.resolveAgentIoRoute(canonicalAgentId);
       if (!this.sameSurfaceRoute(closeRoute, confirmedCloseRoute)) {
         closeRoute = confirmedCloseRoute;
         stopClosePolicy = await this.resolveStopSurfaceClosePolicy(
@@ -5545,11 +5570,7 @@ export class AgentEngine {
     const route = await this.resolveAgentIoRoute(agentId);
     const workspace = route.workspace_id ?? undefined;
     const assertSurfaceBindingCurrent = async (): Promise<void> => {
-      await this.resolveUnchangedAgentIoRoute(
-        agentId,
-        route,
-        "agent send",
-      );
+      await this.resolveUnchangedAgentIoRoute(agentId, route, "agent send");
     };
     await this.client.send(route.surface_id, sanitizeTerminalInput(text), {
       workspace,
@@ -5558,11 +5579,7 @@ export class AgentEngine {
     });
     if (pressEnter) {
       try {
-        await this.resolveUnchangedAgentIoRoute(
-          agentId,
-          route,
-          "Return",
-        );
+        await this.resolveUnchangedAgentIoRoute(agentId, route, "Return");
       } catch (error) {
         throw new Error(
           `Agent "${agentId}" surface route changed before Return; refusing ` +
