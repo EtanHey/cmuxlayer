@@ -29,7 +29,9 @@ const deferredTranscriptResolver = vi.fn(() => ({
 
 After `initialize()`, assert the resolver was not called and the terminal record is sessionless with `transcript_session_capture_deferred: true`. Dispose the engine, recreate it from the same `StateManager`, and initialize again before any normal sweep.
 
-Spy on `stateMgr.updateRecord` and throw exactly once when the patch contains the captured session ID. Run one sweep and assert the resolver was called but the record remains sessionless and marked. Restore the spy, run a later sweep, then assert the canonical record has the captured ID/path and `transcript_session_capture_deferred: false`.
+Spy on `stateMgr.updateRecord` and throw exactly once when the patch contains the captured session ID. Remove the original pane while leaving an unrelated live surface as authoritative absence evidence. Run one sweep and assert the resolver was called without a live binding but the record remains sessionless and marked. Restore the spy, run a later sweep, then assert the canonical record has the captured ID/path and `transcript_session_capture_deferred: false`.
+
+Add a registry regression proving both normal surfaceless eviction and terminal purge retain a marked row.
 
 **Step 2: Verify RED on release main**
 
@@ -74,6 +76,8 @@ In `maybeCaptureBootSessionId()`:
 In `finalizeCapturedSession()`, include `transcript_session_capture_deferred: false` in the same `updateRecord()` patch as `cli_session_id` and `cli_session_path`, including the existing-canonical-row path.
 
 In `purgeStartupTerminalAgents()`, add marked registry rows to `retainAgentIds` before purging.
+
+Before normal absence cleanup, retry marked rows independently of live surface binding. Both `evictSurfaceless()` and `purgeTerminal()` retain marked rows and reset their absence confirmation evidence; ordinary cleanup resumes after the atomic capture clears the marker.
 
 **Step 4: Verify GREEN**
 

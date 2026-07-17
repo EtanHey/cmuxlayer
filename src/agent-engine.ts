@@ -2427,6 +2427,13 @@ export class AgentEngine {
     return this.maybeCaptureBootSessionId(agent, {});
   }
 
+  private async retryDeferredTranscriptCaptures(): Promise<void> {
+    for (const agent of this.registry.list()) {
+      if (agent.transcript_session_capture_deferred !== true) continue;
+      await this.maybeCaptureBootSessionId(agent, {});
+    }
+  }
+
   private async maybeMarkBootReady(
     agent: AgentRecord,
     ctx: SweepAgentContext,
@@ -4156,6 +4163,10 @@ export class AgentEngine {
       now: Date.now(),
     };
     await this.registry.reconcile(surfacelessConfirmation);
+    // Deferred transcript identity does not require a live surface binding.
+    // Retry it before absence cleanup so a closed pane cannot strand or evict
+    // the durable capture intent before the resolver gets a chance to run.
+    await this.retryDeferredTranscriptCaptures();
     await this.registry.evictSurfaceless(surfacelessConfirmation);
     await this.recoverCrashedAgents();
 

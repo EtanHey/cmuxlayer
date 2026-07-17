@@ -861,6 +861,14 @@ describe("Sidebar Sync", () => {
         return updateRecord(agentId, patch);
       });
 
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        title: "unrelated live surface",
+        workspace_ref: "workspace:other",
+      },
+    ];
+
     await engine.runSweep();
 
     expect(deferredTranscriptResolver).toHaveBeenCalledWith(

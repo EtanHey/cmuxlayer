@@ -2718,6 +2718,33 @@ describe("AgentRegistry", () => {
   });
 
   describe("evictSurfaceless confirmation", () => {
+    it("retains deferred transcript captures through normal absence cleanup", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "deferred-terminal-worker",
+          state: "done",
+          surface_id: "surface:missing",
+          role: "worker",
+          transcript_session_capture_deferred: true,
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("surface:witness"),
+      ]);
+      await registry.reconstitute();
+
+      await expect(
+        registry.evictSurfaceless({ confirmationMs: 0 }),
+      ).resolves.toEqual([]);
+      await expect(
+        registry.purgeTerminal({ confirmationMs: 0 }),
+      ).resolves.toBe(0);
+      expect(registry.get("deferred-terminal-worker")).toMatchObject({
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      });
+    });
+
     it("does not evict a UUID-backed record when a legacy topology confirms its ref live", async () => {
       stateMgr.writeState(
         makeRecord({
