@@ -41,6 +41,7 @@ function withTestObserver(opts: CreateServerOptions = {}): CreateServerOptions {
   if (opts.context) return opts;
   return {
     ...opts,
+    sessionIdentityResolver: opts.sessionIdentityResolver ?? (() => null),
     surfaceObserverOwnerIdProvider:
       opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
     surfaceObserverEpochProvider:

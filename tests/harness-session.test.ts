@@ -95,14 +95,14 @@ describe("parseHarnessSession", () => {
     expect(s.last_tool).toBe("exec_command");
   });
 
-  it("Codex: gpt-5.6 family uses the larger verified window over stale JSONL", () => {
+  it("Codex: gpt-5.6 uses the verified 400K app-tier floor over stale JSONL", () => {
     const s = parseHarnessSession(
       "codex",
       codexContextJsonl("gpt-5.6-sol", 105_000, 353_400),
     );
 
-    expect(s.context_window).toBe(1_050_000);
-    expect(s.context_pct).toBe(10);
+    expect(s.context_window).toBe(400_000);
+    expect(s.context_pct).toBe(26);
   });
 
   it("Codex: unknown models keep their JSONL window as the only signal", () => {
@@ -274,9 +274,9 @@ describe("modelContextWindow (Claude denominator + no-JSONL fallback)", () => {
     expect(modelContextWindow("claude-opus-4-1")).toBe(200_000);
   });
 
-  it("GPT-5.6 family = 1.05M verified window", () => {
-    expect(modelContextWindow("gpt-5.6")).toBe(1_050_000);
-    expect(modelContextWindow("gpt-5.6-sol")).toBe(1_050_000);
+  it("GPT-5.6 family = 400K verified app-tier window", () => {
+    expect(modelContextWindow("gpt-5.6")).toBe(400_000);
+    expect(modelContextWindow("gpt-5.6-sol")).toBe(400_000);
   });
 
   it("plain GPT-5/Codex family stays at 400K", () => {

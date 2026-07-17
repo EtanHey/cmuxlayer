@@ -660,6 +660,23 @@ describe("Sidebar Sync", () => {
   });
 
   it("discovers and publishes live seats exactly once during idempotent startup", async () => {
+    const transcriptResolver = vi.fn(() => null);
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: transcriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if (!("snapshot" in publication)) {
+            throw new Error("engine must publish an explicit fleet state");
+          }
+          publishedFleetPublications.push(publication);
+        },
+        dispose: () => {},
+      },
+    });
     liveSurfaces = [
       {
         ...makeSurface("surface:42"),
@@ -706,6 +723,7 @@ describe("Sidebar Sync", () => {
     await engine.initialize(discovery);
 
     expect(scan).toHaveBeenCalledTimes(1);
+    expect(transcriptResolver).not.toHaveBeenCalled();
     expect(publishedFleetPublications).toHaveLength(2);
     expect(publishedFleetPublications[0]).toMatchObject({
       state: "discovering",
@@ -729,6 +747,15 @@ describe("Sidebar Sync", () => {
         ],
       },
     });
+
+    await engine.runSweep();
+
+    expect(transcriptResolver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "auto-codex-surface-42",
+        cli: "codex",
+      }),
+    );
   });
 
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {

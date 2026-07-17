@@ -1345,15 +1345,15 @@ Working (1m 12s • esc to interrupt)
       expect(parsed.context_pct).toBe(40); // 100 - 60 = 40% used
     });
 
-    it("reports 1.05M for the gpt-5.6 family fallback", () => {
+    it("reports the 400K app-tier window for the gpt-5.6 family fallback", () => {
       const parsed = parseScreen(`
 gpt-5.6-sol xhigh · 90% left · ~/Gits/cmuxlayer
 Working (1m 12s • esc to interrupt)
 `);
 
-      expect(MODEL_MAX_TOKENS["gpt-5.6"]).toBe(1_050_000);
-      expect(resolveModelMax("gpt-5.6-sol")).toBe(1_050_000);
-      expect(parsed.context_window).toBe(1_050_000);
+      expect(MODEL_MAX_TOKENS["gpt-5.6"]).toBe(400_000);
+      expect(resolveModelMax("gpt-5.6-sol")).toBe(400_000);
+      expect(parsed.context_window).toBe(400_000);
       expect(parsed.context_pct).toBe(10);
     });
 

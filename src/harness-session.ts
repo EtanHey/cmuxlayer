@@ -32,7 +32,8 @@ export interface HarnessSessionState {
 }
 
 // AIDEV-NOTE: Verified per-model context windows (researcher, BrainLayer brainbar-8a3da79c-159,
-// 2026-06-04; gpt-5.6: Etan web-verify + fleet rules doc §10, 2026-07-11). Used as the
+// 2026-06-04; gpt-5.6: Etan web-verify + fleet rules doc §10, 2026-07-11, superseded
+// for the app tier by Etan's 400K ruling, 2026-07-15). Used as the
 // Claude denominator (Claude JSONL has no window), the no-JSONL fallback, and a floor only
 // for explicitly versioned Codex rules when a lagging CLI reports a smaller session window.
 // Rules are checked in order, so specific versions must precede generic family matches.
@@ -46,8 +47,8 @@ const MODEL_WINDOW_RULES: Array<
   [/fable/, 1_000_000],
   // Claude — 200K tier (Haiku, and 4.0–4.5 generation incl. opus-4-1)
   [/haiku|(sonnet-4(?!-6))|(opus-4(?!-?[678]))|(opus-4-1)/, 200_000],
-  // OpenAI GPT-5.6 / Codex family — whole family is 1.05M.
-  [/gpt-5[.-]6(?:$|[^0-9])/, 1_050_000, true],
+  // OpenAI GPT-5.6 / Codex app tier — 400K, with an explicit stale-JSONL floor.
+  [/gpt-5[.-]6(?:$|[^0-9])/, 400_000, true],
   // OpenAI generic GPT-5 / Codex family — 400K total window (272K input + 128K output)
   [/gpt-5/, 400_000],
   // OpenAI GPT-4 family
