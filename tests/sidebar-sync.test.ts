@@ -758,6 +758,142 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("persists deferred transcript capture across restart and identity-write failure", async () => {
+    const capturedSessionId = "12345678-1234-4234-8234-123456789abc";
+    const deferredTranscriptResolver = vi.fn(() => ({
+      session_id: capturedSessionId,
+      path: "/tmp/codex-session.jsonl",
+    }));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cmuxlayerCodex-pending-startup",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        task_done_candidate_at: "2026-03-14T03:40:00Z",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:42"),
+        title: "cmuxlayerCodex [surface:42]",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    engine.dispose();
+    const terminalRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, terminalRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: deferredTranscriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    mockClient.readScreen
+      .mockResolvedValueOnce({
+        surface: "surface:42",
+        text:
+          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+        lines: 30,
+        scrollback_used: false,
+      })
+      .mockResolvedValue({
+        surface: "surface:42",
+        text:
+          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\nImplemented the fix.\nTASK_DONE",
+        lines: 30,
+        scrollback_used: false,
+      });
+    const terminalDiscovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(terminalDiscovery);
+
+    expect(deferredTranscriptResolver).not.toHaveBeenCalled();
+    expect(engine.getAgentState("cmuxlayerCodex-pending-startup")).toMatchObject(
+      {
+        state: "done",
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      },
+    );
+
+    engine.dispose();
+    const restartedRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, restartedRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: deferredTranscriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    const restartedDiscovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(restartedDiscovery);
+
+    expect(deferredTranscriptResolver).not.toHaveBeenCalled();
+    const updateRecord = stateMgr.updateRecord.bind(stateMgr);
+    let rejectCapturedSessionWrite = true;
+    const updateRecordSpy = vi
+      .spyOn(stateMgr, "updateRecord")
+      .mockImplementation((agentId, patch) => {
+        if (
+          rejectCapturedSessionWrite &&
+          patch.cli_session_id === capturedSessionId
+        ) {
+          rejectCapturedSessionWrite = false;
+          throw new Error("transient state write failure");
+        }
+        return updateRecord(agentId, patch);
+      });
+
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "cmuxlayerCodex-pending-startup",
+        cli: "codex",
+        state: "done",
+      }),
+    );
+    expect(engine.getAgentState("cmuxlayerCodex-pending-startup")).toMatchObject(
+      {
+        state: "done",
+        cli_session_id: null,
+        transcript_session_capture_deferred: true,
+      },
+    );
+
+    updateRecordSpy.mockRestore();
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledTimes(2);
+    expect(
+      engine.getAgentState(
+        generateAgentId("codex", "cmuxlayer", capturedSessionId),
+      ),
+    ).toMatchObject({
+      state: "done",
+      cli_session_id: capturedSessionId,
+      cli_session_path: "/tmp/codex-session.jsonl",
+      transcript_session_capture_deferred: false,
+    });
+  });
+
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
     const discovery = new AgentDiscovery({
       listSurfaces: async () => [],

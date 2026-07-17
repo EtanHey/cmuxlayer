@@ -399,6 +399,36 @@ export class StateManager {
   }
 
   /**
+   * Persist the startup transcript-capture retry marker without refreshing
+   * lifecycle age. The marker is bookkeeping, not agent progress.
+   */
+  setTranscriptSessionCaptureDeferred(
+    agentId: string,
+    deferred: boolean,
+  ): AgentRecord {
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
+    if (!current) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (current.transcript_session_capture_deferred === deferred) {
+      return current;
+    }
+
+    const updated: AgentRecord = {
+      ...current,
+      transcript_session_capture_deferred: deferred,
+    };
+    const agentDir = join(this.baseDir, dirName!);
+    const stateFile = this.stateFilePath(dirName!);
+    const tmpFile = join(agentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, stateFile);
+    this.surfaceSessionIndex.persistRecord(updated);
+    return updated;
+  }
+
+  /**
    * Explicitly reset an agent's lifecycle state after an operation that has
    * already established new ground truth outside the normal state machine.
    * This bypass is intentionally separate from transition().
