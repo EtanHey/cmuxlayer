@@ -4,7 +4,9 @@
 
 **Goal:** Preserve first-connect transcript capture intent across terminalization, daemon restart, startup purge, and a transient identity-write failure without scanning transcripts during startup.
 
-**Architecture:** Store an optional deferred-capture marker on `AgentRecord`. Use a dedicated atomic `StateManager` mutation to set the marker without changing `version` or `updated_at`; capture writes identity and clears the marker together through the normal atomic record update. Startup purge retains marked rows, and normal sweeps resolve transcripts for either ordinarily eligible or durably marked records.
+**Architecture:** Store an optional deferred-capture marker on `AgentRecord`. Use a dedicated atomic `StateManager` mutation to set the marker without changing `version` or `updated_at`; capture writes identity and clears the marker together through the normal atomic record update. Startup purge retains marked rows, while normal sweeps resolve structurally eligible markers for at most three failed calls and clear structurally ineligible markers without invoking the resolver.
+
+**Review amendment:** Persist a failed-resolver attempt count beside the marker. Clear after three failed calls across restarts, or immediately when JSONL/managed-launch transcript context is structurally ineligible, so normal confirmed-absence cleanup can reap the row. Identity-write failures do not consume the resolver cap.
 
 **Tech Stack:** TypeScript, Bun, Vitest, JSON state files with atomic temp-file rename.
 
@@ -13,6 +15,7 @@
 ### Task 1: Specify restart and retry behavior
 
 **Files:**
+- Modify: `tests/agent-registry.test.ts`
 - Modify: `tests/sidebar-sync.test.ts`
 
 **Step 1: Add a focused first-connect regression**
@@ -49,6 +52,8 @@ Expected: FAIL because v0.4.15 neither persists the marker nor retains/retries t
 - Modify: `src/agent-types.ts`
 - Modify: `src/state-manager.ts`
 - Modify: `src/agent-engine.ts`
+- Modify: `src/agent-registry.ts`
+- Modify: `tests/agent-registry.test.ts`
 
 **Step 1: Add the optional record field**
 
@@ -61,7 +66,7 @@ transcript_session_capture_deferred?: boolean;
 
 **Step 2: Add an age-neutral state mutation**
 
-Add `StateManager.setTranscriptSessionCaptureDeferred(agentId, deferred)`. It reads the current record, returns early if unchanged, replaces only the marker, writes `state.json.tmp`, atomically renames it to `state.json`, updates the surface-session index, and returns the record. It must not increment `version`, change `updated_at`, or append a lifecycle event.
+Add `StateManager.setTranscriptSessionCaptureDeferred(agentId, deferred, attempts)`. It reads the current record, returns early if both values are unchanged, atomically replaces the marker and persisted attempt count through `state.json.tmp` plus rename, updates the surface-session index, and returns the record. The mutation supports increment, reset, and clear without incrementing `version`, changing `updated_at`, or appending a lifecycle event.
 
 **Step 3: Route capture through the marker**
 
@@ -70,8 +75,9 @@ In `maybeCaptureBootSessionId()`:
 - Clear a stale marker age-neutrally when a record already has `cli_session_id`.
 - On first-connect (`resolveTranscript: false`), set the marker for transcript-eligible sessionless records.
 - On normal sweeps, resolve when ordinary eligibility is true or the durable marker is true.
-- Never clear the marker before `finalizeCapturedSession()` succeeds.
-- Preserve the marked record when resolver or identity persistence throws.
+- Successful capture clears the marker and attempt count only inside `finalizeCapturedSession()`.
+- Structural ineligibility and the terminal three-failure budget clear both fields through the age-neutral atomic mutation.
+- Preserve the marker when resolver or identity persistence throws before either terminal condition; identity-write failures do not consume the resolver budget.
 
 In `finalizeCapturedSession()`, include `transcript_session_capture_deferred: false` in the same `updateRecord()` patch as `cli_session_id` and `cli_session_path`, including the existing-canonical-row path.
 
@@ -126,7 +132,7 @@ git commit -m "fix(lifecycle): persist deferred session capture"
 bun run typecheck && env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test
 ```
 
-Expected: typecheck exits zero and all 2,211 tests pass. Record the actual summary, not the expectation.
+Expected: typecheck and the full suite exit zero. Record the actual file and test counts reported by the gate output.
 
 **Step 2: Run bounded local review**
 
@@ -143,3 +149,24 @@ Wait at least 120 seconds before the first review check. Read all PR comments an
 **Step 5: Report**
 
 Re-enumerate cmux surfaces, deliver the final PR URL and test count to cmuxLead-v2 on `surface:143`, store the WHAT+WHY milestone in BrainLayer, and stop with `TASK_DONE`.
+
+### Task 5: Bound never-resolving markers (independent review RED)
+
+**Files:**
+- Modify: `src/agent-types.ts`
+- Modify: `src/state-manager.ts`
+- Modify: `src/agent-engine.ts`
+- Modify: `tests/state-manager.test.ts`
+- Modify: `tests/sidebar-sync.test.ts`
+
+**Step 1: Verify RED**
+
+Add a persisted terminal marked row whose resolver always returns `null`. Run sweeps across an engine restart and assert the resolver is called at most three times and the row is subsequently reaped. Add a structurally ineligible marked row and assert it clears without a resolver call. Add a state-manager assertion that the attempt count persists without changing lifecycle age or emitting an event.
+
+**Step 2: Implement the bounded marker**
+
+Persist `transcript_session_capture_attempts` in the age-neutral marker mutation. Count resolver `null`/throw outcomes, clear atomically at three, reset on successful capture, and leave the count unchanged when identity persistence fails. Split lifecycle eligibility from structural transcript context so a terminal JSONL row can use its bounded marker override while unsupported/malformed context clears immediately.
+
+**Step 3: Verify GREEN and run the full gate**
+
+Run the focused state-manager/sidebar regressions, then the exact full typecheck and test gate. Push to the existing PR branch, request re-review, process CI/review findings, and do not merge.

@@ -962,6 +962,131 @@ describe("Sidebar Sync", () => {
     });
   });
 
+  it("bounds unresolved deferred capture across restart and reaps the terminal row", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-07-17T20:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const deferredTranscriptResolver = vi.fn(() => null);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cmuxlayerCodex-stuck-deferred-capture",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        role: "worker",
+        state: "done",
+        surface_id: "surface:missing",
+        transcript_session_capture_deferred: true,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        title: "unrelated live surface",
+        workspace_ref: "workspace:other",
+      },
+    ];
+    const makeDeferredEngine = () => {
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      return new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: deferredTranscriptResolver,
+        inboxOpts,
+        fleetSidebarPublisher: {
+          publish: () => {},
+          dispose: () => {},
+        },
+      });
+    };
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    engine.dispose();
+    engine = makeDeferredEngine();
+    await engine.initialize(discovery);
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledTimes(1);
+    expect(
+      engine.getAgentState("cmuxlayerCodex-stuck-deferred-capture"),
+    ).toMatchObject({
+      cli_session_id: null,
+      transcript_session_capture_deferred: true,
+    });
+
+    engine.dispose();
+    engine = makeDeferredEngine();
+    await engine.initialize(discovery);
+    expect(deferredTranscriptResolver).toHaveBeenCalledTimes(1);
+
+    for (let sweep = 1; sweep <= 3; sweep += 1) {
+      vi.setSystemTime(startedAt.getTime() + sweep * 6_000);
+      await engine.runSweep();
+    }
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledTimes(3);
+    expect(
+      engine.getAgentState("cmuxlayerCodex-stuck-deferred-capture"),
+    ).toBeNull();
+  });
+
+  it("clears an ineligible deferred marker without invoking the resolver", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-07-17T20:30:00.000Z");
+    vi.setSystemTime(startedAt);
+    const deferredTranscriptResolver = vi.fn(() => null);
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "gemini-stale-deferred-capture",
+        cli: "gemini",
+        model: "gemini",
+        launcher_name: "geminiWorker",
+        role: "worker",
+        state: "done",
+        surface_id: "surface:missing",
+        transcript_session_capture_deferred: true,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:witness"),
+        title: "unrelated live surface",
+        workspace_ref: "workspace:other",
+      },
+    ];
+    engine.dispose();
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    engine = new AgentEngine(stateMgr, registry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: deferredTranscriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).not.toHaveBeenCalled();
+    expect(
+      engine.getAgentState("gemini-stale-deferred-capture"),
+    ).toMatchObject({ transcript_session_capture_deferred: false });
+
+    vi.setSystemTime(startedAt.getTime() + 6_000);
+    await engine.runSweep();
+
+    expect(
+      engine.getAgentState("gemini-stale-deferred-capture"),
+    ).toBeNull();
+  });
+
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
     const discovery = new AgentDiscovery({
       listSurfaces: async () => [],

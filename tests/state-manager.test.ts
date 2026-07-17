@@ -164,6 +164,33 @@ describe("StateManager", () => {
     });
   });
 
+  describe("setTranscriptSessionCaptureDeferred", () => {
+    it("persists the failed-attempt count without refreshing lifecycle age", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({
+        version: 7,
+        updated_at: "2026-03-14T03:40:00Z",
+      });
+      mgr.writeState(record);
+      const eventCount = mgr.getEventLog().readAll().length;
+
+      const updated = mgr.setTranscriptSessionCaptureDeferred(
+        record.agent_id,
+        true,
+        2,
+      );
+
+      expect(updated).toMatchObject({
+        transcript_session_capture_deferred: true,
+        transcript_session_capture_attempts: 2,
+        version: 7,
+        updated_at: "2026-03-14T03:40:00Z",
+      });
+      expect(mgr.getEventLog().readAll()).toHaveLength(eventCount);
+      expect(mgr.readState(record.agent_id)).toEqual(updated);
+    });
+  });
+
   describe("listStates", () => {
     it("returns all agent records", () => {
       const mgr = new StateManager(TEST_DIR);

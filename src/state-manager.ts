@@ -399,25 +399,33 @@ export class StateManager {
   }
 
   /**
-   * Persist the startup transcript-capture retry marker without refreshing
-   * lifecycle age. The marker is bookkeeping, not agent progress.
+   * Persist startup transcript-capture retry bookkeeping without refreshing
+   * lifecycle age. Marker/attempt changes are not agent progress.
    */
   setTranscriptSessionCaptureDeferred(
     agentId: string,
     deferred: boolean,
+    attempts = 0,
   ): AgentRecord {
     const dirName = this.resolveStateDir(agentId);
     const current = dirName ? this.readStateFromDir(dirName) : null;
     if (!current) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    if (current.transcript_session_capture_deferred === deferred) {
+    const normalizedAttempts = Number.isFinite(attempts)
+      ? Math.max(0, Math.trunc(attempts))
+      : 0;
+    if (
+      current.transcript_session_capture_deferred === deferred &&
+      (current.transcript_session_capture_attempts ?? 0) === normalizedAttempts
+    ) {
       return current;
     }
 
     const updated: AgentRecord = {
       ...current,
       transcript_session_capture_deferred: deferred,
+      transcript_session_capture_attempts: normalizedAttempts,
     };
     const agentDir = join(this.baseDir, dirName!);
     const stateFile = this.stateFilePath(dirName!);
