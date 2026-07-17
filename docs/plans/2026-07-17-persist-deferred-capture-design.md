@@ -10,7 +10,7 @@ v0.4.15 keeps recursive transcript discovery out of first-connect startup and re
 
 ## Chosen design
 
-Persist a `transcript_session_capture_deferred` marker on `AgentRecord`. First-connect sets the marker without changing the record's lifecycle age. Startup and normal absence cleanup retain marked terminal rows. Before normal absence cleanup, a sweep retries every marked row without requiring a live surface binding, so a pane that closes during restart cannot strand the capture. A normal sweep treats the marker as transcript-capture eligibility even after terminalization or restart.
+Persist a `transcript_session_capture_deferred` marker on `AgentRecord`. First-connect sets the marker without changing the record's lifecycle age. Startup and normal absence cleanup retain marked terminal rows. After the one-shot startup purge retains those marked rows, but before normal absence cleanup, a sweep retries every marker without requiring a live surface binding. This ordering prevents either a pane closing during restart or a successful first retry from discarding the captured identity. A normal sweep treats the marker as transcript-capture eligibility even after terminalization or restart.
 
 Session identity persistence and marker clearing happen in the same atomic state-file replacement. If the identity write fails, the previous record remains sessionless and marked, so a later sweep retries. Once identity is persisted, the marker is false in that same record version.
 
@@ -43,5 +43,6 @@ Extend the existing first-connect lifecycle regression without adding a second o
 5. Remove the original pane and prove the first sweep still reaches the resolver, then leaves the row marked and sessionless.
 6. Prove a later sweep captures identity and clears the marker atomically.
 7. Prove normal surfaceless and terminal cleanup retain a marked row.
+8. Prove an immediate successful first-sweep capture survives the pending startup purge.
 
 Run the focused sidebar and resync suites, then the exact full gate from the approved brief.

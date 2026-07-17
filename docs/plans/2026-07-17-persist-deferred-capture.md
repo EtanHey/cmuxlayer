@@ -77,7 +77,7 @@ In `finalizeCapturedSession()`, include `transcript_session_capture_deferred: fa
 
 In `purgeStartupTerminalAgents()`, add marked registry rows to `retainAgentIds` before purging.
 
-Before normal absence cleanup, retry marked rows independently of live surface binding. Both `evictSurfaceless()` and `purgeTerminal()` retain marked rows and reset their absence confirmation evidence; ordinary cleanup resumes after the atomic capture clears the marker.
+After the pending one-shot startup purge has retained marked rows, but before normal absence cleanup, retry those rows independently of live surface binding. Both `evictSurfaceless()` and `purgeTerminal()` retain marked rows and reset their absence confirmation evidence; ordinary cleanup resumes after the atomic capture clears the marker. Add a regression proving an immediate successful first-sweep capture is not deleted by the pending startup purge.
 
 **Step 4: Verify GREEN**
 

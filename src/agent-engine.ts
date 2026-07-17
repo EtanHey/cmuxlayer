@@ -4163,15 +4163,15 @@ export class AgentEngine {
       now: Date.now(),
     };
     await this.registry.reconcile(surfacelessConfirmation);
-    // Deferred transcript identity does not require a live surface binding.
-    // Retry it before absence cleanup so a closed pane cannot strand or evict
-    // the durable capture intent before the resolver gets a chance to run.
-    await this.retryDeferredTranscriptCaptures();
     await this.registry.evictSurfaceless(surfacelessConfirmation);
     await this.recoverCrashedAgents();
 
     await this.purgeStartupTerminalAgents();
 
+    // Deferred transcript identity does not require a live surface binding.
+    // Retry after the one-shot startup purge has retained marked rows, but
+    // before normal terminal cleanup can act on a closed pane.
+    await this.retryDeferredTranscriptCaptures();
     await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
     await this.reconcileRolePlacements("idle");

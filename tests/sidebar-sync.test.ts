@@ -902,6 +902,66 @@ describe("Sidebar Sync", () => {
     });
   });
 
+  it("retains a successful deferred capture through the pending startup purge", async () => {
+    const capturedSessionId = "87654321-4321-4321-8321-cba987654321";
+    const deferredTranscriptResolver = vi.fn(() => ({
+      session_id: capturedSessionId,
+      path: "/tmp/codex-startup-purge-session.jsonl",
+    }));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cmuxlayerCodex-deferred-startup-purge",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        state: "done",
+        transcript_session_capture_deferred: true,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:42"),
+        title: "cmuxlayerCodex [surface:42]",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    engine.dispose();
+    const restartedRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, restartedRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: deferredTranscriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+
+    expect(deferredTranscriptResolver).not.toHaveBeenCalled();
+
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledTimes(1);
+    expect(
+      engine.getAgentState(
+        generateAgentId("codex", "cmuxlayer", capturedSessionId),
+      ),
+    ).toMatchObject({
+      state: "done",
+      cli_session_id: capturedSessionId,
+      cli_session_path: "/tmp/codex-startup-purge-session.jsonl",
+      transcript_session_capture_deferred: false,
+    });
+  });
+
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {
     const discovery = new AgentDiscovery({
       listSurfaces: async () => [],
