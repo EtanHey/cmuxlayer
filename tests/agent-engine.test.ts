@@ -6974,7 +6974,7 @@ To continue this session, run codex resume ${sessionId}`,
     });
 
     it("resolves done for a non-Codex worker after trailing done output evidence is confirmed", async () => {
-      vi.useFakeTimers();
+      vi.useFakeTimers({ now: new Date("2026-07-17T12:00:00.000Z") });
       try {
         stateMgr.writeState(
           makeRecord({
@@ -6995,7 +6995,11 @@ To continue this session, run codex resume ${sessionId}`,
         await engine.getRegistry().reconstitute();
 
         const pending = engine.waitFor("claude-output-done", "done", 7_000);
-        await vi.advanceTimersByTimeAsync(8_000);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(
+          engine.getAgentState("claude-output-done")?.task_done_candidate_at,
+        ).toEqual(expect.any(String));
+        await vi.advanceTimersByTimeAsync(5_000);
         const result = await pending;
 
         expect(result.matched).toBe(true);

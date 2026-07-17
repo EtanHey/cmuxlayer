@@ -978,6 +978,18 @@ export interface FleetSidebarPublisherOptions {
   outputPath?: string;
   minWriteIntervalMs?: number;
   collapseStore?: FleetSidebarCollapseStore;
+  collapseStateWatcher?: (
+    statePath: string,
+    onChange: () => void,
+  ) => () => void;
+}
+
+function watchFleetSidebarCollapseState(
+  statePath: string,
+  onChange: () => void,
+): () => void {
+  watchFile(statePath, { persistent: false, interval: 100 }, onChange);
+  return () => unwatchFile(statePath, onChange);
 }
 
 export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
@@ -989,6 +1001,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
   private pendingBaselineSource: string | null = null;
   private lastPublishedPublication: FleetSidebarPublication | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly stopCollapseStateWatcher: () => void;
   private disposed = false;
   private readonly collapseStateListener = () => {
     const publication =
@@ -1023,9 +1036,10 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
       500,
       opts.minWriteIntervalMs ?? 500,
     );
-    watchFile(
+    this.stopCollapseStateWatcher = (
+      opts.collapseStateWatcher ?? watchFleetSidebarCollapseState
+    )(
       this.collapseStore.getStatePath(),
-      { persistent: false, interval: 100 },
       this.collapseStateListener,
     );
   }
@@ -1082,10 +1096,7 @@ export class FleetSidebarPublisher implements FleetSidebarPublisherLike {
     this.disposed = true;
     this.clearPending();
     this.lastPublishedPublication = null;
-    unwatchFile(
-      this.collapseStore.getStatePath(),
-      this.collapseStateListener,
-    );
+    this.stopCollapseStateWatcher();
     this.clearTimer();
   }
 

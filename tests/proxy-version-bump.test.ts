@@ -235,7 +235,8 @@ describe("proxy version-bump auto-reconnect", () => {
     daemons.push(daemon);
     await daemon.start();
 
-    let stale = false;
+    let runningVersion = "0.3.33";
+    let installedVersion = "0.3.33";
     const input = new PassThrough();
     const output = new PassThrough();
     const collector = createCollector(output);
@@ -249,10 +250,20 @@ describe("proxy version-bump auto-reconnect", () => {
       requestTimeoutMs: 500,
       staleRecheckIntervalMs: 10,
       detectStaleBuild: () =>
-        stale
-          ? { stale: true, running: "0.3.33", installed: "0.3.34" }
-          : { stale: false, running: "0.3.33", installed: "0.3.33" },
-      spawnDaemonForVersionBump: vi.fn().mockResolvedValue(undefined),
+        runningVersion === installedVersion
+          ? {
+              stale: false,
+              running: runningVersion,
+              installed: installedVersion,
+            }
+          : {
+              stale: true,
+              running: runningVersion,
+              installed: installedVersion,
+            },
+      spawnDaemonForVersionBump: vi.fn().mockImplementation(async () => {
+        runningVersion = installedVersion;
+      }),
       installedDaemonScriptPath: () => "/opt/cmuxlayer/dist/daemon.js",
       logger: { error: vi.fn() },
     });
@@ -283,7 +294,7 @@ describe("proxy version-bump auto-reconnect", () => {
       ),
     );
 
-    stale = true;
+    installedVersion = "0.3.34";
 
     await waitFor(() => daemon.connections.length >= 2, 1_000);
     await waitFor(

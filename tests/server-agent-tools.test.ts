@@ -41,6 +41,17 @@ import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
 
+afterEach(async () => {
+  await Promise.allSettled(
+    serverContexts.map(
+      (context) => context.lifecycleStartPromise ?? Promise.resolve(),
+    ),
+  );
+  for (const context of serverContexts.splice(0)) {
+    context.dispose();
+  }
+});
+
 const AGENT_TOOLS = [
   "spawn_agent",
   "new_worktree_split",
@@ -254,8 +265,32 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
+async function runWithFakeTimers<T>(run: () => Promise<T>): Promise<T> {
+  const resultPromise = run();
+  let settled = false;
+  void resultPromise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  for (let elapsed = 0; elapsed < 5_000 && !settled; elapsed += 50) {
+    for (let flush = 0; flush < 8; flush += 1) {
+      await Promise.resolve();
+    }
+    await vi.advanceTimersByTimeAsync(50);
+  }
+  if (!settled) {
+    throw new Error("Operation did not settle within 5,000 ms of fake time");
+  }
+  return resultPromise;
+}
+
 describe("lean spawn tool responses", () => {
   it("spawn_agent publishes the exact expected-state manifest through the injected writer", async () => {
+    vi.useFakeTimers({ now: new Date("2026-07-17T12:00:00.000Z") });
     const manifests: SeatManifest[] = [];
     const surfaceUuid = "11111111-2222-4333-8444-555555555555";
     const server = createTrackedServer({
@@ -268,31 +303,43 @@ describe("lean spawn tool responses", () => {
       },
       seatManifestNow: () => "2026-07-12T12:00:00.000Z",
     });
+    const context = serverContexts.at(-1)!;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
-      {} as any,
-    );
-    const parsed =
-      result.structuredContent ?? JSON.parse(result.content[0].text);
+    try {
+      const result = await runWithFakeTimers(async () => {
+        const [spawnResult] = await Promise.all([
+          spawn.handler(
+            { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+            {} as any,
+          ),
+          context.lifecycleStartPromise ?? Promise.resolve(),
+        ]);
+        return spawnResult;
+      });
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
-    expect(manifests).toEqual([
-      {
-        surface_id: "surface:new",
-        surface_uuid: surfaceUuid,
-        agent_id: parsed.agent_id,
-        tab_name: "cmuxlayerClaude [surface:new]",
-        session_name: null,
-        model: "fable-5",
-        permission_mode: "skip-permissions",
-        cwd: join(homedir(), "Gits", "cmuxlayer"),
-        repo: "cmuxlayer",
-        cli: "claude",
-        updated_at: "2026-07-12T12:00:00.000Z",
-      },
-    ]);
+      expect(parsed.ok).toBe(true);
+      expect(manifests).toEqual([
+        {
+          surface_id: "surface:new",
+          surface_uuid: surfaceUuid,
+          agent_id: parsed.agent_id,
+          tab_name: "cmuxlayerClaude [surface:new]",
+          session_name: null,
+          model: "fable-5",
+          permission_mode: "skip-permissions",
+          cwd: join(homedir(), "Gits", "cmuxlayer"),
+          repo: "cmuxlayer",
+          cli: "claude",
+          updated_at: "2026-07-12T12:00:00.000Z",
+        },
+      ]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
@@ -924,15 +971,7 @@ describe("agent lifecycle tool handlers", () => {
     mockExec = makeLifecycleExec();
   });
 
-  afterEach(async () => {
-    await Promise.allSettled(
-      serverContexts.map(
-        (context) => context.lifecycleStartPromise ?? Promise.resolve(),
-      ),
-    );
-    for (const context of serverContexts.splice(0)) {
-      context.dispose();
-    }
+  afterEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
