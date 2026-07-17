@@ -21,6 +21,7 @@ function withTestObserver<T extends Omit<CreateServerOptions, "context">>(
 ): T & Omit<CreateServerOptions, "context"> {
   return {
     ...opts,
+    sessionIdentityResolver: opts.sessionIdentityResolver ?? (() => null),
     surfaceObserverOwnerIdProvider:
       opts.surfaceObserverOwnerIdProvider ?? (() => TEST_OBSERVER_OWNER),
     surfaceObserverEpochProvider:

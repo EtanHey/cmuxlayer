@@ -222,6 +222,7 @@ function createTrackedServer(opts: Omit<CreateServerOptions, "context">) {
   };
   const normalizedOpts: Omit<CreateServerOptions, "context"> = {
     ...opts,
+    sessionIdentityResolver: opts.sessionIdentityResolver ?? (() => null),
     surfaceObserverOwnerIdProvider:
       opts.surfaceObserverOwnerIdProvider ?? testObserverOwnerId,
     surfaceObserverEpochProvider:

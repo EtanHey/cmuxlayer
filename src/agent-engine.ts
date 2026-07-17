@@ -2264,12 +2264,16 @@ export class AgentEngine {
   private async maybeCaptureBootSessionId(
     agent: AgentRecord,
     ctx: SweepAgentContext,
+    opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
       return agent;
     }
 
-    if (this.canUseTranscriptSessionResolver(agent)) {
+    if (
+      opts.resolveTranscript !== false &&
+      this.canUseTranscriptSessionResolver(agent)
+    ) {
       try {
         const transcriptSessionId = this.sessionIdentityResolver(agent);
         if (transcriptSessionId) {
@@ -3195,9 +3199,12 @@ export class AgentEngine {
         this.registry.set(originalAgent.agent_id, originalAgent);
       }
       const sweepCtx: SweepAgentContext = {};
+      // MCP readiness must not depend on a synchronous scan of the host's
+      // transcript tree. Normal sweeps retry transcript capture after startup.
       const capturedAgent = await this.maybeCaptureBootSessionId(
         originalAgent,
         sweepCtx,
+        { resolveTranscript: opts.firstConnect !== true },
       );
       const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
       const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
