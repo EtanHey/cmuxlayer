@@ -659,7 +659,7 @@ describe("Sidebar Sync", () => {
     });
   });
 
-  it("discovers and publishes live seats exactly once during idempotent startup", async () => {
+  it("discovers live seats once and defers transcript capture beyond startup", async () => {
     const transcriptResolver = vi.fn(() => null);
     engine.dispose();
     const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -756,6 +756,86 @@ describe("Sidebar Sync", () => {
         cli: "codex",
       }),
     );
+
+    engine.dispose();
+    stateMgr.removeState("auto-codex-surface-42");
+    publishedFleetPublications.length = 0;
+    const capturedSessionId = "12345678-1234-4234-8234-123456789abc";
+    const deferredTranscriptResolver = vi.fn(() => ({
+      session_id: capturedSessionId,
+      path: "/tmp/codex-session.jsonl",
+    }));
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "cmuxlayerCodex-pending-startup",
+        repo: "cmuxlayer",
+        launcher_name: "cmuxlayerCodex",
+        task_done_candidate_at: "2026-03-14T03:40:00Z",
+      }),
+    );
+    const terminalRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, terminalRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: deferredTranscriptResolver,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: (publication) => {
+          if (!("snapshot" in publication)) {
+            throw new Error("engine must publish an explicit fleet state");
+          }
+          publishedFleetPublications.push(publication);
+        },
+        dispose: () => {},
+      },
+    });
+    mockClient.readScreen
+      .mockResolvedValueOnce({
+        surface: "surface:42",
+        text:
+          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\n• Working (1s • esc to interrupt)",
+        lines: 30,
+        scrollback_used: false,
+      })
+      .mockResolvedValue({
+        surface: "surface:42",
+        text:
+          "gpt-5.4 high · 87% left · ~/Gits/cmuxlayer\nImplemented the fix.\nTASK_DONE",
+        lines: 30,
+        scrollback_used: false,
+      });
+    const terminalDiscovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(terminalDiscovery);
+
+    expect(deferredTranscriptResolver).not.toHaveBeenCalled();
+    expect(engine.getAgentState("cmuxlayerCodex-pending-startup")).toMatchObject(
+      { state: "done", cli_session_id: null },
+    );
+
+    await engine.runSweep();
+
+    expect(deferredTranscriptResolver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "cmuxlayerCodex-pending-startup",
+        cli: "codex",
+        state: "done",
+      }),
+    );
+    expect(
+      engine.getAgentState(
+        generateAgentId("codex", "cmuxlayer", capturedSessionId),
+      ),
+    ).toMatchObject({
+      state: "done",
+      cli_session_id: capturedSessionId,
+      cli_session_path: "/tmp/codex-session.jsonl",
+    });
   });
 
   it("treats an empty first-connect enumeration as unknown, not authoritative empty", async () => {

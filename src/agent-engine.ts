@@ -806,6 +806,8 @@ export class AgentEngine {
   private deliveredLeadMonitorDeathAlerts = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
+  /** Sessionless rows whose first-connect transcript lookup was deferred. */
+  private deferredTranscriptSessionAgentIds = new Set<string>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
@@ -2267,16 +2269,23 @@ export class AgentEngine {
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
+      this.deferredTranscriptSessionAgentIds.delete(agent.agent_id);
       return agent;
     }
 
+    const transcriptEligible = this.canUseTranscriptSessionResolver(agent);
+    if (opts.resolveTranscript === false && transcriptEligible) {
+      this.deferredTranscriptSessionAgentIds.add(agent.agent_id);
+    }
     if (
       opts.resolveTranscript !== false &&
-      this.canUseTranscriptSessionResolver(agent)
+      (transcriptEligible ||
+        this.deferredTranscriptSessionAgentIds.has(agent.agent_id))
     ) {
       try {
         const transcriptSessionId = this.sessionIdentityResolver(agent);
         if (transcriptSessionId) {
+          this.deferredTranscriptSessionAgentIds.delete(agent.agent_id);
           return this.finalizeCapturedSession(agent, transcriptSessionId);
         }
       } catch {
@@ -2295,6 +2304,7 @@ export class AgentEngine {
         return agent;
       }
 
+      this.deferredTranscriptSessionAgentIds.delete(agent.agent_id);
       return this.finalizeCapturedSession(agent, {
         session_id: sessionId,
         path: null,
@@ -2874,6 +2884,9 @@ export class AgentEngine {
     }
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
     this.fleetScreenProgress.delete(agentId);
+    if (!this.registry.get(agentId) && !this.stateMgr.readState(agentId)) {
+      this.deferredTranscriptSessionAgentIds.delete(agentId);
+    }
   }
 
   private isLeadWatchBlind(
@@ -3970,8 +3983,12 @@ export class AgentEngine {
   private async purgeStartupTerminalAgents(): Promise<void> {
     if (!this.startupPurgePending) return;
     this.startupPurgePending = false;
+    const retainedAgentIds = new Set([
+      ...this.startupPurgeRetainedAgentIds,
+      ...this.deferredTranscriptSessionAgentIds,
+    ]);
     const purgedIds = this.registry.purgeAllTerminal({
-      retainAgentIds: this.startupPurgeRetainedAgentIds,
+      retainAgentIds: retainedAgentIds,
     });
     this.startupPurgeRetainedAgentIds.clear();
     try {

@@ -18,17 +18,17 @@
 
 **Step 1: Write the failing regression**
 
-Extend the idempotent-startup lifecycle test with an eligible discovered Codex record and a resolver spy. Assert `initialize()` does not call the spy, then call `runSweep()` and assert it does without increasing the approved 2,210-test suite count.
+Extend the idempotent-startup lifecycle test with an eligible discovered Codex record and a resolver spy. Assert `initialize()` does not call the spy, then call `runSweep()` and assert it does. Cover a record that reaches `done` during first-connect so terminalization cannot discard the deferred lookup, without increasing the approved 2,210-test suite count.
 
 **Step 2: Run the focused test to verify RED**
 
-Run: `env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET npx vitest run tests/sidebar-sync.test.ts -t "discovers and publishes live seats exactly once during idempotent startup"`
+Run: `env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET npx vitest run tests/sidebar-sync.test.ts -t "discovers live seats once and defers transcript capture beyond startup"`
 
 Expected: FAIL because first-connect `syncSidebar()` currently invokes the resolver.
 
 **Step 3: Implement the minimal boundary**
 
-Add an optional transcript-resolution flag to `maybeCaptureBootSessionId()`. Pass it as disabled only from `syncSidebar({ firstConnect: true })`; leave normal sweeps and explicit capture enabled.
+Add an optional transcript-resolution flag to `maybeCaptureBootSessionId()`. Pass it as disabled only from `syncSidebar({ firstConnect: true })`; retain eligible deferred rows across terminalization and the startup terminal purge, then clear the deferral after capture. Leave normal sweeps and explicit capture enabled.
 
 **Step 4: Run the focused test to verify GREEN**
 

@@ -19,11 +19,12 @@ The fix still belongs in this batch because a user-sized sessions directory must
 
 ## Production boundary
 
-First-connect sidebar synchronization will skip only transcript-filesystem identity resolution. It will continue topology binding, screen-based boot capture, lifecycle reconciliation, and sidebar publication. The normal sweep and explicit `captureBootSessionId()` path retain transcript resolution, so session identity is deferred rather than removed.
+First-connect sidebar synchronization will skip only transcript-filesystem identity resolution. It will continue topology binding, screen-based boot capture, lifecycle reconciliation, and sidebar publication. Eligible sessionless rows remember that deferral so a same-pass transition to `done` or `error` cannot make transcript capture permanently ineligible or expose the row to the one-time stale-terminal purge. The normal sweep and explicit `captureBootSessionId()` path retain transcript resolution, so session identity is deferred rather than removed.
 
 This is narrower than making the synchronous resolver asynchronous or adding a cross-agent cache:
 
 - no startup await can enter the recursive sessions scan;
+- first-connect terminalization cannot discard a deferred identity lookup;
 - existing later-capture and resume semantics remain intact;
 - screen-derived session IDs can still be captured during the boot window;
 - the change is deterministic and directly testable with an injected resolver spy.
@@ -35,7 +36,7 @@ Production-server test helpers in `resync-tool.test.ts` and the sibling server s
 The lifecycle regression will assert both halves of the boundary:
 
 1. `initialize()` completes without invoking an eligible transcript resolver.
-2. A subsequent explicit sweep invokes that resolver, proving capture was deferred rather than disabled.
+2. A subsequent explicit sweep invokes that resolver, including when the row became terminal during first-connect, proving capture was deferred rather than disabled.
 
 The resync regression remains outcome-focused and deterministic under the hermetic helper.
 
