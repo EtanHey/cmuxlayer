@@ -33,6 +33,7 @@ import type {
 
 const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
+export const SESSION_REGISTRATION_READ_CHUNK_BYTES = 64 * 1024;
 export const SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES = 64 * 1024;
 export const SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE = 64;
 export const SESSION_REGISTRATION_MAX_INDEXED_SURFACES = 1_024;
@@ -322,6 +323,55 @@ function makeIncrementalEntryIndexReader(
     entriesBySurface = new Map();
   };
 
+  const readExactRange = (offset: number, length: number): Buffer | null => {
+    let readBuffer: Buffer | null;
+    try {
+      readBuffer = readFileRange(registryPath, offset, length);
+    } catch {
+      readBuffer = null;
+    }
+    return readBuffer?.byteLength === length ? readBuffer : null;
+  };
+
+  const consumeAppendedBytes = (appended: Buffer): void => {
+    const continuitySource = Buffer.concat([continuityTail, appended]);
+    continuityTail = copyBufferTail(
+      continuitySource,
+      SESSION_REGISTRATION_CONTINUITY_BYTES,
+    );
+    let parseableAppended = appended;
+    if (discardingOversizedLine) {
+      const discardedLineEnd = parseableAppended.indexOf(0x0a);
+      if (discardedLineEnd < 0) {
+        parseableAppended = Buffer.alloc(0);
+      } else {
+        discardingOversizedLine = false;
+        parseableAppended = parseableAppended.subarray(discardedLineEnd + 1);
+      }
+    }
+    const combined = Buffer.concat([pendingLine, parseableAppended]);
+    const finalNewline = combined.lastIndexOf(0x0a);
+    if (finalNewline >= 0) {
+      const completeLines = combined.subarray(0, finalNewline + 1);
+      const trailingLine = combined.subarray(finalNewline + 1);
+      discardingOversizedLine =
+        trailingLine.byteLength >
+        SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
+      pendingLine = boundPendingRegistrationLine(trailingLine);
+      for (const entry of parseSelfRegistrationBufferLines(completeLines)) {
+        if (!isIndexableRegistrationEntry(entry)) continue;
+        const key = surfaceUuidKey(entry.surface_uuid);
+        if (!key) continue;
+        indexSurfaceCandidate(entriesBySurface, key, entry);
+      }
+    } else {
+      discardingOversizedLine =
+        discardingOversizedLine ||
+        combined.byteLength > SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
+      pendingLine = boundPendingRegistrationLine(combined);
+    }
+  };
+
   return () => {
     let fileStat: SelfRegistrationFileStat | null;
     try {
@@ -347,97 +397,44 @@ function makeIncrementalEntryIndexReader(
       fileIdentity !== null &&
       fileStat.size === consumedBytes &&
       fileStat.mtimeMs !== observedMtimeMs;
-    const sameFileGrowth =
-      fileIdentity !== null &&
-      !replaced &&
-      fileStat.size > consumedBytes &&
-      consumedBytes > 0 &&
-      continuityTail.byteLength > 0;
-    if (
+    const resetsIndex =
       fileIdentity === null ||
       replaced ||
       fileStat.size < consumedBytes ||
-      rewrittenAtSameSize
-    ) {
-      reset();
-    }
+      rewrittenAtSameSize;
+    const sameFileGrowth =
+      !resetsIndex &&
+      fileStat.size > consumedBytes &&
+      consumedBytes > 0 &&
+      continuityTail.byteLength > 0;
+    if (resetsIndex) reset();
     fileIdentity = nextIdentity;
 
-    if (fileStat.size > consumedBytes) {
-      const continuityLength = sameFileGrowth
-        ? Math.min(continuityTail.byteLength, consumedBytes)
-        : 0;
-      const offset = consumedBytes - continuityLength;
-      const length = fileStat.size - offset;
-      let readBuffer: Buffer | null;
-      try {
-        readBuffer = readFileRange(registryPath, offset, length);
-      } catch {
-        readBuffer = null;
-      }
-      if (!readBuffer || readBuffer.byteLength !== length) return null;
-
-      let appended = readBuffer;
-      if (continuityLength > 0) {
-        const expectedBoundary = continuityTail.subarray(
-          continuityTail.byteLength - continuityLength,
-        );
-        const observedBoundary = readBuffer.subarray(0, continuityLength);
-        if (!observedBoundary.equals(expectedBoundary)) {
-          reset();
-          try {
-            readBuffer = readFileRange(registryPath, 0, fileStat.size);
-          } catch {
-            readBuffer = null;
-          }
-          if (!readBuffer || readBuffer.byteLength !== fileStat.size) {
-            return null;
-          }
-          appended = readBuffer;
-        } else {
-          appended = readBuffer.subarray(continuityLength);
-        }
-      }
-
-      consumedBytes = fileStat.size;
-      const continuitySource = Buffer.concat([continuityTail, appended]);
-      continuityTail = copyBufferTail(
-        continuitySource,
-        SESSION_REGISTRATION_CONTINUITY_BYTES,
+    if (sameFileGrowth) {
+      const continuityLength = Math.min(
+        continuityTail.byteLength,
+        consumedBytes,
       );
-      let parseableAppended = appended;
-      if (discardingOversizedLine) {
-        const discardedLineEnd = parseableAppended.indexOf(0x0a);
-        if (discardedLineEnd < 0) {
-          parseableAppended = Buffer.alloc(0);
-        } else {
-          discardingOversizedLine = false;
-          parseableAppended = parseableAppended.subarray(
-            discardedLineEnd + 1,
-          );
-        }
-      }
-      const combined = Buffer.concat([pendingLine, parseableAppended]);
-      const finalNewline = combined.lastIndexOf(0x0a);
-      if (finalNewline >= 0) {
-        const completeLines = combined.subarray(0, finalNewline + 1);
-        const trailingLine = combined.subarray(finalNewline + 1);
-        discardingOversizedLine =
-          trailingLine.byteLength >
-          SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
-        pendingLine = boundPendingRegistrationLine(trailingLine);
-        for (const entry of parseSelfRegistrationBufferLines(completeLines)) {
-          if (!isIndexableRegistrationEntry(entry)) continue;
-          const key = surfaceUuidKey(entry.surface_uuid);
-          if (!key) continue;
-          indexSurfaceCandidate(entriesBySurface, key, entry);
-        }
-      } else {
-        discardingOversizedLine =
-          discardingOversizedLine ||
-          combined.byteLength > SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
-        pendingLine = boundPendingRegistrationLine(combined);
-      }
+      const observedBoundary = readExactRange(
+        consumedBytes - continuityLength,
+        continuityLength,
+      );
+      if (!observedBoundary) return null;
+      const expectedBoundary = continuityTail.subarray(
+        continuityTail.byteLength - continuityLength,
+      );
+      if (!observedBoundary.equals(expectedBoundary)) reset();
+    }
+
+    while (consumedBytes < fileStat.size) {
+      const readLength = Math.min(
+        SESSION_REGISTRATION_READ_CHUNK_BYTES,
+        fileStat.size - consumedBytes,
+      );
+      const readBuffer = readExactRange(consumedBytes, readLength);
+      if (!readBuffer) return null;
+      consumeAppendedBytes(readBuffer);
+      consumedBytes += readLength;
     }
     observedMtimeMs = fileStat.mtimeMs;
     return entriesBySurface;

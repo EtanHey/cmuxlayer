@@ -13,6 +13,7 @@ import {
   SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE,
   SESSION_REGISTRATION_MAX_INDEXED_SURFACES,
   SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES,
+  SESSION_REGISTRATION_READ_CHUNK_BYTES,
 } from "../src/self-registration.js";
 import type { SelfRegistrationEntry } from "../src/self-registration.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -280,9 +281,60 @@ describe("makeSelfRegistrationSessionResolver", () => {
       { offset: 0, length: previousLength },
       {
         offset: previousLength - 64,
-        length: body.byteLength - previousLength + 64,
+        length: 64,
       },
+      { offset: previousLength, length: body.byteLength - previousLength },
     ]);
+  });
+
+  it("bounds every cold-start range read for a large registry", () => {
+    const body = Buffer.from(
+      jsonl(
+        {
+          session_id: "sid-oversized-cold-row",
+          surface_uuid: SURFACE_UUID_A,
+          padding: "x".repeat(SESSION_REGISTRATION_READ_CHUNK_BYTES * 3),
+          ts: 1000,
+        },
+        {
+          session_id: "sid-after-large-cold-row",
+          surface_uuid: SURFACE_UUID_B,
+          ts: 2000,
+        },
+      ),
+    );
+    const reads: Array<{ offset: number; length: number }> = [];
+    let shortSecondChunk = true;
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs: 1,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) => {
+        reads.push({ offset, length });
+        if (
+          shortSecondChunk &&
+          offset === SESSION_REGISTRATION_READ_CHUNK_BYTES
+        ) {
+          shortSecondChunk = false;
+          return body.subarray(offset, offset + length - 1);
+        }
+        return body.subarray(offset, offset + length);
+      },
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toBeNull();
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toEqual({
+      session_id: "sid-after-large-cold-row",
+      path: null,
+    });
+    expect(reads.length).toBeGreaterThan(1);
+    expect(Math.max(...reads.map((read) => read.length))).toBeLessThanOrEqual(
+      SESSION_REGISTRATION_READ_CHUNK_BYTES,
+    );
   });
 
   it("evicts least-recent surface keys after the global index cap", () => {
@@ -637,9 +689,10 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ surface_uuid: SURFACE_UUID_D }))?.session_id).toBe(
       "sid-D",
     );
-    expect(reads.slice(-2).map((read) => read.offset)).toEqual([
+    expect(reads.slice(-3).map((read) => read.offset)).toEqual([
       previousLength - 64,
       previousLength - 64,
+      previousLength,
     ]);
   });
 
