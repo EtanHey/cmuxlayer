@@ -4854,7 +4854,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const readCodexRolloutFill = async (
     agent: AgentRecord | null,
   ): Promise<CodexRolloutFill | null> => {
-    const path = agent?.cli === "codex" ? agent.cli_session_path : null;
+    const path =
+      agent?.cli === "codex" && Boolean(agent.surface_uuid?.trim())
+        ? agent.cli_session_path
+        : null;
     if (!path) return null;
     try {
       return await context.codexRolloutFillProvider.get(path);
@@ -10892,6 +10895,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const SCREEN_TIMEOUT = 3000;
           const enriched = await Promise.all(
             agents.map(async (agent) => {
+              const screenDeadline = Date.now() + SCREEN_TIMEOUT;
               let screenData: ParsedScreenResult | null = null;
               let liveSurfaceId: string | null = null;
               let screenFailure: {
@@ -10915,14 +10919,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       surface_id: binding.surfaceRef,
                       workspace_id: binding.workspaceId,
                     };
-                    const [screen, codexFill] = await Promise.all([
-                      client.readScreen(route.surface_id, {
-                        lines: 20,
-                        workspace: route.workspace_id ?? undefined,
-                      }),
-                      readCodexRolloutFill(agent),
-                    ]);
-                    return { route, screen, codexFill };
+                    const codexFillPromise = readCodexRolloutFill(agent);
+                    const screen = await client.readScreen(route.surface_id, {
+                      lines: 20,
+                      workspace: route.workspace_id ?? undefined,
+                    });
+                    return { route, screen, codexFillPromise };
                   })(),
                   new Promise<never>((_, reject) =>
                     setTimeout(
@@ -10933,6 +10935,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ]);
                 liveSurfaceId = resolved.route.surface_id;
                 const screen = resolved.screen;
+                const fillWaitMs = Math.max(0, screenDeadline - Date.now());
+                const codexFill =
+                  fillWaitMs === 0
+                    ? null
+                    : await new Promise<CodexRolloutFill | null>((resolve) => {
+                        const timeout = setTimeout(
+                          () => resolve(null),
+                          fillWaitMs,
+                        );
+                        resolved.codexFillPromise.then(
+                          (fill) => {
+                            clearTimeout(timeout);
+                            resolve(fill);
+                          },
+                          () => {
+                            clearTimeout(timeout);
+                            resolve(null);
+                          },
+                        );
+                      });
                 screenData = applyCodexRolloutFill(
                   applyHarnessState(
                     enrichParsedScreen(
@@ -10942,7 +10964,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ),
                     resolveHarnessStateForSurface(stateMgr, liveSurfaceId),
                   ),
-                  resolved.codexFill,
+                  codexFill,
                 );
               } catch (error) {
                 // Surface may be closed, unavailable, or timed out

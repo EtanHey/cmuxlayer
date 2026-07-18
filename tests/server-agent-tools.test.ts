@@ -7338,6 +7338,50 @@ codex>
     );
   });
 
+  it("get_agent_state never reads a Codex rollout for a UUID-less record", async () => {
+    const path = "/fixtures/codex/uuidless-agent-state.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:uuidless-state",
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-uuidless-state",
+      surface_id: "surface:uuidless-state",
+      surface_uuid: null,
+      surface_observer_id: "cmux:/tmp/current.sock",
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 80_000,
+      context_window: 400_000,
+      context_pct: 20,
+      observed_model_context_window: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "get_agent_state").handler(
+        { agent_id: record.agent_id },
+        {},
+      ),
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      token_count: null,
+      context_window: null,
+      context_pct: null,
+    });
+  });
+
   it("my_agents applies the authorized Codex rollout fill", async () => {
     const stableUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     const path = "/fixtures/codex/my-agents.jsonl";
@@ -7465,6 +7509,53 @@ codex>
     );
     expect(statFile).toHaveBeenCalledTimes(1);
     expect(readFileRange).toHaveBeenCalledTimes(1);
+  });
+
+  it("my_agents preserves screen data when an optional Codex fill never resolves", async () => {
+    const stableUuid = "d3000000-0000-4000-8000-000000000003";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:slow-fill",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-slow-optional-fill",
+      surface_id: "surface:slow-fill",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      parent_agent_id: null,
+      cli_session_path: "/fixtures/codex/slow-fill.jsonl",
+    });
+    const get = vi.fn(() => new Promise<never>(() => {}));
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    vi.useFakeTimers();
+    try {
+      const pending = registeredTestTool(server, "my_agents").handler({}, {});
+      for (let index = 0; index < 50 && get.mock.calls.length === 0; index += 1) {
+        await Promise.resolve();
+      }
+      expect(get).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(3_000);
+      const result = parseToolResult(await pending);
+
+      expect(result.agents[0]).toMatchObject({
+        agent_id: record.agent_id,
+        surface_id: "surface:slow-fill",
+        token_count: null,
+        context_pct: 25,
+      });
+      expect(result.agents[0]).not.toHaveProperty("screen_unavailable");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never invokes the Codex provider for a Claude read_screen", async () => {
