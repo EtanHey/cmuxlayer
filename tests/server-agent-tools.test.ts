@@ -56,6 +56,7 @@ afterEach(async () => {
   for (const stateDir of hermeticSpawnStateDirs.splice(0)) {
     rmSync(stateDir, { recursive: true, force: true });
   }
+  rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
 const AGENT_TOOLS = [
@@ -1145,10 +1146,6 @@ describe("agent lifecycle tool handlers", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     mockExec = makeLifecycleExec();
-  });
-
-  afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
   it("does not adopt cached lifecycle UUID evidence after an observer reconnect", async () => {
@@ -8588,10 +8585,6 @@ describe("auto-focus discipline (focus target before split, restore after render
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
   });
-  afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-  });
-
   // Builds an exec mock that records every call, reports `selectedWorkspace` as
   // the focused one, and returns a non-ready screen for the first `notReadyFor`
   // read-screen polls before reporting ready.
