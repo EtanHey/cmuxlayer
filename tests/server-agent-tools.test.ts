@@ -7756,7 +7756,7 @@ codex>
         }),
       ]),
     );
-    expect(statFile).toHaveBeenCalledTimes(1);
+    expect(statFile).toHaveBeenCalledTimes(2);
     expect(readFileRange).toHaveBeenCalledTimes(1);
   });
 

@@ -174,6 +174,64 @@ describe("CodexRolloutFillProvider", () => {
     ).toBe(true);
   });
 
+  it("keeps a complete token row that starts exactly at the cold-tail boundary", async () => {
+    const path = "/tmp/rollout-tail-boundary.jsonl";
+    const token = Buffer.from(tokenCountLine(70_000));
+    const fillerLine = Buffer.from('{"type":"event_msg"}\n');
+    const tailParts = [token];
+    let tailLength = token.length;
+    while (
+      tailLength + fillerLine.length <=
+      CODEX_ROLLOUT_MAX_TAIL_BYTES
+    ) {
+      tailParts.push(fillerLine);
+      tailLength += fillerLine.length;
+    }
+    const remaining = CODEX_ROLLOUT_MAX_TAIL_BYTES - tailLength;
+    if (remaining > 0) {
+      tailParts.push(Buffer.from(`${" ".repeat(remaining - 1)}\n`));
+    }
+    const prefix = Buffer.from('{"type":"event_msg","prefix":true}\n');
+    const bytes = Buffer.concat([prefix, ...tailParts]);
+    const provider = makeCodexRolloutFillProvider({
+      statFile: async () => ({
+        size: bytes.length,
+        mtimeMs: 1,
+        dev: 2,
+        ino: 45,
+        isFile: true,
+      }),
+      readFileRange: async (_requestedPath, start, length) =>
+        bytes.subarray(start, start + length),
+    });
+
+    await expect(provider.get(path)).resolves.toMatchObject({
+      token_count: 70_000,
+    });
+  });
+
+  it("discards cold bytes when the rollout identity rotates between stat and read", async () => {
+    const path = "/tmp/rollout-stat-read-rotation.jsonl";
+    const replacementBytes = Buffer.from(tokenCountLine(200_000));
+    let statCalls = 0;
+    const provider = makeCodexRolloutFillProvider({
+      statFile: async () => {
+        statCalls += 1;
+        return {
+          size: replacementBytes.length,
+          mtimeMs: statCalls,
+          dev: 2,
+          ino: statCalls === 1 ? 46 : 47,
+          isFile: true,
+        };
+      },
+      readFileRange: async (_requestedPath, start, length) =>
+        replacementBytes.subarray(start, start + length),
+    });
+
+    await expect(provider.get(path)).resolves.toBeNull();
+  });
+
   it("coalesces concurrent cold reads and serves warm data without more I/O", async () => {
     const path = "/tmp/rollout-coalesced.jsonl";
     const bytes = Buffer.from(tokenCountLine(40_000));
@@ -203,13 +261,13 @@ describe("CodexRolloutFillProvider", () => {
       Array.from({ length: 20 }, () => provider.get(path)),
     );
     expect(fills.every((fill) => fill?.token_count === 40_000)).toBe(true);
-    expect(statCalls).toBe(1);
+    expect(statCalls).toBe(2);
     expect(readCalls).toBe(1);
 
     await expect(provider.get(path)).resolves.toMatchObject({
       token_count: 40_000,
     });
-    expect(statCalls).toBe(1);
+    expect(statCalls).toBe(2);
     expect(readCalls).toBe(1);
   });
 
@@ -489,9 +547,9 @@ describe("CodexRolloutFillProvider", () => {
     now += 1;
     await provider.get(first);
 
-    expect(statCalls.get(first)).toBe(2);
-    expect(statCalls.get(second)).toBe(1);
-    expect(statCalls.get(third)).toBe(1);
+    expect(statCalls.get(first)).toBe(4);
+    expect(statCalls.get(second)).toBe(2);
+    expect(statCalls.get(third)).toBe(2);
   });
 
   it("rejects a cold admission while every cache slot is in flight", async () => {

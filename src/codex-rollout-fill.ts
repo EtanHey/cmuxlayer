@@ -284,6 +284,17 @@ export function makeCodexRolloutFillProvider(
       0,
       fileStat.size - CODEX_ROLLOUT_MAX_TAIL_BYTES,
     );
+    let discardLeadingPartial = false;
+    if (start > 0) {
+      const preceding = await readRangeFully(
+        readFileRange,
+        path,
+        start - 1,
+        1,
+      );
+      if (!preceding) return entry.snapshot;
+      discardLeadingPartial = preceding[0] !== 0x0a;
+    }
     const bytes = await readRangeFully(
       readFileRange,
       path,
@@ -291,9 +302,18 @@ export function makeCodexRolloutFillProvider(
       fileStat.size - start,
     );
     if (!bytes) return entry.snapshot;
+    const confirmedStat = await statFile(path);
+    if (
+      !confirmedStat?.isFile ||
+      confirmedStat.dev !== fileStat.dev ||
+      confirmedStat.ino !== fileStat.ino ||
+      confirmedStat.size < fileStat.size
+    ) {
+      return entry.snapshot;
+    }
 
     const draft = cloneReader(entry);
-    ingest(draft, bytes, start > 0);
+    ingest(draft, bytes, discardLeadingPartial);
     draft.identity = `${fileStat.dev}:${fileStat.ino}`;
     draft.size = fileStat.size;
     draft.mtimeMs = fileStat.mtimeMs;
