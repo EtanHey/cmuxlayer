@@ -1636,6 +1636,10 @@ export class AgentRegistry {
     const evicted: string[] = [];
 
     for (const [id, agent] of [...this.agents.entries()]) {
+      if (agent.transcript_session_capture_deferred === true) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
       if (this.matchingLiveSurface(agent, surfaces)) {
         this.surfacelessObservations.delete(agent.agent_id);
         continue;
@@ -2270,6 +2274,10 @@ export class AgentRegistry {
     let purged = 0;
 
     for (const [id, agent] of this.agents) {
+      if (agent.transcript_session_capture_deferred === true) {
+        this.surfacelessObservations.delete(agent.agent_id);
+        continue;
+      }
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }

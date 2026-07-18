@@ -60,6 +60,10 @@ export interface AgentRecord {
   auto_archive_on_done?: boolean;
   task_done_candidate_at?: string | null;
   task_done_detected_at?: string | null;
+  /** First-connect skipped transcript identity resolution; retry on bounded sweeps. */
+  transcript_session_capture_deferred?: boolean;
+  /** Failed deferred transcript resolver calls, persisted across restarts. */
+  transcript_session_capture_attempts?: number;
   deletion_intent: boolean;
   // Quality fields (Task 19)
   quality: AgentQuality;

@@ -381,6 +381,7 @@ const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
+const MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS = 3;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const DONE_QUIESCENCE_MS = 1_500;
@@ -1909,6 +1910,10 @@ export class AgentEngine {
 
   private canUseTranscriptSessionResolver(agent: AgentRecord): boolean {
     if (!TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state)) return false;
+    return this.hasTranscriptSessionResolverContext(agent);
+  }
+
+  private hasTranscriptSessionResolverContext(agent: AgentRecord): boolean {
     if (!JSONL_HARNESSES.has(agent.cli)) return false;
     const hasManagedLaunchContext = Boolean(
       agent.launcher_name ||
@@ -2074,7 +2079,12 @@ export class AgentEngine {
       }
     }
     if (fallbackResolver) return fallbackResolver(agent);
-    if (!this.canUseTranscriptSessionResolver(agent)) return null;
+    if (
+      !this.canUseTranscriptSessionResolver(agent) &&
+      agent.transcript_session_capture_deferred !== true
+    ) {
+      return null;
+    }
     return this.findTranscriptSessionIdentity(agent);
   }
 
@@ -2199,6 +2209,8 @@ export class AgentEngine {
     let updated = this.stateMgr.updateRecord(agent.agent_id, {
       cli_session_id: identity.session_id,
       cli_session_path: identity.path,
+      transcript_session_capture_deferred: false,
+      transcript_session_capture_attempts: 0,
     });
     this.registry.set(agent.agent_id, updated);
 
@@ -2235,11 +2247,15 @@ export class AgentEngine {
         identity.path ?? existingFinal.cli_session_path ?? null;
       const canonicalFinal =
         existingFinal.cli_session_id === identity.session_id &&
-        existingFinal.cli_session_path === sessionPath
+        existingFinal.cli_session_path === sessionPath &&
+        existingFinal.transcript_session_capture_deferred !== true &&
+        (existingFinal.transcript_session_capture_attempts ?? 0) === 0
           ? existingFinal
           : this.stateMgr.updateRecord(finalAgentId, {
               cli_session_id: identity.session_id,
               cli_session_path: sessionPath,
+              transcript_session_capture_deferred: false,
+              transcript_session_capture_attempts: 0,
             });
       const index = this.stateMgr.getSurfaceSessionIndex();
       index.removeAgent(updated.agent_id);
@@ -2333,46 +2349,143 @@ export class AgentEngine {
     opts: { resolveTranscript?: boolean } = {},
   ): Promise<AgentRecord> {
     if (agent.cli_session_id) {
+      if (
+        agent.transcript_session_capture_deferred === true ||
+        (agent.transcript_session_capture_attempts ?? 0) > 0
+      ) {
+        try {
+          const updated = this.stateMgr.setTranscriptSessionCaptureDeferred(
+            agent.agent_id,
+            false,
+            0,
+          );
+          this.registry.set(agent.agent_id, updated);
+          return updated;
+        } catch {
+          return agent;
+        }
+      }
       return agent;
     }
 
-    const canUseSelfRegistration =
-      this.canUseSelfRegistrationSessionResolver(agent);
-    const canUseTranscript =
-      opts.resolveTranscript !== false &&
-      this.canUseTranscriptSessionResolver(agent);
-    if (canUseSelfRegistration || canUseTranscript) {
+    let captureAgent = agent;
+    const hasTranscriptContext =
+      this.hasTranscriptSessionResolverContext(agent);
+    const transcriptEligible = this.canUseTranscriptSessionResolver(agent);
+    if (
+      agent.transcript_session_capture_deferred === true &&
+      !hasTranscriptContext
+    ) {
       try {
-        const resolvedSession =
-          opts.resolveTranscript === false
-            ? this.selfRegistrationSessionResolver?.(agent)
-            : this.sessionIdentityResolver(agent);
-        if (resolvedSession) {
-          return this.finalizeCapturedSession(
-            agent,
-            this.normalizeCapturedSessionIdentity(resolvedSession),
-          );
-        }
+        captureAgent = this.stateMgr.setTranscriptSessionCaptureDeferred(
+          agent.agent_id,
+          false,
+          0,
+        );
+        this.registry.set(agent.agent_id, captureAgent);
       } catch {
         return agent;
       }
     }
+    if (
+      opts.resolveTranscript === false &&
+      transcriptEligible &&
+      captureAgent.transcript_session_capture_deferred !== true
+    ) {
+      try {
+        captureAgent = this.stateMgr.setTranscriptSessionCaptureDeferred(
+          agent.agent_id,
+          true,
+          0,
+        );
+        this.registry.set(agent.agent_id, captureAgent);
+      } catch {
+        // Startup remains available even if the best-effort retry marker fails.
+      }
+    }
+    const canUseSelfRegistration =
+      this.canUseSelfRegistrationSessionResolver(captureAgent);
+    const resolvingFirstConnect = opts.resolveTranscript === false;
+    const shouldResolveIdentity =
+      canUseSelfRegistration ||
+      (!resolvingFirstConnect &&
+        (transcriptEligible ||
+          captureAgent.transcript_session_capture_deferred === true));
+    if (shouldResolveIdentity) {
+      let resolvedSession: CapturedSessionIdentity | string | null;
+      try {
+        resolvedSession = resolvingFirstConnect
+          ? (this.selfRegistrationSessionResolver?.(captureAgent) ?? null)
+          : this.sessionIdentityResolver(captureAgent);
+      } catch {
+        return !resolvingFirstConnect &&
+          captureAgent.transcript_session_capture_deferred === true
+          ? this.recordDeferredTranscriptCaptureFailure(captureAgent)
+          : captureAgent;
+      }
+      if (resolvedSession) {
+        try {
+          return this.finalizeCapturedSession(
+            captureAgent,
+            resolvedSession,
+          );
+        } catch {
+          return captureAgent;
+        }
+      }
+      if (
+        !resolvingFirstConnect &&
+        captureAgent.transcript_session_capture_deferred === true
+      ) {
+        captureAgent = this.recordDeferredTranscriptCaptureFailure(
+          captureAgent,
+        );
+      }
+    }
 
-    if (!this.isBootCaptureWindowOpen(agent)) {
-      return agent;
+    if (!this.isBootCaptureWindowOpen(captureAgent)) {
+      return captureAgent;
     }
 
     try {
-      const screen = await this.readSweepScreen(agent, ctx);
+      const screen = await this.readSweepScreen(captureAgent, ctx);
       const sessionId = extractSessionId(screen.text);
       if (!sessionId) {
-        return agent;
+        return captureAgent;
       }
 
-      return this.finalizeCapturedSession(agent, {
+      return this.finalizeCapturedSession(captureAgent, {
         session_id: sessionId,
         path: null,
       });
+    } catch {
+      return captureAgent;
+    }
+  }
+
+  private recordDeferredTranscriptCaptureFailure(
+    agent: AgentRecord,
+  ): AgentRecord {
+    const previousAttempts = Number.isFinite(
+      agent.transcript_session_capture_attempts,
+    )
+      ? Math.max(
+          0,
+          Math.trunc(agent.transcript_session_capture_attempts ?? 0),
+        )
+      : 0;
+    const attempts = Math.min(
+      MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS,
+      previousAttempts + 1,
+    );
+    try {
+      const updated = this.stateMgr.setTranscriptSessionCaptureDeferred(
+        agent.agent_id,
+        attempts < MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS,
+        attempts,
+      );
+      this.registry.set(agent.agent_id, updated);
+      return updated;
     } catch {
       return agent;
     }
@@ -2385,6 +2498,13 @@ export class AgentEngine {
       return null;
     }
     return this.maybeCaptureBootSessionId(agent, {});
+  }
+
+  private async retryDeferredTranscriptCaptures(): Promise<void> {
+    for (const agent of this.registry.list()) {
+      if (agent.transcript_session_capture_deferred !== true) continue;
+      await this.maybeCaptureBootSessionId(agent, {});
+    }
   }
 
   private async maybeMarkBootReady(
@@ -4029,8 +4149,14 @@ export class AgentEngine {
   private async purgeStartupTerminalAgents(): Promise<void> {
     if (!this.startupPurgePending) return;
     this.startupPurgePending = false;
+    const retainedAgentIds = new Set(this.startupPurgeRetainedAgentIds);
+    for (const agent of this.registry.list()) {
+      if (agent.transcript_session_capture_deferred === true) {
+        retainedAgentIds.add(agent.agent_id);
+      }
+    }
     const purgedIds = this.registry.purgeAllTerminal({
-      retainAgentIds: this.startupPurgeRetainedAgentIds,
+      retainAgentIds: retainedAgentIds,
     });
     this.startupPurgeRetainedAgentIds.clear();
     try {
@@ -4115,6 +4241,10 @@ export class AgentEngine {
 
     await this.purgeStartupTerminalAgents();
 
+    // Deferred transcript identity does not require a live surface binding.
+    // Retry after the one-shot startup purge has retained marked rows, but
+    // before normal terminal cleanup can act on a closed pane.
+    await this.retryDeferredTranscriptCaptures();
     await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
     await this.reconcileRolePlacements("idle");
