@@ -30,6 +30,7 @@ export interface CodexRolloutFillProviderOptions {
   refreshIntervalMs?: number;
   maxConcurrentReads?: number;
   maxEntries?: number;
+  /** Return null only for confirmed absence; reject transient stat failures. */
   statFile?: (path: string) => Promise<CodexRolloutFileStat | null>;
   readFileRange?: (
     path: string,
@@ -94,8 +95,10 @@ async function defaultStatFile(
       ino: value.ino,
       isFile: value.isFile(),
     };
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 
@@ -309,7 +312,10 @@ export function makeCodexRolloutFillProvider(
     entry: FillCacheEntry,
   ): Promise<CodexRolloutFill | null> => {
     const fileStat = await statFile(path);
-    if (!fileStat) return entry.snapshot;
+    if (!fileStat) {
+      resetReader(entry);
+      return null;
+    }
     if (!fileStat.isFile || fileStat.size <= 0) {
       resetReader(entry);
       return null;
@@ -381,6 +387,7 @@ export function makeCodexRolloutFillProvider(
         while (cache.size >= maxEntries && evictOldestSettled()) {
           // Make room for this newly accessed path when a settled entry exists.
         }
+        if (cache.size >= maxEntries) return null;
         entry = {
           snapshot: null,
           identity: null,

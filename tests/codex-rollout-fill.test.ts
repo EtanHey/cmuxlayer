@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -470,6 +470,51 @@ describe("CodexRolloutFillProvider", () => {
     expect(statCalls.get(third)).toBe(1);
   });
 
+  it("rejects a cold admission while every cache slot is in flight", async () => {
+    const firstPath = "/tmp/rollout-cache-inflight-1";
+    const secondPath = "/tmp/rollout-cache-inflight-2";
+    const bytes = Buffer.from(tokenCountLine(20_000));
+    let releaseFirst: (() => void) | null = null;
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const statFile = vi.fn(async (path: string) => {
+      if (path === firstPath) await firstMayFinish;
+      return {
+        size: bytes.length,
+        mtimeMs: 1,
+        dev: 2,
+        ino: path === firstPath ? 41 : 42,
+        isFile: true,
+      };
+    });
+    const provider = makeCodexRolloutFillProvider({
+      maxEntries: 1,
+      statFile,
+      readFileRange: async (_requestedPath, start, length) =>
+        bytes.subarray(start, start + length),
+    });
+
+    const first = provider.get(firstPath);
+    await flushAsyncWork();
+    let secondSettled = false;
+    const second = provider.get(secondPath).then((value) => {
+      secondSettled = true;
+      return value;
+    });
+    await flushAsyncWork();
+
+    expect(secondSettled).toBe(true);
+    await expect(second).resolves.toBeNull();
+    expect(statFile).toHaveBeenCalledTimes(1);
+
+    releaseFirst?.();
+    await first;
+    await expect(provider.get(secondPath)).resolves.toMatchObject({
+      token_count: 20_000,
+    });
+  });
+
   it("waits for a partial token row to finish before publishing it", async () => {
     const path = "/tmp/rollout-partial.jsonl";
     let now = 0;
@@ -645,6 +690,70 @@ describe("CodexRolloutFillProvider", () => {
     now = 1_001;
     await provider.get(path);
     await flushAsyncWork();
+    await expect(provider.get(path)).resolves.toMatchObject({
+      token_count: 60_000,
+    });
+  });
+
+  it("clears the last snapshot after the rollout file is confirmed absent", async () => {
+    const path = "/tmp/rollout-deleted.jsonl";
+    const bytes = Buffer.from(tokenCountLine(60_000));
+    let now = 0;
+    let exists = true;
+    const provider = makeCodexRolloutFillProvider({
+      now: () => now,
+      statFile: async () =>
+        exists
+          ? {
+              size: bytes.length,
+              mtimeMs: 1,
+              dev: 2,
+              ino: 43,
+              isFile: true,
+            }
+          : null,
+      readFileRange: async (_requestedPath, start, length) =>
+        bytes.subarray(start, start + length),
+    });
+
+    await expect(provider.get(path)).resolves.toMatchObject({
+      token_count: 60_000,
+    });
+    exists = false;
+    now = 1_001;
+    await provider.get(path);
+    await flushAsyncWork();
+
+    await expect(provider.get(path)).resolves.toBeNull();
+  });
+
+  it("keeps the last snapshot across a transient stat failure", async () => {
+    const path = "/tmp/rollout-stat-transient.jsonl";
+    const bytes = Buffer.from(tokenCountLine(60_000));
+    let now = 0;
+    let failStat = false;
+    const provider = makeCodexRolloutFillProvider({
+      now: () => now,
+      statFile: async () => {
+        if (failStat) throw new Error("transient stat failure");
+        return {
+          size: bytes.length,
+          mtimeMs: 1,
+          dev: 2,
+          ino: 44,
+          isFile: true,
+        };
+      },
+      readFileRange: async (_requestedPath, start, length) =>
+        bytes.subarray(start, start + length),
+    });
+
+    await provider.get(path);
+    failStat = true;
+    now = 1_001;
+    await provider.get(path);
+    await flushAsyncWork();
+
     await expect(provider.get(path)).resolves.toMatchObject({
       token_count: 60_000,
     });

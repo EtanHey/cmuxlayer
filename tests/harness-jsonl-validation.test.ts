@@ -1,7 +1,7 @@
 // VALIDATION: Claude/Cursor keep the default-on synchronous harness behavior, while Codex
 // uses its exact self-registration path through the async provider and fixed 400K service
 // denominator. No harness may fall back to an inferred 1M Codex window.
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,24 +56,21 @@ describe("CMUXLAYER_HARNESS_JSONL=1 validation (real windows from JSONL)", () =>
     "04",
     "rollout-2026-06-04T22-46-15-vsid-codex.jsonl",
   );
+  const codexRolloutFillProvider = {
+    get: vi.fn(async (requestedPath: string) => {
+      expect(requestedPath).toBe(codexPath);
+      return {
+        token_count: 108_569,
+        context_window: 400_000 as const,
+        context_pct: 27,
+        observed_model_context_window: 258_400,
+      };
+    }),
+  };
 
   beforeAll(() => {
-    // Place the verified fixtures where findHarnessSessionPath resolves them by sessionId.
-    mkdirSync(join(home, ".codex", "sessions", "2026", "06", "04"), {
-      recursive: true,
-    });
-    cpSync(
-      join(FIX, "codex.jsonl"),
-      join(
-        home,
-        ".codex",
-        "sessions",
-        "2026",
-        "06",
-        "04",
-        "rollout-2026-06-04T22-46-15-vsid-codex.jsonl",
-      ),
-    );
+    // Claude/Cursor retain their real JSONL validation fixtures. Codex uses an
+    // injected async provider so this test isolates exact-path server binding.
     mkdirSync(join(home, ".claude", "projects", "-x"), { recursive: true });
     cpSync(
       join(FIX, "claude.jsonl"),
@@ -205,6 +202,7 @@ describe("CMUXLAYER_HARNESS_JSONL=1 validation (real windows from JSONL)", () =>
       stateDir,
       skipAgentLifecycle: true,
       surfaceObserverEpochProvider: () => "test:1",
+      codexRolloutFillProvider,
     });
     context.lifecycleRegistry = {
       canUseObservedBinding: () => true,
@@ -226,6 +224,7 @@ describe("CMUXLAYER_HARNESS_JSONL=1 validation (real windows from JSONL)", () =>
     expect(p.context_window).not.toBe(1_000_000);
     expect(p.token_count).toBe(108569);
     expect(p.context_pct).toBe(27);
+    expect(codexRolloutFillProvider.get).toHaveBeenCalledWith(codexPath);
   });
 
   it("Claude: table window (opus-4-8 → 1M) from JSONL usage tail", async () => {
