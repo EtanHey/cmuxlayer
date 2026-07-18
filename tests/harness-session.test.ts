@@ -22,6 +22,7 @@ import {
   applyHarnessState,
   harnessJsonlEnabled,
   readHarnessSessionTextWindow,
+  parseCodexTokenUsageEvent,
 } from "../src/harness-session.js";
 
 const FIX = join(__dirname, "fixtures", "harness");
@@ -49,6 +50,67 @@ function codexContextJsonl(
     }),
   ].join("\n");
 }
+
+describe("parseCodexTokenUsageEvent", () => {
+  it("reads the latest usage sample instead of the cumulative session total", () => {
+    const usage = parseCodexTokenUsageEvent({
+      timestamp: "2026-07-18T02:45:55.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { total_tokens: 900_000 },
+          last_token_usage: {
+            input_tokens: 100_000,
+            cached_input_tokens: 60_000,
+            cache_write_input_tokens: 2_000,
+            output_tokens: 8_000,
+            reasoning_output_tokens: 4_000,
+            total_tokens: 108_569,
+          },
+          model_context_window: 258_400,
+        },
+      },
+    });
+
+    expect(usage).toEqual({
+      input_tokens: 100_000,
+      cached_input_tokens: 60_000,
+      cache_write_input_tokens: 2_000,
+      output_tokens: 8_000,
+      reasoning_output_tokens: 4_000,
+      total_tokens: 108_569,
+      model_context_window: 258_400,
+    });
+  });
+
+  it("returns null when only cumulative usage exists", () => {
+    expect(
+      parseCodexTokenUsageEvent({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { total_tokens: 900_000 } },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 54])(
+    "rejects an invalid latest total token count: %s",
+    (totalTokens) => {
+      expect(
+        parseCodexTokenUsageEvent({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { total_tokens: totalTokens } },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+});
 
 describe("harnessJsonlEnabled (default-ON, opt-out with =0)", () => {
   const prev = process.env.CMUXLAYER_HARNESS_JSONL;

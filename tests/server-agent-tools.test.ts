@@ -35,6 +35,7 @@ import {
   registerMonitor,
 } from "../src/monitor-registry.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
+import { makeCodexRolloutFillProvider } from "../src/codex-rollout-fill.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -602,6 +603,7 @@ function moveUuidRouteAfterNextSurfaceSnapshot(
 async function createUuidRouteServer(
   routeClient: ReturnType<typeof makeUuidRouteClient>,
   record: AgentRecord,
+  extraOptions: Record<string, unknown> = {},
 ) {
   const stateMgr = new StateManager(TEST_DIR);
   stateMgr.writeState(record);
@@ -610,6 +612,7 @@ async function createUuidRouteServer(
     stateDir: TEST_DIR,
     disableSpawnPreflight: true,
     sessionIdentityResolver: () => null,
+    ...extraOptions,
   });
   await serverContexts.at(-1)?.lifecycleStartPromise;
 
@@ -6992,6 +6995,554 @@ codex>
       };
       expect(reconcileAgentLiveState("error", shell)).toBe("error");
     });
+  });
+
+  it("read_screen binds a Codex fill by stable UUID and exact session path", async () => {
+    const stableUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const path = "/fixtures/codex/rollout-session-a.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:live",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-read-screen",
+      surface_id: "surface:live",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      state: "ready",
+      cli_session_id: "session-a",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+      observed_model_context_window: 258_400,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = await registeredTestTool(server, "read_screen").handler(
+      { surface: "surface:live", parsed_only: true },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(get).toHaveBeenCalledWith(path);
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "codex",
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+    });
+  });
+
+  it("read_screen keeps an authorized Codex fill when the viewport lacks a Codex marker", async () => {
+    const stableUuid = "aaaabbbb-cccc-4ddd-8eee-ffff00001111";
+    const path = "/fixtures/codex/viewport-without-marker.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:markerless",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText("plain build output without a status bar");
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-markerless",
+      surface_id: "surface:markerless",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+      observed_model_context_window: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:markerless", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(result.parsed).toMatchObject({
+      agent_type: "unknown",
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+    });
+  });
+
+  it("read_screen never crosses Codex rollout paths between distinct stable UUIDs", async () => {
+    const firstUuid = "10000000-0000-4000-8000-000000000001";
+    const secondUuid = "20000000-0000-4000-8000-000000000002";
+    const firstPath = "/fixtures/codex/rollout-first.jsonl";
+    const secondPath = "/fixtures/codex/rollout-second.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:first",
+        id: firstUuid,
+        workspace_ref: "workspace:live",
+      },
+      {
+        ref: "surface:second",
+        id: secondUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 99% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const first = makeServerAgentRecord({
+      agent_id: "codex-fill-first",
+      surface_id: "surface:first",
+      surface_uuid: firstUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: firstPath,
+      launch_cwd: null,
+    });
+    const second = makeServerAgentRecord({
+      agent_id: "codex-fill-second",
+      surface_id: "surface:second",
+      surface_uuid: secondUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: secondPath,
+      launch_cwd: "/intentionally/mismatched",
+    });
+    const get = vi.fn(async (path: string) => ({
+      token_count: path === firstPath ? 40_000 : 120_000,
+      context_window: 400_000 as const,
+      context_pct: path === firstPath ? 10 : 30,
+      observed_model_context_window: null,
+    }));
+    const server = await createUuidRouteServer(routeClient, first, {
+      codexRolloutFillProvider: { get },
+    });
+    const engine = testLifecycleEngine(server);
+    engine.stateMgr.writeState(second);
+    engine.getRegistry().set(second.agent_id, second);
+
+    const firstResult = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:first", parsed_only: true },
+        {},
+      ),
+    );
+    const secondResult = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:second", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(firstResult.parsed.token_count).toBe(40_000);
+    expect(secondResult.parsed.token_count).toBe(120_000);
+    expect(get.mock.calls).toEqual([[firstPath], [secondPath]]);
+  });
+
+  it("read_screen preserves screen fallback and skips a recycled Codex surface ref", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:recycled",
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-stale-ref",
+      surface_id: "surface:recycled",
+      surface_uuid: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workspace_id: "workspace:live",
+      cli_session_path: "/fixtures/codex/stale.jsonl",
+    });
+    const get = vi.fn();
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:recycled", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.parsed).toMatchObject({
+      token_count: null,
+      context_pct: 25,
+    });
+  });
+
+  it("read_screen refuses a Codex fill when the surface UUID changes during the read", async () => {
+    const oldUuid = "abab0000-0000-4000-8000-000000000001";
+    const newUuid = "abab0000-0000-4000-8000-000000000002";
+    const path = "/fixtures/codex/recycled-during-read.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:racing",
+        id: oldUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-racing-ref",
+      surface_id: "surface:racing",
+      surface_uuid: newUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 300_000,
+      context_window: 400_000,
+      context_pct: 75,
+      observed_model_context_window: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+    routeClient.client.readScreen.mockImplementationOnce(
+      async (surface: string) => {
+        routeClient.setLiveSurfaces([
+          {
+            ref: "surface:racing",
+            id: newUuid,
+            workspace_ref: "workspace:live",
+          },
+        ]);
+        return {
+          surface,
+          text: "gpt-5.4 high · 75% left · ~/Gits/old-seat\nWorking (2s • esc to interrupt)",
+          lines: 20,
+          scrollback_used: false,
+        };
+      },
+    );
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:racing", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.parsed).toMatchObject({
+      token_count: null,
+      context_pct: 25,
+    });
+  });
+
+  it("read_screen preserves the visible Codex percent when the bound rollout has no sample", async () => {
+    const stableUuid = "abababab-abab-4bab-8bab-abababababab";
+    const path = "/fixtures/codex/no-token-sample.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:no-sample",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-no-sample",
+      surface_id: "surface:no-sample",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue(null);
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:no-sample", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(get).toHaveBeenCalledWith(path);
+    expect(result.parsed).toMatchObject({
+      token_count: null,
+      context_window: 400_000,
+      context_pct: 25,
+    });
+  });
+
+  it("get_agent_state exposes Codex rollout fill without mutating AgentRecord", async () => {
+    const stableUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const path = "/fixtures/codex/get-agent-state.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:state",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-agent-state",
+      surface_id: "surface:state",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 80_000,
+      context_window: 400_000,
+      context_pct: 20,
+      observed_model_context_window: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "get_agent_state").handler(
+        { agent_id: record.agent_id },
+        {},
+      ),
+    );
+
+    expect(get).toHaveBeenCalledWith(path);
+    expect(result).toMatchObject({
+      token_count: 80_000,
+      context_window: 400_000,
+      context_pct: 20,
+    });
+    expect(testLifecycleEngine(server).getAgentState(record.agent_id)).not.toHaveProperty(
+      "token_count",
+    );
+  });
+
+  it("my_agents applies the authorized Codex rollout fill", async () => {
+    const stableUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const path = "/fixtures/codex/my-agents.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:child",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-fill-my-agents",
+      surface_id: "surface:child",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      parent_agent_id: null,
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 160_000,
+      context_window: 400_000,
+      context_pct: 40,
+      observed_model_context_window: null,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "my_agents").handler({}, {}),
+    );
+
+    expect(get).toHaveBeenCalledWith(path);
+    expect(result.agents[0]).toMatchObject({
+      agent_id: record.agent_id,
+      token_count: 160_000,
+      context_window: 400_000,
+      context_pct: 40,
+    });
+  });
+
+  it("my_agents coalesces a shared Codex rollout across authorized records", async () => {
+    const firstUuid = "d1000000-0000-4000-8000-000000000001";
+    const secondUuid = "d2000000-0000-4000-8000-000000000002";
+    const path = "/fixtures/codex/shared-rollout.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:shared-first",
+        id: firstUuid,
+        workspace_ref: "workspace:live",
+      },
+      {
+        ref: "surface:shared-second",
+        id: secondUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 99% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const first = makeServerAgentRecord({
+      agent_id: "codex-shared-first",
+      surface_id: "surface:shared-first",
+      surface_uuid: firstUuid,
+      workspace_id: "workspace:live",
+      parent_agent_id: null,
+      cli_session_path: path,
+    });
+    const second = makeServerAgentRecord({
+      agent_id: "codex-shared-second",
+      surface_id: "surface:shared-second",
+      surface_uuid: secondUuid,
+      workspace_id: "workspace:live",
+      parent_agent_id: null,
+      cli_session_path: path,
+    });
+    const bytes = Buffer.from(
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { total_tokens: 200_000 } },
+        },
+      })}\n`,
+    );
+    const statFile = vi.fn().mockResolvedValue({
+      size: bytes.length,
+      mtimeMs: 1,
+      dev: 2,
+      ino: 50,
+      isFile: true,
+    });
+    const readFileRange = vi.fn(
+      async (_requestedPath: string, start: number, length: number) =>
+        bytes.subarray(start, start + length),
+    );
+    const server = await createUuidRouteServer(routeClient, first, {
+      codexRolloutFillProvider: makeCodexRolloutFillProvider({
+        statFile,
+        readFileRange,
+      }),
+    });
+    const engine = testLifecycleEngine(server);
+    engine.stateMgr.writeState(second);
+    engine.getRegistry().set(second.agent_id, second);
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "my_agents").handler({}, {}),
+    );
+
+    expect(result.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: first.agent_id,
+          token_count: 200_000,
+        }),
+        expect.objectContaining({
+          agent_id: second.agent_id,
+          token_count: 200_000,
+        }),
+      ]),
+    );
+    expect(statFile).toHaveBeenCalledTimes(1);
+    expect(readFileRange).toHaveBeenCalledTimes(1);
+  });
+
+  it("never invokes the Codex provider for a Claude read_screen", async () => {
+    const stableUuid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:claude",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "Claude Code\n⏺ Completed successfully\nToken usage: total=12,345 input=10,000 output=2,345\n🤖 Sonnet 4.6 | 💰 $1.25 | ⏱️  2m 11s",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "claude-no-codex-fill",
+      surface_id: "surface:claude",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      cli: "claude",
+      model: "sonnet",
+      cli_session_path: "/fixtures/claude/session.jsonl",
+    });
+    const get = vi.fn();
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = parseToolResult(
+      await registeredTestTool(server, "read_screen").handler(
+        { surface: "surface:claude", parsed_only: true },
+        {},
+      ),
+    );
+
+    expect(get).not.toHaveBeenCalled();
+    expect(result.parsed).toMatchObject({
+      agent_type: "claude",
+      token_count: 12_345,
+    });
+  });
+
+  it("keeps the Codex rollout reader off the delivery-safety path", async () => {
+    const stableUuid = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:delivery",
+        id: stableUuid,
+        workspace_ref: "workspace:live",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\ncodex> ",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-delivery-no-fill",
+      surface_id: "surface:delivery",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:live",
+      state: "ready",
+      cli_session_path: "/fixtures/codex/delivery.jsonl",
+    });
+    const get = vi.fn();
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "delivery must stay scan-free",
+        press_enter: true,
+      },
+      {},
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("my_agents returns root agents when no parent_agent_id", async () => {

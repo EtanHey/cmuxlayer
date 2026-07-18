@@ -263,6 +263,46 @@ function codexPayload(ev: Record<string, unknown>): {
   return { type, payload };
 }
 
+export interface CodexTokenUsageSample {
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  cache_write_input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_output_tokens: number | null;
+  total_tokens: number;
+  model_context_window: number | null;
+}
+
+function asTokenCount(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+    ? value
+    : null;
+}
+
+/** Parse one upstream Codex `event_msg`/`token_count` rollout item. */
+export function parseCodexTokenUsageEvent(
+  ev: Record<string, unknown>,
+): CodexTokenUsageSample | null {
+  const { type, payload } = codexPayload(ev);
+  if (type !== "token_count") return null;
+  const info = asRecord(payload.info);
+  const last = asRecord(info?.last_token_usage);
+  const totalTokens = asTokenCount(last?.total_tokens);
+  if (totalTokens === null) return null;
+
+  return {
+    input_tokens: asTokenCount(last?.input_tokens),
+    cached_input_tokens: asTokenCount(last?.cached_input_tokens),
+    cache_write_input_tokens: asTokenCount(last?.cache_write_input_tokens),
+    output_tokens: asTokenCount(last?.output_tokens),
+    reasoning_output_tokens: asTokenCount(last?.reasoning_output_tokens),
+    total_tokens: totalTokens,
+    model_context_window: asTokenCount(info?.model_context_window),
+  };
+}
+
 function parseCodex(events: Record<string, unknown>[]): HarnessSessionState {
   let model: string | null = null;
   let tokensUsed: number | null = null;
@@ -278,13 +318,12 @@ function parseCodex(events: Record<string, unknown>[]): HarnessSessionState {
         break;
       }
       case "token_count": {
-        const info = asRecord(payload.info);
-        if (info) {
-          const last = asRecord(info.last_token_usage);
-          const total = asNumber(last?.total_tokens);
-          if (total !== null) tokensUsed = total;
-          const w = asNumber(info.model_context_window);
-          if (w !== null) window = w;
+        const usage = parseCodexTokenUsageEvent(ev);
+        if (usage) {
+          tokensUsed = usage.total_tokens;
+          if (usage.model_context_window !== null) {
+            window = usage.model_context_window;
+          }
         }
         break;
       }
