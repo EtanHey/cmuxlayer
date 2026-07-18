@@ -35,6 +35,7 @@ const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
 export const SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES = 64 * 1024;
 export const SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE = 64;
+export const SESSION_REGISTRATION_MAX_INDEXED_SURFACES = 1_024;
 
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
@@ -217,6 +218,35 @@ function chooseCandidate(
 type SurfaceEntryIndex = Map<string, SelfRegistrationEntry[]>;
 
 /**
+ * Index one registration while bounding both history dimensions. Map insertion
+ * order tracks the most recently appended row for each surface, so exceeding
+ * the key cap evicts the least-recent historical surface rather than a surface
+ * that has just re-registered.
+ */
+function indexSurfaceCandidate(
+  entriesBySurface: SurfaceEntryIndex,
+  key: string,
+  entry: SelfRegistrationEntry,
+): void {
+  const existing = entriesBySurface.get(key);
+  if (existing) {
+    appendBoundedSurfaceCandidate(existing, entry);
+    entriesBySurface.delete(key);
+    entriesBySurface.set(key, existing);
+  } else {
+    entriesBySurface.set(key, [entry]);
+  }
+
+  while (
+    entriesBySurface.size > SESSION_REGISTRATION_MAX_INDEXED_SURFACES
+  ) {
+    const leastRecentKey = entriesBySurface.keys().next().value;
+    if (leastRecentKey === undefined) break;
+    entriesBySurface.delete(leastRecentKey);
+  }
+}
+
+/**
  * Build an append-aware registry index for production lookups.
  *
  * Each call stats the file, but unchanged files perform no read or parse. New
@@ -361,9 +391,7 @@ function makeIncrementalEntryIndexReader(
         )) {
           const key = surfaceUuidKey(entry.surface_uuid);
           if (!key) continue;
-          const existing = entriesBySurface.get(key);
-          if (existing) appendBoundedSurfaceCandidate(existing, entry);
-          else entriesBySurface.set(key, [entry]);
+          indexSurfaceCandidate(entriesBySurface, key, entry);
         }
       } else {
         discardingOversizedLine =

@@ -11,6 +11,7 @@ import {
   parseSelfRegistrationLines,
   resolveSessionRegistryPath,
   SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE,
+  SESSION_REGISTRATION_MAX_INDEXED_SURFACES,
   SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES,
 } from "../src/self-registration.js";
 import type { SelfRegistrationEntry } from "../src/self-registration.js";
@@ -282,6 +283,54 @@ describe("makeSelfRegistrationSessionResolver", () => {
         length: body.byteLength - previousLength + 64,
       },
     ]);
+  });
+
+  it("evicts least-recent surface keys after the global index cap", () => {
+    const records: Array<Record<string, unknown>> = Array.from(
+      { length: SESSION_REGISTRATION_MAX_INDEXED_SURFACES },
+      (_, index) => ({
+        session_id: `sid-${index}`,
+        surface_uuid: `surface-${index}`,
+        ts: index,
+      }),
+    );
+    records.push(
+      {
+        session_id: "sid-0-refreshed",
+        surface_uuid: "surface-0",
+        ts: SESSION_REGISTRATION_MAX_INDEXED_SURFACES,
+      },
+      {
+        session_id: `sid-${SESSION_REGISTRATION_MAX_INDEXED_SURFACES}`,
+        surface_uuid: `surface-${SESSION_REGISTRATION_MAX_INDEXED_SURFACES}`,
+        ts: SESSION_REGISTRATION_MAX_INDEXED_SURFACES + 1,
+      },
+    );
+    const body = Buffer.from(jsonl(...records));
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs: 1,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) =>
+        body.subarray(offset, offset + length),
+      now: () => SESSION_REGISTRATION_MAX_INDEXED_SURFACES + 1,
+    });
+
+    expect(resolve(agent({ surface_uuid: "surface-0" }))?.session_id).toBe(
+      "sid-0-refreshed",
+    );
+    expect(
+      resolve(
+        agent({
+          surface_uuid: `surface-${SESSION_REGISTRATION_MAX_INDEXED_SURFACES}`,
+        }),
+      )?.session_id,
+    ).toBe(`sid-${SESSION_REGISTRATION_MAX_INDEXED_SURFACES}`);
+    expect(resolve(agent({ surface_uuid: "surface-1" }))).toBeNull();
   });
 
   it("holds an incomplete UTF-8 append until its JSONL newline arrives", () => {
