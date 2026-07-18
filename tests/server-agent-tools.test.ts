@@ -423,6 +423,35 @@ describe("lifecycle dependency seams", () => {
     }
   });
 
+  it("prefers a per-server lifecycle initializer for a shared context", async () => {
+    const stateManager = createInMemoryStateManager();
+    const lifecycleSurfaceProvider = vi.fn(async () => {
+      throw new Error("Shared-context seam attempted lifecycle surface I/O");
+    });
+    const lifecycleRegistry = new AgentRegistry(
+      stateManager,
+      lifecycleSurfaceProvider,
+    );
+    const contextInitializer = vi.fn(async () => {});
+    const serverInitializer = vi.fn(async () => {});
+    const context = createServerContext({
+      exec: makeLifecycleExec(),
+      stateManager,
+      lifecycleRegistry,
+      lifecycleInitializer: contextInitializer,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    serverContexts.push(context);
+
+    createServer({ context, lifecycleInitializer: serverInitializer });
+    await context.lifecycleStartPromise;
+
+    expect(serverInitializer).toHaveBeenCalledTimes(1);
+    expect(contextInitializer).not.toHaveBeenCalled();
+    expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+  });
+
   it("captures synchronous injected lifecycle initializer failures", async () => {
     const stateManager = createInMemoryStateManager();
     const lifecycleRegistry = new AgentRegistry(stateManager, async () => []);

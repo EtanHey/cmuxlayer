@@ -2386,6 +2386,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?.enableClaudeChannels ?? context.enableClaudeChannels;
   const skipAgentLifecycle =
     opts?.skipAgentLifecycle ?? context.skipAgentLifecycle;
+  const lifecycleInitializer =
+    opts?.lifecycleInitializer ?? context.lifecycleInitializer;
   const spawnPreflight = opts?.spawnPreflight ?? context.spawnPreflight;
   const disableSpawnPreflight =
     opts?.disableSpawnPreflight ?? context.disableSpawnPreflight;
@@ -8163,8 +8165,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
       context.lifecycleStartError = null;
-      const lifecycleInitialization = context.lifecycleInitializer
-        ? Promise.resolve().then(() => context.lifecycleInitializer!())
+      const lifecycleInitialization = lifecycleInitializer
+        ? Promise.resolve().then(() => lifecycleInitializer())
         : engine.initialize(discovery);
       context.lifecycleStartPromise = lifecycleInitialization
         .catch((error) => {
