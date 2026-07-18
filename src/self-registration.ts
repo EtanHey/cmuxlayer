@@ -22,7 +22,7 @@
  * session_id + surface_uuid to bind, never fabricate an id.
  */
 
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentRecord } from "./agent-types.js";
@@ -62,8 +62,23 @@ export interface SelfRegistrationResolverOptions {
    * Injected in tests so no real HOME I/O is touched.
    */
   readFile?: (path: string) => string | null;
+  /** Injectable file metadata reader for the production incremental index. */
+  statFile?: (path: string) => SelfRegistrationFileStat | null;
+  /** Injectable byte-range reader for the production incremental index. */
+  readFileRange?: (
+    path: string,
+    offset: number,
+    length: number,
+  ) => Buffer | null;
   /** Injectable wall clock for future-timestamp rejection (default Date.now). */
   now?: () => number;
+}
+
+export interface SelfRegistrationFileStat {
+  size: number;
+  mtimeMs: number;
+  dev: number;
+  ino: number;
 }
 
 /** Resolve the registry path from env, defaulting under `$HOME/.cmuxlayer`. */
@@ -158,6 +173,109 @@ function chooseCandidate(
   });
 }
 
+type SurfaceEntryIndex = Map<string, SelfRegistrationEntry[]>;
+
+/**
+ * Build an append-aware registry index for production lookups.
+ *
+ * Each call stats the file, but unchanged files perform no read or parse. New
+ * bytes are read exactly once and indexed by surface UUID, so a sweep across N
+ * uncaptured agents is O(file delta + N), not O(N * registry size). A partial
+ * final JSONL row is retained until its newline arrives. Compaction, truncation,
+ * or rotation resets the index before the replacement file is consumed.
+ */
+function makeIncrementalEntryIndexReader(
+  registryPath: string,
+  statFile: (path: string) => SelfRegistrationFileStat | null,
+  readFileRange: (
+    path: string,
+    offset: number,
+    length: number,
+  ) => Buffer | null,
+): () => SurfaceEntryIndex | null {
+  let fileIdentity: string | null = null;
+  let consumedBytes = 0;
+  let observedMtimeMs = Number.NEGATIVE_INFINITY;
+  let pendingLine = Buffer.alloc(0);
+  let entriesBySurface: SurfaceEntryIndex = new Map();
+
+  const reset = () => {
+    consumedBytes = 0;
+    observedMtimeMs = Number.NEGATIVE_INFINITY;
+    pendingLine = Buffer.alloc(0);
+    entriesBySurface = new Map();
+  };
+
+  return () => {
+    let fileStat: SelfRegistrationFileStat | null;
+    try {
+      fileStat = statFile(registryPath);
+    } catch {
+      fileStat = null;
+    }
+    if (
+      !fileStat ||
+      !Number.isSafeInteger(fileStat.size) ||
+      fileStat.size < 0 ||
+      !Number.isFinite(fileStat.mtimeMs)
+    ) {
+      fileIdentity = null;
+      reset();
+      return null;
+    }
+
+    const nextIdentity = `${fileStat.dev}:${fileStat.ino}`;
+    const replaced =
+      fileIdentity !== null && nextIdentity !== fileIdentity;
+    const rewrittenAtSameSize =
+      fileIdentity !== null &&
+      fileStat.size === consumedBytes &&
+      fileStat.mtimeMs !== observedMtimeMs;
+    if (
+      fileIdentity === null ||
+      replaced ||
+      fileStat.size < consumedBytes ||
+      rewrittenAtSameSize
+    ) {
+      reset();
+    }
+    fileIdentity = nextIdentity;
+
+    if (fileStat.size > consumedBytes) {
+      const offset = consumedBytes;
+      const length = fileStat.size - offset;
+      let appended: Buffer | null;
+      try {
+        appended = readFileRange(registryPath, offset, length);
+      } catch {
+        appended = null;
+      }
+      if (!appended || appended.byteLength !== length) return null;
+
+      consumedBytes = fileStat.size;
+      const combined = Buffer.concat([pendingLine, appended]);
+      const finalNewline = combined.lastIndexOf(0x0a);
+      if (finalNewline >= 0) {
+        const completeLines = combined.subarray(0, finalNewline + 1);
+        pendingLine = combined.subarray(finalNewline + 1);
+        for (const entry of parseSelfRegistrationLines(
+          completeLines.toString("utf8"),
+        )) {
+          const key = surfaceUuidKey(entry.surface_uuid);
+          if (!key) continue;
+          const existing = entriesBySurface.get(key);
+          if (existing) existing.push(entry);
+          else entriesBySurface.set(key, [entry]);
+        }
+      } else {
+        pendingLine = combined;
+      }
+    }
+    observedMtimeMs = fileStat.mtimeMs;
+    return entriesBySurface;
+  };
+}
+
 /**
  * Build the self-registration `SessionIdentityResolver`.
  *
@@ -178,8 +296,29 @@ export function makeSelfRegistrationSessionResolver(
   options: SelfRegistrationResolverOptions = {},
 ): SessionIdentityResolver {
   const registryPath = options.registryPath ?? resolveSessionRegistryPath();
-  const readFile = options.readFile ?? defaultReadFile;
   const now = options.now ?? Date.now;
+  const readCandidates = options.readFile
+    ? (surfaceKey: string): SelfRegistrationEntry[] | null => {
+        let text: string | null;
+        try {
+          text = options.readFile?.(registryPath) ?? null;
+        } catch {
+          return null;
+        }
+        if (!text) return null;
+        return parseSelfRegistrationLines(text).filter(
+          (entry) => surfaceUuidKey(entry.surface_uuid) === surfaceKey,
+        );
+      }
+    : (() => {
+        const readIndex = makeIncrementalEntryIndexReader(
+          registryPath,
+          options.statFile ?? defaultStatFile,
+          options.readFileRange ?? defaultReadFileRange,
+        );
+        return (surfaceKey: string): SelfRegistrationEntry[] | null =>
+          readIndex()?.get(surfaceKey) ?? null;
+      })();
 
   return (agent: AgentRecord): CapturedSessionIdentity | null => {
     const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
@@ -196,17 +335,8 @@ export function makeSelfRegistrationSessionResolver(
     const latestPlausibleTs =
       resolvedAt + SESSION_REGISTRATION_TIMESTAMP_SKEW_MS;
 
-    let text: string | null;
-    try {
-      text = readFile(registryPath);
-    } catch {
-      return null; // missing/unreadable → fall back to scan
-    }
-    if (!text) return null;
-
-    const candidates = parseSelfRegistrationLines(text).filter(
+    const candidates = (readCandidates(agentSurfaceUuid) ?? []).filter(
       (entry) =>
-        surfaceUuidKey(entry.surface_uuid) === agentSurfaceUuid &&
         entry.ts !== null &&
         entry.ts >= earliestCurrentLaunchTs &&
         entry.ts <= latestPlausibleTs,
@@ -220,10 +350,45 @@ export function makeSelfRegistrationSessionResolver(
   };
 }
 
-function defaultReadFile(path: string): string | null {
+function defaultStatFile(path: string): SelfRegistrationFileStat | null {
   try {
-    return readFileSync(path, "utf8");
+    const stat = statSync(path);
+    return {
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      dev: stat.dev,
+      ino: stat.ino,
+    };
   } catch {
     return null;
+  }
+}
+
+function defaultReadFileRange(
+  path: string,
+  offset: number,
+  length: number,
+): Buffer | null {
+  let fileDescriptor: number | null = null;
+  try {
+    fileDescriptor = openSync(path, "r");
+    const buffer = Buffer.allocUnsafe(length);
+    let totalRead = 0;
+    while (totalRead < length) {
+      const bytesRead = readSync(
+        fileDescriptor,
+        buffer,
+        totalRead,
+        length - totalRead,
+        offset + totalRead,
+      );
+      if (bytesRead === 0) return null;
+      totalRead += bytesRead;
+    }
+    return buffer;
+  } catch {
+    return null;
+  } finally {
+    if (fileDescriptor !== null) closeSync(fileDescriptor);
   }
 }

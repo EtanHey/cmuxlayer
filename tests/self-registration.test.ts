@@ -17,6 +17,8 @@ import type { CmuxClient } from "../src/cmux-client.js";
 const TEST_DIR = join(tmpdir(), "cmux-self-registration-test");
 const SURFACE_UUID_A = "11111111-2222-4333-8444-555555555555";
 const SURFACE_UUID_B = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+const SURFACE_UUID_C = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+const SURFACE_UUID_D = "12345678-90ab-4cde-8f01-234567890abc";
 
 /**
  * Minimal AgentRecord for resolver tests — the resolver only reads
@@ -156,6 +158,216 @@ describe("parseSelfRegistrationLines", () => {
 });
 
 describe("makeSelfRegistrationSessionResolver", () => {
+  it("indexes the registry once and reads only newly appended bytes", () => {
+    let body = Buffer.from(
+      jsonl(
+        {
+          session_id: "sid-A",
+          surface_uuid: SURFACE_UUID_A,
+          cwd: null,
+          ts: 1000,
+        },
+        {
+          session_id: "sid-B",
+          surface_uuid: SURFACE_UUID_B,
+          cwd: null,
+          ts: 2000,
+        },
+      ),
+    );
+    let mtimeMs = 1;
+    const reads: Array<{ offset: number; length: number }> = [];
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) => {
+        reads.push({ offset, length });
+        return body.subarray(offset, offset + length);
+      },
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))?.session_id).toBe(
+      "sid-A",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))?.session_id).toBe(
+      "sid-B",
+    );
+    expect(reads).toEqual([{ offset: 0, length: body.byteLength }]);
+
+    const previousLength = body.byteLength;
+    body = Buffer.concat([
+      body,
+      Buffer.from(
+        jsonl({
+          session_id: "sid-C",
+          surface_uuid: SURFACE_UUID_C,
+          cwd: null,
+          ts: 3000,
+        }),
+      ),
+    ]);
+    mtimeMs += 1;
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_C }))?.session_id).toBe(
+      "sid-C",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))?.session_id).toBe(
+      "sid-A",
+    );
+    expect(reads).toEqual([
+      { offset: 0, length: previousLength },
+      { offset: previousLength, length: body.byteLength - previousLength },
+    ]);
+  });
+
+  it("holds an incomplete UTF-8 append until its JSONL newline arrives", () => {
+    const firstLine = Buffer.from(
+      jsonl({ session_id: "sid-A", surface_uuid: SURFACE_UUID_A, ts: 1000 }),
+    );
+    const secondLine = Buffer.from(
+      jsonl({
+        session_id: "sid-B",
+        surface_uuid: SURFACE_UUID_B,
+        session_path: "/tmp/🧪.jsonl",
+        ts: 2000,
+      }),
+    );
+    const multibyteMarker = Buffer.from("🧪");
+    const markerOffset = secondLine.indexOf(multibyteMarker);
+    expect(markerOffset).toBeGreaterThan(0);
+    const splitAt = markerOffset + 2;
+    let body = Buffer.concat([firstLine, secondLine.subarray(0, splitAt)]);
+    let mtimeMs = 1;
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) =>
+        body.subarray(offset, offset + length),
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))?.session_id).toBe(
+      "sid-A",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toBeNull();
+
+    body = Buffer.concat([body, secondLine.subarray(splitAt)]);
+    mtimeMs += 1;
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toEqual({
+      session_id: "sid-B",
+      path: "/tmp/🧪.jsonl",
+    });
+  });
+
+  it("drops cached candidates on same-size rewrite and inode rotation", () => {
+    let body = Buffer.from(
+      jsonl({ session_id: "sid-A", surface_uuid: SURFACE_UUID_A, ts: 1000 }),
+    );
+    let mtimeMs = 1;
+    let ino = 1;
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({ size: body.byteLength, mtimeMs, dev: 1, ino }),
+      readFileRange: (_path, offset, length) =>
+        body.subarray(offset, offset + length),
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))?.session_id).toBe(
+      "sid-A",
+    );
+
+    body = Buffer.from(
+      jsonl({ session_id: "sid-B", surface_uuid: SURFACE_UUID_B, ts: 2000 }),
+    );
+    mtimeMs += 1;
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))?.session_id).toBe(
+      "sid-B",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))).toBeNull();
+
+    body = Buffer.from(
+      jsonl({ session_id: "sid-C", surface_uuid: SURFACE_UUID_C, ts: 3000 }),
+    );
+    ino += 1;
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_C }))?.session_id).toBe(
+      "sid-C",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toBeNull();
+  });
+
+  it("resets after truncation and retries a short appended-byte read", () => {
+    let body = Buffer.from(
+      jsonl(
+        { session_id: "sid-A", surface_uuid: SURFACE_UUID_A, ts: 1000 },
+        { session_id: "sid-B", surface_uuid: SURFACE_UUID_B, ts: 2000 },
+      ),
+    );
+    let mtimeMs = 1;
+    let shortNextRead = false;
+    const reads: Array<{ offset: number; length: number }> = [];
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) => {
+        reads.push({ offset, length });
+        if (shortNextRead) {
+          shortNextRead = false;
+          return body.subarray(offset, offset + length - 1);
+        }
+        return body.subarray(offset, offset + length);
+      },
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))?.session_id).toBe(
+      "sid-B",
+    );
+
+    body = Buffer.from(
+      jsonl({ session_id: "sid-C", surface_uuid: SURFACE_UUID_C, ts: 3000 }),
+    );
+    mtimeMs += 1;
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_C }))?.session_id).toBe(
+      "sid-C",
+    );
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toBeNull();
+
+    const previousLength = body.byteLength;
+    body = Buffer.concat([
+      body,
+      Buffer.from(
+        jsonl({
+          session_id: "sid-D",
+          surface_uuid: SURFACE_UUID_D,
+          ts: 4000,
+        }),
+      ),
+    ]);
+    mtimeMs += 1;
+    shortNextRead = true;
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_D }))).toBeNull();
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_D }))?.session_id).toBe(
+      "sid-D",
+    );
+    expect(reads.slice(-2).map((read) => read.offset)).toEqual([
+      previousLength,
+      previousLength,
+    ]);
+  });
+
   it("returns the registered session_id on a surface_uuid-exact match", () => {
     const resolve = resolverFor(
       jsonl({
