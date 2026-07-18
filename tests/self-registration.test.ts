@@ -36,8 +36,8 @@ function agent(overrides: Partial<AgentRecord>): AgentRecord {
     task_summary: "do the thing",
     pid: null,
     version: 1,
-    created_at: "2026-07-18T00:00:00.000Z",
-    updated_at: "2026-07-18T00:00:00.000Z",
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
     error: null,
     parent_agent_id: null,
     spawn_depth: 0,
@@ -279,6 +279,54 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ surface_uuid: null, launch_cwd: "/w" }))).toBeNull();
   });
 
+  it("rejects a same-surface record older than the current launch window", () => {
+    const createdAt = Date.parse("2026-07-18T00:00:10.000Z");
+    const resolve = resolverFor(
+      jsonl({
+        session_id: "sid-stale",
+        cwd: "/w",
+        ts: createdAt - 5_001,
+      }),
+    );
+
+    expect(
+      resolve(
+        agent({
+          launch_cwd: "/w",
+          created_at: new Date(createdAt).toISOString(),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("accepts a hook record within the five-second launch tolerance", () => {
+    const createdAt = Date.parse("2026-07-18T00:00:10.000Z");
+    const resolve = resolverFor(
+      jsonl({
+        session_id: "sid-current",
+        cwd: "/w",
+        ts: createdAt - 5_000,
+      }),
+    );
+
+    expect(
+      resolve(
+        agent({
+          launch_cwd: "/w",
+          created_at: new Date(createdAt).toISOString(),
+        }),
+      )?.session_id,
+    ).toBe("sid-current");
+  });
+
+  it("rejects a same-surface record without an epoch timestamp", () => {
+    const resolve = resolverFor(
+      jsonl({ session_id: "sid-undated", cwd: "/w" }),
+    );
+
+    expect(resolve(agent({ launch_cwd: "/w" }))).toBeNull();
+  });
+
   it("skips malformed lines but still binds a valid same-surface entry", () => {
     const resolve = resolverFor(
       jsonl("corrupt line not json", {
@@ -327,10 +375,14 @@ describe("makeSelfRegistrationSessionResolver", () => {
  * the assertion is hermetic (no real HOME I/O).
  */
 describe("AgentEngine self-registration wiring", () => {
-  function makeEngine(
+  function makeEngineHarness(
     selfRegistrationSessionResolver:
       ReturnType<typeof makeSelfRegistrationSessionResolver> | (() => null),
-  ): AgentEngine {
+  ): {
+    engine: AgentEngine;
+    stateMgr: StateManager;
+    registry: AgentRegistry;
+  } {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     const stateMgr = new StateManager(TEST_DIR);
@@ -339,10 +391,21 @@ describe("AgentEngine self-registration wiring", () => {
       readScreen: vi.fn(),
       log: vi.fn(),
     } as unknown as CmuxClient;
-    return new AgentEngine(stateMgr, registry, client, {
-      spawnPreflight: async () => {},
-      selfRegistrationSessionResolver,
-    });
+    return {
+      engine: new AgentEngine(stateMgr, registry, client, {
+        spawnPreflight: async () => {},
+        selfRegistrationSessionResolver,
+      }),
+      stateMgr,
+      registry,
+    };
+  }
+
+  function makeEngine(
+    selfRegistrationSessionResolver:
+      ReturnType<typeof makeSelfRegistrationSessionResolver> | (() => null),
+  ): AgentEngine {
+    return makeEngineHarness(selfRegistrationSessionResolver).engine;
   }
 
   it("uses the self-registration hit and does NOT call the transcript scan", () => {
@@ -392,6 +455,76 @@ describe("AgentEngine self-registration wiring", () => {
 
     expect(result).toEqual({ session_id: "sid-scan", path: null });
     expect(scanSpy).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("captures a raw auto-discovered agent using only its stable surface UUID", async () => {
+    const selfRegistrationSessionResolver = vi.fn(() => ({
+      session_id: "sid-raw",
+      path: "/rollout/raw.jsonl",
+    }));
+    const { engine, stateMgr, registry } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+    );
+    const rawAgent = agent({
+      agent_id: "auto-claude-surface-live",
+      state: "working",
+      launcher_name: null,
+      launch_cwd: null,
+      worktree_path: null,
+      task_summary: "(auto-discovered)",
+    });
+    stateMgr.writeState(rawAgent);
+    registry.set(rawAgent.agent_id, rawAgent);
+
+    const captured = await engine.captureBootSessionId(rawAgent.agent_id);
+
+    expect(captured).toMatchObject({
+      cli_session_id: "sid-raw",
+      cli_session_path: "/rollout/raw.jsonl",
+    });
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("captures self-registration on first connect without invoking the scan", async () => {
+    const selfRegistrationSessionResolver = vi.fn(() => ({
+      session_id: "sid-first-connect",
+      path: null,
+    }));
+    const { engine, stateMgr, registry } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+    );
+    const rawAgent = agent({
+      agent_id: "auto-claude-surface-first-connect",
+      state: "ready",
+      launcher_name: null,
+      launch_cwd: null,
+      worktree_path: null,
+      task_summary: "(auto-discovered)",
+    });
+    stateMgr.writeState(rawAgent);
+    registry.set(rawAgent.agent_id, rawAgent);
+    const scanSpy = vi.spyOn(
+      engine as unknown as {
+        findTranscriptSessionIdentity: (a: AgentRecord) => unknown;
+      },
+      "findTranscriptSessionIdentity",
+    );
+
+    const captured = await (
+      engine as unknown as {
+        maybeCaptureBootSessionId(
+          a: AgentRecord,
+          ctx: Record<string, never>,
+          opts: { resolveTranscript: boolean },
+        ): Promise<AgentRecord>;
+      }
+    ).maybeCaptureBootSessionId(rawAgent, {}, { resolveTranscript: false });
+
+    expect(captured.cli_session_id).toBe("sid-first-connect");
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    expect(scanSpy).not.toHaveBeenCalled();
     engine.dispose();
   });
 });

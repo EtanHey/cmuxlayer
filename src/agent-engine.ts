@@ -1891,6 +1891,15 @@ export class AgentEngine {
     return agent.state === "booting";
   }
 
+  private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
+    return Boolean(
+      this.selfRegistrationSessionResolver &&
+      TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state) &&
+      JSONL_HARNESSES.has(agent.cli) &&
+      agent.surface_uuid?.trim(),
+    );
+  }
+
   private canUseTranscriptSessionResolver(agent: AgentRecord): boolean {
     if (!TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state)) return false;
     if (!JSONL_HARNESSES.has(agent.cli)) return false;
@@ -2049,10 +2058,13 @@ export class AgentEngine {
   private resolveSessionIdentityWithSelfRegistration(
     agent: AgentRecord,
   ): CapturedSessionIdentity | null {
-    const selfRegistered = this.selfRegistrationSessionResolver?.(agent);
-    if (selfRegistered) {
-      return this.normalizeCapturedSessionIdentity(selfRegistered);
+    if (this.canUseSelfRegistrationSessionResolver(agent)) {
+      const selfRegistered = this.selfRegistrationSessionResolver?.(agent);
+      if (selfRegistered) {
+        return this.normalizeCapturedSessionIdentity(selfRegistered);
+      }
     }
+    if (!this.canUseTranscriptSessionResolver(agent)) return null;
     return this.findTranscriptSessionIdentity(agent);
   }
 
@@ -2314,14 +2326,22 @@ export class AgentEngine {
       return agent;
     }
 
-    if (
+    const canUseSelfRegistration =
+      this.canUseSelfRegistrationSessionResolver(agent);
+    const canUseTranscript =
       opts.resolveTranscript !== false &&
-      this.canUseTranscriptSessionResolver(agent)
-    ) {
+      this.canUseTranscriptSessionResolver(agent);
+    if (canUseSelfRegistration || canUseTranscript) {
       try {
-        const transcriptSessionId = this.sessionIdentityResolver(agent);
-        if (transcriptSessionId) {
-          return this.finalizeCapturedSession(agent, transcriptSessionId);
+        const resolvedSession =
+          opts.resolveTranscript === false
+            ? this.selfRegistrationSessionResolver?.(agent)
+            : this.sessionIdentityResolver(agent);
+        if (resolvedSession) {
+          return this.finalizeCapturedSession(
+            agent,
+            this.normalizeCapturedSessionIdentity(resolvedSession),
+          );
         }
       } catch {
         return agent;

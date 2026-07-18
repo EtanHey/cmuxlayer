@@ -31,6 +31,8 @@ import type {
   SessionIdentityResolver,
 } from "./agent-engine.js";
 
+const SESSION_REGISTRATION_CREATION_SKEW_MS = 5_000;
+
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
   session_id: string;
@@ -44,7 +46,7 @@ export interface SelfRegistrationEntry {
   launcher: string | null;
   /** Optional rollout/transcript path; returned as the resolved `path`. */
   session_path: string | null;
-  /** Epoch MILLISECONDS. Sorted descending; missing sorts oldest. */
+  /** Epoch MILLISECONDS. Required for current-launch freshness checks. */
   ts: number | null;
 }
 
@@ -159,9 +161,12 @@ function chooseCandidate(
  *
  * Match is stable-surface UUID PRIMARY
  * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
- * optional secondary validator, then newest `ts` decides. AgentRecord.pid is
- * deliberately ignored because production does not populate it with the CLI
- * process pid. Returns
+ * optional secondary validator, then newest `ts` decides. Candidates must also
+ * be timestamped within the current agent-creation window, preventing an
+ * append-only record from a previous process on the same surface from being
+ * finalized during the short interval before the new hook appends. AgentRecord
+ * pid is deliberately ignored because production does not populate it with the
+ * CLI process pid. Returns
  * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
  * missing/unreadable/empty registry, an agent without a stable surface UUID, or
  * no UUID match all return `null` (the caller then falls back to the scan).
@@ -176,6 +181,10 @@ export function makeSelfRegistrationSessionResolver(
     const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
     if (!agentSurfaceUuid) return null;
     const launchCwd = agent.launch_cwd?.trim() || null;
+    const createdAt = Date.parse(agent.created_at);
+    if (Number.isNaN(createdAt)) return null;
+    const earliestCurrentLaunchTs =
+      createdAt - SESSION_REGISTRATION_CREATION_SKEW_MS;
 
     let text: string | null;
     try {
@@ -186,7 +195,10 @@ export function makeSelfRegistrationSessionResolver(
     if (!text) return null;
 
     const candidates = parseSelfRegistrationLines(text).filter(
-      (entry) => surfaceUuidKey(entry.surface_uuid) === agentSurfaceUuid,
+      (entry) =>
+        surfaceUuidKey(entry.surface_uuid) === agentSurfaceUuid &&
+        entry.ts !== null &&
+        entry.ts >= earliestCurrentLaunchTs,
     );
     const chosen = chooseCandidate(candidates, launchCwd);
     if (!chosen) return null;

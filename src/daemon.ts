@@ -521,6 +521,7 @@ export class CmuxLayerDaemon {
           spawnPreflight: this.opts.spawnPreflight,
           disableSpawnPreflight: this.opts.disableSpawnPreflight,
           selfRegistrationSessionResolver:
+            this.opts.selfRegistrationSessionResolver ??
             makeSelfRegistrationSessionResolver(),
           surfaceObserverOwnerIdProvider:
             this.opts.surfaceObserverOwnerIdProvider,
