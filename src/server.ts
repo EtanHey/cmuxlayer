@@ -117,6 +117,11 @@ import {
   loadHarnessSession,
   type Harness,
 } from "./harness-session.js";
+import {
+  makeCodexRolloutFillProvider,
+  type CodexRolloutFill,
+  type CodexRolloutFillProvider,
+} from "./codex-rollout-fill.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import {
   canInferAgentRole,
@@ -1834,6 +1839,7 @@ const JSONL_HARNESSES = new Set<Harness>(["claude", "codex", "cursor"]);
 function resolveHarnessStateForSurface(
   stateMgr: StateManager,
   surfaceRef: string,
+  authorizedRecord?: AgentRecord | null,
 ): ReturnType<typeof loadHarnessSession> {
   if (!harnessJsonlEnabled()) return null;
   const matches = stateMgr
@@ -1845,9 +1851,12 @@ function resolveHarnessStateForSurface(
         new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
       );
     });
-  const record = matches[0];
+  const record = authorizedRecord ?? matches[0];
   const cli = record?.cli as Harness | undefined;
   const sessionId = record?.cli_session_id ?? null;
+  // Codex fill is handled asynchronously from the exact self-registration
+  // session path. Never fall back to the legacy synchronous sessions-dir scan.
+  if (cli === "codex") return null;
   if (!cli || !sessionId || !JSONL_HARNESSES.has(cli)) return null;
   // Honor CODEX_HOME (already used by app-server-bridge) and a test-only home override.
   const opts = {
@@ -1991,6 +2000,8 @@ export interface CreateServerOptions {
    * `makeSelfRegistrationSessionResolver()`; unset in tests keeps HOME I/O out.
    */
   selfRegistrationSessionResolver?: SessionIdentityResolver;
+  /** Async, throttled Codex rollout reader (primarily injectable for tests). */
+  codexRolloutFillProvider?: CodexRolloutFillProvider;
   /** Override git worktree execution/home for tests. */
   worktreeExec?: WorktreeExec;
   worktreeHomeDir?: string;
@@ -2079,6 +2090,7 @@ export interface CmuxServerContext {
   surfaceWriteLivenessCandidates: Set<string>;
   surfacePtyDeadSince: Map<string, number>;
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
+  codexRolloutFillProvider: CodexRolloutFillProvider;
   surfaceWriteLiveness: SurfaceWriteLivenessTracker;
   enableClaudeChannels: boolean;
   skipAgentLifecycle: boolean;
@@ -2198,6 +2210,8 @@ export function createServerContext(
     surfaceWriteLivenessCandidates: new Set(),
     surfacePtyDeadSince: new Map(),
     readScreenInflight: new Map(),
+    codexRolloutFillProvider:
+      opts?.codexRolloutFillProvider ?? makeCodexRolloutFillProvider(),
     surfaceWriteLiveness:
       opts?.surfaceWriteLiveness ?? new SurfaceWriteLivenessTracker(),
     enableClaudeChannels:
@@ -3335,7 +3349,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
-    opts?: { throwOnSurfaceGone?: boolean },
+    opts?: { throwOnSurfaceGone?: boolean; agent?: AgentRecord },
   ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     try {
       const screen = await client.readScreen(surface, {
@@ -3349,7 +3363,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           text,
           pickLatestSurfaceModel(stateMgr, surface),
         ),
-        resolveHarnessStateForSurface(stateMgr, surface),
+        resolveHarnessStateForSurface(stateMgr, surface, opts?.agent),
       );
       return { text, parsed };
     } catch (error) {
@@ -4811,6 +4825,92 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : null;
   };
 
+  const resolveCodexAgentForSurface = (
+    surfaceRef: string,
+    topology: SurfaceTopologySnapshot | null,
+  ): AgentRecord | null => {
+    const candidates = stateMgr
+      .listStates()
+      .filter(
+        (agent) =>
+          agent.cli === "codex" &&
+          Boolean(agent.surface_uuid?.trim()) &&
+          Boolean(agent.cli_session_path),
+      )
+      .sort((a, b) => {
+        if (b.version !== a.version) return b.version - a.version;
+        return (
+          new Date(b.updated_at).getTime() -
+          new Date(a.updated_at).getTime()
+        );
+      });
+
+    for (const candidate of candidates) {
+      const binding = resolveAuthorizedAgentSurfaceBinding(candidate, topology);
+      if (binding?.surfaceRef === surfaceRef) return candidate;
+    }
+    return null;
+  };
+
+  const readCodexRolloutFill = async (
+    agent: AgentRecord | null,
+  ): Promise<CodexRolloutFill | null> => {
+    const path =
+      agent?.cli === "codex" && Boolean(agent.surface_uuid?.trim())
+        ? agent.cli_session_path
+        : null;
+    if (!path) return null;
+    try {
+      return await context.codexRolloutFillProvider.get(path);
+    } catch {
+      return null;
+    }
+  };
+
+  const sameCodexSessionBinding = (
+    before: AgentRecord | null,
+    after: AgentRecord | null,
+  ): AgentRecord | null => {
+    if (!before || !after) return null;
+    if (before.cli !== "codex" || after.cli !== "codex") return null;
+    if (before.agent_id !== after.agent_id) return null;
+    if (
+      before.surface_uuid?.trim().toLowerCase() !==
+      after.surface_uuid?.trim().toLowerCase()
+    ) {
+      return null;
+    }
+    return before.cli_session_path === after.cli_session_path ? after : null;
+  };
+
+  const validateCodexRolloutFill = async (
+    agent: AgentRecord | null,
+    expectedSurfaceRef: string | null,
+    fill: CodexRolloutFill | null,
+  ): Promise<CodexRolloutFill | null> => {
+    if (!agent || !expectedSurfaceRef || !fill) return null;
+    const current = stateMgr.readState(agent.agent_id);
+    if (!sameCodexSessionBinding(agent, current)) return null;
+    const topology = await collectSurfaceTopology().catch(() => null);
+    const binding = current
+      ? resolveAuthorizedAgentSurfaceBinding(current, topology)
+      : null;
+    return binding?.surfaceRef === expectedSurfaceRef ? fill : null;
+  };
+
+  const applyCodexRolloutFill = (
+    parsed: ParsedScreenResult,
+    fill: CodexRolloutFill | null,
+  ): ParsedScreenResult =>
+    fill
+      ? {
+          ...parsed,
+          token_count: fill.token_count,
+          context_window: fill.context_window,
+          context_pct: fill.context_pct,
+        }
+      : parsed;
+
   const evaluateServerAgentHealth = async (
     agent: AgentRecord,
     overrides?: AgentHealthInputOverrides,
@@ -4830,6 +4930,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       parsedSurface = await readParsedSurface(
         binding.surfaceRef,
         binding.workspaceId ?? undefined,
+        { agent },
       );
     }
     const surfaceOverrides = healthTopologyOverrides(
@@ -4979,6 +5080,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ? await readParsedSurface(
           binding.surfaceRef,
           binding.workspaceId ?? undefined,
+          { agent },
         )
       : null;
     const health = await evaluateServerAgentHealth(
@@ -6421,6 +6523,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.readOnly,
     async (args) => {
       try {
+        let codexAgentBeforeRead: AgentRecord | null = null;
+        const hasCodexRolloutCandidate = stateMgr.listStates().some(
+          (agent) =>
+            agent.cli === "codex" &&
+            Boolean(agent.surface_uuid?.trim()) &&
+            Boolean(agent.cli_session_path),
+        );
+        if (hasCodexRolloutCandidate) {
+          const topologyBeforeRead = await collectSurfaceTopology(
+            args.workspace,
+          ).catch(() => null);
+          codexAgentBeforeRead = resolveCodexAgentForSurface(
+            args.surface,
+            topologyBeforeRead,
+          );
+        }
         const { result, topology } = await readScreenSnapshot({
           surface: args.surface,
           workspace: args.workspace,
@@ -6431,13 +6549,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const { column, column_count } =
           topology?.topologyBySurface.get(result.surface) ??
           EMPTY_SURFACE_TOPOLOGY;
-        const parsed = applyHarnessState(
-          enrichParsedScreen(
-            parseScreen(result.text),
-            result.text,
-            pickLatestSurfaceModel(stateMgr, result.surface),
+        const codexAgent = sameCodexSessionBinding(
+          codexAgentBeforeRead,
+          resolveCodexAgentForSurface(result.surface, topology),
+        );
+        const codexFill = await validateCodexRolloutFill(
+          codexAgent,
+          result.surface,
+          await readCodexRolloutFill(codexAgent),
+        );
+        const parsed = applyCodexRolloutFill(
+          applyHarnessState(
+            enrichParsedScreen(
+              parseScreen(result.text),
+              result.text,
+              pickLatestSurfaceModel(stateMgr, result.surface),
+            ),
+            resolveHarnessStateForSurface(
+              stateMgr,
+              result.surface,
+              codexAgent,
+            ),
           ),
-          resolveHarnessStateForSurface(stateMgr, result.surface),
+          codexFill,
         );
 
         if (args.parsed_only) {
@@ -9129,13 +9263,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(new Error(`Agent not found: ${args.agent_id}`));
           const topology = await collectSurfaceTopology();
           const harvestability = engine.assessHarvestability(state);
-          const health = await evaluateServerAgentHealth(
+          const authorizedBinding = resolveAuthorizedAgentSurfaceBinding(
             state,
-            {
-              ...healthTopologyOverrides(state, topology),
-              harvestability,
-            },
             topology,
+          );
+          const [health, pendingCodexFill] = await Promise.all([
+            evaluateServerAgentHealth(
+              state,
+              {
+                ...healthTopologyOverrides(state, topology),
+                harvestability,
+              },
+              topology,
+            ),
+            readCodexRolloutFill(authorizedBinding ? state : null),
+          ]);
+          const codexFill = await validateCodexRolloutFill(
+            authorizedBinding ? state : null,
+            authorizedBinding?.surfaceRef ?? null,
+            pendingCodexFill,
           );
           const formatted =
             formatAgentState(state) +
@@ -9144,11 +9290,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }` +
             `\nhealth: ${health.status}${
               health.issues.length > 0 ? ` (${health.issues.join("; ")})` : ""
-            }`;
+            }` +
+            `\ntoken_count: ${codexFill?.token_count ?? "unknown"}` +
+            `\ncontext_window: ${codexFill?.context_window ?? "unknown"}` +
+            `\ncontext_pct: ${codexFill?.context_pct ?? "unknown"}`;
           const payload = {
             ...toAgentStatePayload(state),
             harvestability,
             health,
+            token_count: codexFill?.token_count ?? null,
+            context_window: codexFill?.context_window ?? null,
+            context_pct: codexFill?.context_pct ?? null,
           };
           return okFormatted(
             formatted,
@@ -10775,6 +10927,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const SCREEN_TIMEOUT = 3000;
           const enriched = await Promise.all(
             agents.map(async (agent) => {
+              const screenDeadline = Date.now() + SCREEN_TIMEOUT;
               let screenData: ParsedScreenResult | null = null;
               let liveSurfaceId: string | null = null;
               let screenFailure: {
@@ -10798,11 +10951,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       surface_id: binding.surfaceRef,
                       workspace_id: binding.workspaceId,
                     };
+                    const codexFillPromise = readCodexRolloutFill(agent);
                     const screen = await client.readScreen(route.surface_id, {
                       lines: 20,
                       workspace: route.workspace_id ?? undefined,
                     });
-                    return { route, screen };
+                    return { route, screen, codexFillPromise };
                   })(),
                   new Promise<never>((_, reject) =>
                     setTimeout(
@@ -10813,13 +10967,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ]);
                 liveSurfaceId = resolved.route.surface_id;
                 const screen = resolved.screen;
-                screenData = applyHarnessState(
-                  enrichParsedScreen(
-                    parseScreen(screen.text),
-                    screen.text,
-                    pickLatestSurfaceModel(stateMgr, liveSurfaceId),
+                const fillWaitMs = Math.max(0, screenDeadline - Date.now());
+                const pendingCodexFill =
+                  fillWaitMs === 0
+                    ? null
+                    : await new Promise<CodexRolloutFill | null>((resolve) => {
+                        const timeout = setTimeout(
+                          () => resolve(null),
+                          fillWaitMs,
+                        );
+                        resolved.codexFillPromise.then(
+                          (fill) => {
+                            clearTimeout(timeout);
+                            resolve(fill);
+                          },
+                          () => {
+                            clearTimeout(timeout);
+                            resolve(null);
+                          },
+                        );
+                      });
+                const codexFill = await validateCodexRolloutFill(
+                  agent,
+                  resolved.route.surface_id,
+                  pendingCodexFill,
+                );
+                screenData = applyCodexRolloutFill(
+                  applyHarnessState(
+                    enrichParsedScreen(
+                      parseScreen(screen.text),
+                      screen.text,
+                      pickLatestSurfaceModel(stateMgr, liveSurfaceId),
+                    ),
+                    resolveHarnessStateForSurface(
+                      stateMgr,
+                      liveSurfaceId,
+                      agent,
+                    ),
                   ),
-                  resolveHarnessStateForSurface(stateMgr, liveSurfaceId),
+                  codexFill,
                 );
               } catch (error) {
                 // Surface may be closed, unavailable, or timed out
@@ -10844,6 +11030,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ...(resumeCommand ? { resume_command: resumeCommand } : {}),
                 surface_id: liveSurfaceId,
                 token_count: screenData?.token_count ?? null,
+                context_window: screenData?.context_window ?? null,
                 context_pct: screenData?.context_pct ?? null,
                 cost: screenData?.cost ?? null,
                 task_summary: agent.task_summary,
