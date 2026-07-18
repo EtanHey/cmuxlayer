@@ -163,13 +163,13 @@ function chooseCandidate(
  *
  * Match is stable-surface UUID PRIMARY
  * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
- * optional secondary validator, then newest `ts` decides. Candidates must be
- * newer than the current agent-creation window and no farther in the future
- * than the allowed reader-clock skew. Those bounds prevent an append-only row
- * from a previous process (or from before a backward clock correction) from
- * being finalized before the new hook appends. AgentRecord pid is deliberately
- * ignored because production does not populate it with the CLI process pid.
- * Returns
+ * optional secondary validator, then newest `ts` decides. For cmuxlayer-owned
+ * launches, candidates must be newer than the agent-creation window; raw and
+ * repaired records deliberately skip that lower bound because their
+ * `created_at` is discovery time, not launch time. All candidates are bounded
+ * against the reader clock so a row from before a backward clock correction
+ * cannot dominate. AgentRecord pid is deliberately ignored because production
+ * does not populate it with the CLI process pid. Returns
  * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
  * missing/unreadable/empty registry, an agent without a stable surface UUID, or
  * no UUID match all return `null` (the caller then falls back to the scan).
@@ -188,7 +188,9 @@ export function makeSelfRegistrationSessionResolver(
     const createdAt = Date.parse(agent.created_at);
     if (Number.isNaN(createdAt)) return null;
     const earliestCurrentLaunchTs =
-      createdAt - SESSION_REGISTRATION_TIMESTAMP_SKEW_MS;
+      agent.surface_provenance === "cmuxlayer_spawn"
+        ? createdAt - SESSION_REGISTRATION_TIMESTAMP_SKEW_MS
+        : Number.NEGATIVE_INFINITY;
     const resolvedAt = now();
     if (!Number.isSafeInteger(resolvedAt)) return null;
     const latestPlausibleTs =

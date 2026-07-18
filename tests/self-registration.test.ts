@@ -293,6 +293,7 @@ describe("makeSelfRegistrationSessionResolver", () => {
       resolve(
         agent({
           launch_cwd: "/w",
+          surface_provenance: "cmuxlayer_spawn",
           created_at: new Date(createdAt).toISOString(),
         }),
       ),
@@ -313,6 +314,7 @@ describe("makeSelfRegistrationSessionResolver", () => {
       resolve(
         agent({
           launch_cwd: "/w",
+          surface_provenance: "cmuxlayer_spawn",
           created_at: new Date(createdAt).toISOString(),
         }),
       )?.session_id,
@@ -353,6 +355,53 @@ describe("makeSelfRegistrationSessionResolver", () => {
       )?.session_id,
     ).toBe("sid-current");
   });
+
+  it.each([
+    {
+      label: "auto-discovered",
+      overrides: {
+        surface_provenance: "unknown" as const,
+        task_summary: "(auto-discovered)",
+        launcher_name: null,
+        launch_cwd: null,
+        worktree_path: null,
+      },
+    },
+    {
+      label: "resync-repaired",
+      overrides: {
+        surface_provenance: undefined,
+        task_summary: "(resync-repaired)",
+        launch_cwd: null,
+        worktree_path: null,
+      },
+    },
+  ])(
+    "accepts a valid $label registration older than its discovery record",
+    ({ overrides }) => {
+      const now = Date.parse("2026-07-18T00:10:00.000Z");
+      const discoveredAt = now - 10_000;
+      const resolve = makeSelfRegistrationSessionResolver({
+        registryPath: "/fake/registry.jsonl",
+        readFile: () =>
+          jsonl({
+            session_id: "sid-already-running",
+            cwd: "/actual/agent/cwd",
+            ts: discoveredAt - 60_000,
+          }),
+        now: () => now,
+      });
+
+      expect(
+        resolve(
+          agent({
+            ...overrides,
+            created_at: new Date(discoveredAt).toISOString(),
+          }),
+        )?.session_id,
+      ).toBe("sid-already-running");
+    },
+  );
 
   it("accepts a timestamp at the reader-clock skew boundary", () => {
     const now = Date.parse("2026-07-18T00:01:00.000Z");
