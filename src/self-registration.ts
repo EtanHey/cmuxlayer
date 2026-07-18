@@ -239,6 +239,7 @@ function makeIncrementalEntryIndexReader(
   let consumedBytes = 0;
   let observedMtimeMs = Number.NEGATIVE_INFINITY;
   let pendingLine = Buffer.alloc(0);
+  let discardingOversizedLine = false;
   let continuityTail = Buffer.alloc(0);
   let entriesBySurface: SurfaceEntryIndex = new Map();
 
@@ -246,6 +247,7 @@ function makeIncrementalEntryIndexReader(
     consumedBytes = 0;
     observedMtimeMs = Number.NEGATIVE_INFINITY;
     pendingLine = Buffer.alloc(0);
+    discardingOversizedLine = false;
     continuityTail = Buffer.alloc(0);
     entriesBySurface = new Map();
   };
@@ -333,13 +335,27 @@ function makeIncrementalEntryIndexReader(
         continuitySource,
         SESSION_REGISTRATION_CONTINUITY_BYTES,
       );
-      const combined = Buffer.concat([pendingLine, appended]);
+      let parseableAppended = appended;
+      if (discardingOversizedLine) {
+        const discardedLineEnd = parseableAppended.indexOf(0x0a);
+        if (discardedLineEnd < 0) {
+          parseableAppended = Buffer.alloc(0);
+        } else {
+          discardingOversizedLine = false;
+          parseableAppended = parseableAppended.subarray(
+            discardedLineEnd + 1,
+          );
+        }
+      }
+      const combined = Buffer.concat([pendingLine, parseableAppended]);
       const finalNewline = combined.lastIndexOf(0x0a);
       if (finalNewline >= 0) {
         const completeLines = combined.subarray(0, finalNewline + 1);
-        pendingLine = boundPendingRegistrationLine(
-          combined.subarray(finalNewline + 1),
-        );
+        const trailingLine = combined.subarray(finalNewline + 1);
+        discardingOversizedLine =
+          trailingLine.byteLength >
+          SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
+        pendingLine = boundPendingRegistrationLine(trailingLine);
         for (const entry of parseSelfRegistrationLines(
           completeLines.toString("utf8"),
         )) {
@@ -350,6 +366,9 @@ function makeIncrementalEntryIndexReader(
           else entriesBySurface.set(key, [entry]);
         }
       } else {
+        discardingOversizedLine =
+          discardingOversizedLine ||
+          combined.byteLength > SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
         pendingLine = boundPendingRegistrationLine(combined);
       }
     }
