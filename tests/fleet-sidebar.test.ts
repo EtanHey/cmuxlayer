@@ -32,6 +32,35 @@ import {
 
 const tempDirs: string[] = [];
 
+function manualCollapseStateWatcher() {
+  let listener: (() => void) | null = null;
+  let watchedPath: string | null = null;
+  let disposed = false;
+  return {
+    watch: (path: string, onChange: () => void) => {
+      watchedPath = path;
+      listener = onChange;
+      return () => {
+        disposed = true;
+        listener = null;
+      };
+    },
+    emit: () => {
+      if (!listener) return false;
+      listener();
+      return true;
+    },
+    watchedPath: () => watchedPath,
+    connected: () => listener !== null,
+    disposed: () => disposed,
+  };
+}
+
+function agePublishedSidebar(path: string): void {
+  const oldEnoughToBypassThrottle = new Date(Date.now() - 1_000);
+  utimesSync(path, oldEnoughToBypassThrottle, oldEnoughToBypassThrottle);
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -1614,41 +1643,41 @@ writeFileSync(process.argv[3], "released");`,
     publisher.dispose();
   });
 
-  it("republishes the cached snapshot promptly when CLI state changes", async () => {
+  it("republishes the cached snapshot promptly when CLI state changes", () => {
     const outputPath = tempOutputPath();
     const statePath = join(outputPath, "..", "fleet-collapse.json");
     const store = new FleetSidebarCollapseStore({ statePath });
+    const watcher = manualCollapseStateWatcher();
     const publisher = new FleetSidebarPublisher({
       outputPath,
       collapseStore: store,
+      collapseStateWatcher: watcher.watch,
     });
 
+    let source = "";
     try {
       publisher.publish(snapshotWithStatus("collapse without waiting for sweep"));
       expect(readFileSync(outputPath, "utf8")).toContain(
         '"surfaceRef": "surface:1"',
       );
+      agePublishedSidebar(outputPath);
 
       new FleetSidebarCollapseStore({ statePath }).setLaneCollapsed(
         "cmuxlayer",
         true,
       );
-      const deadline = Date.now() + 1_200;
-      while (
-        Date.now() < deadline &&
-        readFileSync(outputPath, "utf8").includes(
-          '"surfaceRef": "surface:1"',
-        )
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      expect(watcher.emit()).toBe(true);
 
-      const source = readFileSync(outputPath, "utf8");
+      source = readFileSync(outputPath, "utf8");
       expect(source).toContain('fleetLane("cmuxlayer", 1, 1, true, 1, [');
       expect(source).not.toContain('"surfaceRef": "surface:1"');
+      expect(watcher.watchedPath()).toBe(statePath);
     } finally {
       publisher.dispose();
     }
+    expect(watcher.connected()).toBe(false);
+    expect(watcher.disposed()).toBe(true);
+    expect(watcher.emit()).toBe(false);
   });
 
   it("creates the target atomically and leaves no temporary file", () => {
@@ -1816,13 +1845,15 @@ writeFileSync(process.argv[3], "released");`,
     publisher.dispose();
   });
 
-  it("keeps the last authoritative topology when collapse changes after a pending decrease is canceled", async () => {
+  it("keeps the last authoritative topology when collapse changes after a pending decrease is canceled", () => {
     const outputPath = tempOutputPath();
     const statePath = join(outputPath, "..", "fleet-collapse.json");
     const store = new FleetSidebarCollapseStore({ statePath });
+    const watcher = manualCollapseStateWatcher();
     const publisher = new FleetSidebarPublisher({
       outputPath,
       collapseStore: store,
+      collapseStateWatcher: watcher.watch,
     });
     publisher.publish(
       publication(
@@ -1842,15 +1873,10 @@ writeFileSync(process.argv[3], "released");`,
         ["surface:1", "surface:2"],
       ),
     );
+    agePublishedSidebar(outputPath);
     store.setLaneCollapsed("cmuxlayer", true);
+    expect(watcher.emit()).toBe(true);
     const collapsedLane = 'fleetLane("cmuxlayer", 2, 2, true, 2, [';
-    const deadline = Date.now() + 2_000;
-    while (
-      Date.now() < deadline &&
-      !readFileSync(outputPath, "utf8").includes(collapsedLane)
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
 
     const source = readFileSync(outputPath, "utf8");
     expect(source).toContain(
@@ -1859,6 +1885,9 @@ writeFileSync(process.argv[3], "released");`,
     expect(source).toContain(collapsedLane);
     expect(source).not.toContain("rendered=1");
     publisher.dispose();
+    expect(watcher.connected()).toBe(false);
+    expect(watcher.disposed()).toBe(true);
+    expect(watcher.emit()).toBe(false);
   });
 
   it("accepts a populated decrease after omitted seat surfaces disappear", async () => {

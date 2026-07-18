@@ -29,6 +29,7 @@ import type { ExecFn } from "../src/cmux-client.js";
 import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
+import { AgentRegistry } from "../src/agent-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   reconcileMonitorRegistry,
@@ -40,6 +41,23 @@ import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
+const hermeticSpawnStateDirs: string[] = [];
+let hermeticSpawnFixtureSequence = 0;
+
+afterEach(async () => {
+  await Promise.allSettled(
+    serverContexts.map(
+      (context) => context.lifecycleStartPromise ?? Promise.resolve(),
+    ),
+  );
+  for (const context of serverContexts.splice(0)) {
+    context.dispose();
+  }
+  for (const stateDir of hermeticSpawnStateDirs.splice(0)) {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+  rmSync(TEST_DIR, { recursive: true, force: true });
+});
 
 const AGENT_TOOLS = [
   "spawn_agent",
@@ -254,13 +272,227 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
+function createInMemoryStateManager(
+  baseDir = "/in-memory/spawn-manifest",
+): StateManager {
+  const records = new Map<string, AgentRecord>();
+  const eventLog = {
+    append: vi.fn(),
+    appendDelivery: vi.fn(),
+    appendControlHealth: vi.fn(),
+    appendClose: vi.fn(),
+    appendCloseForensics: vi.fn(),
+    readAll: vi.fn(() => []),
+    readEntries: vi.fn(() => []),
+    readForAgent: vi.fn(() => []),
+    readCloseEvents: vi.fn(() => []),
+  } as unknown as ReturnType<StateManager["getEventLog"]>;
+  const surfaceSessionIndex = {
+    persist: vi.fn(),
+    persistRecord: vi.fn(() => null),
+    removeAgent: vi.fn(),
+    lookup: vi.fn(() => null),
+  } as unknown as ReturnType<StateManager["getSurfaceSessionIndex"]>;
+  const readRecord = (agentId: string): AgentRecord | null => {
+    const record = records.get(agentId);
+    return record ? { ...record } : null;
+  };
+  const requireRecord = (agentId: string): AgentRecord => {
+    const record = readRecord(agentId);
+    if (!record) throw new Error(`Agent not found: ${agentId}`);
+    return record;
+  };
+  const updateRecord = (
+    agentId: string,
+    fields: Partial<AgentRecord>,
+  ): AgentRecord => {
+    const current = requireRecord(agentId);
+    const updated: AgentRecord = {
+      ...current,
+      ...fields,
+      agent_id: current.agent_id,
+      created_at: current.created_at,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+    records.set(agentId, updated);
+    return { ...updated };
+  };
+
+  return {
+    getBaseDir: () => baseDir,
+    getEventLog: () => eventLog,
+    getSurfaceSessionIndex: () => surfaceSessionIndex,
+    writeState: (record) => {
+      records.set(record.agent_id, { ...record });
+    },
+    readState: readRecord,
+    hasStateFile: (agentId) => records.has(agentId),
+    transition: (agentId, toState, extra) =>
+      updateRecord(agentId, { state: toState, ...extra }),
+    updateRecord,
+    resetState: (agentId, toState, fields) =>
+      updateRecord(agentId, { ...fields, state: toState }),
+    renameState: (agentId, newAgentId) => {
+      const current = requireRecord(agentId);
+      if (agentId !== newAgentId && records.has(newAgentId)) {
+        throw new Error(`Agent already exists: ${newAgentId}`);
+      }
+      records.delete(agentId);
+      const renamed: AgentRecord = {
+        ...current,
+        agent_id: newAgentId,
+        version: current.version + 1,
+        updated_at: new Date().toISOString(),
+      };
+      records.set(newAgentId, renamed);
+      for (const child of records.values()) {
+        if (child.parent_agent_id === agentId) {
+          records.set(child.agent_id, {
+            ...child,
+            parent_agent_id: newAgentId,
+            version: child.version + 1,
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
+      return { ...renamed };
+    },
+    listStates: () => [...records.values()].map((record) => ({ ...record })),
+    removeState: (agentId) => {
+      records.delete(agentId);
+    },
+  } as unknown as StateManager;
+}
+
+function createHermeticSpawnServer(
+  opts: Omit<CreateServerOptions, "context" | "stateDir">,
+) {
+  const stateDir = join(
+    tmpdir(),
+    `cmuxlayer-spawn-hermetic-${process.pid}-${hermeticSpawnFixtureSequence++}`,
+  );
+  rmSync(stateDir, { recursive: true, force: true });
+  hermeticSpawnStateDirs.push(stateDir);
+
+  const stateManager = createInMemoryStateManager(stateDir);
+  const lifecycleSurfaceProvider = vi.fn(async () => {
+    throw new Error("Hermetic spawn fixture attempted registry surface I/O");
+  });
+  const lifecycleRegistry = new AgentRegistry(
+    stateManager,
+    lifecycleSurfaceProvider,
+  );
+  vi.spyOn(
+    lifecycleRegistry,
+    "refreshManagedSurfaceMetadata",
+  ).mockImplementation(async (_discovery, refreshOpts) =>
+    refreshOpts?.agentId ? lifecycleRegistry.get(refreshOpts.agentId) : null,
+  );
+  const lifecycleInitializer = vi.fn(async () => {});
+  const serverOptions = {
+    ...opts,
+    stateDir,
+    stateManager,
+    lifecycleRegistry,
+    lifecycleInitializer,
+  } as Omit<CreateServerOptions, "context">;
+  const server = createTrackedServer(serverOptions);
+
+  return {
+    server,
+    context: serverContexts.at(-1)!,
+    stateDir,
+    lifecycleInitializer,
+    lifecycleSurfaceProvider,
+  };
+}
+
+describe("lifecycle dependency seams", () => {
+  it("uses the injected state manager as the state directory authority", () => {
+    const stateManager = createInMemoryStateManager();
+    const context = createServerContext({
+      stateDir: "/conflicting/spawn-manifest-state",
+      stateManager,
+    });
+
+    try {
+      expect(context.stateDir).toBe(stateManager.getBaseDir());
+    } finally {
+      context.dispose();
+    }
+  });
+
+  it("prefers a per-server lifecycle initializer for a shared context", async () => {
+    const stateManager = createInMemoryStateManager();
+    const lifecycleSurfaceProvider = vi.fn(async () => {
+      throw new Error("Shared-context seam attempted lifecycle surface I/O");
+    });
+    const lifecycleRegistry = new AgentRegistry(
+      stateManager,
+      lifecycleSurfaceProvider,
+    );
+    const contextInitializer = vi.fn(async () => {});
+    const serverInitializer = vi.fn(async () => {});
+    const context = createServerContext({
+      exec: makeLifecycleExec(),
+      stateManager,
+      lifecycleRegistry,
+      lifecycleInitializer: contextInitializer,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    serverContexts.push(context);
+
+    createServer({ context, lifecycleInitializer: serverInitializer });
+    await context.lifecycleStartPromise;
+
+    expect(serverInitializer).toHaveBeenCalledTimes(1);
+    expect(contextInitializer).not.toHaveBeenCalled();
+    expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+  });
+
+  it("captures synchronous injected lifecycle initializer failures", async () => {
+    const stateManager = createInMemoryStateManager();
+    const lifecycleRegistry = new AgentRegistry(stateManager, async () => []);
+    const initializationError = new Error("synchronous lifecycle failure");
+    const lifecycleInitializer = vi.fn((): Promise<void> => {
+      throw initializationError;
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(() =>
+        createTrackedServer({
+          exec: makeLifecycleExec(),
+          stateManager,
+          lifecycleRegistry,
+          lifecycleInitializer,
+          disableSpawnPreflight: true,
+          sessionIdentityResolver: () => null,
+        }),
+      ).not.toThrow();
+
+      const context = serverContexts.at(-1)!;
+      await context.lifecycleStartPromise;
+      expect(context.lifecycleStartError).toBe(initializationError);
+      expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith(
+        "[cmuxlayer] lifecycle initialization failed:",
+        initializationError,
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+});
+
 describe("lean spawn tool responses", () => {
   it("spawn_agent publishes the exact expected-state manifest through the injected writer", async () => {
     const manifests: SeatManifest[] = [];
     const surfaceUuid = "11111111-2222-4333-8444-555555555555";
-    const server = createTrackedServer({
+    const fixture = createHermeticSpawnServer({
       exec: makeLifecycleExec({ surfaceUuid }),
-      stateDir: TEST_DIR,
       disableSpawnPreflight: true,
       sessionIdentityResolver: () => null,
       seatManifestWriter: async (manifest) => {
@@ -268,6 +500,13 @@ describe("lean spawn tool responses", () => {
       },
       seatManifestNow: () => "2026-07-12T12:00:00.000Z",
     });
+    const {
+      server,
+      context,
+      stateDir,
+      lifecycleInitializer,
+      lifecycleSurfaceProvider,
+    } = fixture;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
@@ -293,18 +532,28 @@ describe("lean spawn tool responses", () => {
         updated_at: "2026-07-12T12:00:00.000Z",
       },
     ]);
+    expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
+    expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+    expect(context.stateDir).toBe(stateDir);
+    expect(existsSync(stateDir)).toBe(false);
   });
 
   it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
     const manifests: SeatManifest[] = [];
-    const server = createTrackedServer({
+    const fixture = createHermeticSpawnServer({
       exec: makeLifecycleExec(),
-      stateDir: TEST_DIR,
       spawnPreflight: async () => ({ launcherName: "registeredClaude" }),
       sessionIdentityResolver: () => null,
       seatManifestWriter: async (manifest) => manifests.push(manifest),
       seatManifestNow: () => "2026-07-12T12:00:00.000Z",
     });
+    const {
+      server,
+      context,
+      stateDir,
+      lifecycleInitializer,
+      lifecycleSurfaceProvider,
+    } = fixture;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     await spawn.handler(
@@ -315,6 +564,10 @@ describe("lean spawn tool responses", () => {
     expect(manifests[0]?.tab_name).toBe(
       "registeredClaude [surface:new]",
     );
+    expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
+    expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+    expect(context.stateDir).toBe(stateDir);
+    expect(existsSync(stateDir)).toBe(false);
   });
 
   it("spawn_agent defaults to the lean payload in text and structured content", async () => {
@@ -922,18 +1175,6 @@ describe("agent lifecycle tool handlers", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     mockExec = makeLifecycleExec();
-  });
-
-  afterEach(async () => {
-    await Promise.allSettled(
-      serverContexts.map(
-        (context) => context.lifecycleStartPromise ?? Promise.resolve(),
-      ),
-    );
-    for (const context of serverContexts.splice(0)) {
-      context.dispose();
-    }
-    rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
   it("does not adopt cached lifecycle UUID evidence after an observer reconnect", async () => {
@@ -8373,10 +8614,6 @@ describe("auto-focus discipline (focus target before split, restore after render
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
   });
-  afterEach(() => {
-    rmSync(TEST_DIR, { recursive: true, force: true });
-  });
-
   // Builds an exec mock that records every call, reports `selectedWorkspace` as
   // the focused one, and returns a non-ready screen for the first `notReadyFor`
   // read-screen polls before reporting ready.
