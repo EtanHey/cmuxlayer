@@ -252,6 +252,11 @@ function chooseCandidate(
 
 type SurfaceEntryIndex = Map<string, SelfRegistrationEntry[]>;
 
+/** Exclude rows that can never resolve before they consume bounded index state. */
+function isIndexableRegistrationEntry(entry: SelfRegistrationEntry): boolean {
+  return entry.ts !== null;
+}
+
 /**
  * Index one registration while bounding both history dimensions. Map insertion
  * order tracks the most recently appended row for each surface, so exceeding
@@ -422,6 +427,7 @@ function makeIncrementalEntryIndexReader(
           SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
         pendingLine = boundPendingRegistrationLine(trailingLine);
         for (const entry of parseSelfRegistrationBufferLines(completeLines)) {
+          if (!isIndexableRegistrationEntry(entry)) continue;
           const key = surfaceUuidKey(entry.surface_uuid);
           if (!key) continue;
           indexSurfaceCandidate(entriesBySurface, key, entry);

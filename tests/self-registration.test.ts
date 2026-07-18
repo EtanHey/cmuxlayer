@@ -333,6 +333,40 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ surface_uuid: "surface-1" }))).toBeNull();
   });
 
+  it("does not let universally unusable rows consume surface slots", () => {
+    const records: Array<Record<string, unknown>> = [
+      {
+        session_id: "sid-valid-older-surface",
+        surface_uuid: SURFACE_UUID_A,
+        ts: 1,
+      },
+      ...Array.from(
+        { length: SESSION_REGISTRATION_MAX_INDEXED_SURFACES },
+        (_, index) => ({
+          session_id: `sid-unusable-${index}`,
+          surface_uuid: `unusable-surface-${index}`,
+          ts: null,
+        }),
+      ),
+    ];
+    const body = Buffer.from(jsonl(...records));
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs: 1,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) =>
+        body.subarray(offset, offset + length),
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))?.session_id).toBe(
+      "sid-valid-older-surface",
+    );
+  });
+
   it("holds an incomplete UTF-8 append until its JSONL newline arrives", () => {
     const firstLine = Buffer.from(
       jsonl({ session_id: "sid-A", surface_uuid: SURFACE_UUID_A, ts: 1000 }),
