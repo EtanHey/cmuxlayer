@@ -183,6 +183,8 @@ const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const PICKER_BLOCK_WINDOW_LINES = 32;
 const PICKER_NUMBERED_OPTION_RE =
   /^\s*(?:[>❯›]\s*)?(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
+const PICKER_SELECTED_NUMBERED_OPTION_RE =
+  /^\s*[>❯›]\s*(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
 const PICKER_NAVIGATION_FOOTER_RE =
   /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press up to edit queued messages)/i;
 const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
@@ -714,16 +716,23 @@ function hasPickerNavigationBlock(text: string): boolean {
     const isQueuedMessageFooter = /Press up to edit queued messages/i.test(
       footer,
     );
-    const hasClaudePickerChrome = block.some(
-      (line) =>
-        CLAUDE_PICKER_HEADER_RE.test(line) ||
-        CLAUDE_PICKER_AUX_OPTION_RE.test(line),
+    const hasClaudePickerHeader = block.some((line) =>
+      CLAUDE_PICKER_HEADER_RE.test(line),
     );
+    const claudePickerAuxOptions = block.filter((line) =>
+      CLAUDE_PICKER_AUX_OPTION_RE.test(line),
+    ).length;
+    const hasSelectedNumberedOption = block.some((line) =>
+      PICKER_SELECTED_NUMBERED_OPTION_RE.test(line),
+    );
+    const hasStructuredClaudePicker =
+      (hasClaudePickerHeader && hasSelectedNumberedOption) ||
+      claudePickerAuxOptions >= 2;
 
     if (
       (numberedOptions >= 2 ||
         (!isQueuedMessageFooter && hasSelector)) &&
-      (!isQueuedMessageFooter || hasClaudePickerChrome)
+      (!isQueuedMessageFooter || hasStructuredClaudePicker)
     ) {
       return true;
     }
