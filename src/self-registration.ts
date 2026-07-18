@@ -109,6 +109,19 @@ function cliKey(value: string | null | undefined): string | null {
   return value?.trim().toLowerCase() || null;
 }
 
+/** Copy a bounded tail without retaining the source Buffer's backing store. */
+export function copyBufferTail(
+  source: Buffer,
+  maxBytes: number,
+): Buffer<ArrayBuffer> {
+  const boundedMaxBytes =
+    Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : 0;
+  const length = Math.min(source.byteLength, boundedMaxBytes);
+  const copy = Buffer.allocUnsafe(length);
+  source.copy(copy, 0, source.byteLength - length);
+  return copy;
+}
+
 /**
  * Parse JSONL registry text into entries. Malformed lines and records missing
  * the required `session_id`/`surface_uuid` are skipped; unknown fields are
@@ -293,17 +306,15 @@ function makeIncrementalEntryIndexReader(
 
       consumedBytes = fileStat.size;
       const continuitySource = Buffer.concat([continuityTail, appended]);
-      continuityTail = continuitySource.subarray(
-        Math.max(
-          0,
-          continuitySource.byteLength - SESSION_REGISTRATION_CONTINUITY_BYTES,
-        ),
+      continuityTail = copyBufferTail(
+        continuitySource,
+        SESSION_REGISTRATION_CONTINUITY_BYTES,
       );
       const combined = Buffer.concat([pendingLine, appended]);
       const finalNewline = combined.lastIndexOf(0x0a);
       if (finalNewline >= 0) {
         const completeLines = combined.subarray(0, finalNewline + 1);
-        pendingLine = combined.subarray(finalNewline + 1);
+        pendingLine = Buffer.from(combined.subarray(finalNewline + 1));
         for (const entry of parseSelfRegistrationLines(
           completeLines.toString("utf8"),
         )) {

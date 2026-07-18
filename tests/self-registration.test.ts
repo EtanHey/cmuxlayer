@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
+  copyBufferTail,
   makeSelfRegistrationSessionResolver,
   parseSelfRegistrationLines,
   resolveSessionRegistryPath,
@@ -70,6 +71,20 @@ function resolverFor(text: string) {
     readFile: () => text,
   });
 }
+
+describe("copyBufferTail", () => {
+  it("copies only the bounded tail without retaining the source backing buffer", () => {
+    const source = Buffer.alloc(1024, 0x61);
+    source.fill(0x62, source.byteLength - 64);
+
+    const tail = copyBufferTail(source, 64);
+
+    expect(tail).toEqual(Buffer.alloc(64, 0x62));
+    expect(tail.buffer).not.toBe(source.buffer);
+    source.fill(0x63);
+    expect(tail).toEqual(Buffer.alloc(64, 0x62));
+  });
+});
 
 describe("resolveSessionRegistryPath", () => {
   it("prefers CMUXLAYER_SESSION_REGISTRY when set", () => {
