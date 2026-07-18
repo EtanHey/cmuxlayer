@@ -12,13 +12,14 @@
  * scan (`findLatestHarnessSessionIdentity`) is kept only as a deprecated
  * last-resort fallback for hook-less agents, reached when this returns null.
  *
- * Registry contract (written by the boot hook / launcher wrapper; verified live):
- *   {"session_id":"<id>","cwd":"<abs worktree cwd>","pid":<agent pid,int>,
+ * Registry contract (written by the boot hook / launcher wrapper):
+ *   {"session_id":"<id>","surface_uuid":"<CMUX_SURFACE_ID>",
+ *    "cwd":"<abs worktree cwd>","pid":<agent pid,int>,
  *    "cli":"claude|codex","launcher":"<e.g. cmuxlayerCodex>",
  *    "session_path":"<optional rollout path>","ts":<epoch MILLISECONDS,int>}
  * Path: ${CMUXLAYER_SESSION_REGISTRY:-$HOME/.cmuxlayer/session-registry.jsonl}.
  * Tolerant reader: skip malformed lines, ignore unknown extra fields, require
- * only session_id + cwd to bind, never fabricate an id.
+ * session_id + surface_uuid to bind, never fabricate an id.
  */
 
 import { readFileSync } from "node:fs";
@@ -33,7 +34,10 @@ import type {
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
   session_id: string;
-  cwd: string;
+  /** Stable cmux UUID from the pane's injected CMUX_SURFACE_ID. */
+  surface_uuid: string;
+  /** Optional validator for duplicate records from the same surface. */
+  cwd: string | null;
   /** Agent CLI process pid (getppid past the shell wrapper). May be absent. */
   pid: number | null;
   cli: string | null;
@@ -67,17 +71,24 @@ export function resolveSessionRegistryPath(
   return join(homedir(), ".cmuxlayer", "session-registry.jsonl");
 }
 
-function toFiniteInt(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+function toIntegerOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? value
+    : null;
 }
 
 function toStringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function surfaceUuidKey(value: string | null | undefined): string | null {
+  return value?.trim().toLowerCase() || null;
+}
+
 /**
  * Parse JSONL registry text into entries. Malformed lines and records missing
- * the required `session_id`/`cwd` are skipped; unknown fields are ignored.
+ * the required `session_id`/`surface_uuid` are skipped; unknown fields are
+ * ignored. `cwd` is optional because raw-seat records do not reliably carry it.
  */
 export function parseSelfRegistrationLines(
   text: string,
@@ -98,41 +109,44 @@ export function parseSelfRegistrationLines(
     const rec = parsed as Record<string, unknown>;
     const session_id =
       typeof rec.session_id === "string" ? rec.session_id.trim() : "";
-    const cwd = typeof rec.cwd === "string" ? rec.cwd : "";
-    if (!session_id || !cwd) continue; // require session_id + cwd to bind
+    const surface_uuid =
+      typeof rec.surface_uuid === "string" ? rec.surface_uuid.trim() : "";
+    const cwd =
+      typeof rec.cwd === "string" && rec.cwd.length > 0 ? rec.cwd : null;
+    if (!session_id || !surface_uuid) continue;
     entries.push({
       session_id,
+      surface_uuid,
       cwd,
-      pid: toFiniteInt(rec.pid),
+      pid: toIntegerOrNull(rec.pid),
       cli: toStringOrNull(rec.cli),
       launcher: toStringOrNull(rec.launcher),
       session_path: toStringOrNull(rec.session_path),
-      ts: toFiniteInt(rec.ts),
+      ts: toIntegerOrNull(rec.ts),
     });
   }
   return entries;
 }
 
 /**
- * Choose the winning entry among same-cwd candidates.
+ * Choose the winning entry among records for one stable surface UUID.
  *
- * pid is a SECONDARY tiebreaker: if the agent's pid is known AND some candidate
- * shares it, restrict to those; otherwise the whole cwd-matched pool competes.
- * The winner is the newest `ts` (epoch ms); on an exact tie the later (appended
- * last) record wins. Note: cmuxlayer's AgentRecord.pid is currently never
- * populated in production (always null), so in practice this reduces to
- * newest-ts-among-same-cwd — cwd-exact already carries the worktree case.
+ * AgentRecord.pid is not a CLI process pid: production record creation,
+ * recovery, repair, and auto-discovery paths all leave it null. It therefore
+ * cannot soundly participate in identity selection. When launch_cwd is known
+ * and at least one candidate matches it exactly, that subset is preferred as
+ * an optional validator. The winner is then the newest `ts` (epoch ms); on an
+ * exact tie the later (last-appended) record wins.
  */
 function chooseCandidate(
   candidates: SelfRegistrationEntry[],
-  agentPid: number | null | undefined,
+  launchCwd: string | null,
 ): SelfRegistrationEntry | null {
   if (candidates.length === 0) return null;
-  let pool = candidates;
-  if (agentPid != null) {
-    const pidMatches = candidates.filter((e) => e.pid === agentPid);
-    if (pidMatches.length > 0) pool = pidMatches;
-  }
+  const cwdMatches = launchCwd
+    ? candidates.filter((entry) => entry.cwd === launchCwd)
+    : [];
+  const pool = cwdMatches.length > 0 ? cwdMatches : candidates;
   return pool.reduce((best, entry) => {
     const bestTs = best.ts ?? Number.NEGATIVE_INFINITY;
     const entryTs = entry.ts ?? Number.NEGATIVE_INFINITY;
@@ -143,11 +157,14 @@ function chooseCandidate(
 /**
  * Build the self-registration `SessionIdentityResolver`.
  *
- * Match is cwd-exact PRIMARY (`entry.cwd === agent.launch_cwd`, worktree-precise)
- * with pid as a secondary tiebreaker and newest `ts` deciding. Returns
+ * Match is stable-surface UUID PRIMARY
+ * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
+ * optional secondary validator, then newest `ts` decides. AgentRecord.pid is
+ * deliberately ignored because production does not populate it with the CLI
+ * process pid. Returns
  * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
- * missing/unreadable/empty registry, an agent without a launch_cwd, or no
- * cwd match all return `null` (the caller then falls back to the scan).
+ * missing/unreadable/empty registry, an agent without a stable surface UUID, or
+ * no UUID match all return `null` (the caller then falls back to the scan).
  */
 export function makeSelfRegistrationSessionResolver(
   options: SelfRegistrationResolverOptions = {},
@@ -156,8 +173,9 @@ export function makeSelfRegistrationSessionResolver(
   const readFile = options.readFile ?? defaultReadFile;
 
   return (agent: AgentRecord): CapturedSessionIdentity | null => {
-    const launchCwd = agent.launch_cwd?.trim();
-    if (!launchCwd) return null; // no cwd key → cannot bind
+    const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
+    if (!agentSurfaceUuid) return null;
+    const launchCwd = agent.launch_cwd?.trim() || null;
 
     let text: string | null;
     try {
@@ -168,9 +186,9 @@ export function makeSelfRegistrationSessionResolver(
     if (!text) return null;
 
     const candidates = parseSelfRegistrationLines(text).filter(
-      (entry) => entry.cwd === launchCwd,
+      (entry) => surfaceUuidKey(entry.surface_uuid) === agentSurfaceUuid,
     );
-    const chosen = chooseCandidate(candidates, agent.pid);
+    const chosen = chooseCandidate(candidates, launchCwd);
     if (!chosen) return null;
     return {
       session_id: chosen.session_id,

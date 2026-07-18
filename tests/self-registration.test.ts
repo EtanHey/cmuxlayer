@@ -15,16 +15,19 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient } from "../src/cmux-client.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-self-registration-test");
+const SURFACE_UUID_A = "11111111-2222-4333-8444-555555555555";
+const SURFACE_UUID_B = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
 /**
  * Minimal AgentRecord for resolver tests — the resolver only reads
- * `launch_cwd` and `pid`; the composed-default tests additionally need
+ * `surface_uuid` and optionally `launch_cwd`; the composed-default tests need
  * `cli`/`repo`/`state`/`created_at`/`task_summary` for the scan guard.
  */
 function agent(overrides: Partial<AgentRecord>): AgentRecord {
   return {
     agent_id: "cmuxlayerClaude-pending",
     surface_id: "surface:1",
+    surface_uuid: SURFACE_UUID_A,
     state: "booting",
     repo: "cmuxlayer",
     model: "opus",
@@ -50,7 +53,11 @@ function agent(overrides: Partial<AgentRecord>): AgentRecord {
 function jsonl(...records: Array<Record<string, unknown> | string>): string {
   return (
     records
-      .map((r) => (typeof r === "string" ? r : JSON.stringify(r)))
+      .map((r) =>
+        typeof r === "string"
+          ? r
+          : JSON.stringify({ surface_uuid: SURFACE_UUID_A, ...r }),
+      )
       .join("\n") + "\n"
   );
 }
@@ -90,15 +97,19 @@ describe("parseSelfRegistrationLines", () => {
     expect(entries.map((e) => e.session_id)).toEqual(["sid-1", "sid-2"]);
   });
 
-  it("requires session_id AND cwd; drops records missing either", () => {
+  it("requires session_id and surface_uuid while allowing cwd to be absent", () => {
     const text = jsonl(
       { session_id: "sid-1", cwd: "/w" },
-      { session_id: "no-cwd" },
+      { session_id: "sid-no-cwd", cwd: null },
+      { session_id: "no-surface", surface_uuid: null, cwd: "/w" },
       { cwd: "/no-session" },
       { session_id: "", cwd: "/w" },
     );
     const entries = parseSelfRegistrationLines(text);
-    expect(entries.map((e) => e.session_id)).toEqual(["sid-1"]);
+    expect(entries.map((e) => e.session_id)).toEqual([
+      "sid-1",
+      "sid-no-cwd",
+    ]);
   });
 
   it("tolerates unknown extra fields and preserves session_path", () => {
@@ -116,6 +127,7 @@ describe("parseSelfRegistrationLines", () => {
     );
     expect(entries[0]).toMatchObject({
       session_id: "sid-1",
+      surface_uuid: SURFACE_UUID_A,
       cwd: "/w",
       pid: 10,
       cli: "codex",
@@ -123,10 +135,28 @@ describe("parseSelfRegistrationLines", () => {
       ts: 1234,
     });
   });
+
+  it("does not use fractional pid or timestamp values as integer identity metadata", () => {
+    const entries = parseSelfRegistrationLines(
+      jsonl({
+        session_id: "sid-1",
+        cwd: "/w",
+        pid: 10.5,
+        ts: 1234.5,
+      }),
+    );
+
+    expect(entries[0]).toMatchObject({
+      session_id: "sid-1",
+      cwd: "/w",
+      pid: null,
+      ts: null,
+    });
+  });
 });
 
 describe("makeSelfRegistrationSessionResolver", () => {
-  it("returns the registered session_id on a cwd-exact match", () => {
+  it("returns the registered session_id on a surface_uuid-exact match", () => {
     const resolve = resolverFor(
       jsonl({
         session_id: "sid-exact",
@@ -152,7 +182,7 @@ describe("makeSelfRegistrationSessionResolver", () => {
     });
   });
 
-  it("disambiguates 3 worktrees by cwd — each agent binds ONLY its own (no cross-binding)", () => {
+  it("uses exact cwd as an optional secondary among records for one surface", () => {
     const cwdA = "/Users/e/Gits/repo.wt/alpha";
     const cwdB = "/Users/e/Gits/repo.wt/beta";
     const cwdC = "/Users/e/Gits/repo";
@@ -174,6 +204,36 @@ describe("makeSelfRegistrationSessionResolver", () => {
     );
   });
 
+  it("binds distinct surface UUIDs without cwd and never cross-binds them", () => {
+    const resolve = resolverFor(
+      jsonl(
+        {
+          session_id: "sid-A",
+          surface_uuid: SURFACE_UUID_A,
+          cwd: null,
+          ts: 2000,
+        },
+        {
+          session_id: "sid-B",
+          surface_uuid: SURFACE_UUID_B,
+          cwd: "/wrong/cwd",
+          ts: 3000,
+        },
+      ),
+    );
+
+    expect(
+      resolve(
+        agent({ surface_uuid: SURFACE_UUID_A, launch_cwd: "/agent/a" }),
+      )?.session_id,
+    ).toBe("sid-A");
+    expect(
+      resolve(
+        agent({ surface_uuid: SURFACE_UUID_B, launch_cwd: "/agent/b" }),
+      )?.session_id,
+    ).toBe("sid-B");
+  });
+
   it("same-cwd, pid unknown (production reality): newest ts wins", () => {
     const resolve = resolverFor(
       jsonl(
@@ -186,7 +246,7 @@ describe("makeSelfRegistrationSessionResolver", () => {
     );
   });
 
-  it("same-cwd, pid known and matching: pid wins even against a newer-ts entry", () => {
+  it("ignores AgentRecord.pid because production does not populate the CLI pid", () => {
     const resolve = resolverFor(
       jsonl(
         { session_id: "sid-old", cwd: "/w", pid: 100, ts: 1000 },
@@ -194,37 +254,32 @@ describe("makeSelfRegistrationSessionResolver", () => {
       ),
     );
     expect(resolve(agent({ launch_cwd: "/w", pid: 100 }))?.session_id).toBe(
-      "sid-old",
-    );
-  });
-
-  it("same-cwd, pid known but no entry matches: falls back to newest ts", () => {
-    const resolve = resolverFor(
-      jsonl(
-        { session_id: "sid-old", cwd: "/w", pid: 100, ts: 1000 },
-        { session_id: "sid-new", cwd: "/w", pid: 200, ts: 2000 },
-      ),
-    );
-    expect(resolve(agent({ launch_cwd: "/w", pid: 999 }))?.session_id).toBe(
       "sid-new",
     );
   });
 
-  it("no cwd match returns null (never fabricates)", () => {
+  it("uses the UUID match when cwd is mismatched", () => {
     const resolve = resolverFor(
       jsonl({ session_id: "sid-1", cwd: "/other", pid: 1, ts: 1 }),
     );
-    expect(resolve(agent({ launch_cwd: "/w" }))).toBeNull();
+    expect(resolve(agent({ launch_cwd: "/w" }))?.session_id).toBe("sid-1");
   });
 
-  it("returns null when the agent has no launch_cwd", () => {
+  it("uses the UUID match when the agent has no launch_cwd", () => {
     const resolve = resolverFor(
       jsonl({ session_id: "sid-1", cwd: "/w", pid: 1, ts: 1 }),
     );
-    expect(resolve(agent({ launch_cwd: null }))).toBeNull();
+    expect(resolve(agent({ launch_cwd: null }))?.session_id).toBe("sid-1");
   });
 
-  it("skips malformed lines but still binds a valid same-cwd entry", () => {
+  it("returns null when the agent has no surface_uuid", () => {
+    const resolve = resolverFor(
+      jsonl({ session_id: "sid-1", cwd: "/w", pid: 1, ts: 1 }),
+    );
+    expect(resolve(agent({ surface_uuid: null, launch_cwd: "/w" }))).toBeNull();
+  });
+
+  it("skips malformed lines but still binds a valid same-surface entry", () => {
     const resolve = resolverFor(
       jsonl("corrupt line not json", {
         session_id: "sid-good",
