@@ -538,6 +538,29 @@ describe("CmuxLayerDaemon", () => {
     context.dispose();
   });
 
+  it("forwards a custom self-registration resolver into its lazy context", async () => {
+    const selfRegistrationSessionResolver = vi.fn(() => null);
+    const daemon = new CmuxLayerDaemon({
+      exec: createListSurfacesExec(),
+      stateDir: stateDir("custom-self-registration-resolver-state"),
+      skipAgentLifecycle: true,
+      selfRegistrationSessionResolver,
+    });
+
+    const context = await (
+      daemon as unknown as {
+        getContext(): Promise<
+          ReturnType<typeof createProductionServerContext>
+        >;
+      }
+    ).getContext();
+
+    expect(context.selfRegistrationSessionResolver).toBe(
+      selfRegistrationSessionResolver,
+    );
+    context.dispose();
+  });
+
   it("retires exactly once when the installed build becomes stale", async () => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("stale-retire");

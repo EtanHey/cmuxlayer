@@ -22,10 +22,7 @@ import {
 import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
-import {
-  buildSpawnToolReturn,
-  shapeSpawnResponse,
-} from "./spawn-response.js";
+import { buildSpawnToolReturn, shapeSpawnResponse } from "./spawn-response.js";
 import { StateManager } from "./state-manager.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import {
@@ -153,7 +150,10 @@ import {
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
-import { reposEquivalent, resolveWorkspaceRefForRepo } from "./repo-workspace.js";
+import {
+  reposEquivalent,
+  resolveWorkspaceRefForRepo,
+} from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
   buildSurfaceBindingObservation,
@@ -210,10 +210,7 @@ class SurfaceEnumerationError extends Error {
   }
 }
 
-function requireSurfaceEnumerationArray<T>(
-  value: unknown,
-  label: string,
-): T[] {
+function requireSurfaceEnumerationArray<T>(value: unknown, label: string): T[] {
   if (Array.isArray(value)) return value as T[];
   throw new SurfaceEnumerationError(
     `Malformed cmux surface enumeration: ${label} is not an array`,
@@ -365,8 +362,7 @@ const BOOT_PROMPT_TIMEOUT_MS = 60_000;
 const BOOT_PROMPT_READY_POLL_MS = 250;
 const BOOT_PROMPT_UPDATE_MAX_MS = 120_000;
 const BOOT_PROMPT_UPDATE_RELAUNCH_MAX = 2;
-const BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS =
-  BOOT_PROMPT_READY_POLL_MS * 3;
+const BOOT_PROMPT_UPDATE_MENU_DISMISS_GRACE_MS = BOOT_PROMPT_READY_POLL_MS * 3;
 const BOOT_PROMPT_POST_UPDATE_READY_GRACE_MS = BOOT_PROMPT_READY_POLL_MS * 3;
 
 function bootPromptUpdateMaxMs(): number {
@@ -379,8 +375,7 @@ const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 /** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
-const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS =
-  AGENT_HEALTH_MONITOR_MAX_AGE_MS;
+const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = AGENT_HEALTH_MONITOR_MAX_AGE_MS;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
 /** Agent states that are safe to close without `force`: the task is over. */
 const TERMINAL_AGENT_STATES = new Set<AgentState>(["done", "error"]);
@@ -513,8 +508,7 @@ class DeliverySafetyGateError extends Error {
 
   constructor(
     readonly error_code:
-      | "blocked_by_interactive_prompt"
-      | "blocked_by_permission_prompt",
+      "blocked_by_interactive_prompt" | "blocked_by_permission_prompt",
     readonly screen: ParsedScreenResult,
   ) {
     super(
@@ -629,7 +623,10 @@ function controlModeFromStatusEntries(entries: unknown): ControlMode {
 }
 
 function screenUnavailableMessage(error: unknown): string {
-  return readErrorText(error).replace(/^Error\ncmux read-screen failed:\s*/i, "");
+  return readErrorText(error).replace(
+    /^Error\ncmux read-screen failed:\s*/i,
+    "",
+  );
 }
 
 function isSurfaceGoneReadFailure(error: unknown, surface: string): boolean {
@@ -768,10 +765,7 @@ function requireValue(
 }
 
 type ListSurfacesRemoteState =
-  | "local"
-  | "connected"
-  | "disconnected"
-  | "unavailable";
+  "local" | "connected" | "disconnected" | "unavailable";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -1244,11 +1238,7 @@ function hasInlinePrompt(value: string | undefined): value is string {
 
 function assertInlineInputAllowed(opts: {
   tool:
-    | "send_input"
-    | "send_command"
-    | "spawn_agent"
-    | "send_to"
-    | "send_to_agent";
+    "send_input" | "send_command" | "spawn_agent" | "send_to" | "send_to_agent";
   arg: "text" | "command" | "prompt";
   value: string | undefined;
   allowLongInline?: boolean;
@@ -1297,7 +1287,8 @@ function inferBroadcastRecordRole(agent: AgentRecord): AgentRole | null {
     return inferAgentRole({
       role: agent.role,
       cli: agent.cli,
-      launcherName: agent.launcher_name ?? launcherNameForCli(agent.repo, agent.cli),
+      launcherName:
+        agent.launcher_name ?? launcherNameForCli(agent.repo, agent.cli),
       title: agent.task_summary,
     });
   } catch (error) {
@@ -1418,7 +1409,9 @@ function shouldHandleCodexUpdateMenu(
   cli: CliType | undefined,
   text: string,
 ): boolean {
-  return (cli === undefined || cli === "codex") && isCodexUpdateMenuScreen(text);
+  return (
+    (cli === undefined || cli === "codex") && isCodexUpdateMenuScreen(text)
+  );
 }
 
 function readyPatternCandidates(cli?: CliType): CliType[] {
@@ -1547,8 +1540,7 @@ function lineIsCurrentComposerRegionAnchor(
       return /Claude Code|What can I help you with\?/i.test(trimmed);
     case "codex":
       return (
-        /\bOpenAI\s+Codex\b/i.test(trimmed) ||
-        /\bModel:\s*gpt-/i.test(trimmed)
+        /\bOpenAI\s+Codex\b/i.test(trimmed) || /\bModel:\s*gpt-/i.test(trimmed)
       );
     case "cursor":
       return /^Cursor Agent$/i.test(trimmed) || /^cursor>\s*$/i.test(trimmed);
@@ -1740,8 +1732,7 @@ export function screenShowsPendingShellInput(
     .join("")
     .trimEnd();
   return (
-    pending === trimmed ||
-    pending.replace(/\s+/g, "") === compactSubmitted
+    pending === trimmed || pending.replace(/\s+/g, "") === compactSubmitted
   );
 }
 
@@ -1993,6 +1984,13 @@ export interface CreateServerOptions {
   inboxBaseDir?: string;
   /** Override session identity lookup (primarily for mocked tests). */
   sessionIdentityResolver?: SessionIdentityResolver;
+  /**
+   * PRIMARY session-identity resolver — the self-registration READ side. Threaded
+   * to the lifecycle engine as its primary resolver (self-registration first,
+   * transcript scan only as fallback). Production entrypoints inject
+   * `makeSelfRegistrationSessionResolver()`; unset in tests keeps HOME I/O out.
+   */
+  selfRegistrationSessionResolver?: SessionIdentityResolver;
   /** Override git worktree execution/home for tests. */
   worktreeExec?: WorktreeExec;
   worktreeHomeDir?: string;
@@ -2087,6 +2085,7 @@ export interface CmuxServerContext {
   spawnPreflight?: (params: SpawnAgentParams) => Promise<void>;
   disableSpawnPreflight?: boolean;
   sessionIdentityResolver?: SessionIdentityResolver;
+  selfRegistrationSessionResolver?: SessionIdentityResolver;
   lifecycleRegistry: AgentRegistry | null;
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
@@ -2208,6 +2207,7 @@ export function createServerContext(
     spawnPreflight: opts?.spawnPreflight,
     disableSpawnPreflight: opts?.disableSpawnPreflight,
     sessionIdentityResolver: opts?.sessionIdentityResolver,
+    selfRegistrationSessionResolver: opts?.selfRegistrationSessionResolver,
     lifecycleRegistry: null,
     lifecycleStarted: false,
     lifecycleStartPromise: null,
@@ -2319,13 +2319,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): AgentRole | null => {
     const uuid = discovered.surface_uuid?.trim().toLowerCase() || null;
     const workspace = discovered.workspace_id ?? null;
-    const matchesBinding = (
-      override: {
-        role: AgentRole;
-        workspace: string | null;
-        surfaceUuid: string | null;
-      },
-    ): boolean => {
+    const matchesBinding = (override: {
+      role: AgentRole;
+      workspace: string | null;
+      surfaceUuid: string | null;
+    }): boolean => {
       if (workspace && override.workspace && workspace !== override.workspace) {
         return false;
       }
@@ -2352,8 +2350,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const originalLaunchCommandsBySurface =
     context.originalLaunchCommandsBySurface;
   const surfaceWriteLiveness = context.surfaceWriteLiveness;
-  const surfaceWriteLivenessCandidates =
-    context.surfaceWriteLivenessCandidates;
+  const surfaceWriteLivenessCandidates = context.surfaceWriteLivenessCandidates;
   const surfacePtyDeadSince = context.surfacePtyDeadSince;
   const seatManifestWriter: SeatManifestWriter =
     opts?.seatManifestWriter ??
@@ -2421,8 +2418,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }) => Promise<void> = async () => {};
   let lifecycleEnsureRegistered: (() => Promise<void>) | null = null;
   let lifecycleRefreshManagedMetadata:
-    | ((agentId?: string) => Promise<void>)
-    | null = null;
+    ((agentId?: string) => Promise<void>) | null = null;
   let lifecycleHealthEngine: AgentEngine | null = null;
   const refreshManagedMetadataBestEffort = async (
     agentId?: string,
@@ -2464,7 +2460,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return { control: "autonomous" };
     }
     try {
-      const entries = await statusClient.listStatus({ workspace: modeWorkspace });
+      const entries = await statusClient.listStatus({
+        workspace: modeWorkspace,
+      });
       return {
         control: controlModeFromStatusEntries(entries),
         workspace: modeWorkspace,
@@ -2523,7 +2521,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const monitorRegistryOptions = (): MonitorRegistryOptions => ({
-    ...(opts?.monitorRegistryPath ? { registryPath: opts.monitorRegistryPath } : {}),
+    ...(opts?.monitorRegistryPath
+      ? { registryPath: opts.monitorRegistryPath }
+      : {}),
     ...(opts?.monitorRegistryNow ? { now: opts.monitorRegistryNow } : {}),
   });
   const monitorRegistryError = (
@@ -2544,10 +2544,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
     const ownerSeat = nonEmptyString(args.owner_seat);
     if (!ownerSeat || /^(?:unknown|none|null|n\/a)$/i.test(ownerSeat)) {
-      return monitorRegistryError(
-        "missing-or-unknown-owner-seat",
-        monitorId,
-      );
+      return monitorRegistryError("missing-or-unknown-owner-seat", monitorId);
     }
     const watchTargets = Array.isArray(args.watch_targets)
       ? args.watch_targets.map(nonEmptyString)
@@ -2600,10 +2597,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           target !== "~" && !target.startsWith("~/") && !isAbsolute(target),
       )
     ) {
-      return monitorRegistryError(
-        "rearm-watch-target-not-absolute",
-        monitorId,
-      );
+      return monitorRegistryError("rearm-watch-target-not-absolute", monitorId);
     }
 
     return {
@@ -2630,7 +2624,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     claimed_monitor_ids?: string[];
   }): string[] => {
     const ids = [
-      ...(nonEmptyString(args.monitor_id) ? [nonEmptyString(args.monitor_id)!] : []),
+      ...(nonEmptyString(args.monitor_id)
+        ? [nonEmptyString(args.monitor_id)!]
+        : []),
       ...(Array.isArray(args.monitor_ids) ? args.monitor_ids : []),
       ...(Array.isArray(args.claimed_monitor_ids)
         ? args.claimed_monitor_ids
@@ -2696,11 +2692,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ...(claimedMonitorIds.length > 0 ? { claimedMonitorIds } : {}),
     });
     const requestedIds = new Set(claimedMonitorIds);
-    const monitors = filterMonitorRegistryRecords(
-      query.monitors,
-      args,
-      true,
-    );
+    const monitors = filterMonitorRegistryRecords(query.monitors, args, true);
     const monitorById = new Map(
       query.monitors.map((monitor) => [monitor.monitor_id, monitor]),
     );
@@ -2737,17 +2729,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
   const toolHandlersByName = new Map<
     string,
-    (
-      args: Record<string, unknown>,
-      extra: unknown,
-    ) => Promise<ToolReturn>
+    (args: Record<string, unknown>, extra: unknown) => Promise<ToolReturn>
   >();
   const palette = createDefaultToolPalette(
     opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
   );
-  (
-    server as unknown as { tool: (...args: unknown[]) => unknown }
-  ).tool = (...args: unknown[]): unknown => {
+  (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (
+    ...args: unknown[]
+  ): unknown => {
     const toolName = args[0];
     const handlerIndex = args.length - 1;
     const handler = args[handlerIndex];
@@ -2864,8 +2853,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (
             workspace &&
             override.workspace === workspace &&
-            (observation.coverage === "uuid" ||
-              observation.coverage === "ref")
+            (observation.coverage === "uuid" || observation.coverage === "ref")
           ) {
             roleSurfaceOverrides.delete(surfaceId);
           }
@@ -3016,7 +3004,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } = {},
   ): Promise<T> => {
     if (opts.toolName) {
-      await assertSurfaceMutationAllowed(opts.toolName, surface, opts.workspace);
+      await assertSurfaceMutationAllowed(
+        opts.toolName,
+        surface,
+        opts.workspace,
+      );
     }
     const owner = opts.owner ?? `surface-write:${randomUUID()}`;
     // Capture the ref-only provenance before the async write. A reconnect or
@@ -3189,7 +3181,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               SEND_INPUT_SAFE_RETRY_OBSERVE_MS -
               (Date.now() - observationStartedAt);
             if (remainingMs <= 0) break;
-            await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remainingMs));
+            await delay(
+              Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remainingMs),
+            );
           }
 
           const message =
@@ -3359,7 +3353,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
       return { text, parsed };
     } catch (error) {
-      if (opts?.throwOnSurfaceGone && isSurfaceGoneReadFailure(error, surface)) {
+      if (
+        opts?.throwOnSurfaceGone &&
+        isSurfaceGoneReadFailure(error, surface)
+      ) {
         throw new SurfaceGoneError(surface, error);
       }
       return null;
@@ -3561,11 +3558,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? true
           : opts.require_working_status
             ? false
-          : lastHasPendingInput
-            ? false
-          : lastRetryEligiblePendingInput
-            ? false
-            : null,
+            : lastHasPendingInput
+              ? false
+              : lastRetryEligiblePendingInput
+                ? false
+                : null,
       retry_count: retryCount,
     };
   };
@@ -3763,8 +3760,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   const current = await opts.resolveRoute!();
                   if (
                     current.surface !== target.surface ||
-                    (current.workspace ?? null) !==
-                      (target.workspace ?? null)
+                    (current.workspace ?? null) !== (target.workspace ?? null)
                   ) {
                     throw new Error(
                       `Boot prompt route changed before update-menu Return; ` +
@@ -3806,7 +3802,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         if (updateStartedAt !== null) {
-          const updateDuration = Math.max(now - updateStartedAt, updateElapsedMs);
+          const updateDuration = Math.max(
+            now - updateStartedAt,
+            updateElapsedMs,
+          );
           deadline = Math.max(
             deadline + updateDuration,
             now + postUpdateReadyBudgetMs(),
@@ -3824,8 +3823,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           updateWasSeen &&
           opts.onUpdateShellRelaunch &&
           matchesShellPrompt(screen.text) &&
-          !candidates.some((candidate) =>
-            matchReadyPattern(candidate, screen.text).matched,
+          !candidates.some(
+            (candidate) => matchReadyPattern(candidate, screen.text).matched,
           )
         ) {
           if (updateShellRelaunches >= BOOT_PROMPT_UPDATE_RELAUNCH_MAX) {
@@ -3913,7 +3912,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         const composerInput = extractComposerInputRegion(snapshot.text);
-        const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+        const hasPendingInput = screenShowsPendingInput(
+          snapshot.text,
+          opts.text,
+        );
         if (
           composerInput !== null &&
           !hasPendingInput &&
@@ -4163,124 +4165,129 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
     await opts.assertSurfaceBindingCurrent?.();
-    await withSurfaceWrite(opts.surface, async () => {
-      const submitPendingLauncherCommand = async (): Promise<boolean> => {
-        const readLauncherScreen = () =>
-          client.readScreen(opts.surface, {
-            workspace: opts.workspace,
-            lines: 80,
-            scrollback: false,
-          });
+    await withSurfaceWrite(
+      opts.surface,
+      async () => {
+        const submitPendingLauncherCommand = async (): Promise<boolean> => {
+          const readLauncherScreen = () =>
+            client.readScreen(opts.surface, {
+              workspace: opts.workspace,
+              lines: 80,
+              scrollback: false,
+            });
 
-        let screen;
-        try {
-          screen = await readLauncherScreen();
-        } catch (error) {
-          if (isSurfaceGoneReadFailure(error, opts.surface)) {
-            throw new SurfaceGoneError(opts.surface, error);
-          }
-          return false;
-        }
-        if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
-          return false;
-        }
-
-        try {
-          // Return is a mutation: retrying after a lost acknowledgement can
-          // submit into the newly started CLI. Probe before any fallback.
-          await opts.assertSurfaceBindingCurrent?.();
-          await client.sendKey(opts.surface, "return", {
-            workspace: opts.workspace,
-          });
-          return true;
-        } catch (error) {
-          if (isSurfaceGoneReadFailure(error, opts.surface)) {
-            throw new SurfaceGoneError(opts.surface, error);
-          }
+          let screen;
           try {
-            const confirmation = await readLauncherScreen();
-            return !screenShowsPendingShellInput(
-              confirmation.text,
-              sanitizedCommand,
-            );
-          } catch (confirmationError) {
-            if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
-              throw new SurfaceGoneError(opts.surface, confirmationError);
+            screen = await readLauncherScreen();
+          } catch (error) {
+            if (isSurfaceGoneReadFailure(error, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, error);
             }
-            throw error;
+            return false;
           }
-        }
-      };
-      const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
-        await opts.assertSurfaceBindingCurrent?.();
-        await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
-        await waitForLaunchShellReady({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          require_fresh_shell_prompt: true,
-        });
-      };
-      if (opts.relaunch) {
-        if (await submitPendingLauncherCommand()) {
-          return;
-        }
-        await clearAndVerifyFreshShellPrompt();
-      }
-      const relaunchOriginalCommand = async (): Promise<void> => {
-        await clearAndVerifyFreshShellPrompt();
-        await deliverInputChunks({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          chunks,
-          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-          press_enter: true,
-          source_event: "spawn_agent",
-          verify_submit: false,
-          beforeMutation: opts.assertSurfaceBindingCurrent,
-        });
-      };
-      try {
-        const delivery = await deliverInputChunks({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          chunks,
-          chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-          chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-          press_enter: true,
-          source_event: "spawn_agent",
-          verify_submit: true,
-          submit_verify_timeout_ms: SEND_INPUT_RECOVERY_ENTER_DELAY_MS,
-          beforeMutation: opts.assertSurfaceBindingCurrent,
-        });
-        if (delivery.submit_verified !== true) {
-          // The command can clear from the shell without proving the launcher
-          // accepted it. Probe once to consume transient ready evidence, then
-          // let boot-prompt readiness own update/relaunch monitoring.
-          await probeAgentLaunchReadyOnce({
+          if (!screenShowsPendingShellInput(screen.text, sanitizedCommand)) {
+            return false;
+          }
+
+          try {
+            // Return is a mutation: retrying after a lost acknowledgement can
+            // submit into the newly started CLI. Probe before any fallback.
+            await opts.assertSurfaceBindingCurrent?.();
+            await client.sendKey(opts.surface, "return", {
+              workspace: opts.workspace,
+            });
+            return true;
+          } catch (error) {
+            if (isSurfaceGoneReadFailure(error, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, error);
+            }
+            try {
+              const confirmation = await readLauncherScreen();
+              return !screenShowsPendingShellInput(
+                confirmation.text,
+                sanitizedCommand,
+              );
+            } catch (confirmationError) {
+              if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
+                throw new SurfaceGoneError(opts.surface, confirmationError);
+              }
+              throw error;
+            }
+          }
+        };
+        const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+          await opts.assertSurfaceBindingCurrent?.();
+          await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
+          await waitForLaunchShellReady({
             surface: opts.surface,
             workspace: opts.workspace,
+            require_fresh_shell_prompt: true,
+          });
+        };
+        if (opts.relaunch) {
+          if (await submitPendingLauncherCommand()) {
+            return;
+          }
+          await clearAndVerifyFreshShellPrompt();
+        }
+        const relaunchOriginalCommand = async (): Promise<void> => {
+          await clearAndVerifyFreshShellPrompt();
+          await deliverInputChunks({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: true,
+            source_event: "spawn_agent",
+            verify_submit: false,
+            beforeMutation: opts.assertSurfaceBindingCurrent,
+          });
+        };
+        try {
+          const delivery = await deliverInputChunks({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: true,
+            source_event: "spawn_agent",
+            verify_submit: true,
+            submit_verify_timeout_ms: SEND_INPUT_RECOVERY_ENTER_DELAY_MS,
+            beforeMutation: opts.assertSurfaceBindingCurrent,
+          });
+          if (delivery.submit_verified !== true) {
+            // The command can clear from the shell without proving the launcher
+            // accepted it. Probe once to consume transient ready evidence, then
+            // let boot-prompt readiness own update/relaunch monitoring.
+            await probeAgentLaunchReadyOnce({
+              surface: opts.surface,
+              workspace: opts.workspace,
+            });
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (!/Enter submit could not be verified/.test(message)) {
+            throw error;
+          }
+          // The command can remain visible in shell history while the launcher is
+          // already booting. Readiness detection is the authoritative launch check.
+          await waitForAgentLaunchReady({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            onUpdateShellRelaunch: relaunchOriginalCommand,
           });
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/Enter submit could not be verified/.test(message)) {
-          throw error;
-        }
-        // The command can remain visible in shell history while the launcher is
-        // already booting. Readiness detection is the authoritative launch check.
-        await waitForAgentLaunchReady({
-          surface: opts.surface,
-          workspace: opts.workspace,
-          onUpdateShellRelaunch: relaunchOriginalCommand,
-        });
-      }
-    }, {
-      toolName: "send_command",
-      workspace: opts.workspace,
-      observePtyWrite: true,
-      stableSurfaceIdentity: opts.stableSurfaceIdentity,
-    });
+      },
+      {
+        toolName: "send_command",
+        workspace: opts.workspace,
+        observePtyWrite: true,
+        stableSurfaceIdentity: opts.stableSurfaceIdentity,
+      },
+    );
   };
 
   const deliverBootPrompt = async (opts: {
@@ -4362,7 +4369,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined;
     const useFilePointer =
       Boolean(bootPromptPath) &&
-      (/[\r\n]/.test(rawPrompt) || rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
+      (/[\r\n]/.test(rawPrompt) ||
+        rawPrompt.length > SEND_INPUT_MAX_INLINE_CHARS);
     const promptWarning =
       bootPromptPath &&
       rawPrompt.length > BOOT_PROMPT_PATH_WARNING_CHARS &&
@@ -4560,9 +4568,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const explicitWorkspace = opts.explicitWorkspace
       ? await canonicalWorkspaceRef(opts.explicitWorkspace)
       : undefined;
-    if (explicitWorkspace) return { workspace: explicitWorkspace, warnings: [] };
+    if (explicitWorkspace)
+      return { workspace: explicitWorkspace, warnings: [] };
 
-    const callerWorkspace = opts.callerWorkspace ?? (await callerWorkspaceStrict());
+    const callerWorkspace =
+      opts.callerWorkspace ?? (await callerWorkspaceStrict());
     if (callerWorkspace) return { workspace: callerWorkspace, warnings: [] };
 
     const repoWorkspace = await resolveWorkspaceForRepo(opts.repo);
@@ -4697,8 +4707,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const surfaceObserverEpochProvider =
-    (): SurfaceObserverIdProvider | undefined =>
-      () => context.surfaceObserverEpoch;
+    (): SurfaceObserverIdProvider | undefined => () =>
+      context.surfaceObserverEpoch;
 
   const assertSurfaceObserverEpochCurrent = (
     observerEpoch: SurfaceObserverEpoch,
@@ -4781,7 +4791,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const resolveSurfaceWorkspace = async (
     surfaceRef: string,
   ): Promise<string | null> =>
-    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ?? null;
+    (await collectSurfaceTopology())?.workspaceBySurface.get(surfaceRef) ??
+    null;
 
   const resolveAuthorizedAgentSurfaceBinding = (
     agent: AgentRecord,
@@ -4856,11 +4867,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         resolveCollapsedMonitors: (ownerSeats) => {
           if (!opts?.monitorRegistryPath) return [];
           const owners = new Set(ownerSeats);
-          return readMonitorRegistry(monitorRegistryOptions()).monitors
-            .filter(
+          return readMonitorRegistry(monitorRegistryOptions())
+            .monitors.filter(
               (monitor) =>
-                monitor.state === "collapsed" &&
-                owners.has(monitor.owner_seat),
+                monitor.state === "collapsed" && owners.has(monitor.owner_seat),
             )
             .map((monitor) => ({
               monitor_id: monitor.monitor_id,
@@ -4929,7 +4939,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     const issueSeverities = Object.fromEntries(
-      issueCodes.map((code) => [code, DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code]]),
+      issueCodes.map((code) => [
+        code,
+        DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code],
+      ]),
     );
     const hasBlockingIssue = issueCodes.some(
       (code) => DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY[code] === "blocking",
@@ -5041,7 +5054,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspaceCwdByRef.set(workspace.ref, cwd);
           }
         }
-        const paneByWorkspaceAndRef = new Map<string, Record<string, unknown>>();
+        const paneByWorkspaceAndRef = new Map<
+          string,
+          Record<string, unknown>
+        >();
         for (const { workspaceRef, panes } of panesByWorkspace) {
           for (const pane of panes.panes) {
             paneByWorkspaceAndRef.set(
@@ -5233,7 +5249,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (isToolReturn(inputOrError)) {
           return inputOrError;
         }
-        const existing = readMonitorRegistry(monitorRegistryOptions()).monitors.find(
+        const existing = readMonitorRegistry(
+          monitorRegistryOptions(),
+        ).monitors.find(
           (record) => record.monitor_id === inputOrError.monitor_id,
         );
         if (existing?.state === "deadman-fired") {
@@ -5446,10 +5464,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const callerWorkspace = await currentCallerWorkspace();
         const deletingCallerWorkspace = callerWorkspace === targetWorkspace;
 
-        if (
-          !args.force &&
-          (deletingCallerWorkspace || liveAgents.length > 0)
-        ) {
+        if (!args.force && (deletingCallerWorkspace || liveAgents.length > 0)) {
           const reasons = [
             ...(deletingCallerWorkspace ? ["it is the caller workspace"] : []),
             ...(liveAgents.length > 0
@@ -5472,10 +5487,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         await client.deleteWorkspace(targetWorkspace);
-        const removedWorkspace =
-          workspaces.find((workspace) => workspace.ref === targetWorkspace) ?? {
-            ref: targetWorkspace,
-          };
+        const removedWorkspace = workspaces.find(
+          (workspace) => workspace.ref === targetWorkspace,
+        ) ?? {
+          ref: targetWorkspace,
+        };
         const data = {
           workspace: targetWorkspace,
           force: args.force ?? false,
@@ -5723,8 +5739,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
         let bootPromptDelivery:
-          | Awaited<ReturnType<typeof deliverBootPrompt>>
-          | undefined;
+          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
         if (bootPromptPath) {
           const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
@@ -5764,12 +5779,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data.role = inferredRole;
         }
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered = isBootPromptDelivered(
-            bootPromptDelivery,
-          );
+          data.boot_prompt_delivered =
+            isBootPromptDelivered(bootPromptDelivery);
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified =
-            bootPromptDelivery.submit_verified;
+          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_split", {
@@ -5868,8 +5881,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result.title = args.title;
         }
         let bootPromptDelivery:
-          | Awaited<ReturnType<typeof deliverBootPrompt>>
-          | undefined;
+          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
         if (bootPromptPath) {
           const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
@@ -5896,12 +5908,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const data: Record<string, unknown> = { ...result };
         if (bootPromptDelivery) {
-          data.boot_prompt_delivered = isBootPromptDelivered(
-            bootPromptDelivery,
-          );
+          data.boot_prompt_delivered =
+            isBootPromptDelivered(bootPromptDelivery);
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
-          data.boot_prompt_submit_verified =
-            bootPromptDelivery.submit_verified;
+          data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
         }
         return okFormatted(
           formatOk("new_surface", {
@@ -6110,23 +6120,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
         }
 
-        const delivery = await withSurfaceWrite(args.surface, async () => {
-          return deliverInputChunks({
-            surface: args.surface,
+        const delivery = await withSurfaceWrite(
+          args.surface,
+          async () => {
+            return deliverInputChunks({
+              surface: args.surface,
+              workspace: args.workspace,
+              chunks,
+              chunk_size: effectiveChunkSize,
+              chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+              press_enter: args.press_enter,
+              rename_to_task: args.rename_to_task,
+              source_event: "send_input",
+              verify_submit: shouldVerifySubmit,
+            });
+          },
+          {
+            toolName: "send_input",
             workspace: args.workspace,
-            chunks,
-            chunk_size: effectiveChunkSize,
-            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-            press_enter: args.press_enter,
-            rename_to_task: args.rename_to_task,
-            source_event: "send_input",
-            verify_submit: shouldVerifySubmit,
-          });
-        }, {
-          toolName: "send_input",
-          workspace: args.workspace,
-          observePtyWrite: true,
-        });
+            observePtyWrite: true,
+          },
+        );
 
         const identity = resolveTargetIdentity(stateMgr, args.surface);
         const data = {
@@ -6236,26 +6250,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const shouldVerifySubmit =
           !!targetRecord && INTERACTIVE_AGENT_STATES.has(targetRecord.state);
 
-        const delivery = await withSurfaceWrite(args.surface, async () => {
-          return deliverInputChunks({
-            surface: args.surface,
+        const delivery = await withSurfaceWrite(
+          args.surface,
+          async () => {
+            return deliverInputChunks({
+              surface: args.surface,
+              workspace: args.workspace,
+              chunks,
+              chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+              chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+              press_enter: true,
+              source_event: "send_command",
+              verify_submit: bootPromptPath ? false : shouldVerifySubmit,
+            });
+          },
+          {
+            toolName: "send_command",
             workspace: args.workspace,
-            chunks,
-            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-            press_enter: true,
-            source_event: "send_command",
-            verify_submit: bootPromptPath ? false : shouldVerifySubmit,
-          });
-        }, {
-          toolName: "send_command",
-          workspace: args.workspace,
-          observePtyWrite: true,
-        });
+            observePtyWrite: true,
+          },
+        );
 
         let bootPromptDelivery:
-          | Awaited<ReturnType<typeof deliverBootPrompt>>
-          | undefined;
+          Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
         if (bootPromptPath && launcherCli) {
           bootPromptDelivery = await deliverBootPrompt({
             surface: args.surface,
@@ -6282,7 +6299,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: delivery.submit_verified,
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_bytes: bootPromptDelivery?.bytes,
-          boot_prompt_submit_verified: bootPromptDelivery?.submit_verified ?? null,
+          boot_prompt_submit_verified:
+            bootPromptDelivery?.submit_verified ?? null,
           boot_prompt_warning: bootPromptDelivery?.prompt_warning ?? null,
         };
         return okFormatted(
@@ -6346,13 +6364,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         const key = normalizeKeyName(args.key);
-        await withSurfaceWrite(args.surface, async () => {
-          await sendKeyWithRetry(args.surface, key, args.workspace);
-        }, {
-          toolName: "send_key",
-          workspace: args.workspace,
-          observePtyWrite: true,
-        });
+        await withSurfaceWrite(
+          args.surface,
+          async () => {
+            await sendKeyWithRetry(args.surface, key, args.workspace);
+          },
+          {
+            toolName: "send_key",
+            workspace: args.workspace,
+            observePtyWrite: true,
+          },
+        );
         const data = { surface: args.surface, key };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
@@ -6524,11 +6546,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const currentTitle = surface?.title ?? "";
           finalTitle = replaceTaskSuffix(currentTitle, args.title);
         }
-        await withSurfaceWrite(args.surface, async () => {
-          await client.renameTab(args.surface, finalTitle, {
-            workspace: args.workspace,
-          });
-        }, { toolName: "rename_tab", workspace: args.workspace });
+        await withSurfaceWrite(
+          args.surface,
+          async () => {
+            await client.renameTab(args.surface, finalTitle, {
+              workspace: args.workspace,
+            });
+          },
+          { toolName: "rename_tab", workspace: args.workspace },
+        );
         await lifecycleSeatManifestPublisher({
           surfaceId: args.surface,
           tabName: finalTitle,
@@ -6669,7 +6695,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.workspace,
         );
         let staleRegistryDoneConsolidated:
-          | { agent_id: string; previous_state: AgentState; done_signal: string }
+          | {
+              agent_id: string;
+              previous_state: AgentState;
+              done_signal: string;
+            }
           | undefined;
         // Liveness guard: never destroy a pane whose agent is still live unless
         // the caller explicitly forces it. This is the safety net for the
@@ -6810,8 +6840,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
 
         let closePolicy:
-          | ReturnType<typeof chooseSurfaceClosePolicy>
-          | undefined;
+          ReturnType<typeof chooseSurfaceClosePolicy> | undefined;
 
         try {
           const identified = args.workspace
@@ -7256,10 +7285,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               client.listPaneSurfaces({ workspace: ref, pane: p.ref }),
             ),
           );
-          const groups = partitionPaneSurfacesByMembership(paneList, rawGroups, {
-            workspace_ref: panes.workspace_ref ?? ref,
-            window_ref: panes.window_ref,
-          });
+          const groups = partitionPaneSurfacesByMembership(
+            paneList,
+            rawGroups,
+            {
+              workspace_ref: panes.workspace_ref ?? ref,
+              window_ref: panes.window_ref,
+            },
+          );
           if (!isPaneSurfaceEnumerationComplete(paneList, groups)) {
             throw new SurfaceEnumerationError(
               `Incomplete cmux surface enumeration for ${ref}`,
@@ -7275,8 +7308,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const observerEpoch = context.surfaceObserverEpoch;
       if (
         lastLifecycleSurfaces &&
-        (!observerEpoch ||
-          lastLifecycleSurfaceObserverEpoch !== observerEpoch)
+        (!observerEpoch || lastLifecycleSurfaceObserverEpoch !== observerEpoch)
       ) {
         lastLifecycleSurfaces = null;
         lastLifecycleSurfaceObserverEpoch = null;
@@ -7324,15 +7356,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     registry =
       context.lifecycleRegistry ??
-      new AgentRegistry(
-        stateMgr,
-        surfaceProvider,
-        {
-          observerIdProvider: () => context.surfaceObserverId,
-          observerEpochProvider: () => context.surfaceObserverEpoch,
-          explicitRoleProvider: explicitRoleForDiscoveredSurface,
-        },
-      );
+      new AgentRegistry(stateMgr, surfaceProvider, {
+        observerIdProvider: () => context.surfaceObserverId,
+        observerEpochProvider: () => context.surfaceObserverEpoch,
+        explicitRoleProvider: explicitRoleForDiscoveredSurface,
+      });
     context.lifecycleRegistry = registry;
     const discovery = new AgentDiscovery({
       observerIdProvider: () => context.surfaceObserverEpoch,
@@ -7391,11 +7419,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           readScreen: (surface, readOpts) =>
             client.readScreen(surface, readOpts),
           send: (surface, text, sendOpts) => {
-            const {
-              beforeMutation,
-              stableSurfaceIdentity,
-              ...clientOpts
-            } = sendOpts ?? {};
+            const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+              sendOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7411,11 +7436,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           },
           sendKey: (surface, key, keyOpts) => {
-            const {
-              beforeMutation,
-              stableSurfaceIdentity,
-              ...clientOpts
-            } = keyOpts ?? {};
+            const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+              keyOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7434,11 +7456,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             client.setProgress(value, progressOpts),
           clearProgress: (progressOpts) => client.clearProgress(progressOpts),
           newSplit: async (direction, splitOpts) => {
-            const {
-              beforeMutation,
-              stableSurfaceIdentity,
-              ...clientOpts
-            } = splitOpts ?? {};
+            const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+              splitOpts ?? {};
             await assertWorkspaceMutationAllowed(
               "agent_engine",
               splitOpts?.workspace,
@@ -7481,11 +7500,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           listPaneSurfaces: (surfaceOpts) =>
             client.listPaneSurfaces(surfaceOpts),
           closeSurface: (surface, closeOpts) => {
-            const {
-              beforeMutation,
-              stableSurfaceIdentity,
-              ...clientOpts
-            } = closeOpts ?? {};
+            const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+              closeOpts ?? {};
             return withSurfaceWrite(
               surface,
               async () => {
@@ -7509,11 +7525,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           },
           moveSurface: async (moveOpts) => {
-            const {
-              beforeMutation,
-              stableSurfaceIdentity,
-              ...clientOpts
-            } = moveOpts;
+            const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+              moveOpts;
             await assertWorkspaceMutationAllowed(
               "move_surface",
               moveOpts.workspace,
@@ -7540,6 +7553,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             spawnPreflight ??
             (disableSpawnPreflight ? async () => {} : undefined),
           sessionIdentityResolver: context.sessionIdentityResolver,
+          selfRegistrationSessionResolver:
+            context.selfRegistrationSessionResolver,
           roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
           inboxOpts,
           launchCommandSender: async ({
@@ -7569,10 +7584,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace,
           }) => {
             if (phase === "placement") {
-              await assertWorkspaceMutationAllowed(
-                "agent_engine",
-                workspace,
-              );
+              await assertWorkspaceMutationAllowed("agent_engine", workspace);
               return;
             }
             if (!surface) {
@@ -7605,9 +7617,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         const existing = input.agentId
           ? engine.getAgentState(input.agentId)
-          : registry.list().find(
-              (record) => record.surface_id === input.surfaceId,
-            ) ?? null;
+          : (registry
+              .list()
+              .find((record) => record.surface_id === input.surfaceId) ?? null);
         if (!existing) return;
 
         const updated =
@@ -7637,8 +7649,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           model: updated.model,
           permission_mode:
             updated.cli === "kiro" ? "default" : "skip-permissions",
-          cwd:
-            updated.launch_cwd ?? join(homedir(), "Gits", updated.repo),
+          cwd: updated.launch_cwd ?? join(homedir(), "Gits", updated.repo),
           repo: updated.repo,
           cli: updated.cli,
           updated_at: seatManifestNow(),
@@ -8053,7 +8064,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         model: z
           .string()
           .optional()
-          .describe("OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default."),
+          .describe(
+            "OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default.",
+          ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
           .describe("CLI tool to launch"),
@@ -8188,7 +8201,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           const spawnWorkspace = targetResolution.workspace;
           const comparisonWorkspace = spawnWorkspace ?? parentWorkspace;
-          await assertWorkspaceMutationAllowed("spawn_agent", comparisonWorkspace);
+          await assertWorkspaceMutationAllowed(
+            "spawn_agent",
+            comparisonWorkspace,
+          );
           const worktree = await prepareSpawnWorktree(
             args.repo,
             args.worktree,
@@ -8272,8 +8288,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           let bootPromptDelivery:
-            | Awaited<ReturnType<typeof deliverBootPrompt>>
-            | undefined;
+            Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
           try {
             if (hasInlinePrompt(args.prompt) || bootPromptPath) {
               const deliveryWorkspace = spawnDeliveryWorkspace(
@@ -8326,7 +8341,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
             const clearBootPromptPending = () => {
-              const record = resolveSpawnRecord(result.agent_id, result.surface_id);
+              const record = resolveSpawnRecord(
+                result.agent_id,
+                result.surface_id,
+              );
               const agentId = record?.agent_id ?? result.agent_id;
               const updated = stateMgr.updateRecord(agentId, {
                 boot_prompt_pending: false,
@@ -8408,35 +8426,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : undefined;
 
           const formattedData = {
-              agent_id: result.agent_id,
-              repo: args.repo,
-              model: result.model ?? args.model,
-              requested_model: result.requested_model,
-              warning:
-                result.warnings && result.warnings.length > 0
-                  ? result.warnings.join(" | ")
-                  : undefined,
-              surface: result.surface_id,
-              role,
-              health,
-              duplicate_spawn_warning: duplicateSpawnWarning,
-              monitor_boot: monitorBoot,
-              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-            };
+            agent_id: result.agent_id,
+            repo: args.repo,
+            model: result.model ?? args.model,
+            requested_model: result.requested_model,
+            warning:
+              result.warnings && result.warnings.length > 0
+                ? result.warnings.join(" | ")
+                : undefined,
+            surface: result.surface_id,
+            role,
+            health,
+            duplicate_spawn_warning: duplicateSpawnWarning,
+            monitor_boot: monitorBoot,
+            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+          };
           const responseData = {
-              ...result,
-              worktree: worktree.prepared,
-              mcp_profile: worktree.mcpProfileLabel,
-              role,
-              health,
-              duplicate_spawn_warning: duplicateSpawnWarning,
-              existing_same_lane_agents: existingSameLaneAgents,
-              monitor_boot: monitorBoot,
-              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-              boot_prompt_bytes: bootPromptDelivery?.bytes,
-              boot_prompt_submit_verified:
-                bootPromptDelivery?.submit_verified ?? null,
-            };
+            ...result,
+            worktree: worktree.prepared,
+            mcp_profile: worktree.mcpProfileLabel,
+            role,
+            health,
+            duplicate_spawn_warning: duplicateSpawnWarning,
+            existing_same_lane_agents: existingSameLaneAgents,
+            monitor_boot: monitorBoot,
+            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+            boot_prompt_bytes: bootPromptDelivery?.bytes,
+            boot_prompt_submit_verified:
+              bootPromptDelivery?.submit_verified ?? null,
+          };
           return buildSpawnToolReturn(
             {
               retry_count: currentTransportRetryCount(),
@@ -8552,8 +8570,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
 
           let bootPromptDelivery:
-            | Awaited<ReturnType<typeof deliverBootPrompt>>
-            | undefined;
+            Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
           if (hasPrompt) {
             const deliveryWorkspace = spawnDeliveryWorkspace(
               result,
@@ -8606,23 +8623,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : undefined;
 
           const formattedData = {
-              agent_id: result.agent_id,
-              surface: result.surface_id,
-              worktree: worktree.prepared?.path ?? "",
-              mcp_profile: worktree.mcpProfileLabel ?? "inherit",
-              health,
-            };
+            agent_id: result.agent_id,
+            surface: result.surface_id,
+            worktree: worktree.prepared?.path ?? "",
+            mcp_profile: worktree.mcpProfileLabel ?? "inherit",
+            health,
+          };
           const responseData = {
-              ...result,
-              role: "worker",
-              health,
-              worktree: worktree.prepared,
-              mcp_profile: worktree.mcpProfileLabel ?? "inherit",
-              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
-              boot_prompt_bytes: bootPromptDelivery?.bytes,
-              boot_prompt_submit_verified:
-                bootPromptDelivery?.submit_verified ?? null,
-            };
+            ...result,
+            role: "worker",
+            health,
+            worktree: worktree.prepared,
+            mcp_profile: worktree.mcpProfileLabel ?? "inherit",
+            boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+            boot_prompt_bytes: bootPromptDelivery?.bytes,
+            boot_prompt_submit_verified:
+              bootPromptDelivery?.submit_verified ?? null,
+          };
           return buildSpawnToolReturn(
             {
               retry_count: currentTransportRetryCount(),
@@ -8735,8 +8752,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             originalLaunchCommandsBySurface.delete(result.surface_id);
             appendStaleBuildWarning(result);
             let bootPromptDelivery:
-              | Awaited<ReturnType<typeof deliverBootPrompt>>
-              | undefined;
+              Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
 
             if (hasPrompt) {
               const deliveryWorkspace = spawnDeliveryWorkspace(
@@ -8793,7 +8809,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role === "orchestrator"
                 ? ensureMonitorBoot(result.agent_id)
                 : undefined;
-            const topology = currentAgent ? await collectSurfaceTopology() : null;
+            const topology = currentAgent
+              ? await collectSurfaceTopology()
+              : null;
             const health = currentAgent
               ? await evaluateServerAgentHealth(
                   agentForSpawnHealth(currentAgent, result),
@@ -8846,18 +8864,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const workspaceWarnings = staleWarning ? [staleWarning] : [];
 
           const formattedData = {
-              workspace,
-              agents: spawnedAgents.length,
-              ...(staleWarning ? { warning: staleWarning } : {}),
-            };
+            workspace,
+            agents: spawnedAgents.length,
+            ...(staleWarning ? { warning: staleWarning } : {}),
+          };
           const responseData = {
-              workspace,
-              title: workspaceResult.title,
-              agents: spawnedAgents,
-              ...(workspaceWarnings.length > 0
-                ? { warnings: workspaceWarnings }
-                : {}),
-            };
+            workspace,
+            title: workspaceResult.title,
+            agents: spawnedAgents,
+            ...(workspaceWarnings.length > 0
+              ? { warnings: workspaceWarnings }
+              : {}),
+          };
           return buildSpawnToolReturn(
             {
               retry_count: currentTransportRetryCount(),
@@ -8898,7 +8916,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "wait_for",
       "Block until one agent_id or every agent in ids reaches a target registry state and return health. Defaults to waiting for completion (`done`).",
       {
-        agent_id: z.string().optional().describe("Single agent ID from spawn_agent"),
+        agent_id: z
+          .string()
+          .optional()
+          .describe("Single agent ID from spawn_agent"),
         ids: z
           .array(z.string())
           .min(1)
@@ -9122,9 +9143,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               harvestability.closeable ? "closeable" : "not closeable"
             }` +
             `\nhealth: ${health.status}${
-              health.issues.length > 0
-                ? ` (${health.issues.join("; ")})`
-                : ""
+              health.issues.length > 0 ? ` (${health.issues.join("; ")})` : ""
             }`;
           const payload = {
             ...toAgentStatePayload(state),
@@ -9226,7 +9245,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       add(process.env.CMUX_TAB_ID);
       add(process.env.CMUX_SURFACE_ID);
 
-      for (const surface of [process.env.CMUX_SURFACE_ID, process.env.CMUX_TAB_ID]) {
+      for (const surface of [
+        process.env.CMUX_SURFACE_ID,
+        process.env.CMUX_TAB_ID,
+      ]) {
         if (!surface?.trim()) continue;
         try {
           const identified = await client.identify(surface.trim());
@@ -9243,10 +9265,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       agent: AgentRecord,
     ): Promise<string | null> => {
       if (agent.state === "error") {
-        let livenessTarget: Pick<
-          AgentRecord,
-          "surface_id" | "surface_uuid"
-        > = agent;
+        let livenessTarget: Pick<AgentRecord, "surface_id" | "surface_uuid"> =
+          agent;
         try {
           livenessTarget = await engine.resolveAgentIoRoute(agent.agent_id);
         } catch {
@@ -9276,9 +9296,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
 
     const agentSeatLabel = (agent: AgentRecord): string =>
-      agent.seat_id?.trim() ||
-      agent.surface_id ||
-      agent.agent_id;
+      agent.seat_id?.trim() || agent.surface_id || agent.agent_id;
 
     server.tool(
       "broadcast",
@@ -9307,7 +9325,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const parsedArgs = BroadcastArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
             return err(
-              new Error(formatToolValidationError("broadcast", parsedArgs.error)),
+              new Error(
+                formatToolValidationError("broadcast", parsedArgs.error),
+              ),
             );
           }
           const args = parsedArgs.data;
@@ -9330,7 +9350,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   return await registry.listMerged(discovery);
                 } catch (error) {
                   if (
-                    !(error instanceof SurfaceBindingChangedDuringDiscoveryError)
+                    !(
+                      error instanceof SurfaceBindingChangedDuringDiscoveryError
+                    )
                   ) {
                     throw error;
                   }
@@ -9355,7 +9377,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const targets = (await collectTargets()).filter(
             (agent) =>
-              broadcastRoleMatches(args.role, inferBroadcastRecordRole(agent)) &&
+              broadcastRoleMatches(
+                args.role,
+                inferBroadcastRecordRole(agent),
+              ) &&
               workspaceMatches(agent) &&
               !excludedAgentIds.has(agent.agent_id) &&
               !isCaller(agent),
@@ -9450,9 +9475,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             discovery.invalidate();
             const discoveredBeforeRepair = await discovery.scan(true);
-            const repair = registry.repairFromDiscovery(discoveredBeforeRepair, {
-              seatRegistry,
-            });
+            const repair = registry.repairFromDiscovery(
+              discoveredBeforeRepair,
+              {
+                seatRegistry,
+              },
+            );
             const liveSeatProofObserverId = registry.getObserverId();
             const liveSeatProofObserverEpoch = registry.getObserverEpoch();
             discovery.invalidate();
@@ -9469,12 +9497,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               force: true,
               discovered: discoveredAfterRepair,
             });
-            const surfacelessEvicted = await registry.evictSurfaceless(
-              {
-                ...surfaceAbsenceConfirmation,
-                liveSeatProof,
-              },
-            );
+            const surfacelessEvicted = await registry.evictSurfaceless({
+              ...surfaceAbsenceConfirmation,
+              liveSeatProof,
+            });
             engine.evictDeadProcessAgents();
             discovery.invalidate();
             let after = await registry.listMerged(discovery, { force: true });
@@ -9493,9 +9519,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 (uuidCount === 0 || uuidCount === surfaceCount)
               );
             };
-            const topologyBeforeReflowIsCoherent = topologyIsCoherent(
-              topologyBeforeReflow,
-            );
+            const topologyBeforeReflowIsCoherent =
+              topologyIsCoherent(topologyBeforeReflow);
             const reflowed: Array<{
               agent_id: string;
               surface_id: string;
@@ -9504,10 +9529,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               pane: string;
             }> = [];
             type ReflowOperation =
-              | "new_split"
-              | "move_surface"
-              | "verify_reflow"
-              | "close_surface";
+              "new_split" | "move_surface" | "verify_reflow" | "close_surface";
             const reflowSkipped: Array<{
               agent_id: string;
               surface_id: string;
@@ -9562,11 +9584,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               expectedWorkspace: string,
               operation: ReflowOperation,
             ) => {
-              assertCurrentReflowAuthority(
-                agent,
-                expectedWorkspace,
-                operation,
-              );
+              assertCurrentReflowAuthority(agent, expectedWorkspace, operation);
               assertSurfaceObserverEpochCurrent(
                 reflowObserverEpoch,
                 `resync_agents ${operation}`,
@@ -9597,9 +9615,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const observedUuid =
                 topology.surfaceIdByRef.get(binding.surfaceRef) ?? null;
-              if (
-                !registry.canUseObservedBinding(currentAgent, observedUuid)
-              ) {
+              if (!registry.canUseObservedBinding(currentAgent, observedUuid)) {
                 throw new Error(
                   `Fresh binding ${binding.surfaceRef} is not owned by the current observer before ${operation}; refusing reflow mutation.`,
                 );
@@ -9617,7 +9633,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     `${binding.surfaceRef}@${workspace ?? "unknown"}); refusing to mutate a recycled ref.`,
                 );
               }
-              const current = topology.topologyBySurface.get(binding.surfaceRef);
+              const current = topology.topologyBySurface.get(
+                binding.surfaceRef,
+              );
               if (current?.column !== 0) {
                 throw new Error(
                   `Stable surface UUID ${agent.surface_uuid ?? "unavailable"} no longer needs left-column reflow before ${operation}.`,
@@ -9653,9 +9671,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   continue;
                 }
                 const liveSurfaceRef = binding.surfaceRef;
-                const current = topologyBeforeReflow.topologyBySurface.get(
-                  liveSurfaceRef,
-                );
+                const current =
+                  topologyBeforeReflow.topologyBySurface.get(liveSurfaceRef);
                 if (current?.column !== 0) continue;
 
                 let seededSurface: string | null = null;
@@ -9669,7 +9686,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   workspace =
                     topologyBeforeReflow.workspaceBySurface.get(
                       liveSurfaceRef,
-                    ) ?? agent.workspace_id ?? null;
+                    ) ??
+                    agent.workspace_id ??
+                    null;
                   if (!workspace) continue;
 
                   let targetPane: string | null = null;
@@ -9740,10 +9759,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       reflowObserverEpoch,
                       "resync_agents move_surface pane selection",
                     );
-                    targetPane = topPaneInRoleColumn(
-                      panes.panes,
-                      "worker",
-                    )?.ref ?? null;
+                    targetPane =
+                      topPaneInRoleColumn(panes.panes, "worker")?.ref ?? null;
                   }
                   if (!targetPane) continue;
 
@@ -9798,7 +9815,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   panesByWorkspace.delete(workspace);
 
                   attemptedOperation = "verify_reflow";
-                  const topologyAfterMove = await collectSurfaceTopology(workspace);
+                  const topologyAfterMove =
+                    await collectSurfaceTopology(workspace);
                   assertSurfaceObserverEpochCurrent(
                     reflowObserverEpoch,
                     "resync_agents verify_reflow",
@@ -9845,7 +9863,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 } finally {
                   if (seededSurface) {
                     try {
-                      const cleanupSeedUuid = seededSurfaceUuid as string | null;
+                      const cleanupSeedUuid = seededSurfaceUuid as
+                        string | null;
                       assertSurfaceObserverEpochCurrent(
                         reflowObserverEpoch,
                         "resync_agents close_surface",
@@ -9866,10 +9885,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         );
                       }
                       const seedUuidKey = cleanupSeedUuid.toLowerCase();
-                      const freshSeedRef = [...cleanupTopology.surfaceRefById]
-                        .find(([surfaceUuid]) =>
+                      const freshSeedRef = [
+                        ...cleanupTopology.surfaceRefById,
+                      ].find(
+                        ([surfaceUuid]) =>
                           surfaceUuid.toLowerCase() === seedUuidKey,
-                        )?.[1];
+                      )?.[1];
                       if (!freshSeedRef) {
                         throw new Error(
                           `Seed UUID ${cleanupSeedUuid} is no longer uniquely bound; refusing close_surface.`,
@@ -9895,8 +9916,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                           }
                           const immediateSeedRef = [
                             ...immediateTopology.surfaceRefById,
-                          ].find(([surfaceUuid]) =>
-                            surfaceUuid.toLowerCase() === seedUuidKey,
+                          ].find(
+                            ([surfaceUuid]) =>
+                              surfaceUuid.toLowerCase() === seedUuidKey,
                           )?.[1];
                           if (immediateSeedRef !== freshSeedRef) {
                             throw new Error(
@@ -9964,7 +9986,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 !surface.read_error &&
                 !managedSurfaceIds.has(surface.surface_id),
             );
-            const orphanedHealth = orphanedSurfaces.map(buildOrphanSurfaceHealth);
+            const orphanedHealth = orphanedSurfaces.map(
+              buildOrphanSurfaceHealth,
+            );
             const evicted = [
               ...new Set([
                 ...repair.evicted,
@@ -10109,7 +10133,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (mode === "command") {
               const command = args.command ?? args.text;
               if (command === undefined) {
-                throw new Error("send_to mode=command requires command or text");
+                throw new Error(
+                  "send_to mode=command requires command or text",
+                );
               }
               return legacyHandler("send_command")(
                 {
@@ -10751,13 +10777,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agents.map(async (agent) => {
               let screenData: ParsedScreenResult | null = null;
               let liveSurfaceId: string | null = null;
-              let screenFailure:
-                | {
-                    screen_unavailable: true;
-                    error_code: "screen_unavailable";
-                    screen_error: string;
-                  }
-                | null = null;
+              let screenFailure: {
+                screen_unavailable: true;
+                error_code: "screen_unavailable";
+                screen_error: string;
+              } | null = null;
               try {
                 const resolved = await Promise.race([
                   (async () => {
@@ -10923,10 +10947,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
         ...(replacement
           ? {
-              callback: async (
-                args: Record<string, unknown>,
-                extra: unknown,
-              ) =>
+              callback: async (args: Record<string, unknown>, extra: unknown) =>
                 withDeprecationWarning(
                   await originalHandler(args, extra),
                   name,

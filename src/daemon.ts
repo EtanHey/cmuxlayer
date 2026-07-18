@@ -18,6 +18,7 @@ import {
   type CreateCmuxClientOptions,
 } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
+import { makeSelfRegistrationSessionResolver } from "./self-registration.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
   defaultMonitorRegistryPath,
@@ -519,10 +520,12 @@ export class CmuxLayerDaemon {
           enableClaudeChannels: this.opts.enableClaudeChannels,
           spawnPreflight: this.opts.spawnPreflight,
           disableSpawnPreflight: this.opts.disableSpawnPreflight,
+          selfRegistrationSessionResolver:
+            this.opts.selfRegistrationSessionResolver ??
+            makeSelfRegistrationSessionResolver(),
           surfaceObserverOwnerIdProvider:
             this.opts.surfaceObserverOwnerIdProvider,
-          surfaceObserverEpochProvider:
-            this.opts.surfaceObserverEpochProvider,
+          surfaceObserverEpochProvider: this.opts.surfaceObserverEpochProvider,
         });
         return this.context;
       })();

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { CmuxClient } from "./cmux-client.js";
 import type { CmuxSocketClient } from "./cmux-socket-client.js";
 import { AgentEngine, resolveSweepTiming } from "./agent-engine.js";
+import { makeSelfRegistrationSessionResolver } from "./self-registration.js";
 import type { AgentRoute } from "./agent-types.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
@@ -227,10 +228,14 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
               this.client.listPaneSurfaces({ workspace: ref, pane: pane.ref }),
             ),
           );
-          const groups = partitionPaneSurfacesByMembership(panes.panes, rawGroups, {
-            workspace_ref: panes.workspace_ref ?? ref,
-            window_ref: panes.window_ref,
-          });
+          const groups = partitionPaneSurfacesByMembership(
+            panes.panes,
+            rawGroups,
+            {
+              workspace_ref: panes.workspace_ref ?? ref,
+              window_ref: panes.window_ref,
+            },
+          );
           assertCompletePaneSurfaceEnumeration(panes.panes, groups, ref);
           return groups;
         }),
@@ -283,11 +288,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         setProgress: async () => {},
         clearProgress: async () => {},
         newSplit: (direction, splitOpts) => {
-          const {
-            beforeMutation,
-            stableSurfaceIdentity,
-            ...clientOpts
-          } = splitOpts ?? {};
+          const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+            splitOpts ?? {};
           return this.runWorkspaceMutation(
             "new_split",
             splitOpts?.workspace,
@@ -323,11 +325,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         listPaneSurfaces: (surfaceOpts) =>
           this.client.listPaneSurfaces(surfaceOpts),
         closeSurface: (surface, closeOpts) => {
-          const {
-            beforeMutation,
-            stableSurfaceIdentity,
-            ...clientOpts
-          } = closeOpts ?? {};
+          const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+            closeOpts ?? {};
           return this.runWorkspaceMutation(
             "close_surface",
             closeOpts?.workspace,
@@ -344,11 +343,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           );
         },
         moveSurface: (moveOpts) => {
-          const {
-            beforeMutation,
-            stableSurfaceIdentity,
-            ...clientOpts
-          } = moveOpts;
+          const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
+            moveOpts;
           return this.runWorkspaceMutation(
             "move_surface",
             moveOpts.workspace,
@@ -381,6 +377,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
         monitorRegistryPath: defaultMonitorRegistryPath(),
         monitorRegistryNotify: httpNotifyMonitorDeadman,
+        selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
         closeForensicsRunner: createDefaultCloseForensicsRunner({
           stateMgr: this.stateMgr,
           listSurfacesForRefMap: surfaceProvider,
