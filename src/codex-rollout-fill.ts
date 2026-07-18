@@ -160,13 +160,18 @@ export function makeCodexRolloutFillProvider(
   const withReadPermit = async <T>(operation: () => Promise<T>): Promise<T> => {
     if (activeReads >= maxConcurrentReads) {
       await new Promise<void>((resolve) => readWaiters.push(resolve));
+    } else {
+      activeReads += 1;
     }
-    activeReads += 1;
     try {
       return await operation();
     } finally {
       activeReads -= 1;
-      readWaiters.shift()?.();
+      const next = readWaiters.shift();
+      if (next) {
+        activeReads += 1;
+        next();
+      }
     }
   };
 

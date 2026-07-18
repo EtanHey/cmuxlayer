@@ -384,6 +384,55 @@ describe("CodexRolloutFillProvider", () => {
     expect(maxActiveStats).toBe(4);
   });
 
+  it("does not let a newcomer steal a permit reserved for a queued reader", async () => {
+    const firstPath = "/tmp/rollout-permit-first.jsonl";
+    let releaseFirst: (() => void) | null = null;
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let releaseFollowers: (() => void) | null = null;
+    const followersMayFinish = new Promise<void>((resolve) => {
+      releaseFollowers = resolve;
+    });
+    let activeStats = 0;
+    let maxActiveStats = 0;
+    const provider = makeCodexRolloutFillProvider({
+      maxConcurrentReads: 1,
+      statFile: async (path) => {
+        activeStats += 1;
+        maxActiveStats = Math.max(maxActiveStats, activeStats);
+        if (path === firstPath) await firstMayFinish;
+        else await followersMayFinish;
+        activeStats -= 1;
+        return null;
+      },
+    });
+
+    const first = provider.get(firstPath);
+    await flushAsyncWork();
+    const queued = provider.get("/tmp/rollout-permit-queued.jsonl");
+    await flushAsyncWork();
+
+    const intruders: Array<Promise<unknown>> = [];
+    let intruderIndex = 0;
+    const enqueueIntruder = (): void => {
+      queueMicrotask(() => {
+        intruders.push(
+          provider.get(`/tmp/rollout-permit-intruder-${intruderIndex++}.jsonl`),
+        );
+        if (intruderIndex < 50) enqueueIntruder();
+      });
+    };
+    enqueueIntruder();
+    releaseFirst?.();
+    for (let index = 0; index < 100; index += 1) await Promise.resolve();
+    const observedMax = maxActiveStats;
+
+    releaseFollowers?.();
+    await Promise.all([first, queued, ...intruders]);
+    expect(observedMax).toBe(1);
+  });
+
   it("evicts the least-recently-used settled path when the cache cap is reached", async () => {
     const bytes = Buffer.from(tokenCountLine(20_000));
     let now = 0;
