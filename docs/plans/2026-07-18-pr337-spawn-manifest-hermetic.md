@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Prove the manifest tests still touch lifecycle storage
+## Task 1: Prove the manifest tests still touch lifecycle storage
 
 **Files:**
 - Modify: `tests/server-agent-tools.test.ts`
@@ -34,7 +34,7 @@ directory was never created.
 Run both named manifest tests. Expected: FAIL because the current server ignores
 the injected lifecycle state and creates the state directory.
 
-### Task 2: Add the minimal production dependency seams
+## Task 2: Add the minimal production dependency seams
 
 **Files:**
 - Modify: `src/server.ts`
@@ -63,7 +63,7 @@ Delete the fake-time helper if it has no remaining callers.
 Run both manifest tests, typecheck, and the complete server-tools file. Expected:
 all pass; the exact manifest and launcher-name assertions are unchanged.
 
-### Task 3: Prove the corrected load contract and publish
+## Task 3: Prove the corrected load contract and publish
 
 **Files:**
 - Modify: PR #337 body/comment only

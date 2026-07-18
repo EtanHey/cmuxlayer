@@ -271,7 +271,9 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
-function createInMemoryStateManager(): StateManager {
+function createInMemoryStateManager(
+  baseDir = "/in-memory/spawn-manifest",
+): StateManager {
   const records = new Map<string, AgentRecord>();
   const eventLog = {
     append: vi.fn(),
@@ -317,7 +319,7 @@ function createInMemoryStateManager(): StateManager {
   };
 
   return {
-    getBaseDir: () => "/in-memory/spawn-manifest",
+    getBaseDir: () => baseDir,
     getEventLog: () => eventLog,
     getSurfaceSessionIndex: () => surfaceSessionIndex,
     writeState: (record) => {
@@ -372,7 +374,7 @@ function createHermeticSpawnServer(
   rmSync(stateDir, { recursive: true, force: true });
   hermeticSpawnStateDirs.push(stateDir);
 
-  const stateManager = createInMemoryStateManager();
+  const stateManager = createInMemoryStateManager(stateDir);
   const lifecycleSurfaceProvider = vi.fn(async () => {
     throw new Error("Hermetic spawn fixture attempted registry surface I/O");
   });
@@ -394,9 +396,11 @@ function createHermeticSpawnServer(
     lifecycleRegistry,
     lifecycleInitializer,
   } as Omit<CreateServerOptions, "context">;
+  const server = createTrackedServer(serverOptions);
 
   return {
-    server: createTrackedServer(serverOptions),
+    server,
+    context: serverContexts.at(-1)!,
     stateDir,
     lifecycleInitializer,
     lifecycleSurfaceProvider,
@@ -468,6 +472,7 @@ describe("lean spawn tool responses", () => {
     });
     const {
       server,
+      context,
       stateDir,
       lifecycleInitializer,
       lifecycleSurfaceProvider,
@@ -499,6 +504,7 @@ describe("lean spawn tool responses", () => {
     ]);
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+    expect(context.stateDir).toBe(stateDir);
     expect(existsSync(stateDir)).toBe(false);
   });
 
@@ -513,6 +519,7 @@ describe("lean spawn tool responses", () => {
     });
     const {
       server,
+      context,
       stateDir,
       lifecycleInitializer,
       lifecycleSurfaceProvider,
@@ -529,6 +536,7 @@ describe("lean spawn tool responses", () => {
     );
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
+    expect(context.stateDir).toBe(stateDir);
     expect(existsSync(stateDir)).toBe(false);
   });
 
