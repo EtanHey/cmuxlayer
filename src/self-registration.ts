@@ -105,6 +105,10 @@ function surfaceUuidKey(value: string | null | undefined): string | null {
   return value?.trim().toLowerCase() || null;
 }
 
+function cliKey(value: string | null | undefined): string | null {
+  return value?.trim().toLowerCase() || null;
+}
+
 /**
  * Parse JSONL registry text into entries. Malformed lines and records missing
  * the required `session_id`/`surface_uuid` are skipped; unknown fields are
@@ -328,8 +332,10 @@ function makeIncrementalEntryIndexReader(
  * repaired records deliberately skip that lower bound because their
  * `created_at` is discovery time, not launch time. All candidates are bounded
  * against the reader clock so a row from before a backward clock correction
- * cannot dominate. AgentRecord pid is deliberately ignored because production
- * does not populate it with the CLI process pid. Returns
+ * cannot dominate. A row with explicit `cli` metadata must match the agent;
+ * missing CLI remains compatible with older writers. AgentRecord pid is
+ * deliberately ignored because production does not populate it with the CLI
+ * process pid. Returns
  * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
  * missing/unreadable/empty registry, an agent without a stable surface UUID, or
  * no UUID match all return `null` (the caller then falls back to the scan).
@@ -365,6 +371,7 @@ export function makeSelfRegistrationSessionResolver(
   return (agent: AgentRecord): CapturedSessionIdentity | null => {
     const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
     if (!agentSurfaceUuid) return null;
+    const agentCli = cliKey(agent.cli);
     const launchCwd = agent.launch_cwd?.trim() || null;
     const createdAt = Date.parse(agent.created_at);
     if (Number.isNaN(createdAt)) return null;
@@ -379,6 +386,7 @@ export function makeSelfRegistrationSessionResolver(
 
     const candidates = (readCandidates(agentSurfaceUuid) ?? []).filter(
       (entry) =>
+        (entry.cli === null || cliKey(entry.cli) === agentCli) &&
         entry.ts !== null &&
         entry.ts >= earliestCurrentLaunchTs &&
         entry.ts <= latestPlausibleTs,

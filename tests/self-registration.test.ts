@@ -491,6 +491,39 @@ describe("makeSelfRegistrationSessionResolver", () => {
     ).toBe("sid-B");
   });
 
+  it("rejects an explicit registry CLI mismatch for the same surface UUID", () => {
+    const resolve = resolverFor(
+      jsonl({
+        session_id: "sid-claude",
+        surface_uuid: SURFACE_UUID_A,
+        cli: "claude",
+        cwd: null,
+        ts: 2000,
+      }),
+    );
+
+    expect(
+      resolve(agent({ surface_uuid: SURFACE_UUID_A, cli: "codex" })),
+    ).toBeNull();
+  });
+
+  it("keeps older writer rows without CLI metadata backward-compatible", () => {
+    const resolve = resolverFor(
+      jsonl({
+        session_id: "sid-legacy",
+        surface_uuid: SURFACE_UUID_A,
+        cli: null,
+        cwd: null,
+        ts: 2000,
+      }),
+    );
+
+    expect(
+      resolve(agent({ surface_uuid: SURFACE_UUID_A, cli: "codex" }))
+        ?.session_id,
+    ).toBe("sid-legacy");
+  });
+
   it("same-cwd, pid unknown (production reality): newest ts wins", () => {
     const resolve = resolverFor(
       jsonl(
