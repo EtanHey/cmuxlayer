@@ -33,6 +33,8 @@ import type {
 
 const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
+export const SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES = 64 * 1024;
+export const SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE = 64;
 
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
@@ -117,9 +119,30 @@ export function copyBufferTail(
   const boundedMaxBytes =
     Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : 0;
   const length = Math.min(source.byteLength, boundedMaxBytes);
-  const copy = Buffer.allocUnsafe(length);
+  const copy = Buffer.allocUnsafeSlow(length);
   source.copy(copy, 0, source.byteLength - length);
   return copy;
+}
+
+/** Retain a partial JSONL row only while it remains within the record cap. */
+export function boundPendingRegistrationLine(
+  source: Buffer,
+): Buffer<ArrayBuffer> {
+  if (source.byteLength > SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES) {
+    return Buffer.alloc(0);
+  }
+  return copyBufferTail(source, source.byteLength);
+}
+
+/** Keep only the recent per-surface history needed for bounded selection. */
+export function appendBoundedSurfaceCandidate(
+  candidates: SelfRegistrationEntry[],
+  entry: SelfRegistrationEntry,
+): void {
+  candidates.push(entry);
+  const excess =
+    candidates.length - SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE;
+  if (excess > 0) candidates.splice(0, excess);
 }
 
 /**
@@ -314,18 +337,20 @@ function makeIncrementalEntryIndexReader(
       const finalNewline = combined.lastIndexOf(0x0a);
       if (finalNewline >= 0) {
         const completeLines = combined.subarray(0, finalNewline + 1);
-        pendingLine = Buffer.from(combined.subarray(finalNewline + 1));
+        pendingLine = boundPendingRegistrationLine(
+          combined.subarray(finalNewline + 1),
+        );
         for (const entry of parseSelfRegistrationLines(
           completeLines.toString("utf8"),
         )) {
           const key = surfaceUuidKey(entry.surface_uuid);
           if (!key) continue;
           const existing = entriesBySurface.get(key);
-          if (existing) existing.push(entry);
+          if (existing) appendBoundedSurfaceCandidate(existing, entry);
           else entriesBySurface.set(key, [entry]);
         }
       } else {
-        pendingLine = combined;
+        pendingLine = boundPendingRegistrationLine(combined);
       }
     }
     observedMtimeMs = fileStat.mtimeMs;

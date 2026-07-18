@@ -4,11 +4,16 @@ import { homedir } from "node:os";
 import { rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
+  appendBoundedSurfaceCandidate,
+  boundPendingRegistrationLine,
   copyBufferTail,
   makeSelfRegistrationSessionResolver,
   parseSelfRegistrationLines,
   resolveSessionRegistryPath,
+  SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE,
+  SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES,
 } from "../src/self-registration.js";
+import type { SelfRegistrationEntry } from "../src/self-registration.js";
 import type { AgentRecord } from "../src/agent-types.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
@@ -81,8 +86,44 @@ describe("copyBufferTail", () => {
 
     expect(tail).toEqual(Buffer.alloc(64, 0x62));
     expect(tail.buffer).not.toBe(source.buffer);
+    expect(tail.buffer.byteLength).toBe(tail.byteLength);
     source.fill(0x63);
     expect(tail).toEqual(Buffer.alloc(64, 0x62));
+  });
+});
+
+describe("bounded incremental registry state", () => {
+  it("drops an oversized unterminated row instead of retaining it", () => {
+    const oversized = Buffer.alloc(
+      SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES + 1,
+      0x61,
+    );
+
+    expect(boundPendingRegistrationLine(oversized)).toEqual(Buffer.alloc(0));
+  });
+
+  it("retains only the newest bounded candidates for one surface", () => {
+    const candidates: SelfRegistrationEntry[] = [];
+    const total = SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE + 5;
+
+    for (let index = 0; index < total; index += 1) {
+      appendBoundedSurfaceCandidate(candidates, {
+        session_id: `sid-${index}`,
+        surface_uuid: SURFACE_UUID_A,
+        cwd: `/worktree/${index}`,
+        pid: null,
+        cli: "claude",
+        launcher: null,
+        session_path: null,
+        ts: index,
+      });
+    }
+
+    expect(candidates).toHaveLength(
+      SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE,
+    );
+    expect(candidates[0]?.session_id).toBe("sid-5");
+    expect(candidates.at(-1)?.session_id).toBe(`sid-${total - 1}`);
   });
 });
 
@@ -783,6 +824,9 @@ describe("AgentEngine self-registration wiring", () => {
   function makeEngineHarness(
     selfRegistrationSessionResolver:
       ReturnType<typeof makeSelfRegistrationSessionResolver> | (() => null),
+    sessionIdentityResolver?: (agent: AgentRecord) =>
+      | { session_id: string; path: string | null }
+      | null,
   ): {
     engine: AgentEngine;
     stateMgr: StateManager;
@@ -800,6 +844,7 @@ describe("AgentEngine self-registration wiring", () => {
       engine: new AgentEngine(stateMgr, registry, client, {
         spawnPreflight: async () => {},
         selfRegistrationSessionResolver,
+        sessionIdentityResolver,
       }),
       stateMgr,
       registry,
@@ -860,6 +905,85 @@ describe("AgentEngine self-registration wiring", () => {
 
     expect(result).toEqual({ session_id: "sid-scan", path: null });
     expect(scanSpy).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("keeps self-registration primary when a custom fallback is also supplied", () => {
+    const selfRegistrationSessionResolver = vi.fn(() => ({
+      session_id: "sid-self-reg",
+      path: null,
+    }));
+    const customFallback = vi.fn(() => ({
+      session_id: "sid-custom",
+      path: null,
+    }));
+    const { engine } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+      customFallback,
+    );
+    const resolver = (
+      engine as unknown as {
+        sessionIdentityResolver: (a: AgentRecord) => unknown;
+      }
+    ).sessionIdentityResolver;
+
+    expect(resolver(agent({ launch_cwd: "/w" }))).toEqual({
+      session_id: "sid-self-reg",
+      path: null,
+    });
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    expect(customFallback).not.toHaveBeenCalled();
+    engine.dispose();
+  });
+
+  it("uses the custom resolver after a self-registration miss", () => {
+    const selfRegistrationSessionResolver = vi.fn(() => null);
+    const customFallback = vi.fn(() => ({
+      session_id: "sid-custom",
+      path: null,
+    }));
+    const { engine } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+      customFallback,
+    );
+    const resolver = (
+      engine as unknown as {
+        sessionIdentityResolver: (a: AgentRecord) => unknown;
+      }
+    ).sessionIdentityResolver;
+
+    expect(resolver(agent({ launch_cwd: "/w" }))).toEqual({
+      session_id: "sid-custom",
+      path: null,
+    });
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    expect(customFallback).toHaveBeenCalledTimes(1);
+    engine.dispose();
+  });
+
+  it("lets an injected null fallback suppress real transcript I/O", () => {
+    const selfRegistrationSessionResolver = vi.fn(() => null);
+    const customFallback = vi.fn(() => null);
+    const { engine } = makeEngineHarness(
+      selfRegistrationSessionResolver,
+      customFallback,
+    );
+    const scanSpy = vi.spyOn(
+      engine as unknown as {
+        findTranscriptSessionIdentity: (a: AgentRecord) => unknown;
+      },
+      "findTranscriptSessionIdentity",
+    );
+    const resolver = (
+      engine as unknown as {
+        sessionIdentityResolver: (a: AgentRecord) => unknown;
+      }
+    ).sessionIdentityResolver;
+
+    expect(resolver(agent({ launch_cwd: "/w" }))).toBeNull();
+    expect(selfRegistrationSessionResolver).toHaveBeenCalledTimes(1);
+    expect(customFallback).toHaveBeenCalledTimes(1);
+    expect(scanSpy).not.toHaveBeenCalled();
     engine.dispose();
   });
 

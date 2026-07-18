@@ -279,6 +279,10 @@ export interface AgentEngineOptions {
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
+  /**
+   * Optional fallback override after self-registration misses. When supplied,
+   * it replaces the filesystem transcript scan (primarily for hermetic tests).
+   */
   sessionIdentityResolver?: SessionIdentityResolver;
   /**
    * PRIMARY session-identity resolver: the self-registration READ side. When
@@ -855,9 +859,12 @@ export class AgentEngine {
     // app-server-runtime).
     this.selfRegistrationSessionResolver =
       opts?.selfRegistrationSessionResolver ?? null;
-    this.sessionIdentityResolver =
-      opts?.sessionIdentityResolver ??
-      ((agent) => this.resolveSessionIdentityWithSelfRegistration(agent));
+    const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
+    this.sessionIdentityResolver = (agent) =>
+      this.resolveSessionIdentityWithSelfRegistration(
+        agent,
+        fallbackSessionIdentityResolver,
+      );
     // Default no-op: constructing an engine (tests, libraries) must never touch
     // the real outbox or network. Production entrypoints inject the real
     // drainOutbox (see server.ts createServer / app-server-runtime).
@@ -2052,18 +2059,21 @@ export class AgentEngine {
    * boot, so we read it instead of scanning `~/.claude`/`~/.codex` and inferring
    * by cwd+recency (which breaks with raw spawns + worktrees + many agents per
    * repo). The scan is only reached when self-registration returns null (unset in
-   * bare construction, or a hook-less agent with no registry entry); #336's
-   * bounded deferred-capture marker still guards that fallback.
+   * bare construction, or a hook-less agent with no registry entry) and no
+   * injected fallback override is present; #336's bounded deferred-capture marker
+   * still guards that fallback.
    */
   private resolveSessionIdentityWithSelfRegistration(
     agent: AgentRecord,
-  ): CapturedSessionIdentity | null {
+    fallbackResolver?: SessionIdentityResolver,
+  ): CapturedSessionIdentity | string | null {
     if (this.canUseSelfRegistrationSessionResolver(agent)) {
       const selfRegistered = this.selfRegistrationSessionResolver?.(agent);
       if (selfRegistered) {
         return this.normalizeCapturedSessionIdentity(selfRegistered);
       }
     }
+    if (fallbackResolver) return fallbackResolver(agent);
     if (!this.canUseTranscriptSessionResolver(agent)) return null;
     return this.findTranscriptSessionIdentity(agent);
   }
