@@ -327,6 +327,57 @@ describe("makeSelfRegistrationSessionResolver", () => {
     expect(resolve(agent({ launch_cwd: "/w" }))).toBeNull();
   });
 
+  it("ignores a future-dated row instead of letting it dominate the current registration", () => {
+    const now = Date.parse("2026-07-18T00:01:00.000Z");
+    const createdAt = now - 30_000;
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      readFile: () =>
+        jsonl(
+          { session_id: "sid-current", cwd: "/w", ts: now },
+          {
+            session_id: "sid-future-stale",
+            cwd: "/w",
+            ts: now + 5_001,
+          },
+        ),
+      now: () => now,
+    });
+
+    expect(
+      resolve(
+        agent({
+          launch_cwd: "/w",
+          created_at: new Date(createdAt).toISOString(),
+        }),
+      )?.session_id,
+    ).toBe("sid-current");
+  });
+
+  it("accepts a timestamp at the reader-clock skew boundary", () => {
+    const now = Date.parse("2026-07-18T00:01:00.000Z");
+    const createdAt = now - 30_000;
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      readFile: () =>
+        jsonl({
+          session_id: "sid-skew-boundary",
+          cwd: "/w",
+          ts: now + 5_000,
+        }),
+      now: () => now,
+    });
+
+    expect(
+      resolve(
+        agent({
+          launch_cwd: "/w",
+          created_at: new Date(createdAt).toISOString(),
+        }),
+      )?.session_id,
+    ).toBe("sid-skew-boundary");
+  });
+
   it("skips malformed lines but still binds a valid same-surface entry", () => {
     const resolve = resolverFor(
       jsonl("corrupt line not json", {

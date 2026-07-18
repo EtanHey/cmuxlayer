@@ -31,7 +31,7 @@ import type {
   SessionIdentityResolver,
 } from "./agent-engine.js";
 
-const SESSION_REGISTRATION_CREATION_SKEW_MS = 5_000;
+const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
@@ -62,6 +62,8 @@ export interface SelfRegistrationResolverOptions {
    * Injected in tests so no real HOME I/O is touched.
    */
   readFile?: (path: string) => string | null;
+  /** Injectable wall clock for future-timestamp rejection (default Date.now). */
+  now?: () => number;
 }
 
 /** Resolve the registry path from env, defaulting under `$HOME/.cmuxlayer`. */
@@ -161,12 +163,13 @@ function chooseCandidate(
  *
  * Match is stable-surface UUID PRIMARY
  * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
- * optional secondary validator, then newest `ts` decides. Candidates must also
- * be timestamped within the current agent-creation window, preventing an
- * append-only record from a previous process on the same surface from being
- * finalized during the short interval before the new hook appends. AgentRecord
- * pid is deliberately ignored because production does not populate it with the
- * CLI process pid. Returns
+ * optional secondary validator, then newest `ts` decides. Candidates must be
+ * newer than the current agent-creation window and no farther in the future
+ * than the allowed reader-clock skew. Those bounds prevent an append-only row
+ * from a previous process (or from before a backward clock correction) from
+ * being finalized before the new hook appends. AgentRecord pid is deliberately
+ * ignored because production does not populate it with the CLI process pid.
+ * Returns
  * `{ session_id, path }` or `null`. NO filesystem scan of session dirs; a
  * missing/unreadable/empty registry, an agent without a stable surface UUID, or
  * no UUID match all return `null` (the caller then falls back to the scan).
@@ -176,6 +179,7 @@ export function makeSelfRegistrationSessionResolver(
 ): SessionIdentityResolver {
   const registryPath = options.registryPath ?? resolveSessionRegistryPath();
   const readFile = options.readFile ?? defaultReadFile;
+  const now = options.now ?? Date.now;
 
   return (agent: AgentRecord): CapturedSessionIdentity | null => {
     const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
@@ -184,7 +188,11 @@ export function makeSelfRegistrationSessionResolver(
     const createdAt = Date.parse(agent.created_at);
     if (Number.isNaN(createdAt)) return null;
     const earliestCurrentLaunchTs =
-      createdAt - SESSION_REGISTRATION_CREATION_SKEW_MS;
+      createdAt - SESSION_REGISTRATION_TIMESTAMP_SKEW_MS;
+    const resolvedAt = now();
+    if (!Number.isSafeInteger(resolvedAt)) return null;
+    const latestPlausibleTs =
+      resolvedAt + SESSION_REGISTRATION_TIMESTAMP_SKEW_MS;
 
     let text: string | null;
     try {
@@ -198,7 +206,8 @@ export function makeSelfRegistrationSessionResolver(
       (entry) =>
         surfaceUuidKey(entry.surface_uuid) === agentSurfaceUuid &&
         entry.ts !== null &&
-        entry.ts >= earliestCurrentLaunchTs,
+        entry.ts >= earliestCurrentLaunchTs &&
+        entry.ts <= latestPlausibleTs,
     );
     const chosen = chooseCandidate(candidates, launchCwd);
     if (!chosen) return null;
