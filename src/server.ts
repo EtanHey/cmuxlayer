@@ -1979,6 +1979,12 @@ export interface CreateServerOptions {
   context?: CmuxServerContext;
   /** Base directory for agent state files. Defaults to ~/.local/state/cmux-agents */
   stateDir?: string;
+  /** Override lifecycle persistence (primarily for hermetic tests). */
+  stateManager?: StateManager;
+  /** Override the lifecycle registry paired with stateManager (primarily for tests). */
+  lifecycleRegistry?: AgentRegistry;
+  /** Override persisted-state reconstitution at lifecycle startup (primarily for tests). */
+  lifecycleInitializer?: () => Promise<void>;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
   /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
@@ -2099,6 +2105,7 @@ export interface CmuxServerContext {
   sessionIdentityResolver?: SessionIdentityResolver;
   selfRegistrationSessionResolver?: SessionIdentityResolver;
   lifecycleRegistry: AgentRegistry | null;
+  lifecycleInitializer: (() => Promise<void>) | null;
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
   lifecycleStartError: Error | null;
@@ -2164,17 +2171,18 @@ export function createServerContext(
       bin: opts?.bin ?? (opts?.exec ? "cmux" : undefined),
     });
   const autoVitestStateDir =
-    !opts?.stateDir && process.env.VITEST === "true"
+    !opts?.stateDir && !opts?.stateManager && process.env.VITEST === "true"
       ? mkdtempSync(join(tmpdir(), "cmuxlayer-vitest-state-"))
       : null;
   const stateDir =
+    opts?.stateManager?.getBaseDir() ??
     opts?.stateDir ??
     autoVitestStateDir ??
     join(homedir(), ".local", "state", "cmux-agents");
   if (autoVitestStateDir) {
     registerAutoVitestStateDir(autoVitestStateDir);
   }
-  const stateMgr = new StateManager(stateDir);
+  const stateMgr = opts?.stateManager ?? new StateManager(stateDir);
   const readObserverProvider = (
     provider: () => string | null | undefined,
   ): string | null => {
@@ -2222,7 +2230,8 @@ export function createServerContext(
     disableSpawnPreflight: opts?.disableSpawnPreflight,
     sessionIdentityResolver: opts?.sessionIdentityResolver,
     selfRegistrationSessionResolver: opts?.selfRegistrationSessionResolver,
-    lifecycleRegistry: null,
+    lifecycleRegistry: opts?.lifecycleRegistry ?? null,
+    lifecycleInitializer: opts?.lifecycleInitializer ?? null,
     lifecycleStarted: false,
     lifecycleStartPromise: null,
     lifecycleStartError: null,
@@ -8154,8 +8163,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (!context.lifecycleStarted) {
       context.lifecycleStarted = true;
       context.lifecycleStartError = null;
-      context.lifecycleStartPromise = engine
-        .initialize(discovery)
+      const lifecycleInitialization = context.lifecycleInitializer
+        ? Promise.resolve().then(() => context.lifecycleInitializer!())
+        : engine.initialize(discovery);
+      context.lifecycleStartPromise = lifecycleInitialization
         .catch((error) => {
           context.lifecycleStartError =
             error instanceof Error ? error : new Error(String(error));
