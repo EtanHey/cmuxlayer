@@ -1,13 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { open, stat } from "node:fs/promises";
 import {
   CODEX_ROLLOUT_MAX_TAIL_BYTES,
   CODEX_ROLLOUT_MAX_PENDING_LINE_BYTES,
   CODEX_ROLLOUT_READ_CHUNK_BYTES,
   makeCodexRolloutFillProvider,
 } from "../src/codex-rollout-fill.js";
+
+vi.mock("node:fs/promises", () => ({
+  open: vi.fn(),
+  stat: vi.fn(),
+}));
 
 function tokenCountLine(
   totalTokens: number,
@@ -68,18 +71,39 @@ describe("CodexRolloutFillProvider", () => {
   });
 
   it("uses asynchronous production file operations when no reader is injected", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-fill-"));
-    const path = join(dir, "rollout-session.jsonl");
-    writeFileSync(path, tokenCountLine(80_000));
-    try {
-      const provider = makeCodexRolloutFillProvider();
-      await expect(provider.get(path)).resolves.toMatchObject({
-        token_count: 80_000,
-        context_pct: 20,
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    const path = "/tmp/rollout-session.jsonl";
+    const bytes = Buffer.from(tokenCountLine(80_000));
+    vi.mocked(stat).mockResolvedValue({
+      size: bytes.length,
+      mtimeMs: 1,
+      dev: 2,
+      ino: 3,
+      isFile: () => true,
+    } as Awaited<ReturnType<typeof stat>>);
+    const read = vi.fn(
+      async (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        const chunk = bytes.subarray(position, position + length);
+        chunk.copy(buffer, offset);
+        return { bytesRead: chunk.length, buffer };
+      },
+    );
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(open).mockResolvedValue({ read, close } as any);
+
+    const provider = makeCodexRolloutFillProvider();
+    await expect(provider.get(path)).resolves.toMatchObject({
+      token_count: 80_000,
+      context_pct: 20,
+    });
+    expect(stat).toHaveBeenCalledWith(path);
+    expect(open).toHaveBeenCalledWith(path, "r");
+    expect(read).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
   });
 
   it("completes bounded range reads when the filesystem returns short chunks", async () => {
