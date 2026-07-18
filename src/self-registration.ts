@@ -156,6 +156,12 @@ export function parseSelfRegistrationLines(
 ): SelfRegistrationEntry[] {
   const entries: SelfRegistrationEntry[] = [];
   for (const rawLine of text.split("\n")) {
+    if (
+      Buffer.byteLength(rawLine, "utf8") >
+      SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES
+    ) {
+      continue;
+    }
     const line = rawLine.trim();
     if (!line) continue;
     let parsed: unknown;
@@ -185,6 +191,35 @@ export function parseSelfRegistrationLines(
       session_path: toStringOrNull(rec.session_path),
       ts: toIntegerOrNull(rec.ts),
     });
+  }
+  return entries;
+}
+
+/**
+ * Parse complete JSONL rows without decoding a row that exceeds the byte cap.
+ * The production incremental reader calls this only with newline-complete
+ * bytes; handling a final unterminated slice keeps the helper safe in isolation.
+ */
+function parseSelfRegistrationBufferLines(
+  source: Buffer,
+): SelfRegistrationEntry[] {
+  const entries: SelfRegistrationEntry[] = [];
+  let lineStart = 0;
+  while (lineStart < source.byteLength) {
+    const newline = source.indexOf(0x0a, lineStart);
+    const lineEnd = newline >= 0 ? newline : source.byteLength;
+    if (
+      lineEnd - lineStart <=
+      SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES
+    ) {
+      entries.push(
+        ...parseSelfRegistrationLines(
+          source.subarray(lineStart, lineEnd).toString("utf8"),
+        ),
+      );
+    }
+    if (newline < 0) break;
+    lineStart = newline + 1;
   }
   return entries;
 }
@@ -386,9 +421,7 @@ function makeIncrementalEntryIndexReader(
           trailingLine.byteLength >
           SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES;
         pendingLine = boundPendingRegistrationLine(trailingLine);
-        for (const entry of parseSelfRegistrationLines(
-          completeLines.toString("utf8"),
-        )) {
+        for (const entry of parseSelfRegistrationBufferLines(completeLines)) {
           const key = surfaceUuidKey(entry.surface_uuid);
           if (!key) continue;
           indexSurfaceCandidate(entriesBySurface, key, entry);

@@ -426,6 +426,47 @@ describe("makeSelfRegistrationSessionResolver", () => {
     });
   });
 
+  it("skips a complete newline-terminated row over the byte cap", () => {
+    const oversizedLine = Buffer.from(
+      jsonl({
+        session_id: "sid-must-be-skipped",
+        surface_uuid: SURFACE_UUID_A,
+        padding: "x".repeat(SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES),
+        ts: 1000,
+      }),
+    );
+    expect(oversizedLine.byteLength).toBeGreaterThan(
+      SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES,
+    );
+    const body = Buffer.concat([
+      oversizedLine,
+      Buffer.from(
+        jsonl({
+          session_id: "sid-after-oversized-row",
+          surface_uuid: SURFACE_UUID_B,
+          ts: 2000,
+        }),
+      ),
+    ]);
+    const resolve = makeSelfRegistrationSessionResolver({
+      registryPath: "/fake/registry.jsonl",
+      statFile: () => ({
+        size: body.byteLength,
+        mtimeMs: 1,
+        dev: 1,
+        ino: 1,
+      }),
+      readFileRange: (_path, offset, length) =>
+        body.subarray(offset, offset + length),
+    });
+
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_A }))).toBeNull();
+    expect(resolve(agent({ surface_uuid: SURFACE_UUID_B }))).toEqual({
+      session_id: "sid-after-oversized-row",
+      path: null,
+    });
+  });
+
   it("drops cached candidates on same-size rewrite and inode rotation", () => {
     let body = Buffer.from(
       jsonl({ session_id: "sid-A", surface_uuid: SURFACE_UUID_A, ts: 1000 }),
