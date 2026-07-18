@@ -32,6 +32,7 @@ import type {
 } from "./agent-engine.js";
 
 const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
+const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
 
 /** A single self-registration record, after tolerant parsing. */
 export interface SelfRegistrationEntry {
@@ -180,9 +181,10 @@ type SurfaceEntryIndex = Map<string, SelfRegistrationEntry[]>;
  *
  * Each call stats the file, but unchanged files perform no read or parse. New
  * bytes are read exactly once and indexed by surface UUID, so a sweep across N
- * uncaptured agents is O(file delta + N), not O(N * registry size). A partial
- * final JSONL row is retained until its newline arrives. Compaction, truncation,
- * or rotation resets the index before the replacement file is consumed.
+ * uncaptured agents is O(bounded continuity check + file delta + N), not
+ * O(N * registry size). A partial final JSONL row is retained until its newline
+ * arrives. Compaction, truncation, rotation, or a failed append-continuity check
+ * resets the index before the replacement file is consumed.
  */
 function makeIncrementalEntryIndexReader(
   registryPath: string,
@@ -197,12 +199,14 @@ function makeIncrementalEntryIndexReader(
   let consumedBytes = 0;
   let observedMtimeMs = Number.NEGATIVE_INFINITY;
   let pendingLine = Buffer.alloc(0);
+  let continuityTail = Buffer.alloc(0);
   let entriesBySurface: SurfaceEntryIndex = new Map();
 
   const reset = () => {
     consumedBytes = 0;
     observedMtimeMs = Number.NEGATIVE_INFINITY;
     pendingLine = Buffer.alloc(0);
+    continuityTail = Buffer.alloc(0);
     entriesBySurface = new Map();
   };
 
@@ -231,6 +235,12 @@ function makeIncrementalEntryIndexReader(
       fileIdentity !== null &&
       fileStat.size === consumedBytes &&
       fileStat.mtimeMs !== observedMtimeMs;
+    const sameFileGrowth =
+      fileIdentity !== null &&
+      !replaced &&
+      fileStat.size > consumedBytes &&
+      consumedBytes > 0 &&
+      continuityTail.byteLength > 0;
     if (
       fileIdentity === null ||
       replaced ||
@@ -242,17 +252,49 @@ function makeIncrementalEntryIndexReader(
     fileIdentity = nextIdentity;
 
     if (fileStat.size > consumedBytes) {
-      const offset = consumedBytes;
+      const continuityLength = sameFileGrowth
+        ? Math.min(continuityTail.byteLength, consumedBytes)
+        : 0;
+      const offset = consumedBytes - continuityLength;
       const length = fileStat.size - offset;
-      let appended: Buffer | null;
+      let readBuffer: Buffer | null;
       try {
-        appended = readFileRange(registryPath, offset, length);
+        readBuffer = readFileRange(registryPath, offset, length);
       } catch {
-        appended = null;
+        readBuffer = null;
       }
-      if (!appended || appended.byteLength !== length) return null;
+      if (!readBuffer || readBuffer.byteLength !== length) return null;
+
+      let appended = readBuffer;
+      if (continuityLength > 0) {
+        const expectedBoundary = continuityTail.subarray(
+          continuityTail.byteLength - continuityLength,
+        );
+        const observedBoundary = readBuffer.subarray(0, continuityLength);
+        if (!observedBoundary.equals(expectedBoundary)) {
+          reset();
+          try {
+            readBuffer = readFileRange(registryPath, 0, fileStat.size);
+          } catch {
+            readBuffer = null;
+          }
+          if (!readBuffer || readBuffer.byteLength !== fileStat.size) {
+            return null;
+          }
+          appended = readBuffer;
+        } else {
+          appended = readBuffer.subarray(continuityLength);
+        }
+      }
 
       consumedBytes = fileStat.size;
+      const continuitySource = Buffer.concat([continuityTail, appended]);
+      continuityTail = continuitySource.subarray(
+        Math.max(
+          0,
+          continuitySource.byteLength - SESSION_REGISTRATION_CONTINUITY_BYTES,
+        ),
+      );
       const combined = Buffer.concat([pendingLine, appended]);
       const finalNewline = combined.lastIndexOf(0x0a);
       if (finalNewline >= 0) {
