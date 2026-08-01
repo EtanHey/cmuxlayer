@@ -4059,7 +4059,8 @@ describe("agent lifecycle tool handlers", () => {
         role: "ic",
       }),
     ];
-    const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(records);
+    const { server, sendCalls, sendKeyCalls } =
+      await createBroadcastServer(records);
     const broadcast = (server as any)._registeredTools["broadcast"];
 
     const result = await broadcast.handler(
@@ -4076,6 +4077,35 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendCalls).toHaveLength(0);
     expect(sendKeyCalls).toHaveLength(0);
     expect(readOutboxMtimeMs(outboxPath)).toBe(outboxMtimeBefore);
+  });
+
+  it("broadcast refuses the dense incident below the general inline cap", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "ic-target",
+        surface_id: "surface:ic",
+        state: "ready",
+        role: "ic",
+      }),
+    ];
+    const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(records);
+    const broadcast = (server as any)._registeredTools["broadcast"];
+
+    const result = await broadcast.handler(
+      { text: "x".repeat(1_734) },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("broadcast.text");
+    expect(parsed.error).toContain("1734 characters");
+    expect(parsed.error).toContain("longest unbroken run is 1734");
+    expect(parsed.error).toContain("routing policy threshold 1500");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(parsed.error).not.toContain("allow_long_inline");
+    expect(sendCalls).toHaveLength(0);
+    expect(sendKeyCalls).toHaveLength(0);
   });
 
   it("broadcast fails closed when live surface enumeration is malformed", async () => {
