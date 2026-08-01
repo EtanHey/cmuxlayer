@@ -1291,9 +1291,13 @@ function assertDenseInlineInputAllowed(opts: {
     return;
   }
 
+  const inputCharacterCount = Array.from(opts.value).length;
   const longestUnbrokenRun = opts.value
-    .split("\n")
-    .reduce((longest, line) => Math.max(longest, line.length), 0);
+    .split(/\r?\n/)
+    .reduce(
+      (longest, line) => Math.max(longest, Array.from(line).length),
+      0,
+    );
   if (longestUnbrokenRun <= DENSE_INLINE_POLICY_MAX_UNBROKEN_CHARS) {
     return;
   }
@@ -1304,7 +1308,7 @@ function assertDenseInlineInputAllowed(opts: {
       ? ""
       : " To deliberately send raw inline text, pass allow_long_inline:true.";
   throw new Error(
-    `${argName} is ${opts.value.length} characters and its longest unbroken run is ${longestUnbrokenRun}, above the dense inline routing policy threshold ${DENSE_INLINE_POLICY_MAX_UNBROKEN_CHARS}. Long dense payloads belong in a file: write the payload to a file and send one line: "Read and follow <path>".` +
+    `${argName} is ${inputCharacterCount} characters and its longest unbroken run is ${longestUnbrokenRun}, above the dense inline routing policy threshold ${DENSE_INLINE_POLICY_MAX_UNBROKEN_CHARS}. Long dense payloads belong in a file: write the payload to a file and send one line: "Read and follow <path>".` +
       overrideGuidance,
   );
 }

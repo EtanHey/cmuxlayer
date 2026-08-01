@@ -385,6 +385,37 @@ describe("pane input pointer discipline", () => {
     expect(parseToolResult(result).ok).toBe(true);
   });
 
+  it("counts astral symbols as Unicode characters for the dense threshold", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+    const text = "😀".repeat(751);
+
+    const result = await tool.handler(
+      { surface: "surface:1", text },
+      {} as any,
+    );
+
+    expect(text).toHaveLength(1_502);
+    expect(Array.from(text)).toHaveLength(751);
+    expect(parseToolResult(result).ok).toBe(true);
+  });
+
+  it("does not count CR in CRLF as line content at the dense boundary", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: `${"x".repeat(1_500)}\r\nok` },
+      {} as any,
+    );
+
+    expect(parseToolResult(result).ok).toBe(true);
+  });
+
   it("send_input refuses while a Claude AskUserQuestion overlay is active", async () => {
     const overlayText = readPainpointFixture("claude-ask-user-question-overlay.txt");
     const { createServer } = await loadServerModule();
