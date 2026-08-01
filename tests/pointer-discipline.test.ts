@@ -13,6 +13,9 @@ import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 
 const previousMaxInlineChars = process.env.CMUXLAYER_MAX_INLINE_CHARS;
 let testDir = "";
+const denseIncidentPayload = "x".repeat(1_734);
+const lineBrokenIncidentPayload =
+  `${"x".repeat(79)}\n`.repeat(21) + "x".repeat(54);
 
 async function loadServerModule() {
   vi.resetModules();
@@ -289,7 +292,10 @@ describe("pane input pointer discipline", () => {
     tool = (server as any)._registeredTools["send_input"];
 
     result = await tool.handler(
-      { surface: "surface:1", text: "x".repeat(1_700) },
+      {
+        surface: "surface:1",
+        text: `${"x".repeat(850)}\n${"x".repeat(849)}`,
+      },
       {} as any,
     );
 
@@ -316,6 +322,67 @@ describe("pane input pointer discipline", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1"]),
     );
+  });
+
+  it("send_input refuses the 1,734-character dense incident as routing policy", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: denseIncidentPayload },
+      {} as any,
+    );
+
+    expect(denseIncidentPayload).toHaveLength(1_734);
+    expect(denseIncidentPayload).not.toContain("\n");
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("send_input.text");
+    expect(parsed.error).toContain("1734 characters");
+    expect(parsed.error).toContain("longest unbroken run is 1734");
+    expect(parsed.error).toContain("routing policy threshold 1500");
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(parsed.error).toContain("allow_long_inline");
+    expect(parsed.error).not.toContain("mid-token");
+    expect(parsed.error).not.toContain("break panes");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("keeps a line-broken 1,734-character send_input payload allowed", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: lineBrokenIncidentPayload },
+      {} as any,
+    );
+
+    expect(lineBrokenIncidentPayload).toHaveLength(1_734);
+    expect(
+      Math.max(
+        ...lineBrokenIncidentPayload.split("\n").map((line) => line.length),
+      ),
+    ).toBe(79);
+    expect(parseToolResult(result).ok).toBe(true);
+  });
+
+  it("keeps a 1,500-character unbroken send_input payload allowed", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_input"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", text: "x".repeat(1_500) },
+      {} as any,
+    );
+
+    expect(parseToolResult(result).ok).toBe(true);
   });
 
   it("send_input refuses while a Claude AskUserQuestion overlay is active", async () => {
@@ -534,6 +601,24 @@ describe("pane input pointer discipline", () => {
     ).toBe(1);
   });
 
+  it("send_command refuses the dense incident below the general inline cap", async () => {
+    const { createServer } = await loadServerModule();
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["send_command"];
+
+    const result = await tool.handler(
+      { surface: "surface:1", command: denseIncidentPayload },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("send_command.command");
+    expect(parsed.error).toContain("routing policy threshold 1500");
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
   it("spawn_agent refuses an over-threshold inline prompt and points to boot_prompt_path", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
     const { createServer, createServerContext } = await loadServerModule();
@@ -564,6 +649,37 @@ describe("pane input pointer discipline", () => {
     expect(parsed.error).toContain("spawn_agent.prompt");
     expect(parsed.error).toContain("boot_prompt_path");
     expect(parsed.error).toContain("allow_long_inline");
+    expect(mockExec).not.toHaveBeenCalled();
+    context.dispose();
+  });
+
+  it("spawn_agent refuses the dense incident below the general inline cap", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+    mockExec.mockClear();
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: denseIncidentPayload,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("spawn_agent.prompt");
+    expect(parsed.error).toContain("routing policy threshold 1500");
     expect(mockExec).not.toHaveBeenCalled();
     context.dispose();
   });
@@ -667,6 +783,73 @@ describe("pane input pointer discipline", () => {
     expect(mockExec).not.toHaveBeenCalled();
     context.dispose();
   });
+
+  it("send_to mode=agent refuses the dense incident below the general inline cap", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendTo = (server as any)._registeredTools["send_to"];
+    mockExec.mockClear();
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: denseIncidentPayload, press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("send_to.text");
+    expect(parsed.error).toContain("routing policy threshold 1500");
+    expect(mockExec).not.toHaveBeenCalled();
+    context.dispose();
+  });
+
+  it.each([
+    ["surface", { text: denseIncidentPayload }],
+    ["command", { command: denseIncidentPayload }],
+  ] as const)(
+    "send_to mode=%s refuses the dense incident below the general inline cap",
+    async (mode, payload) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      const mockExec = makeLifecycleExec();
+      const context = createServerContext({
+        exec: mockExec,
+        stateDir: testDir,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
+      const server = createServer({ context });
+      const sendTo = (server as any)._registeredTools["send_to"];
+      mockExec.mockClear();
+
+      const result = await sendTo.handler(
+        { mode, target: "surface:new", ...payload },
+        {} as any,
+      );
+
+      const parsed = parseToolResult(result);
+      expect(result.isError).toBe(true);
+      expect(parsed.error).toContain(
+        mode === "surface" ? "send_input.text" : "send_command.command",
+      );
+      expect(parsed.error).toContain("routing policy threshold 1500");
+      expect(
+        mockExec.mock.calls.some(([, args]) =>
+          args.some((arg: string) =>
+            ["send", "set-buffer", "paste-buffer", "send-key"].includes(arg),
+          ),
+        ),
+      ).toBe(false);
+      context.dispose();
+    },
+  );
 
   it("send_to allow_long_inline bypasses the inline text cap", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
@@ -829,6 +1012,66 @@ describe("pane input pointer discipline", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("CMUXLAYER_MAX_INLINE_CHARS=700");
     expect(mockExec).not.toHaveBeenCalled();
+    context.dispose();
+  });
+
+  it("send_to_agent refuses the dense incident below the general inline cap", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const agentId = await spawnReadyAgent(server);
+    const sendToAgent = (server as any)._registeredTools["send_to_agent"];
+    mockExec.mockClear();
+
+    const result = await sendToAgent.handler(
+      { agent_id: agentId, text: denseIncidentPayload, press_enter: true },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("send_to_agent.text");
+    expect(parsed.error).toContain("routing policy threshold 1500");
+    expect(mockExec).not.toHaveBeenCalled();
+    context.dispose();
+  });
+
+  it("send-class tool descriptions teach the dense payload routing policy", async () => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const context = createServerContext({
+      exec: makeLifecycleExec(),
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context }) as any;
+
+    for (const toolName of [
+      "send_input",
+      "send_command",
+      "spawn_agent",
+      "broadcast",
+      "send_to",
+      "send_to_agent",
+    ]) {
+      const description = server._registeredTools[toolName].description;
+      expect(description, toolName).toContain("1500");
+      expect(description, toolName).toMatch(/dense/i);
+      expect(description, toolName).toMatch(/routing policy/i);
+      expect(description, toolName).toContain("Read and follow <path>");
+      expect(description, toolName).toMatch(/zsh history expansion/i);
+      expect(description, toolName).toContain("!");
+      expect(description, toolName).not.toMatch(
+        /mid-token|break panes|pane break/i,
+      );
+    }
+
     context.dispose();
   });
 });
