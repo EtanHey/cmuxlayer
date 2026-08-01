@@ -325,6 +325,8 @@ describe("parseHarnessSession", () => {
 
 describe("modelContextWindow (Claude denominator + no-JSONL fallback)", () => {
   it("maps current-gen 1M Claude models", () => {
+    expect(modelContextWindow("claude-opus-5")).toBe(1_000_000);
+    expect(modelContextWindow("claude-opus-5[1m]")).toBe(1_000_000);
     expect(modelContextWindow("claude-opus-4-8")).toBe(1_000_000);
     expect(modelContextWindow("claude-opus-4-6")).toBe(1_000_000);
     expect(modelContextWindow("claude-sonnet-4-6")).toBe(1_000_000);

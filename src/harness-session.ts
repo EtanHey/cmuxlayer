@@ -40,8 +40,8 @@ export interface HarnessSessionState {
 const MODEL_WINDOW_RULES: Array<
   [pattern: RegExp, window: number, jsonlFloor?: boolean]
 > = [
-  // Claude — current gen ships 1M standard (Opus 4.6/4.7/4.8, Sonnet 4.6)
-  [/(opus-4-?[678])|(sonnet-4-?6)/, 1_000_000],
+  // Claude — current gen ships 1M standard (Opus 5/4.6/4.7/4.8, Sonnet 4.6)
+  [/(opus-5(?:$|[^0-9]))|(opus-4-?[678])|(sonnet-4-?6)/, 1_000_000],
   // Claude — Fable (Mythos tier) ships 1M standard. A live 151% reading proved it was
   // falling through to the 200K default. Matches "fable", "fable-5", "claude-fable-5".
   [/fable/, 1_000_000],
