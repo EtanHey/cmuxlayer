@@ -49,7 +49,7 @@ describe("model-policy drift gate", () => {
     }
 
     expect(MODEL_POLICY_CONTRACT.cli.claude.defaultModel).toBe(
-      "claude-opus-4-8[1m]",
+      "claude-opus-5[1m]",
     );
 
     const codex = MODEL_POLICY_CONTRACT.cli.codex;
