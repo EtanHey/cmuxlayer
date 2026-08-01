@@ -1880,6 +1880,21 @@ function screenShowsPendingInput(
   );
 }
 
+function screenShowsQueuedAgentInput(screenText: string): boolean {
+  const normalized = normalizeTerminalText(screenText);
+  const heading =
+    /(?:^|\n)[ \t]*Messages to be submitted after next tool call[ \t]*(?=\n|$)/i.exec(
+      normalized,
+    );
+  if (!heading) {
+    return false;
+  }
+
+  return /(?:^|\n)[ \t]*↳(?:[ \t]|$)/.test(
+    normalized.slice(heading.index + heading[0].length),
+  );
+}
+
 export function screenShowsPendingShellInput(
   screenText: string,
   submittedText: string,
@@ -3726,7 +3741,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let retryCount = 0;
     let sawClearedComposerEvidence = false;
     let sawAllowedClearedComposerEvidence = false;
-    let lastHasPendingInput = false;
+    let lastHasPendingSubmitEvidence = false;
     let lastRetryEligiblePendingInput = false;
     let retryEligiblePendingSince: number | null = null;
     let retriedAt: number | null = null;
@@ -3758,21 +3773,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       sawReadableScreen = true;
 
-      if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+      const hasQueuedAgentInput = screenShowsQueuedAgentInput(snapshot.text);
+      const hasPendingSubmitEvidence =
+        hasPendingInput || hasQueuedAgentInput;
+      lastHasPendingSubmitEvidence = hasPendingSubmitEvidence;
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      if (
+        !hasPendingSubmitEvidence &&
+        isSubmitVerifiedStatus(snapshot.parsed.status)
+      ) {
         return {
           submit_verified: true,
           submit_verification_reason: null,
           retry_count: retryCount,
         };
       }
-
-      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
-      lastHasPendingInput = hasPendingInput;
-      const composerInput = extractComposerInputRegion(snapshot.text);
       const hasClearedAgentComposer =
         composerInput !== null &&
         composerInput.trim() === "" &&
-        !hasPendingInput &&
+        !hasPendingSubmitEvidence &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       if (hasClearedAgentComposer) {
         sawClearedComposerEvidence = true;
@@ -3867,7 +3887,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const submitVerified =
       opts.require_working_status ||
-      lastHasPendingInput ||
+      lastHasPendingSubmitEvidence ||
       lastRetryEligiblePendingInput ||
       !sawReadableScreen
         ? false
@@ -3875,7 +3895,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const failureReason: SubmitVerificationFailureReason | null =
       submitVerified !== false
         ? null
-        : lastHasPendingInput || lastRetryEligiblePendingInput
+        : lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput
           ? "input_still_pending"
           : !sawReadableScreen
             ? sawBlankScreen
@@ -9108,15 +9128,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
-            // Verify every relay to an interactive agent — not just long ones.
-            // A short relay (the common agent-to-agent case) to a frozen
-            // terminal must be caught, never reported as ok. allow_busy sends
-            // are deliberate queue/interjection writes and stay unverified to
-            // avoid false-failing accepted queued input.
+            // Verify every submitted agent relay — not just long ones. A short
+            // relay (the common agent-to-agent case) to a frozen terminal must
+            // be caught, never reported as ok. Busy sends do not retry Return:
+            // accepted queued input can repaint slowly, but text still proven
+            // inside the active composer must not receive a success receipt.
             verify_submit:
               args.press_enter &&
-              !args.allow_busy &&
-              INTERACTIVE_AGENT_STATES.has(deliveryRoute.state),
+              (args.allow_busy ||
+                INTERACTIVE_AGENT_STATES.has(deliveryRoute.state)),
             allow_recovery_enter_retry: !args.allow_busy,
             beforeMutation: assertDeliveryRouteCurrent,
           });

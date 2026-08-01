@@ -3126,7 +3126,6 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-
     expect(result.isError).not.toBe(true);
     expect(data.delivered).toBe(true);
     expect(data.submit_verified).toBe(true);

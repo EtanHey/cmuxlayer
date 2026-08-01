@@ -26,6 +26,22 @@ async function callTool(
   return resultPromise;
 }
 
+async function callToolInTimerSteps(
+  server: any,
+  name: string,
+  args: Record<string, unknown>,
+) {
+  const tool = server._registeredTools[name];
+  if (!tool) {
+    throw new Error(`Tool not found: ${name}`);
+  }
+  const resultPromise = tool.handler(args, {} as any);
+  for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+    await vi.advanceTimersByTimeAsync(100);
+  }
+  return resultPromise;
+}
+
 function readEventLog(): Array<Record<string, unknown>> {
   const filePath = join(TEST_DIR, "events.jsonl");
   if (!existsSync(filePath)) {
@@ -50,11 +66,17 @@ class FakeClaudeSurfaceClient {
   readonly title = "brainlayerClaude";
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
+  readonly screenReads: string[] = [];
   readonly renameTabCalls: string[] = [];
   requiredReturns = 2;
   completionMode: "idle" | "working" = "working";
+  cli: "claude" | "codex" = "claude";
+  keepWorkingStatusWhilePending = false;
+  queuedCodexReadsAfterReturn = 0;
+  failScreenReadsAfterReturn = false;
   private pendingText = "";
   private returnCount = 0;
+  private queuedCodexReadsRemaining = 0;
   private mode: "idle" | "working" = "idle";
 
   async listWorkspaces() {
@@ -144,17 +166,23 @@ class FakeClaudeSurfaceClient {
       return;
     }
 
-    this.mode = "idle";
+    this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
+    this.mode = this.keepWorkingStatusWhilePending ? "working" : "idle";
   }
 
   async readScreen(surface: string, opts?: { lines?: number }) {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);
     }
+    if (this.failScreenReadsAfterReturn && this.returnCount > 0) {
+      throw new Error("screen temporarily unavailable");
+    }
 
+    const text = this.renderScreen();
+    this.screenReads.push(text);
     return {
       surface,
-      text: this.renderScreen(),
+      text,
       lines: opts?.lines ?? 30,
       scrollback_used: false,
     };
@@ -165,11 +193,21 @@ class FakeClaudeSurfaceClient {
   }
 
   private renderScreen(): string {
+    const tail = this.pendingText.slice(-160);
+    if (this.cli === "codex") {
+      const status = this.mode === "working" ? "Working (11s)" : "";
+      if (this.pendingText && this.queuedCodexReadsRemaining > 0) {
+        this.queuedCodexReadsRemaining -= 1;
+        const truncated = `${this.pendingText.slice(0, 42)}…`;
+        return `OpenAI Codex\n${status}\n\nMessages to be submitted after next tool call\n  ↳ ${truncated}\n\n› \n\n  gpt-5.6-sol xhigh`;
+      }
+      return `OpenAI Codex\n${status}\n\n› ${tail}\n\n  gpt-5.6-sol xhigh`;
+    }
+
     if (this.mode === "working") {
       return "Claude Code\n✻ Working\n";
     }
 
-    const tail = this.pendingText.slice(-160);
     return `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
   }
 }
@@ -821,29 +859,107 @@ describe("enter reliability", () => {
     expect(events[0]?.submit_verified).toBeNull();
   });
 
-  it("does not retry Enter for allow_busy agent sends with ambiguous pending input", async () => {
+  it("Probe B: rejects an allow_busy Codex receipt when Return leaves the follow-up in the composer", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
+    client.cli = "codex";
+    client.keepWorkingStatusWhilePending = true;
     server = createReliabilityServer(client);
-    registerAgent(server, { state: "ready" });
+    registerAgent(server, { state: "working", cli: "codex" });
+    const followUp = "Probe B follow-up evidence ".repeat(22).slice(0, 541);
 
     const result = await callTool(server, "send_to", {
       agent_id: "agent-1",
-      text: "stack this while busy",
+      text: followUp,
       press_enter: true,
       allow_busy: true,
     });
     const parsed = parseResult(result);
     const events = readEventLog().filter((event) => event.event_type === "send_to");
 
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBeNull();
+    expect(followUp).toHaveLength(541);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(client.sendCalls.join("")).toBe(followUp);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBe(false);
+    expect(events[0]?.retry_count).toBe(0);
+  }, 10_000);
+
+  it("Probe E: rejects working status across a truncated Codex queue-to-composer transition", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    client.cli = "codex";
+    client.keepWorkingStatusWhilePending = true;
+    client.queuedCodexReadsAfterReturn = 1;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "ready", cli: "codex" });
+    const followUp = "Probe E queued follow-up evidence ".repeat(20).slice(0, 541);
+    const tail = followUp.slice(-80);
+
+    const result = await callToolInTimerSteps(server, "send_to", {
+      agent_id: "agent-1",
+      text: followUp,
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter((event) => event.event_type === "send_to");
+    const queuedScreen = client.screenReads.find((screen) =>
+      screen.includes("Messages to be submitted after next tool call"),
+    );
+    const composerScreen = client.screenReads.find(
+      (screen) =>
+        !screen.includes("Messages to be submitted after next tool call") &&
+        screen.includes("› ") &&
+        screen.includes(tail),
+    );
+
+    expect(followUp).toHaveLength(541);
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
+    expect(queuedScreen).toContain("↳ Probe E queued follow-up evidence");
+    expect(queuedScreen).not.toContain(tail);
+    expect(composerScreen).toContain("› ");
+    expect(composerScreen).toContain(tail);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.submit_verified).toBe(false);
+    expect(events[0]?.retry_count).toBe(0);
+  }, 10_000);
+
+  it("fails closed when requested agent submission verification cannot read the screen", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.failScreenReadsAfterReturn = true;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "unavailable verification evidence",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+    const events = readEventLog().filter((event) => event.event_type === "send_to");
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBeNull();
+    expect(events[0]?.submit_verified).toBe(false);
     expect(events[0]?.retry_count).toBe(0);
   }, 10_000);
 
