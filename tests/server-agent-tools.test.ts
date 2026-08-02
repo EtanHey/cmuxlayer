@@ -3714,6 +3714,74 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("new_worktree_split reports the created identity when boot prompt verification fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+      const worktreePath = join(
+        gitsDir,
+        "cmuxlayer.wt",
+        "boot-verification-failure-worker",
+      );
+      const worktreeExec = vi.fn().mockImplementation(async () => {
+        mkdirSync(worktreePath, { recursive: true });
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec();
+      let promptSent = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "verify this prompt") {
+          promptSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (promptSent && args.includes("send-key")) {
+          return { stdout: "{}", stderr: "" };
+        }
+        if (promptSent && args.includes("read-screen")) {
+          throw new Error("screen unavailable after prompt delivery");
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const tool = (server as any)._registeredTools["new_worktree_split"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "verify this prompt",
+          worktree: { name: "boot verification failure worker" },
+          boot_prompt_timeout_ms: 23,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await resultPromise;
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.workspace_id).toBe("workspace:1");
+      expect(parsed.submit_verification_reason).toBe(
+        "surface_read_unavailable",
+      );
+      expect(parsed.retry_safe).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn_agent reports readiness timeout without poisoning agent state", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");

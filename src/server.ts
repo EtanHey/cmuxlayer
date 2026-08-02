@@ -6181,18 +6181,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result?.workspace,
           { waitForReady: false },
         );
+        const createdIdentity = result
+          ? {
+              surface: result.surface,
+              workspace: result.workspace,
+              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+            }
+          : {};
         if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
+          return err(e, surfaceGonePayload(e, createdIdentity));
         }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             last_10_lines: e.last_10_lines,
           });
         }
         if (e instanceof BootPromptUpdateMenuBlockedError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
@@ -6200,11 +6207,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             delivered_chars: e.delivered_chars,
           });
         }
-        return err(e);
+        return err(e, createdIdentity);
       }
     },
   );
@@ -6308,18 +6315,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const createdIdentity = result
+          ? {
+              surface: result.surface,
+              workspace: result.workspace,
+              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+            }
+          : {};
         if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
+          return err(e, surfaceGonePayload(e, createdIdentity));
         }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             last_10_lines: e.last_10_lines,
           });
         }
         if (e instanceof BootPromptUpdateMenuBlockedError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
@@ -6327,11 +6341,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             delivered_chars: e.delivered_chars,
           });
         }
-        return err(e);
+        return err(e, createdIdentity);
       }
     },
   );
@@ -9193,6 +9207,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : mutationWorkspace,
             { waitForReady: false },
           );
+          const createdIdentity = result
+            ? {
+                agent_id: result.agent_id,
+                surface_id: result.surface_id,
+                workspace_id: result.workspace_id ?? mutationWorkspace,
+              }
+            : {};
           if (e instanceof AgentLaunchError) {
             if (e.launch_cause instanceof DeliverySafetyGateError) {
               return err(e.launch_cause, {
@@ -9222,6 +9243,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...createdIdentity,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
@@ -9229,11 +9251,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (e instanceof SubmitVerificationError) {
             return err(e, {
+              ...createdIdentity,
               submit_verified: false,
               retry_count: e.retry_count,
             });
           }
-          return err(e);
+          if (e instanceof SurfaceGoneError) {
+            return err(e, surfaceGonePayload(e, createdIdentity));
+          }
+          if (e instanceof BootPromptTimeoutError) {
+            return err(e, {
+              ...createdIdentity,
+              last_10_lines: e.last_10_lines,
+            });
+          }
+          if (e instanceof BootPromptUpdateMenuBlockedError) {
+            return err(e, {
+              ...createdIdentity,
+              error_code: e.error_code,
+              last_10_lines: e.last_10_lines,
+              recovery: e.recovery,
+            });
+          }
+          if (e instanceof BootPromptDeliveryError) {
+            return err(e, {
+              ...createdIdentity,
+              delivered_chars: e.delivered_chars,
+            });
+          }
+          return err(e, createdIdentity);
         }
       },
     );
@@ -9277,6 +9323,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let focusRestoreLease: FocusRestoreLease | null = null;
         let workspace: string | undefined;
         let lastSurface: string | undefined;
+        let activeSpawnIdentity:
+          | {
+              agent_id: string;
+              surface_id: string;
+              workspace_id: string | null;
+            }
+          | undefined;
+        const createdAgentIdentities: Array<{
+          agent_id: string;
+          surface_id: string;
+          workspace_id: string | null;
+        }> = [];
+        const spawnedAgents: Array<{
+          agent_id: string;
+          surface_id: string;
+          repo: string;
+          cli: CliType;
+          role: AgentRole;
+          health?: ReturnType<typeof evaluateAgentHealth>;
+          monitor_boot?: MonitorBootResult;
+          boot_prompt_delivered?: boolean;
+          boot_prompt_submit_verified?: boolean | null;
+        }> = [];
+        const leanSpawnedAgents: Record<string, unknown>[] = [];
         try {
           await assertWorkspaceMutationAllowed(
             "spawn_in_workspace",
@@ -9305,21 +9375,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             focusRestoreLease,
           );
 
-          const spawnedAgents: Array<{
-            agent_id: string;
-            surface_id: string;
-            repo: string;
-            cli: CliType;
-            role: AgentRole;
-            health?: ReturnType<typeof evaluateAgentHealth>;
-            monitor_boot?: MonitorBootResult;
-            boot_prompt_delivered?: boolean;
-            boot_prompt_submit_verified?: boolean | null;
-          }> = [];
-          const leanSpawnedAgents: Record<string, unknown>[] = [];
-
           for (const agent of args.agents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
+            activeSpawnIdentity = undefined;
             const result = await engine.spawnAgent({
               repo: agent.repo,
               model: agent.model,
@@ -9335,6 +9393,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 );
               },
             });
+            activeSpawnIdentity = {
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+              workspace_id: result.workspace_id ?? workspace ?? null,
+            };
+            createdAgentIdentities.push(activeSpawnIdentity);
+            lastSurface = result.surface_id;
             const originalLaunchCommand = originalLaunchCommandsBySurface.get(
               result.surface_id,
             );
@@ -9368,6 +9433,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
 
               canonicalizeSpawnResult(result);
+              activeSpawnIdentity.agent_id = result.agent_id;
+              activeSpawnIdentity.workspace_id =
+                result.workspace_id ?? workspace ?? null;
               const updated = stateMgr.updateRecord(result.agent_id, {
                 task_summary:
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
@@ -9441,7 +9509,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
 
-          lastSurface = spawnedAgents[spawnedAgents.length - 1]?.surface_id;
           const focusRestoreWarning = await restoreFocusAfterRender(
             focusRestoreLease,
             lastSurface,
@@ -9494,8 +9561,53 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace,
             { waitForReady: false },
           );
+          const failedIdentity =
+            e instanceof AgentLaunchError
+              ? {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id ?? null,
+                }
+              : activeSpawnIdentity;
+          const failureAgents = [...createdAgentIdentities];
+          if (
+            failedIdentity &&
+            !failureAgents.some(
+              (candidate) =>
+                candidate.agent_id === failedIdentity.agent_id &&
+                candidate.surface_id === failedIdentity.surface_id,
+            )
+          ) {
+            failureAgents.push(failedIdentity);
+          }
+          const failureIdentityPayload = {
+            ...(workspace ? { workspace, workspace_id: workspace } : {}),
+            ...(failedIdentity ?? {}),
+            ...(failureAgents.length > 0 ? { agents: failureAgents } : {}),
+          };
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                ...failureIdentityPayload,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(
+                  e.launch_cause,
+                  failureIdentityPayload,
+                ),
+              );
+            }
+            return err(e, failureIdentityPayload);
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...failureIdentityPayload,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
@@ -9503,11 +9615,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (e instanceof SubmitVerificationError) {
             return err(e, {
+              ...failureIdentityPayload,
               submit_verified: false,
               retry_count: e.retry_count,
             });
           }
-          return err(e);
+          if (e instanceof SurfaceGoneError) {
+            return err(
+              e,
+              surfaceGonePayload(e, failureIdentityPayload),
+            );
+          }
+          if (e instanceof BootPromptTimeoutError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              last_10_lines: e.last_10_lines,
+            });
+          }
+          if (e instanceof BootPromptUpdateMenuBlockedError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              error_code: e.error_code,
+              last_10_lines: e.last_10_lines,
+              recovery: e.recovery,
+            });
+          }
+          if (e instanceof BootPromptDeliveryError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              delivered_chars: e.delivered_chars,
+            });
+          }
+          return err(e, failureIdentityPayload);
         }
       },
     );

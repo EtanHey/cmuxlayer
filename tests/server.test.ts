@@ -7513,7 +7513,7 @@ describe("tool handler integration", () => {
           // The end-to-end update path can consume two launcher submit-
           // verification windows plus several independent 2s readiness
           // phases. This is only the fake-clock driver ceiling; the production
-          // timeout asserted above remains boot_prompt_timeout_ms: 2_000.
+          // timeout supplied to this call remains boot_prompt_timeout_ms: 2_000.
           30_000,
         );
         const parsed =
@@ -9561,6 +9561,47 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("new_split reports the created surface when rename fails", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rename-tab")) {
+        throw new Error("rename failed after split creation");
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        pane: "pane:1",
+        workspace: "workspace:1",
+        title: "Build Task",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("rename failed after split creation");
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.workspace).toBe("workspace:1");
+  });
+
   it("new_surface handler calls cmux new-surface", async () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -9619,6 +9660,46 @@ describe("tool handler integration", () => {
         "Build Logs",
       ]),
     );
+  });
+
+  it("new_surface reports the created surface when rename fails", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:3",
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rename-tab")) {
+        throw new Error("rename failed after surface creation");
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_surface"];
+
+    const result = await tool.handler(
+      {
+        pane: "pane:1",
+        workspace: "workspace:1",
+        title: "Build Logs",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("rename failed after surface creation");
+    expect(parsed.surface).toBe("surface:3");
+    expect(parsed.workspace).toBe("workspace:1");
   });
 
   it("new_surface rejects missing boot_prompt_path before creating a tab", async () => {
