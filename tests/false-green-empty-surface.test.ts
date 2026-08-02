@@ -147,7 +147,7 @@ describe("false-green empty surface protection", () => {
     expect(parsed.submit_verified).toBeNull();
   });
 
-  it("runs submit verification when isolated state has an interactive record for the surface", async () => {
+  it("fails closed when tracked send_command verification has no positive screen evidence", async () => {
     vi.useFakeTimers();
     const now = "2026-07-01T20:56:00.000Z";
     const record: AgentRecord = {
@@ -207,8 +207,10 @@ describe("false-green empty surface protection", () => {
     const result = await resultPromise;
 
     const parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBeNull();
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.retry_count).toBe(0);
     expect(
       (mockExec as any).mock.calls.filter(([, args]: [string, string[]]) =>
         args.includes("send-key") && args.includes("return"),

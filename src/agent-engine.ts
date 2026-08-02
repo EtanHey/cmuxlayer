@@ -147,6 +147,7 @@ export interface SpawnAgentParams {
   model?: string;
   cli: CliType;
   prompt: string;
+  boot_prompt_timeout_ms?: number;
   boot_prompt_pending?: boolean;
   workspace?: string;
   cwd?: string;
@@ -179,6 +180,19 @@ export interface SpawnAgentResult {
   model_policy?: SpawnModelPolicy;
   cwd?: string;
   mcp_env?: string;
+}
+
+export class AgentLaunchError extends Error {
+  constructor(
+    message: string,
+    readonly agent_id: string,
+    readonly surface_id: string,
+    readonly workspace_id?: string,
+    readonly launch_cause?: unknown,
+  ) {
+    super(message);
+    this.name = "AgentLaunchError";
+  }
 }
 
 function isWorktreeLaunch(
@@ -310,6 +324,7 @@ export interface AgentEngineOptions {
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
+    timeout_ms?: number;
     assertSurfaceBindingCurrent: () => Promise<void>;
   }) => Promise<void>;
   /**
@@ -1850,6 +1865,7 @@ export class AgentEngine {
     command: string,
     agentId: string,
     observerEpoch: SurfaceObserverEpoch,
+    timeoutMs?: number,
   ): Promise<void> {
     const expectedRoute = this.resolveAgentRoute(agentId);
     if (surface !== expectedRoute.surface_id) {
@@ -1885,6 +1901,7 @@ export class AgentEngine {
         ...this.stableSurfaceWriteOptions(expectedRoute.surface_uuid),
         workspace,
         command,
+        timeout_ms: timeoutMs,
         assertSurfaceBindingCurrent,
       });
       return;
@@ -4747,6 +4764,7 @@ export class AgentEngine {
         launchCmd,
         agentId,
         surface.observerEpoch,
+        spawnParams.boot_prompt_timeout_ms,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4765,7 +4783,13 @@ export class AgentEngine {
       } catch {
         // Preserve the original launch error for the caller.
       }
-      throw error;
+      throw new AgentLaunchError(
+        message,
+        failedAgentId,
+        surface.surface,
+        surface.actual_workspace ?? surface.workspace,
+        error,
+      );
     }
     this.schedulePostSpawnLivenessAssertion(agentId);
     const seatWarnings =

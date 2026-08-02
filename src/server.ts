@@ -39,6 +39,7 @@ import {
 } from "./cmux-observer-identity.js";
 import {
   AgentEngine,
+  AgentLaunchError,
   buildLaunchCommand,
   resolveSweepTiming,
   type AgentLifecycleEvent,
@@ -3506,6 +3507,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
 
     const timeoutMs = opts.timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
+    // Once verification is requested, missing or inconclusive evidence is a
+    // failed verification. The spawn launcher probe remains advisory because
+    // agent-readiness detection is authoritative for that one internal path.
+    const noSubmitEvidenceResult =
+      opts.source_event === "spawn_agent" ? null : false;
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
@@ -3530,11 +3536,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         throwOnSurfaceGone: true,
       });
       if (!snapshot) {
-        return { submit_verified: null, retry_count: retryCount };
+        return {
+          submit_verified: noSubmitEvidenceResult,
+          retry_count: retryCount,
+        };
       }
 
       if (!snapshot.text.trim()) {
-        return { submit_verified: null, retry_count: retryCount };
+        return {
+          submit_verified: noSubmitEvidenceResult,
+          retry_count: retryCount,
+        };
       }
 
       if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
@@ -3634,7 +3646,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? false
               : lastRetryEligiblePendingInput
                 ? false
-                : null,
+                : noSubmitEvidenceResult,
       retry_count: retryCount,
     };
   };
@@ -4221,6 +4233,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
+    timeout_ms?: number;
     relaunch?: boolean;
     assertSurfaceBindingCurrent?: () => Promise<void>;
   }): Promise<void> => {
@@ -4234,6 +4247,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await waitForLaunchShellReady({
         surface: opts.surface,
         workspace: opts.workspace,
+        timeout_ms: opts.timeout_ms,
       });
     }
     await opts.assertSurfaceBindingCurrent?.();
@@ -4293,6 +4307,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await waitForLaunchShellReady({
             surface: opts.surface,
             workspace: opts.workspace,
+            timeout_ms: opts.timeout_ms,
             require_fresh_shell_prompt: true,
           });
         };
@@ -4349,6 +4364,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await waitForAgentLaunchReady({
             surface: opts.surface,
             workspace: opts.workspace,
+            timeout_ms: opts.timeout_ms,
             onUpdateShellRelaunch: relaunchOriginalCommand,
           });
         }
@@ -7878,6 +7894,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity,
             workspace,
             command,
+            timeout_ms,
             assertSurfaceBindingCurrent,
           }) => {
             originalLaunchCommandsBySurface.set(surface, command);
@@ -7887,6 +7904,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 stableSurfaceIdentity,
                 workspace,
                 command,
+                timeout_ms,
                 assertSurfaceBindingCurrent,
               });
             } catch (error) {
@@ -8408,7 +8426,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default(BOOT_PROMPT_TIMEOUT_MS)
           .describe(
-            "Timeout in milliseconds waiting for the agent ready prompt",
+            "Timeout in milliseconds for initial shell readiness and the agent ready prompt",
           ),
         workspace: z
           .string()
@@ -8602,6 +8620,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               auto_archive_on_done: args.auto_archive_on_done ?? false,
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
+              boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async () => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
@@ -8837,6 +8856,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", formattedData),
           );
         } catch (e) {
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                agent_id: e.agent_id,
+                surface_id: e.surface_id,
+                workspace_id: e.workspace_id,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(e.launch_cause, {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id,
+                }),
+              );
+            }
+            return err(e, {
+              agent_id: e.agent_id,
+              surface_id: e.surface_id,
+              workspace_id: e.workspace_id,
+            });
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
               error_code: e.error_code,
@@ -8867,7 +8913,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .int()
           .positive()
           .optional()
-          .default(BOOT_PROMPT_TIMEOUT_MS),
+          .default(BOOT_PROMPT_TIMEOUT_MS)
+          .describe(
+            "Timeout in milliseconds for initial shell readiness and the agent ready prompt",
+          ),
         workspace: z.string().optional().describe("Target workspace ref"),
         worktree: worktreeArgSchema
           .optional()
@@ -8937,6 +8986,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 focusRestoreLease,
               );
             },
+            boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
           });
           const originalLaunchCommand = originalLaunchCommandsBySurface.get(
             result.surface_id,
@@ -9045,6 +9095,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : mutationWorkspace,
             { waitForReady: false },
           );
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                agent_id: e.agent_id,
+                surface_id: e.surface_id,
+                workspace_id: e.workspace_id,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(e.launch_cause, {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id,
+                }),
+              );
+            }
+            return err(e, {
+              agent_id: e.agent_id,
+              surface_id: e.surface_id,
+              workspace_id: e.workspace_id,
+            });
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
               error_code: e.error_code,

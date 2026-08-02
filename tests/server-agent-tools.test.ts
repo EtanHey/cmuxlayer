@@ -79,6 +79,7 @@ const AGENT_TOOLS = [
 
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
+  shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
   let readyText = "What can I help you with?\n>";
@@ -207,7 +208,7 @@ function makeLifecycleExec(opts?: {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: readyText,
+          text: opts?.shellNeverReady ? "terminal initializing" : readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -3419,6 +3420,83 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["new-split"]),
     );
+  });
+
+  it("spawn_agent applies boot_prompt_timeout_ms to initial shell readiness", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createLifecycleServer(
+        makeLifecycleExec({ shellNeverReady: true }),
+      );
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "readiness timeout contract",
+          boot_prompt_timeout_ms: 90_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(90_100);
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 90000ms waiting for shell readiness",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent reports the created agent and surface when initial shell readiness fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createLifecycleServer(
+        makeLifecycleExec({ shellNeverReady: true }),
+      );
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const engine = (server as any)._registeredTools["interact"]._engine;
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "readiness failure identity",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("Timed out after 20ms");
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.workspace_id).toBe("ws:1");
+
+      const state = engine.stateMgr
+        .listStates()
+        .find((candidate: AgentRecord) =>
+          candidate.surface_id === parsed.surface_id
+        );
+      expect(state).toBeDefined();
+      expect(state?.agent_id).toBe(parsed.agent_id);
+      expect(state?.state).toBe("error");
+      expect(state?.error).toContain("waiting for shell readiness");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("spawn_agent reports readiness timeout without poisoning agent state", async () => {

@@ -2845,7 +2845,7 @@ describe("tool handler integration", () => {
     expect(result.content[0].text).toContain("delivered to surface:unknown");
   });
 
-  it("send_command returns delivered + identity + submit_verified (F8)", async () => {
+  it("send_command fails closed when tracked-agent verification has no screen evidence (F8)", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
@@ -2883,13 +2883,11 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(data.delivered).toBe(true);
-    expect(data.surface).toBe("surface:6");
-    expect(data.title).toBe("cmuxlayerCodex");
-    expect(data.model).toBe("GPT-5.5");
-    expect(data.agent_type).toBe("codex");
-    expect("submit_verified" in data).toBe(true);
-    expect(result.content[0].text).toContain("delivered to cmuxlayerCodex");
+    expect(result.isError).toBe(true);
+    expect(data.ok).toBe(false);
+    expect(data.submit_verified).toBe(false);
+    expect(data.retry_count).toBe(0);
+    expect(data.error).toContain("Enter submit could not be verified");
     rmSync(stateDir, { recursive: true, force: true });
   });
 
