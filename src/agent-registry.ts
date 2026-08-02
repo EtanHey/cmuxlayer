@@ -297,7 +297,7 @@ function roleFromSeatOrLauncher(input: {
     return "orchestrator";
   }
   if (seatRole === "ic") {
-    return "ic";
+    return "worker";
   }
   if (seatRole === "worker") {
     return "worker";
@@ -2281,7 +2281,7 @@ export class AgentRegistry {
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }
-      if (agent.role === "orchestrator" || agent.role === "ic") {
+      if (agent.role === "orchestrator") {
         continue;
       }
       if (this.matchingLiveSurface(agent, surfaces)) {

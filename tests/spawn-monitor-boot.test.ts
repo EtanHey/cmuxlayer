@@ -139,6 +139,7 @@ describe("spawn monitor boot", () => {
         model: "sonnet",
         cli: "claude",
         role: "orchestrator",
+        workspace: "workspace:1",
         verbose: true,
       },
       {} as any,
@@ -170,6 +171,7 @@ describe("spawn monitor boot", () => {
         model: "gpt-5.4",
         cli: "codex",
         role: "worker",
+        workspace: "workspace:1",
       },
       {} as any,
     );
@@ -206,6 +208,7 @@ describe("spawn monitor boot", () => {
           model: "sonnet",
           cli: "claude",
           role: "orchestrator",
+          workspace: "workspace:1",
           verbose: true,
         },
         {} as any,
@@ -235,6 +238,7 @@ describe("spawn monitor boot", () => {
         model: "sonnet",
         cli: "claude",
         role: "orchestrator",
+        workspace: "workspace:1",
       },
       {} as any,
     );

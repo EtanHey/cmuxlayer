@@ -213,6 +213,19 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("non_claude_orchestrator");
   });
 
+  it("accepts an explicitly managed non-Claude orchestrator as the single left-side coordinator", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({
+        cli: "codex",
+        role: "orchestrator",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+      { monitor_alive: true },
+    );
+
+    expect(health.issue_codes).not.toContain("non_claude_orchestrator");
+  });
+
   it("marks unexpected three-column topology as unhealthy", () => {
     const health = evaluateAgentHealth(makeRecord(), {
       monitor_alive: true,

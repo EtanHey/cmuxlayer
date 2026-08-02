@@ -35,6 +35,7 @@ import {
   TEST_SURFACE_OBSERVER_OWNER,
   withTestSurfaceObserver,
 } from "./helpers/test-surface-observer.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-inbox-nudge");
 const PRIMARY_SURFACE_UUID = "11111111-1111-4111-8111-111111111111";
@@ -192,15 +193,19 @@ function createInboxServer(exec: ExecFn, inboxDir: string) {
 
 async function spawnTestAgent(server: any): Promise<string> {
   const tool = server._registeredTools["spawn_agent"];
-  const result = await tool.handler(
-    {
-      repo: "brainlayer",
-      model: "sonnet",
-      cli: "claude",
-      role: "ic",
-      prompt: "task",
-    },
-    {} as any,
+  const result = await runWithCallerContext(
+    { workspaceId: "workspace:1" },
+    () =>
+      tool.handler(
+        {
+          repo: "brainlayer",
+          model: "sonnet",
+          cli: "claude",
+          role: "worker",
+          prompt: "task",
+        },
+        {} as any,
+      ),
   );
   const parsed = result.structuredContent ?? JSON.parse(result.content[0].text);
   expect(parsed.ok).toBe(true);

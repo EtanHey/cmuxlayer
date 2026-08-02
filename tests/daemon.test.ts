@@ -1988,6 +1988,7 @@ describe("CmuxLayerDaemon", () => {
         repo: "brainlayer",
         model: "gpt-5.4",
         cli: "codex",
+        workspace: "workspace:1",
       },
     });
     const agentId = String(spawned.structuredContent?.agent_id);
@@ -2214,6 +2215,7 @@ describe("CmuxLayerDaemon", () => {
           repo: "brainlayer",
           model: "gpt-5.4",
           cli: "codex",
+          workspace: "workspace:1",
         },
       });
       const agentId = String(spawned.structuredContent?.agent_id);

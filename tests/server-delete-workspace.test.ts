@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const roots: string[] = [];
 
@@ -198,7 +199,10 @@ describe("delete_workspace", () => {
     const server = createServer({ client: client as any, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools.delete_workspace;
 
-    const result = await tool.handler({ workspace: "workspace:7" }, {} as any);
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:7" },
+      () => tool.handler({ workspace: "workspace:7" }, {} as any),
+    );
 
     expect(client.deleteWorkspace).not.toHaveBeenCalled();
     expect(result.structuredContent).toMatchObject({
@@ -220,9 +224,9 @@ describe("delete_workspace", () => {
       });
       const tool = (server as any)._registeredTools.delete_workspace;
 
-      const result = await tool.handler(
-        { workspace: workspaceAlias },
-        {} as any,
+      const result = await runWithCallerContext(
+        { workspaceId: "workspace:7" },
+        () => tool.handler({ workspace: workspaceAlias }, {} as any),
       );
 
       expect(client.deleteWorkspace).not.toHaveBeenCalled();

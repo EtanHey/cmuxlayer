@@ -8,6 +8,7 @@ import {
 } from "../src/server.js";
 import { inboxPath, monitorAlive } from "../src/inbox.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
+import { runWithCallerContext } from "../src/caller-context.js";
 
 const TEST_DIR = join(tmpdir(), "cmuxlayer-spawn-workspace-test");
 
@@ -327,14 +328,23 @@ describe("workspace spawn tools", () => {
     });
     const tool = (server as any)._registeredTools["spawn_in_workspace"];
 
-    const result = await tool.handler(
-      {
-        workspace_title: "red-team",
-        agents: [
-          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
-        ],
-      },
-      {} as any,
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:manual" },
+      () =>
+        tool.handler(
+          {
+            workspace_title: "red-team",
+            agents: [
+              {
+                repo: "cmuxlayer",
+                model: "gpt-5.4",
+                cli: "codex",
+                role: "worker",
+              },
+            ],
+          },
+          {} as any,
+        ),
     );
 
     const parsed =
@@ -384,6 +394,52 @@ describe("workspace spawn tools", () => {
     });
   });
 
+  it("spawn_in_workspace refuses a reused workspace owned by another repo before mutation", async () => {
+    const client = makeWorkspaceClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:t3layer",
+          title: "t3layer",
+          current_directory: "/Users/etanheyman/Gits/t3layer",
+        },
+      ],
+    });
+    const server = createServer({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const tool = getTool(server, "spawn_in_workspace");
+
+    const result = await tool.handler(
+      {
+        workspace_title: "ignored-title",
+        reuse_workspace: "workspace:t3layer",
+        agents: [
+          {
+            repo: "brainlayer",
+            model: "gpt-5.4",
+            cli: "codex",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+    const parsed = parseStructuredResult<{ ok: boolean; error?: string }>(
+      result,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/workspace.*t3layer.*brainlayer|brainlayer.*workspace.*t3layer/i);
+    expect(client.createWorkspace).not.toHaveBeenCalled();
+    expect(client.selectWorkspace).not.toHaveBeenCalled();
+    expect(client.newSplit).not.toHaveBeenCalled();
+    expect(client.newSurface).not.toHaveBeenCalled();
+  });
+
   it("spawn_in_workspace refuses a manual-mode reused workspace before selecting", async () => {
     const client = makeWorkspaceClient();
     client.listStatus.mockResolvedValue([
@@ -423,7 +479,7 @@ describe("workspace spawn tools", () => {
     expect(client.newSplit).not.toHaveBeenCalled();
   });
 
-  it("same-repo child spawn inherits parent workspace and reports wrong actual workspace as unhealthy", async () => {
+  it("same-repo child spawn inherits parent workspace and blocks a wrong actual workspace without leaking", async () => {
     const fixture = readWrongWorkspaceFixture();
     const repo = repoLabelFromFixturePath(fixture.parent_agent.repo);
     const childRepo = repoLabelFromFixturePath(fixture.spawn_request.repo);
@@ -538,26 +594,29 @@ describe("workspace spawn tools", () => {
       },
       {},
     );
-    const child = parseStructuredResult<{
-      ok: boolean;
-      workspace_id?: string;
-      warnings?: string[];
-      health?: { status: string; issue_codes: string[] };
-    }>(childResult);
+    const child = parseStructuredResult<{ ok: boolean; error?: string }>(
+      childResult,
+    );
 
     expect(client.newSplit.mock.calls[1]?.[1]?.workspace).toBe(
       fixture.parent_agent.workspace_id,
     );
-    expect(child.ok).toBe(true);
-    expect(child.workspace_id).toBe(fixture.parent_agent.workspace_id);
-    expect(child.warnings).toEqual([
-      expect.stringMatching(/Spawn placement mismatch/),
-    ]);
-    expect(child.health).toMatchObject({
-      status: "unhealthy",
-      issue_codes: expect.arrayContaining([
-        "registry_surface_workspace_mismatch",
-      ]),
-    });
+    expect(childResult.isError).toBe(true);
+    expect(child.ok).toBe(false);
+    expect(child.error).toContain(
+      `Spawn placement blocked: requested ${fixture.parent_agent.workspace_id} but cmux returned workspace:B`,
+    );
+    expect(client.closeSurface).toHaveBeenCalledWith(
+      "surface:2",
+      expect.objectContaining({
+        workspace: "workspace:B",
+        collapsePane: false,
+      }),
+    );
+    expect(client.send).not.toHaveBeenCalledWith(
+      "surface:2",
+      expect.anything(),
+      expect.anything(),
+    );
   });
 });

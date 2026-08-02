@@ -20,7 +20,6 @@ interface PaneLayout {
   pane: CmuxPane;
   surfaces: CmuxPaneSurfaces["surfaces"];
   orchestratorCount: number;
-  icCount: number;
   workerCount: number;
   unknownCount: number;
   roleCount: number;
@@ -29,7 +28,6 @@ interface PaneLayout {
 
 export interface RoleSurfaceIds {
   orchestrator: Set<string>;
-  ic: Set<string>;
   worker: Set<string>;
   unknown?: Set<string>;
 }
@@ -45,7 +43,6 @@ export interface AgentPlacementContext {
 function emptyRoleSurfaceIds(): RoleSurfaceIds {
   return {
     orchestrator: new Set(),
-    ic: new Set(),
     worker: new Set(),
     unknown: new Set(),
   };
@@ -57,7 +54,6 @@ function normalizeRoleSurfaceIds(
   if (!("worker" in input)) {
     return {
       orchestrator: new Set(),
-      ic: new Set(),
       worker: new Set(input),
       unknown: new Set(),
     };
@@ -82,15 +78,13 @@ function describePaneLayouts(
     const orchestratorCount = roles.filter(
       (role) => role === "orchestrator",
     ).length;
-    const icCount = roles.filter((role) => role === "ic").length;
     const workerCount = roles.filter((role) => role === "worker").length;
     const unknownCount = roles.filter((role) => role === "unknown").length;
-    const roleCount = orchestratorCount + icCount + workerCount;
+    const roleCount = orchestratorCount + workerCount;
     return {
       pane,
       surfaces,
       orchestratorCount,
-      icCount,
       workerCount,
       unknownCount,
       roleCount,
@@ -104,7 +98,6 @@ function roleForSurface(
   roleSurfaceIds: RoleSurfaceIds,
 ): AgentRole | "unknown" | null {
   if (roleSurfaceIds.orchestrator.has(surface.ref)) return "orchestrator";
-  if (roleSurfaceIds.ic.has(surface.ref)) return "ic";
   if (roleSurfaceIds.worker.has(surface.ref)) return "worker";
   if (roleSurfaceIds.unknown?.has(surface.ref)) return "unknown";
   if (surface.type === "terminal") return roleFromLauncherLabel(surface.title);
@@ -166,6 +159,24 @@ export function deriveRoleColumnIndex(
   return deriveColumnIndex(renderedPanes.length > 0 ? renderedPanes : panes);
 }
 
+export class PlacementTopologyError extends Error {
+  readonly code = "PLACEMENT_TOPOLOGY_BLOCKED";
+
+  constructor(readonly columnCount: number) {
+    super(
+      `Role placement blocked: workspace has ${columnCount} columns; the two-column lead/worker invariant allows at most two`,
+    );
+    this.name = "PlacementTopologyError";
+  }
+}
+
+function assertTwoColumnPlacementTopology(panes: CmuxPane[]): void {
+  const columnCount = new Set(deriveRoleColumnIndex(panes).values()).size;
+  if (columnCount > 2) {
+    throw new PlacementTopologyError(columnCount);
+  }
+}
+
 export function canonicalRoleColumn(role: AgentRole): number | null {
   if (role === "orchestrator") return 0;
   if (role === "worker") return 1;
@@ -196,20 +207,10 @@ export function topPaneInRoleColumn(
   );
 }
 
-function isDedicatedIcPane(layout: PaneLayout): boolean {
-  return (
-    layout.icCount > 0 &&
-    layout.orchestratorCount === 0 &&
-    layout.workerCount === 0 &&
-    layout.nonRoleCount === 0
-  );
-}
-
 function isDedicatedWorkerPane(layout: PaneLayout): boolean {
   return (
     layout.workerCount > 0 &&
     layout.orchestratorCount === 0 &&
-    layout.icCount === 0 &&
     layout.nonRoleCount === 0
   );
 }
@@ -270,6 +271,12 @@ function roleFromCli(cli: string | undefined): AgentRole | null {
   }
 }
 
+function normalizeExplicitRole(
+  role: AgentRole | "ic" | undefined,
+): AgentRole | undefined {
+  return role === "ic" ? "worker" : role;
+}
+
 export function canInferAgentRole(input: {
   role?: AgentRole;
   launcherName?: string;
@@ -290,7 +297,8 @@ export function inferAgentRole(input: {
   title?: string;
   cli?: string;
 }): AgentRole {
-  if (input.role) return input.role;
+  const explicitRole = normalizeExplicitRole(input.role);
+  if (explicitRole) return explicitRole;
 
   const launcherRole =
     roleFromLauncherLabel(input.launcherName) ??
@@ -324,7 +332,7 @@ export function inferRecordRole(
   agent: Pick<AgentRecord, "role" | "cli" | "repo">,
 ): AgentRole {
   return (
-    agent.role ??
+    normalizeExplicitRole(agent.role) ??
     inferAgentRole({
       cli: agent.cli,
       launcherName: launcherNameForCli(agent.repo, agent.cli),
@@ -350,7 +358,6 @@ export function collectRoleSurfaceIds(
 ): RoleSurfaceIds {
   const ids: RoleSurfaceIds = {
     orchestrator: new Set(),
-    ic: new Set(),
     worker: new Set(),
     unknown: new Set(),
   };
@@ -377,7 +384,6 @@ export function collectRoleSurfaceIds(
  * - orchestrators dock at the current top of column 0
  * - workers dock at the current top of column 1, independent of pane fill
  * - a missing worker column is seeded to the right of the top lead pane
- * - IC placement retains its existing hierarchy-aware policy
  */
 export function chooseAgentSpawnPlacement(
   panes: CmuxPane[],
@@ -385,17 +391,10 @@ export function chooseAgentSpawnPlacement(
   roleSurfaceIdsInput: ReadonlySet<string> | RoleSurfaceIds,
   context: AgentPlacementContext = {},
 ): AgentSpawnPlacement {
+  assertTwoColumnPlacementTopology(panes);
   const roleSurfaceIds = normalizeRoleSurfaceIds(roleSurfaceIdsInput);
   const role = context.role ?? "worker";
   const layouts = describePaneLayouts(panes, paneSurfaces, roleSurfaceIds);
-  const columnByPane = deriveColumnIndex(panes);
-  const byColumnThenIndex = (a: PaneLayout, b: PaneLayout): number => {
-    const aColumn = columnByPane.get(a.pane.ref) ?? a.pane.index;
-    const bColumn = columnByPane.get(b.pane.ref) ?? b.pane.index;
-    return aColumn - bColumn || a.pane.index - b.pane.index;
-  };
-  const rightmostByColumn = (candidates: PaneLayout[]) =>
-    [...candidates].sort(byColumnThenIndex).at(-1);
 
   if (layouts.length === 0) {
     return { kind: "split", direction: "right" };
@@ -419,25 +418,6 @@ export function chooseAgentSpawnPlacement(
       direction: "right",
       ...(leadPane ? { pane: leadPane.ref } : {}),
     };
-  }
-
-  const workerPanes = layouts.filter(isDedicatedWorkerPane);
-  const icPanes = layouts.filter(isDedicatedIcPane);
-
-  if (role === "ic") {
-    const icPane = rightmostByColumn(icPanes);
-    if (icPane) {
-      return { kind: "surface", pane: icPane.pane.ref };
-    }
-    const workerPane = rightmostByColumn(workerPanes);
-    if (workerPane) {
-      return {
-        kind: "split",
-        direction: "up",
-        pane: workerPane.pane.ref,
-      };
-    }
-    return { kind: "split", direction: "right" };
   }
 
   return { kind: "split", direction: "right" };

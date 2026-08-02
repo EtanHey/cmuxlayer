@@ -336,7 +336,12 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
     // First spawn a parent
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parentResult = await spawn.handler(
-      { repo: "test", model: "sonnet", cli: "claude" },
+      {
+        repo: "test",
+        model: "sonnet",
+        cli: "claude",
+        workspace: "workspace:1",
+      },
       {} as any,
     );
     const parentId = (
@@ -349,6 +354,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
         repo: "test",
         model: "haiku",
         cli: "claude",
+        workspace: "workspace:1",
         parent_agent_id: parentId,
       },
       {} as any,
@@ -368,6 +374,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
         repo: "test",
         model: "opus",
         cli: "claude",
+        workspace: "workspace:1",
         max_cost_per_agent: 5.0,
       },
       {} as any,
@@ -386,6 +393,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
         repo: "test",
         model: "sonnet",
         cli: "claude",
+        workspace: "workspace:1",
         prompt: "orphan",
         parent_agent_id: "nonexistent-agent",
       },

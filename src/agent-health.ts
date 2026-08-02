@@ -253,7 +253,7 @@ function inferTopologyRole(
   agent: AgentRecord,
   input: AgentHealthInput,
 ): AgentRole | null {
-  if (agent.role) return agent.role;
+  if (agent.role) return inferRecordRoleOrNull(agent);
 
   return (
     inferRoleOrNull({ title: input.surface_title ?? undefined }) ??
@@ -482,7 +482,6 @@ export function evaluateAgentHealth(
   if (
     agent.state === "done" &&
     role !== "orchestrator" &&
-    role !== "ic" &&
     input.harvestability?.evidence_channel.degraded === true
   ) {
     addIssue(
@@ -516,7 +515,11 @@ export function evaluateAgentHealth(
     }
   }
 
-  if (agent.cli !== "claude" && role === "orchestrator") {
+  if (
+    agent.cli !== "claude" &&
+    role === "orchestrator" &&
+    agent.surface_provenance !== "cmuxlayer_spawn"
+  ) {
     addIssue(
       issueCodes,
       issues,

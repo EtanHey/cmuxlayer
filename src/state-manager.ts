@@ -33,6 +33,18 @@ type AgentRecordPatch = Partial<
   Omit<AgentRecord, "agent_id" | "created_at" | "updated_at" | "version" | "state">
 >;
 
+type PersistedAgentRecord = Omit<AgentRecord, "role"> & {
+  role?: AgentRole | "ic";
+};
+
+function normalizePersistedAgentRecord(
+  record: PersistedAgentRecord,
+): AgentRecord {
+  const role: AgentRole | undefined =
+    record.role === "ic" ? "worker" : record.role;
+  return { ...record, role };
+}
+
 export interface SurfaceSessionIndexEntry {
   agent_id: string;
   workspace_id: string | null;
@@ -207,7 +219,9 @@ export class StateManager {
     const stateFile = this.stateFilePath(dirName);
     if (!existsSync(stateFile)) return null;
     try {
-      return JSON.parse(readFileSync(stateFile, "utf-8")) as AgentRecord;
+      return normalizePersistedAgentRecord(
+        JSON.parse(readFileSync(stateFile, "utf-8")) as PersistedAgentRecord,
+      );
     } catch {
       return null;
     }
