@@ -3430,16 +3430,14 @@ describe("agent lifecycle tool handlers", () => {
       );
       const spawn = (server as any)._registeredTools["spawn_agent"];
 
-      const resultPromise = spawn.handler(
-        {
-          repo: "brainlayer",
-          model: "codex",
-          cli: "codex",
-          prompt: "readiness timeout contract",
-          boot_prompt_timeout_ms: 90_000,
-        },
-        {} as any,
-      );
+      const spawnArgs = spawn.inputSchema.parse({
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "readiness timeout contract",
+        boot_prompt_timeout_ms: 90_000,
+      });
+      const resultPromise = spawn.handler(spawnArgs, {} as any);
       await vi.advanceTimersByTimeAsync(90_100);
       const result = await resultPromise;
       const parsed =
@@ -3518,10 +3516,10 @@ describe("agent lifecycle tool handlers", () => {
       const state = engine.stateMgr
         .listStates()
         .find((candidate: AgentRecord) =>
-          candidate.surface_id === parsed.surface_id
+          candidate.agent_id === parsed.agent_id
         );
       expect(state).toBeDefined();
-      expect(state?.agent_id).toBe(parsed.agent_id);
+      expect(state?.surface_id).toBe(parsed.surface_id);
       expect(state?.state).toBe("error");
       expect(state?.error).toContain("waiting for shell readiness");
     } finally {

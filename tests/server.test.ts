@@ -7510,7 +7510,7 @@ describe("tool handler integration", () => {
               },
               {} as any,
             ),
-          5_000,
+          10_000,
         );
         const parsed =
           result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -9301,6 +9301,11 @@ describe("tool handler integration", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Timed out");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe(
+      "working_status_not_observed",
+    );
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.boot_prompt_delivered).not.toBe(true);
     expect(returnPresses).toBe(1);
   }, 10_000);

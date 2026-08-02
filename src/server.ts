@@ -4596,14 +4596,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !snapshot ||
           !screenShowsPendingInput(snapshot.text, sanitizedText)
         ) {
-          await waitForBootPromptSubmitEvidence({
-            surface: deliveryRoute.surface,
-            workspace: deliveryRoute.workspace,
-            text: sanitizedText,
-            timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
-            baseline_metrics: readiness.metrics,
-            beforeRead: assertDeliveryRouteCurrent,
-          });
+          try {
+            await waitForBootPromptSubmitEvidence({
+              surface: deliveryRoute.surface,
+              workspace: deliveryRoute.workspace,
+              text: sanitizedText,
+              timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+              baseline_metrics: readiness.metrics,
+              beforeRead: assertDeliveryRouteCurrent,
+            });
+          } catch (fallbackError) {
+            if (fallbackError instanceof SurfaceGoneError) {
+              throw fallbackError;
+            }
+            const deliveredChars = chunks
+              .slice(0, sentChunks)
+              .reduce((sum, chunk) => sum + chunk.length, 0);
+            const fallbackMessage =
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : String(fallbackError);
+            throw new BootPromptDeliveryError(
+              `Boot prompt delivery failed after ${deliveredChars} chars: ${fallbackMessage}`,
+              deliveredChars,
+              error,
+            );
+          }
           return {
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             retry_count: error.retry_count,
