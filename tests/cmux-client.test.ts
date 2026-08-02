@@ -203,6 +203,32 @@ describe("CmuxClient.newSplit", () => {
     ]);
   });
 
+  it("forwards an explicit focus preference to cmux", async () => {
+    const data = {
+      workspace: "workspace:1",
+      surface: "surface:3",
+      pane: "pane:2",
+      title: "Split",
+      type: "terminal",
+    };
+    const { client, exec } = mockClient(data);
+
+    await client.newSplit("right", {
+      workspace: "workspace:1",
+      focus: false,
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json", "--id-format", "both",
+      "new-split",
+      "right",
+      "--workspace",
+      "workspace:1",
+      "--focus",
+      "false",
+    ]);
+  });
+
   it("resolves a pane target to the selected surface instead of using --panel", async () => {
     const paneSurfaces = {
       workspace_ref: "workspace:1",
@@ -741,6 +767,49 @@ describe("CmuxClient.selectWorkspace", () => {
       "--workspace",
       "workspace:3",
     ]);
+  });
+});
+
+describe("CmuxClient.focusSurface", () => {
+  it("calls the surface.focus RPC with the exact surface and workspace", async () => {
+    const { client, exec } = mockClient({});
+
+    await client.focusSurface("surface:origin", {
+      workspace: "workspace:1",
+    });
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "--id-format",
+      "both",
+      "rpc",
+      "surface.focus",
+      JSON.stringify({
+        surface_id: "surface:origin",
+        workspace_id: "workspace:1",
+      }),
+    ]);
+  });
+});
+
+describe("CmuxClient.identify", () => {
+  it("can read global focus without supplying a caller surface", async () => {
+    const { client, exec } = mockClient({
+      focused: {
+        workspace_ref: "workspace:1",
+        surface_ref: "surface:origin",
+      },
+    });
+
+    const result = await client.identify();
+
+    expect(exec).toHaveBeenCalledWith("cmux", [
+      "--json",
+      "--id-format",
+      "both",
+      "identify",
+    ]);
+    expect(result.focused?.surface_ref).toBe("surface:origin");
   });
 });
 

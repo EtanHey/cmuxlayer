@@ -1025,6 +1025,32 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("transport self-healing", () => {
     client.stop();
   });
 
+  it("forwards focusSurface through the self-healing transport", async () => {
+    const socketPath = join(tmpdir(), `cmux-focus-surface-${process.pid}.sock`);
+    const cli = new CmuxClient({
+      exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
+      bin: "cmux",
+    });
+    const socket = {
+      currentSocketPath: () => socketPath,
+      disconnect: vi.fn(),
+      focusSurface: vi.fn().mockResolvedValue(undefined),
+    } as unknown as CmuxSocketClient;
+    const client = wrapSocketWithSelfHeal(socket, cli, {
+      socketPath,
+      reprobeIntervalMs: 60_000,
+    });
+
+    await (client as unknown as CmuxClient).focusSurface("surface:origin", {
+      workspace: "workspace:1",
+    });
+
+    expect(socket.focusSurface).toHaveBeenCalledWith("surface:origin", {
+      workspace: "workspace:1",
+    });
+    client.stop();
+  });
+
   it("flushes queued failed payloads sequentially", async () => {
     const socketPath = join(tmpdir(), `cmux-queue-seq-${process.pid}.sock`);
     let activeFlushes = 0;
