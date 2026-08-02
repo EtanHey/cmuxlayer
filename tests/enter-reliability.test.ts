@@ -350,6 +350,44 @@ class FakeSlowClearingAgentClient extends FakeClaudeSurfaceClient {
   }
 }
 
+class FakeTransientVerificationReadClient extends FakeClaudeSurfaceClient {
+  verificationReadAttempts = 0;
+
+  async readScreen(surface: string, opts?: { lines?: number }) {
+    if (this.sendCalls.length > 0) {
+      this.verificationReadAttempts += 1;
+      if (this.verificationReadAttempts === 1) {
+        throw new Error("EAGAIN: transient cmux read failure");
+      }
+    }
+    return super.readScreen(surface, opts);
+  }
+}
+
+class FakeUnavailableVerificationScreenClient extends FakeClaudeSurfaceClient {
+  verificationReadAttempts = 0;
+
+  constructor(private readonly unavailableMode: "throw" | "blank") {
+    super();
+  }
+
+  async readScreen(surface: string, opts?: { lines?: number }) {
+    if (this.sendCalls.length === 0) {
+      return super.readScreen(surface, opts);
+    }
+    this.verificationReadAttempts += 1;
+    if (this.unavailableMode === "throw") {
+      throw new Error("EAGAIN: cmux read unavailable");
+    }
+    return {
+      surface,
+      text: "",
+      lines: opts?.lines ?? 30,
+      scrollback_used: false,
+    };
+  }
+}
+
 function createReliabilityServer(client: FakeClaudeSurfaceClient) {
   const server = createServer({
     client: client as any,
@@ -461,6 +499,8 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendCalls.join("")).toHaveLength(2000);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
@@ -532,7 +572,7 @@ describe("enter reliability", () => {
     },
   );
 
-  it("leaves send_to submit verification unknown when agent text remains ambiguously pending", async () => {
+  it("reports send_to input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -549,6 +589,8 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
     expect(
@@ -590,6 +632,72 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
+  it("keeps polling after a transient verification read failure instead of false-failing a landed send", async () => {
+    const client = new FakeTransientVerificationReadClient();
+    client.requiredReturns = 1;
+    server = createReliabilityServer(client);
+    registerAgent(server);
+
+    const result = await callTool(server, "send_to", {
+      agent_id: "agent-1",
+      text: "land once despite EAGAIN",
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(client.verificationReadAttempts).toBeGreaterThanOrEqual(2);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+  });
+
+  it.each([
+    ["unavailable reads", "throw", "surface_read_unavailable"],
+    ["blank screens", "blank", "surface_screen_empty"],
+  ] as const)(
+    "fails closed only after a full verification window of %s and returns a non-retry-safe reason",
+    async (_name, mode, expectedReason) => {
+      const client = new FakeUnavailableVerificationScreenClient(mode);
+      client.requiredReturns = 1;
+      server = createReliabilityServer(client);
+      registerAgent(server);
+
+      const tool = (server as any)._registeredTools["send_to"];
+      let settled = false;
+      const resultPromise = tool.handler(
+        {
+          agent_id: "agent-1",
+          text: "land once but evidence stays unavailable",
+          press_enter: true,
+        },
+        {} as any,
+      );
+      void resultPromise.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(settled).toBe(false);
+      expect(client.verificationReadAttempts).toBeGreaterThan(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await resultPromise;
+      const parsed = parseResult(result);
+
+      expect(result.isError).toBe(true);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.submit_verified).toBe(false);
+      expect(parsed.submit_verification_reason).toBe(expectedReason);
+      expect(parsed.retry_safe).toBe(false);
+      expect(
+        client.sendKeyCalls.filter((key) => key === "return"),
+      ).toHaveLength(1);
+    },
+  );
+
   it("does not retry Enter for send_command when the agent composer remains ambiguously pending", async () => {
     const client = new FakeClaudeSurfaceClient();
     server = createReliabilityServer(client);
@@ -606,6 +714,8 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -620,7 +730,7 @@ describe("enter reliability", () => {
     ).toBe(true);
   }, 10_000);
 
-  it("leaves short send_command verification unknown when agent text remains ambiguously pending", async () => {
+  it("reports short send_command input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -636,6 +746,8 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -650,7 +762,7 @@ describe("enter reliability", () => {
     ).toBe(true);
   }, 10_000);
 
-  it("leaves short send_input verification unknown when agent text remains ambiguously pending", async () => {
+  it("reports short send_input as still pending when the composer never clears", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     server = createReliabilityServer(client);
@@ -667,6 +779,8 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,

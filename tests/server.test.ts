@@ -2878,16 +2878,105 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_command"];
-    const result = await tool.handler(
-      { surface: "surface:6", command: "codex resume 123" },
-      {} as any,
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          { surface: "surface:6", command: "codex resume 123" },
+          {} as any,
+        ),
+      6_000,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(result.isError).toBe(true);
     expect(data.ok).toBe(false);
     expect(data.submit_verified).toBe(false);
+    expect(data.submit_verification_reason).toBe("surface_screen_empty");
+    expect(data.retry_safe).toBe(false);
     expect(data.retry_count).toBe(0);
     expect(data.error).toContain("Enter submit could not be verified");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("send_command returns delivered + cached identity after positive submit verification (F8)", async () => {
+    const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command-positive");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "codex-positive-1",
+      surface_id: "surface:positive",
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "GPT-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "cmuxlayerCodex positive",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:positive",
+            text: "gpt-5.5 xhigh · 99% left\nWorking (1s • esc to interrupt)",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_command"];
+    const result = await tool.handler(
+      { surface: "surface:positive", command: "codex resume verified" },
+      {} as any,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
+    expect(data.delivered).toBe(true);
+    expect(data.submit_verified).toBe(true);
+    expect(data.surface).toBe("surface:positive");
+    expect(data.title).toBe("cmuxlayerCodex positive");
+    expect(data.model).toBe("GPT-5.5");
+    expect(data.agent_type).toBe("codex");
+    expect(result.content[0].text).toContain(
+      "delivered to cmuxlayerCodex positive",
+    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("send") &&
+          args.includes("--surface") &&
+          args.includes("surface:positive") &&
+          args.includes("codex resume verified"),
+      ),
+    ).toBe(true);
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("send-key") &&
+          args.includes("--surface") &&
+          args.includes("surface:positive") &&
+          args.includes("return"),
+      ),
+    ).toBe(true);
     rmSync(stateDir, { recursive: true, force: true });
   });
 
@@ -9282,6 +9371,9 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Boot prompt delivery failed");
     expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.boot_prompt_delivered).not.toBe(true);
     expect(returnPresses).toBe(1);
   }, 10_000);
