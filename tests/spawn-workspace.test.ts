@@ -219,6 +219,60 @@ describe("workspace spawn tools", () => {
     ).toEqual(["workspace:grid", "workspace:grid"]);
   });
 
+  it("spawn_in_workspace reports every created identity when a later launch fails", async () => {
+    const client = makeWorkspaceClient();
+    let launcherSends = 0;
+    client.send.mockImplementation(async () => {
+      launcherSends += 1;
+      if (launcherSends === 2) {
+        throw new Error("second launcher send failed");
+      }
+    });
+    const server = createServer({
+      client: client as any,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+    });
+    const tool = getTool(server, "spawn_in_workspace");
+
+    const result = await tool.handler(
+      {
+        workspace_title: "red-team",
+        agents: [
+          { repo: "brainlayer", model: "sonnet", cli: "claude", role: "orchestrator" },
+          { repo: "cmuxlayer", model: "gpt-5.4", cli: "codex", role: "worker" },
+        ],
+      },
+      {},
+    );
+    const parsed = parseStructuredResult<{
+      ok: boolean;
+      error: string;
+      agent_id?: string;
+      surface_id?: string;
+      workspace_id?: string;
+      agents?: Array<{ agent_id: string; surface_id: string; workspace_id?: string }>;
+    }>(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("second launcher send failed");
+    expect(parsed.agent_id).toEqual(expect.any(String));
+    expect(parsed.surface_id).toBe("surface:2");
+    expect(parsed.workspace_id).toBe("workspace:grid");
+    expect(parsed.agents).toEqual([
+      expect.objectContaining({
+        agent_id: expect.any(String),
+        surface_id: "surface:1",
+        workspace_id: "workspace:grid",
+      }),
+      expect.objectContaining({
+        agent_id: parsed.agent_id,
+        surface_id: "surface:2",
+        workspace_id: "workspace:grid",
+      }),
+    ]);
+  });
+
   it("spawn_in_workspace surfaces the stale-build warning at the aggregate level", async () => {
     // spawn_in_workspace rebuilds its response from per-agent objects (which
     // drop result.warnings), so a stale MCP serving a multi-agent workspace

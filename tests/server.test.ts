@@ -2845,7 +2845,7 @@ describe("tool handler integration", () => {
     expect(result.content[0].text).toContain("delivered to surface:unknown");
   });
 
-  it("send_command returns delivered + identity + submit_verified (F8)", async () => {
+  it("send_command fails closed when tracked-agent verification has no screen evidence (F8)", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
@@ -2878,18 +2878,105 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_command"];
+    const result = await runWithFakeTimers(
+      () =>
+        tool.handler(
+          { surface: "surface:6", command: "codex resume 123" },
+          {} as any,
+        ),
+      6_000,
+    );
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(data.ok).toBe(false);
+    expect(data.submit_verified).toBe(false);
+    expect(data.submit_verification_reason).toBe("surface_screen_empty");
+    expect(data.retry_safe).toBe(false);
+    expect(data.retry_count).toBe(0);
+    expect(data.error).toContain("Enter submit could not be verified");
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("send_command returns delivered + cached identity after positive submit verification (F8)", async () => {
+    const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command-positive");
+    rmSync(stateDir, { recursive: true, force: true });
+    mkdirSync(stateDir, { recursive: true });
+    const stateMgr = new StateManager(stateDir);
+    stateMgr.writeState({
+      agent_id: "codex-positive-1",
+      surface_id: "surface:positive",
+      state: "idle",
+      repo: "cmuxlayer",
+      model: "GPT-5.5",
+      cli: "codex",
+      cli_session_id: null,
+      task_summary: "cmuxlayerCodex positive",
+      pid: null,
+      version: 1,
+      created_at: "2026-06-04T00:00:00Z",
+      updated_at: "2026-06-04T00:00:00Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+    });
+
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:positive",
+            text: "gpt-5.5 xhigh · 99% left\nWorking (1s • esc to interrupt)",
+            lines: 30,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({
+      exec: mockExec,
+      stateDir,
+      skipAgentLifecycle: true,
+    });
+    const tool = (server as any)._registeredTools["send_command"];
     const result = await tool.handler(
-      { surface: "surface:6", command: "codex resume 123" },
+      { surface: "surface:positive", command: "codex resume verified" },
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).not.toBe(true);
     expect(data.delivered).toBe(true);
-    expect(data.surface).toBe("surface:6");
-    expect(data.title).toBe("cmuxlayerCodex");
+    expect(data.submit_verified).toBe(true);
+    expect(data.surface).toBe("surface:positive");
+    expect(data.title).toBe("cmuxlayerCodex positive");
     expect(data.model).toBe("GPT-5.5");
     expect(data.agent_type).toBe("codex");
-    expect("submit_verified" in data).toBe(true);
-    expect(result.content[0].text).toContain("delivered to cmuxlayerCodex");
+    expect(result.content[0].text).toContain(
+      "delivered to cmuxlayerCodex positive",
+    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("send") &&
+          args.includes("--surface") &&
+          args.includes("surface:positive") &&
+          args.includes("codex resume verified"),
+      ),
+    ).toBe(true);
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("send-key") &&
+          args.includes("--surface") &&
+          args.includes("surface:positive") &&
+          args.includes("return"),
+      ),
+    ).toBe(true);
     rmSync(stateDir, { recursive: true, force: true });
   });
 
@@ -7423,7 +7510,11 @@ describe("tool handler integration", () => {
               },
               {} as any,
             ),
-          5_000,
+          // The end-to-end update path can consume two launcher submit-
+          // verification windows plus several independent 2s readiness
+          // phases. This is only the fake-clock driver ceiling; the production
+          // timeout supplied to this call remains boot_prompt_timeout_ms: 2_000.
+          30_000,
         );
         const parsed =
           result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -9214,6 +9305,11 @@ describe("tool handler integration", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Timed out");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe(
+      "working_status_not_observed",
+    );
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.boot_prompt_delivered).not.toBe(true);
     expect(returnPresses).toBe(1);
   }, 10_000);
@@ -9284,6 +9380,9 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(false);
     expect(parsed.error).toContain("Boot prompt delivery failed");
     expect(parsed.error).toContain("Enter submit could not be verified");
+    expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe("input_still_pending");
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.boot_prompt_delivered).not.toBe(true);
     expect(returnPresses).toBe(1);
   }, 10_000);
@@ -9462,6 +9561,47 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("new_split reports the created surface when rename fails", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:2",
+            pane: "pane:1",
+            title: "New",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rename-tab")) {
+        throw new Error("rename failed after split creation");
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      {
+        direction: "right",
+        pane: "pane:1",
+        workspace: "workspace:1",
+        title: "Build Task",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("rename failed after split creation");
+    expect(parsed.surface).toBe("surface:2");
+    expect(parsed.workspace).toBe("workspace:1");
+  });
+
   it("new_surface handler calls cmux new-surface", async () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -9520,6 +9660,46 @@ describe("tool handler integration", () => {
         "Build Logs",
       ]),
     );
+  });
+
+  it("new_surface reports the created surface when rename fails", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:3",
+            pane: "pane:1",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rename-tab")) {
+        throw new Error("rename failed after surface creation");
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["new_surface"];
+
+    const result = await tool.handler(
+      {
+        pane: "pane:1",
+        workspace: "workspace:1",
+        title: "Build Logs",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("rename failed after surface creation");
+    expect(parsed.surface).toBe("surface:3");
+    expect(parsed.workspace).toBe("workspace:1");
   });
 
   it("new_surface rejects missing boot_prompt_path before creating a tab", async () => {

@@ -39,6 +39,7 @@ import {
 } from "./cmux-observer-identity.js";
 import {
   AgentEngine,
+  AgentLaunchError,
   buildLaunchCommand,
   resolveSweepTiming,
   type AgentLifecycleEvent,
@@ -469,6 +470,8 @@ type BroadcastReceipt = {
   seat: string;
   delivered: boolean;
   submit_verified: boolean | null;
+  submit_verification_reason?: SubmitVerificationFailureReason;
+  retry_safe?: false;
   error?: string;
   skipped?: string;
 };
@@ -488,6 +491,8 @@ export interface DeliveryRecord {
   press_enter: boolean;
   verify_submit: boolean;
   submit_verified: boolean | null;
+  submit_verification_reason?: SubmitVerificationFailureReason;
+  retry_safe?: false;
   retry_count: number;
   rename_to_task?: string;
   started_at: string;
@@ -506,15 +511,32 @@ class DeliveryError extends Error {
   }
 }
 
+type SubmitVerificationFailureReason =
+  | "surface_read_unavailable"
+  | "surface_screen_empty"
+  | "input_still_pending"
+  | "working_status_not_observed"
+  | "submit_evidence_absent";
+
 class SubmitVerificationError extends Error {
+  readonly retry_safe = false;
+
   constructor(
     message: string,
     readonly retry_count: number,
+    readonly reason: SubmitVerificationFailureReason,
   ) {
     super(message);
     this.name = "SubmitVerificationError";
   }
 }
+
+const submitVerificationFailurePayload = (error: SubmitVerificationError) => ({
+  submit_verified: false as const,
+  submit_verification_reason: error.reason,
+  retry_safe: error.retry_safe,
+  retry_count: error.retry_count,
+});
 
 class DeliverySafetyGateError extends Error {
   readonly delivered = false;
@@ -566,6 +588,7 @@ class BootPromptDeliveryError extends Error {
   constructor(
     message: string,
     readonly delivered_chars: number,
+    readonly submit_verification_error?: SubmitVerificationError,
   ) {
     super(message);
     this.name = "BootPromptDeliveryError";
@@ -735,6 +758,13 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           screen: error.screen,
         }
       : {};
+  const submitVerificationExtra =
+    error instanceof SubmitVerificationError
+      ? submitVerificationFailurePayload(error)
+      : error instanceof BootPromptDeliveryError &&
+          error.submit_verification_error
+        ? submitVerificationFailurePayload(error.submit_verification_error)
+        : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -760,6 +790,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...retryMeta,
     ...modeExtra,
     ...deliverySafetyExtra,
+    ...submitVerificationExtra,
     ...extra,
   };
   return {
@@ -2866,6 +2897,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     failed_chunk: record.failed_chunk ?? null,
     error: record.error ?? null,
     submit_verified: record.submit_verified,
+    submit_verification_reason: record.submit_verification_reason ?? null,
+    retry_safe: record.retry_safe ?? null,
     retry_count: record.retry_count,
   });
 
@@ -3498,14 +3531,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     allow_recovery_enter_retry?: boolean;
     timeout_ms?: number;
     beforeMutation?: () => Promise<void>;
-  }): Promise<{ submit_verified: boolean | null; retry_count: number }> => {
+  }): Promise<{
+    submit_verified: boolean | null;
+    submit_verification_reason: SubmitVerificationFailureReason | null;
+    retry_count: number;
+  }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
       // command was at or below SEND_INPUT_CHUNK_THRESHOLD; it is not a failure.
-      return { submit_verified: null, retry_count: 0 };
+      return {
+        submit_verified: null,
+        submit_verification_reason: null,
+        retry_count: 0,
+      };
     }
 
     const timeoutMs = opts.timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
+    // Once verification is requested, missing or inconclusive evidence is a
+    // failed verification. The spawn launcher probe remains advisory because
+    // agent-readiness detection is authoritative for that one internal path.
+    const noSubmitEvidenceResult =
+      opts.source_event === "spawn_agent" ? null : false;
     const startedAt = Date.now();
     let retried = false;
     let retryCount = 0;
@@ -3515,6 +3561,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let lastRetryEligiblePendingInput = false;
     let retryEligiblePendingSince: number | null = null;
     let retriedAt: number | null = null;
+    let sawReadableScreen = false;
+    let sawBlankScreen = false;
     const screenIncludesSubmittedText = (screenText: string): boolean => {
       const trimmed = opts.text.trim();
       if (!trimmed) {
@@ -3530,15 +3578,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         throwOnSurfaceGone: true,
       });
       if (!snapshot) {
-        return { submit_verified: null, retry_count: retryCount };
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
       }
 
       if (!snapshot.text.trim()) {
-        return { submit_verified: null, retry_count: retryCount };
+        sawBlankScreen = true;
+        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        continue;
       }
+      sawReadableScreen = true;
 
       if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
-        return { submit_verified: true, retry_count: retryCount };
+        return {
+          submit_verified: true,
+          submit_verification_reason: null,
+          retry_count: retryCount,
+        };
       }
 
       const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
@@ -3556,7 +3612,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !screenIncludesSubmittedText(snapshot.text);
         if (allowClearedComposerSubmitEvidence) {
           sawAllowedClearedComposerEvidence = true;
-          return { submit_verified: true, retry_count: retryCount };
+          return {
+            submit_verified: true,
+            submit_verification_reason: null,
+            retry_count: retryCount,
+          };
         }
       }
 
@@ -3619,22 +3679,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         retryEligiblePendingInput &&
         Date.now() - retriedAt >= SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS
       ) {
-        return { submit_verified: false, retry_count: retryCount };
+        return {
+          submit_verified: false,
+          submit_verification_reason: "input_still_pending",
+          retry_count: retryCount,
+        };
       }
 
       await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
     }
+    if (sawClearedComposerEvidence && sawAllowedClearedComposerEvidence) {
+      return {
+        submit_verified: true,
+        submit_verification_reason: null,
+        retry_count: retryCount,
+      };
+    }
+
+    const submitVerified =
+      opts.require_working_status ||
+      lastHasPendingInput ||
+      lastRetryEligiblePendingInput ||
+      !sawReadableScreen
+        ? false
+        : noSubmitEvidenceResult;
+    const failureReason: SubmitVerificationFailureReason | null =
+      submitVerified !== false
+        ? null
+        : lastHasPendingInput || lastRetryEligiblePendingInput
+          ? "input_still_pending"
+          : !sawReadableScreen
+            ? sawBlankScreen
+              ? "surface_screen_empty"
+              : "surface_read_unavailable"
+            : opts.require_working_status
+              ? "working_status_not_observed"
+              : "submit_evidence_absent";
     return {
-      submit_verified:
-        sawClearedComposerEvidence && sawAllowedClearedComposerEvidence
-          ? true
-          : opts.require_working_status
-            ? false
-            : lastHasPendingInput
-              ? false
-              : lastRetryEligiblePendingInput
-                ? false
-                : null,
+      submit_verified: submitVerified,
+      submit_verification_reason: failureReason,
       retry_count: retryCount,
     };
   };
@@ -3692,6 +3775,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       0,
     );
     let submit_verified: boolean | null = null;
+    let submit_verification_reason: SubmitVerificationFailureReason | null =
+      null;
     let retry_count = 0;
 
     if (opts.press_enter) {
@@ -3726,6 +3811,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         beforeMutation: opts.beforeMutation,
       });
       submit_verified = verification.submit_verified;
+      submit_verification_reason = verification.submit_verification_reason;
       retry_count = verification.retry_count;
     }
 
@@ -3753,6 +3839,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       throw new SubmitVerificationError(
         `Enter submit could not be verified for ${opts.surface} within ${timeoutMs}ms`,
         retry_count,
+        submit_verification_reason ?? "submit_evidence_absent",
       );
     }
 
@@ -4221,6 +4308,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     command: string;
+    timeout_ms?: number;
     relaunch?: boolean;
     assertSurfaceBindingCurrent?: () => Promise<void>;
   }): Promise<void> => {
@@ -4234,6 +4322,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await waitForLaunchShellReady({
         surface: opts.surface,
         workspace: opts.workspace,
+        timeout_ms: opts.timeout_ms,
       });
     }
     await opts.assertSurfaceBindingCurrent?.();
@@ -4293,6 +4382,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await waitForLaunchShellReady({
             surface: opts.surface,
             workspace: opts.workspace,
+            timeout_ms: opts.timeout_ms,
             require_fresh_shell_prompt: true,
           });
         };
@@ -4349,6 +4439,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await waitForAgentLaunchReady({
             surface: opts.surface,
             workspace: opts.workspace,
+            timeout_ms: opts.timeout_ms,
             onUpdateShellRelaunch: relaunchOriginalCommand,
           });
         }
@@ -4505,14 +4596,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !snapshot ||
           !screenShowsPendingInput(snapshot.text, sanitizedText)
         ) {
-          await waitForBootPromptSubmitEvidence({
-            surface: deliveryRoute.surface,
-            workspace: deliveryRoute.workspace,
-            text: sanitizedText,
-            timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
-            baseline_metrics: readiness.metrics,
-            beforeRead: assertDeliveryRouteCurrent,
-          });
+          try {
+            await waitForBootPromptSubmitEvidence({
+              surface: deliveryRoute.surface,
+              workspace: deliveryRoute.workspace,
+              text: sanitizedText,
+              timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+              baseline_metrics: readiness.metrics,
+              beforeRead: assertDeliveryRouteCurrent,
+            });
+          } catch (fallbackError) {
+            if (fallbackError instanceof SurfaceGoneError) {
+              throw fallbackError;
+            }
+            const deliveredChars = chunks
+              .slice(0, sentChunks)
+              .reduce((sum, chunk) => sum + chunk.length, 0);
+            const fallbackMessage =
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : String(fallbackError);
+            throw new BootPromptDeliveryError(
+              `Boot prompt delivery failed after ${deliveredChars} chars: ${fallbackMessage}`,
+              deliveredChars,
+              error,
+            );
+          }
           return {
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
             retry_count: error.retry_count,
@@ -4530,6 +4639,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       throw new BootPromptDeliveryError(
         `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
         deliveredChars,
+        error instanceof SubmitVerificationError ? error : undefined,
       );
     }
   };
@@ -4818,6 +4928,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (error) {
         if (error instanceof SubmitVerificationError) {
           record.submit_verified = false;
+          record.submit_verification_reason = error.reason;
+          record.retry_safe = error.retry_safe;
           record.retry_count = error.retry_count;
         } else if (error instanceof DeliverySafetyGateError) {
           record.submit_verified = error.submit_verified;
@@ -6069,18 +6181,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           result?.workspace,
           { waitForReady: false },
         );
+        const createdIdentity = result
+          ? {
+              surface: result.surface,
+              workspace: result.workspace,
+              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+            }
+          : {};
         if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
+          return err(e, surfaceGonePayload(e, createdIdentity));
         }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             last_10_lines: e.last_10_lines,
           });
         }
         if (e instanceof BootPromptUpdateMenuBlockedError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
@@ -6088,11 +6207,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             delivered_chars: e.delivered_chars,
           });
         }
-        return err(e);
+        return err(e, createdIdentity);
       }
     },
   );
@@ -6196,18 +6315,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const createdIdentity = result
+          ? {
+              surface: result.surface,
+              workspace: result.workspace,
+              ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+            }
+          : {};
         if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e));
+          return err(e, surfaceGonePayload(e, createdIdentity));
         }
         if (e instanceof BootPromptTimeoutError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             last_10_lines: e.last_10_lines,
           });
         }
         if (e instanceof BootPromptUpdateMenuBlockedError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             error_code: e.error_code,
             last_10_lines: e.last_10_lines,
             recovery: e.recovery,
@@ -6215,11 +6341,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof BootPromptDeliveryError) {
           return err(e, {
-            surface: result?.surface,
+            ...createdIdentity,
             delivered_chars: e.delivered_chars,
           });
         }
-        return err(e);
+        return err(e, createdIdentity);
       }
     },
   );
@@ -7878,6 +8004,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity,
             workspace,
             command,
+            timeout_ms,
             assertSurfaceBindingCurrent,
           }) => {
             originalLaunchCommandsBySurface.set(surface, command);
@@ -7887,6 +8014,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 stableSurfaceIdentity,
                 workspace,
                 command,
+                timeout_ms,
                 assertSurfaceBindingCurrent,
               });
             } catch (error) {
@@ -8040,6 +8168,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       model?: string | null;
       mcpEnv?: string;
       originalCommand?: string;
+      timeout_ms?: number;
     }): Promise<void> => {
       const record = resolveSpawnRecord(opts.agentId, opts.surface);
       if (!record) {
@@ -8080,6 +8209,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         surface: route.surface,
         workspace: route.workspace,
         command,
+        timeout_ms: opts.timeout_ms,
         relaunch: true,
         assertSurfaceBindingCurrent,
       });
@@ -8406,9 +8536,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .int()
           .positive()
           .optional()
-          .default(BOOT_PROMPT_TIMEOUT_MS)
           .describe(
-            "Timeout in milliseconds waiting for the agent ready prompt",
+            "Optional timeout override in milliseconds for initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (10s shell, 15s launch, 60s boot prompt).",
           ),
         workspace: z
           .string()
@@ -8602,6 +8731,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               auto_archive_on_done: args.auto_archive_on_done ?? false,
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
+              boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async () => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
@@ -8657,6 +8787,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     model: result.model ?? args.model,
                     mcpEnv: result.mcp_env,
                     originalCommand: originalLaunchCommand,
+                    timeout_ms: args.boot_prompt_timeout_ms,
                   }),
               });
 
@@ -8837,6 +8968,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", formattedData),
           );
         } catch (e) {
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                agent_id: e.agent_id,
+                surface_id: e.surface_id,
+                workspace_id: e.workspace_id,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(e.launch_cause, {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id,
+                }),
+              );
+            }
+            return err(e, {
+              agent_id: e.agent_id,
+              surface_id: e.surface_id,
+              workspace_id: e.workspace_id,
+            });
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
               error_code: e.error_code,
@@ -8867,7 +9025,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .int()
           .positive()
           .optional()
-          .default(BOOT_PROMPT_TIMEOUT_MS),
+          .describe(
+            "Optional timeout override in milliseconds for initial shell readiness, agent launch readiness, and the boot prompt. When omitted, each phase keeps its established default (10s shell, 15s launch, 60s boot prompt).",
+          ),
         workspace: z.string().optional().describe("Target workspace ref"),
         worktree: worktreeArgSchema
           .optional()
@@ -8937,6 +9097,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 focusRestoreLease,
               );
             },
+            boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
           });
           const originalLaunchCommand = originalLaunchCommandsBySurface.get(
             result.surface_id,
@@ -8972,6 +9133,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   model: result!.model ?? args.model,
                   mcpEnv: result!.mcp_env,
                   originalCommand: originalLaunchCommand,
+                  timeout_ms: args.boot_prompt_timeout_ms,
                 }),
             });
             canonicalizeSpawnResult(result);
@@ -9045,8 +9207,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : mutationWorkspace,
             { waitForReady: false },
           );
+          const createdIdentity = result
+            ? {
+                agent_id: result.agent_id,
+                surface_id: result.surface_id,
+                workspace_id: result.workspace_id ?? mutationWorkspace,
+              }
+            : {};
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                agent_id: e.agent_id,
+                surface_id: e.surface_id,
+                workspace_id: e.workspace_id,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(e.launch_cause, {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id,
+                }),
+              );
+            }
+            return err(e, {
+              agent_id: e.agent_id,
+              surface_id: e.surface_id,
+              workspace_id: e.workspace_id,
+            });
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...createdIdentity,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
@@ -9054,11 +9251,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (e instanceof SubmitVerificationError) {
             return err(e, {
+              ...createdIdentity,
               submit_verified: false,
               retry_count: e.retry_count,
             });
           }
-          return err(e);
+          if (e instanceof SurfaceGoneError) {
+            return err(e, surfaceGonePayload(e, createdIdentity));
+          }
+          if (e instanceof BootPromptTimeoutError) {
+            return err(e, {
+              ...createdIdentity,
+              last_10_lines: e.last_10_lines,
+            });
+          }
+          if (e instanceof BootPromptUpdateMenuBlockedError) {
+            return err(e, {
+              ...createdIdentity,
+              error_code: e.error_code,
+              last_10_lines: e.last_10_lines,
+              recovery: e.recovery,
+            });
+          }
+          if (e instanceof BootPromptDeliveryError) {
+            return err(e, {
+              ...createdIdentity,
+              delivered_chars: e.delivered_chars,
+            });
+          }
+          return err(e, createdIdentity);
         }
       },
     );
@@ -9102,6 +9323,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let focusRestoreLease: FocusRestoreLease | null = null;
         let workspace: string | undefined;
         let lastSurface: string | undefined;
+        let activeSpawnIdentity:
+          | {
+              agent_id: string;
+              surface_id: string;
+              workspace_id: string | null;
+            }
+          | undefined;
+        const createdAgentIdentities: Array<{
+          agent_id: string;
+          surface_id: string;
+          workspace_id: string | null;
+        }> = [];
+        const spawnedAgents: Array<{
+          agent_id: string;
+          surface_id: string;
+          repo: string;
+          cli: CliType;
+          role: AgentRole;
+          health?: ReturnType<typeof evaluateAgentHealth>;
+          monitor_boot?: MonitorBootResult;
+          boot_prompt_delivered?: boolean;
+          boot_prompt_submit_verified?: boolean | null;
+        }> = [];
+        const leanSpawnedAgents: Record<string, unknown>[] = [];
         try {
           await assertWorkspaceMutationAllowed(
             "spawn_in_workspace",
@@ -9130,21 +9375,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             focusRestoreLease,
           );
 
-          const spawnedAgents: Array<{
-            agent_id: string;
-            surface_id: string;
-            repo: string;
-            cli: CliType;
-            role: AgentRole;
-            health?: ReturnType<typeof evaluateAgentHealth>;
-            monitor_boot?: MonitorBootResult;
-            boot_prompt_delivered?: boolean;
-            boot_prompt_submit_verified?: boolean | null;
-          }> = [];
-          const leanSpawnedAgents: Record<string, unknown>[] = [];
-
           for (const agent of args.agents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
+            activeSpawnIdentity = undefined;
             const result = await engine.spawnAgent({
               repo: agent.repo,
               model: agent.model,
@@ -9160,6 +9393,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 );
               },
             });
+            activeSpawnIdentity = {
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+              workspace_id: result.workspace_id ?? workspace ?? null,
+            };
+            createdAgentIdentities.push(activeSpawnIdentity);
+            lastSurface = result.surface_id;
             const originalLaunchCommand = originalLaunchCommandsBySurface.get(
               result.surface_id,
             );
@@ -9193,6 +9433,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
 
               canonicalizeSpawnResult(result);
+              activeSpawnIdentity.agent_id = result.agent_id;
+              activeSpawnIdentity.workspace_id =
+                result.workspace_id ?? workspace ?? null;
               const updated = stateMgr.updateRecord(result.agent_id, {
                 task_summary:
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
@@ -9266,7 +9509,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
 
-          lastSurface = spawnedAgents[spawnedAgents.length - 1]?.surface_id;
           const focusRestoreWarning = await restoreFocusAfterRender(
             focusRestoreLease,
             lastSurface,
@@ -9319,8 +9561,53 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace,
             { waitForReady: false },
           );
+          const failedIdentity =
+            e instanceof AgentLaunchError
+              ? {
+                  agent_id: e.agent_id,
+                  surface_id: e.surface_id,
+                  workspace_id: e.workspace_id ?? null,
+                }
+              : activeSpawnIdentity;
+          const failureAgents = [...createdAgentIdentities];
+          if (
+            failedIdentity &&
+            !failureAgents.some(
+              (candidate) =>
+                candidate.agent_id === failedIdentity.agent_id &&
+                candidate.surface_id === failedIdentity.surface_id,
+            )
+          ) {
+            failureAgents.push(failedIdentity);
+          }
+          const failureIdentityPayload = {
+            ...(workspace ? { workspace, workspace_id: workspace } : {}),
+            ...(failedIdentity ?? {}),
+            ...(failureAgents.length > 0 ? { agents: failureAgents } : {}),
+          };
+          if (e instanceof AgentLaunchError) {
+            if (e.launch_cause instanceof DeliverySafetyGateError) {
+              return err(e.launch_cause, {
+                ...failureIdentityPayload,
+                error_code: e.launch_cause.error_code,
+                submit_verified: e.launch_cause.submit_verified,
+                screen: e.launch_cause.screen,
+              });
+            }
+            if (e.launch_cause instanceof SurfaceGoneError) {
+              return err(
+                e.launch_cause,
+                surfaceGonePayload(
+                  e.launch_cause,
+                  failureIdentityPayload,
+                ),
+              );
+            }
+            return err(e, failureIdentityPayload);
+          }
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...failureIdentityPayload,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
@@ -9328,11 +9615,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (e instanceof SubmitVerificationError) {
             return err(e, {
+              ...failureIdentityPayload,
               submit_verified: false,
               retry_count: e.retry_count,
             });
           }
-          return err(e);
+          if (e instanceof SurfaceGoneError) {
+            return err(
+              e,
+              surfaceGonePayload(e, failureIdentityPayload),
+            );
+          }
+          if (e instanceof BootPromptTimeoutError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              last_10_lines: e.last_10_lines,
+            });
+          }
+          if (e instanceof BootPromptUpdateMenuBlockedError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              error_code: e.error_code,
+              last_10_lines: e.last_10_lines,
+              recovery: e.recovery,
+            });
+          }
+          if (e instanceof BootPromptDeliveryError) {
+            return err(e, {
+              ...failureIdentityPayload,
+              delivered_chars: e.delivered_chars,
+            });
+          }
+          return err(e, failureIdentityPayload);
         }
       },
     );
@@ -9868,6 +10182,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     : e instanceof DeliverySafetyGateError
                       ? e.submit_verified
                       : null,
+                ...(e instanceof SubmitVerificationError
+                  ? {
+                      submit_verification_reason: e.reason,
+                      retry_safe: e.retry_safe,
+                    }
+                  : {}),
                 error: e instanceof Error ? e.message : String(e),
               });
             }
@@ -10653,10 +10973,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           if (e instanceof SubmitVerificationError) {
-            return err(e, {
-              submit_verified: false,
-              retry_count: e.retry_count,
-            });
+            return err(e, submitVerificationFailurePayload(e));
           }
           return err(e);
         }

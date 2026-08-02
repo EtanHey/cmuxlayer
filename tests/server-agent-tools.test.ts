@@ -79,6 +79,7 @@ const AGENT_TOOLS = [
 
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
+  shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
   let readyText = "What can I help you with?\n>";
@@ -207,7 +208,7 @@ function makeLifecycleExec(opts?: {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: readyText,
+          text: opts?.shellNeverReady ? "terminal initializing" : readyText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -3419,6 +3420,366 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["new-split"]),
     );
+  });
+
+  it("spawn_agent applies boot_prompt_timeout_ms to initial shell readiness", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createLifecycleServer(
+        makeLifecycleExec({ shellNeverReady: true }),
+      );
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const spawnArgs = spawn.inputSchema.parse({
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "readiness timeout contract",
+        boot_prompt_timeout_ms: 90_000,
+      });
+      const resultPromise = spawn.handler(spawnArgs, {} as any);
+      await vi.advanceTimersByTimeAsync(90_100);
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 90000ms waiting for shell readiness",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent preserves the 10000ms shell-readiness default when no override is supplied", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createLifecycleServer(
+        makeLifecycleExec({ shellNeverReady: true }),
+      );
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const spawnArgs = spawn.inputSchema.parse({
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "default readiness timeout contract",
+      });
+      const resultPromise = spawn.handler(spawnArgs, {} as any);
+      await vi.advanceTimersByTimeAsync(60_100);
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 10000ms waiting for shell readiness",
+      );
+      expect(parsed.error).not.toContain("60000ms");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent reports the created agent and surface when initial shell readiness fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = createLifecycleServer(
+        makeLifecycleExec({ shellNeverReady: true }),
+      );
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const engine = (server as any)._registeredTools["interact"]._engine;
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "readiness failure identity",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("Timed out after 20ms");
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.workspace_id).toBe("ws:1");
+
+      const state = engine.stateMgr
+        .listStates()
+        .find((candidate: AgentRecord) =>
+          candidate.agent_id === parsed.agent_id
+        );
+      expect(state).toBeDefined();
+      expect(state?.surface_id).toBe(parsed.surface_id);
+      expect(state?.state).toBe("error");
+      expect(state?.error).toContain("waiting for shell readiness");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent applies boot_prompt_timeout_ms to agent-launch readiness", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /[A-Za-z0-9_.-]+Codex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSentAt ??= Date.now();
+        }
+        if (args.includes("read-screen")) {
+          if (
+            launcherSentAt !== null &&
+            Date.now() - launcherSentAt < 200
+          ) {
+            throw new Error("EAGAIN: launcher screen not readable yet");
+          }
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                launcherSentAt === null
+                  ? "$ "
+                  : "agent launcher still starting",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "agent-launch timeout contract",
+          boot_prompt_timeout_ms: 37,
+        },
+        {} as any,
+      );
+      for (let elapsed = 0; elapsed < 1_000; elapsed += 50) {
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      const result = await resultPromise;
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 37ms waiting for agent launch readiness",
+      );
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent applies boot_prompt_timeout_ms to the post-update fresh-shell retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      let clearingForRelaunch = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /[A-Za-z0-9_.-]+Codex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSentAt ??= Date.now();
+        }
+        if (args.includes("send-key") && args.includes("ctrl-c")) {
+          clearingForRelaunch = true;
+        }
+        if (args.includes("read-screen")) {
+          let text = "$ ";
+          if (clearingForRelaunch) {
+            text = "terminal initializing after update";
+          } else if (launcherSentAt !== null) {
+            const elapsed = Date.now() - launcherSentAt;
+            text =
+              elapsed < 200
+                ? "agent launcher still starting"
+                : elapsed < 325
+                  ? "Updating Codex CLI from 0.142.5 → 0.143.0 …"
+                  : "Update ran successfully! Please restart Codex.\netan@mac % ";
+          }
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text,
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "fresh-shell timeout contract",
+          boot_prompt_timeout_ms: 400,
+        },
+        {} as any,
+      );
+      for (let elapsed = 0; elapsed < 2_000; elapsed += 50) {
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 400ms waiting for shell readiness",
+      );
+      expect(clearingForRelaunch).toBe(true);
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("new_worktree_split reports the created identity when initial readiness fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+      const worktreePath = join(
+        gitsDir,
+        "cmuxlayer.wt",
+        "readiness-failure-worker",
+      );
+      const worktreeExec = vi.fn().mockImplementation(async () => {
+        mkdirSync(worktreePath, { recursive: true });
+        return { stdout: "", stderr: "" };
+      });
+      const server = createTrackedServer({
+        exec: makeLifecycleExec({ shellNeverReady: true }),
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const tool = (server as any)._registeredTools["new_worktree_split"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "codex",
+          cli: "codex",
+          worktree: { name: "readiness failure worker" },
+          boot_prompt_timeout_ms: 23,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "Timed out after 23ms waiting for shell readiness",
+      );
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.workspace_id).toBe("ws:1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("new_worktree_split reports the created identity when boot prompt verification fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+      const worktreePath = join(
+        gitsDir,
+        "cmuxlayer.wt",
+        "boot-verification-failure-worker",
+      );
+      const worktreeExec = vi.fn().mockImplementation(async () => {
+        mkdirSync(worktreePath, { recursive: true });
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec();
+      let promptSent = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "verify this prompt") {
+          promptSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (promptSent && args.includes("send-key")) {
+          return { stdout: "{}", stderr: "" };
+        }
+        if (promptSent && args.includes("read-screen")) {
+          throw new Error("screen unavailable after prompt delivery");
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const tool = (server as any)._registeredTools["new_worktree_split"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          model: "codex",
+          cli: "codex",
+          prompt: "verify this prompt",
+          worktree: { name: "boot verification failure worker" },
+          boot_prompt_timeout_ms: 23,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await resultPromise;
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.agent_id).toEqual(expect.any(String));
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.workspace_id).toBe("workspace:1");
+      expect(parsed.submit_verification_reason).toBe(
+        "surface_read_unavailable",
+      );
+      expect(parsed.retry_safe).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("spawn_agent reports readiness timeout without poisoning agent state", async () => {
