@@ -7510,7 +7510,11 @@ describe("tool handler integration", () => {
               },
               {} as any,
             ),
-          10_000,
+          // The end-to-end update path can consume two launcher submit-
+          // verification windows plus several independent 2s readiness
+          // phases. This is only the fake-clock driver ceiling; the production
+          // timeout asserted above remains boot_prompt_timeout_ms: 2_000.
+          30_000,
         );
         const parsed =
           result.structuredContent ?? JSON.parse(result.content[0].text);
