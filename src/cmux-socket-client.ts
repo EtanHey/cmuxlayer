@@ -267,6 +267,23 @@ export class CmuxSocketClient {
     }
   }
 
+  async focusSurface(
+    surface: string,
+    opts?: { workspace?: string },
+  ): Promise<void> {
+    try {
+      await this.call("surface.focus", {
+        surface_id: surface,
+        ...(opts?.workspace ? { workspace_id: opts.workspace } : {}),
+      });
+    } catch (e) {
+      if (this.isMethodNotFound(e) && this.cliFallback) {
+        return this.cliFallbackPinned()!.focusSurface(surface, opts);
+      }
+      throw e;
+    }
+  }
+
   async createWorkspace(
     title: string,
   ): Promise<{ workspace: string; title: string }> {
@@ -392,10 +409,18 @@ export class CmuxSocketClient {
       focus?: boolean;
     },
   ): Promise<CmuxNewSplitResult> {
-    if (opts?.focus === false) {
-      throw new CmuxSocketError(
-        "cmux does not support creating unfocused splits",
-      );
+    // The installed CLI documents --focus, but the v2 surface.split focus
+    // parameter is not part of cmuxlayer's verified socket contract. Route an
+    // explicit preference through the pinned CLI instead of risking a silently
+    // ignored socket field.
+    if (opts?.focus !== undefined) {
+      if (!this.cliFallback) {
+        throw new CmuxSocketError(
+          "newSplit focus requires the CLI fallback",
+          "unsupported_focus_option",
+        );
+      }
+      return this.cliFallbackPinned()!.newSplit(direction, opts);
     }
 
     if (opts?.type === "browser") {
@@ -742,7 +767,7 @@ export class CmuxSocketClient {
     }
   }
 
-  async identify(surface: string): Promise<{
+  async identify(surface?: string): Promise<{
     caller?: {
       workspace_ref?: string;
       surface_ref?: string;
@@ -754,7 +779,9 @@ export class CmuxSocketClient {
       pane_ref?: string;
     };
   }> {
-    return this.call("system.identify", { surface_id: surface });
+    return this.call("system.identify", {
+      ...(surface ? { surface_id: surface } : {}),
+    });
   }
 
   async browser(args: string[]): Promise<unknown> {

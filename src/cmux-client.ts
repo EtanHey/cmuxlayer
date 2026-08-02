@@ -378,10 +378,6 @@ export class CmuxClient {
       focus?: boolean;
     },
   ): Promise<CmuxNewSplitResult> {
-    if (opts?.focus === false) {
-      throw new Error("cmux does not support creating unfocused splits");
-    }
-
     if (opts?.type === "browser") {
       if (opts.surface || opts.pane) {
         throw new Error(
@@ -392,6 +388,8 @@ export class CmuxClient {
       const args = ["new-pane", "--type", "browser", "--direction", direction];
       if (opts.workspace) args.push("--workspace", opts.workspace);
       if (opts.url) args.push("--url", opts.url);
+      if (opts.focus !== undefined)
+        args.push("--focus", String(opts.focus));
 
       const raw = await this.run(args);
       const parsed = this.parse<Record<string, unknown>>(raw, "new-pane");
@@ -404,6 +402,8 @@ export class CmuxClient {
 
     const args = ["new-split", direction];
     if (opts?.workspace) args.push("--workspace", opts.workspace);
+    if (opts?.focus !== undefined)
+      args.push("--focus", String(opts.focus));
     const anchorSurface =
       opts?.surface ??
       (opts?.pane
@@ -533,6 +533,20 @@ export class CmuxClient {
   async selectWorkspace(workspace: string): Promise<void> {
     const args = ["select-workspace", "--workspace", workspace];
     await this.run(args);
+  }
+
+  async focusSurface(
+    surface: string,
+    opts?: { workspace?: string },
+  ): Promise<void> {
+    await this.run([
+      "rpc",
+      "surface.focus",
+      JSON.stringify({
+        surface_id: surface,
+        ...(opts?.workspace ? { workspace_id: opts.workspace } : {}),
+      }),
+    ]);
   }
 
   async createWorkspace(
@@ -715,8 +729,10 @@ export class CmuxClient {
     return this.parseStatusOutput(raw);
   }
 
-  async identify(surface: string): Promise<CmuxIdentifyResult> {
-    const raw = await this.run(["identify", "--surface", surface]);
+  async identify(surface?: string): Promise<CmuxIdentifyResult> {
+    const args = ["identify"];
+    if (surface) args.push("--surface", surface);
+    const raw = await this.run(args);
     return this.parse(raw, "identify");
   }
 

@@ -90,6 +90,7 @@ const FORWARDED_ASYNC_METHODS = [
   "pasteText",
   "sendKey",
   "selectWorkspace",
+  "focusSurface",
   "createWorkspace",
   "deleteWorkspace",
   "readScreen",

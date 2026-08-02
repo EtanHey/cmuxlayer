@@ -4628,6 +4628,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
   };
 
+  type FocusTarget = {
+    workspace: string;
+    surface?: string;
+  };
+
+  type FocusRestoreLease = {
+    prior: FocusTarget;
+    expected: FocusTarget;
+  };
+
+  /** Currently-focused workspace and surface, with workspace-only fallback. */
+  const currentFocusTarget = async (): Promise<FocusTarget | null> => {
+    try {
+      const focused = (await client.identify()).focused;
+      if (focused?.workspace_ref) {
+        return {
+          workspace: focused.workspace_ref,
+          ...(focused.surface_ref ? { surface: focused.surface_ref } : {}),
+        };
+      }
+    } catch {
+      // Older/degraded transports may not expose global focus via identify.
+    }
+    const workspace = await currentFocusedWorkspace();
+    return workspace ? { workspace } : null;
+  };
+
   const focusedWorkspaceFallbackWarning =
     "No explicit workspace, caller workspace, or repo workspace could be resolved; falling back to the currently focused workspace.";
 
@@ -4665,41 +4692,101 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return { workspace: undefined, warnings: [] };
   };
 
-  /**
-   * Focus the target workspace before a split when it differs from the prior
-   * focus. Returns the prior focus ref IF a jump was performed (so the caller
-   * passes it to restoreFocusAfterRender), or null when no jump was needed.
+  /** Capture origin focus, select the placement workspace, and record the
+   * exact focus state caused by that selection. The expected state is refreshed
+   * immediately after pane creation so restoration never depends on whether a
+   * cmux transport focuses newly-created surfaces by default.
    */
   const focusTargetBeforeSplit = async (
     targetWorkspace: string | undefined,
-  ): Promise<string | null> => {
+    restore = true,
+    capturedPrior?: FocusTarget | null,
+  ): Promise<FocusRestoreLease | null> => {
     if (!targetWorkspace) return null;
-    const prior = await currentFocusedWorkspace();
-    if (!prior || prior === targetWorkspace) return null;
-    await client.selectWorkspace(targetWorkspace);
-    return prior;
+    const prior =
+      capturedPrior === undefined
+        ? await currentFocusTarget()
+        : capturedPrior;
+    const placementFocus =
+      capturedPrior === undefined ? prior : await currentFocusTarget();
+    if (!placementFocus || placementFocus.workspace !== targetWorkspace) {
+      await client.selectWorkspace(targetWorkspace);
+    }
+    if (!prior || !restore) return null;
+    const expected = await currentFocusTarget();
+    // Without an exact expected surface, a later same-workspace user move
+    // cannot be distinguished from cmuxlayer's own placement focus.
+    if (!expected?.surface) return null;
+    return { prior, expected };
   };
 
+  /** Refresh the lease immediately after the surface mutation. */
+  const capturePostCreationFocus = async (
+    lease: FocusRestoreLease | null,
+  ): Promise<FocusRestoreLease | null> => {
+    if (!lease) return null;
+    const expected = await currentFocusTarget();
+    return expected?.surface ? { ...lease, expected } : null;
+  };
+
+  const sameExactFocus = (left: FocusTarget, right: FocusTarget): boolean =>
+    Boolean(
+      left.surface &&
+        right.surface &&
+        left.workspace === right.workspace &&
+        left.surface === right.surface,
+    );
+
   /**
-   * Restore the prior focus AFTER the new terminal is fully rendered — only
-   * when a jump actually happened (priorFocus non-null). Waits for shell
-   * readiness so focus is not restored mid-render. Restores focus even if
-   * readiness times out (never strand focus on the wrong workspace).
+   * Restore the prior surface AFTER the new terminal is fully rendered. Waits
+   * for shell readiness so focus is not restored mid-render. Restores focus
+   * even if readiness times out (never strand focus on the spawned pane).
    */
   const restoreFocusAfterRender = async (
-    priorFocus: string | null,
+    lease: FocusRestoreLease | null,
     surface: string | undefined,
     workspace: string | undefined,
-  ): Promise<void> => {
-    if (!priorFocus) return;
-    if (surface) {
+    opts?: { waitForReady?: boolean },
+  ): Promise<string | null> => {
+    if (!lease) return null;
+    if (surface && opts?.waitForReady !== false) {
       try {
         await waitForLaunchShellReady({ surface, workspace });
       } catch {
         // Readiness timed out — restore focus anyway rather than strand it.
       }
     }
-    await client.selectWorkspace(priorFocus);
+    const current = await currentFocusTarget();
+    // The user may deliberately move while a pane boots. Restore only while
+    // focus still exactly matches the post-creation state cmuxlayer caused.
+    if (!current || !sameExactFocus(current, lease.expected)) return null;
+    try {
+      if (lease.prior.surface) {
+        await client.focusSurface(lease.prior.surface, {
+          workspace: lease.prior.workspace,
+        });
+        return null;
+      }
+      await client.selectWorkspace(lease.prior.workspace);
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return `Focus restore failed: ${message}`;
+    }
+  };
+
+  /** Explicit focus:true is best-effort so the created handle is never lost. */
+  const focusCreatedSurface = async (
+    surface: string,
+    workspace: string | undefined,
+  ): Promise<string | null> => {
+    try {
+      await client.focusSurface(surface, { workspace });
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return `Focus request failed: ${message}`;
+    }
   };
 
   const startBackgroundDelivery = (record: DeliveryRecord) => {
@@ -5700,8 +5787,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       focus: z
         .boolean()
         .optional()
-        .default(true)
-        .describe("Focus the new pane"),
+        .describe(
+          "Set true to focus the new pane and leave focus there; otherwise cmuxlayer restores the exact origin after render",
+        ),
       boot_prompt_path: z
         .string()
         .nullable()
@@ -5720,6 +5808,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       let result: CmuxNewSplitResult | undefined;
+      let focusRestoreLease: FocusRestoreLease | null = null;
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         const shouldInferRole =
@@ -5783,7 +5872,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // Auto-focus only applies to workspace-targeted splits (no explicit
         // pane/surface anchor). Captured right before creation, AFTER all
         // validation, so a rejected request has no focus side effects.
-        let priorFocus: string | null = null;
+        let focusRequestWarning: string | null = null;
         let actualPlacement: "split" | "surface" = "split";
         let actualDirection: string | null = args.direction;
         if (inferredRole && (args.type ?? "terminal") === "terminal") {
@@ -5833,18 +5922,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           actualPlacement = placement.kind;
           actualDirection =
             placement.kind === "split" ? placement.direction : null;
-          if (placement.kind === "surface" && args.focus === false) {
-            throw new Error(
-              "focus=false is not supported when role-based new_split reuses an existing pane as a tab",
-            );
-          }
           // Role-based placement has no explicit pane/surface (validated above),
           // so it is always a workspace-targeted split — apply auto-focus.
           assertSurfaceObserverEpochCurrent(
             rolePlacementObserverEpoch,
             "role-based new_split placement",
           );
-          priorFocus = await focusTargetBeforeSplit(targetWorkspace);
+          focusRestoreLease = await focusTargetBeforeSplit(
+            targetWorkspace,
+            args.focus !== true,
+          );
           assertSurfaceObserverEpochCurrent(
             rolePlacementObserverEpoch,
             "role-based new_split placement",
@@ -5863,7 +5950,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   type: args.type,
                   url: args.url,
                   title: args.title,
-                  focus: args.focus,
                 });
           assertSurfaceObserverEpochCurrent(
             rolePlacementObserverEpoch,
@@ -5873,7 +5959,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // Only workspace-targeted splits need auto-focus; an explicit
           // pane/surface anchor already pins the destination workspace.
           if (!args.pane && !args.surface) {
-            priorFocus = await focusTargetBeforeSplit(targetWorkspace);
+            focusRestoreLease = await focusTargetBeforeSplit(
+              targetWorkspace,
+              args.focus !== true,
+            );
           }
           result = await client.newSplit(args.direction, {
             workspace: targetWorkspace,
@@ -5882,8 +5971,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             type: args.type,
             url: args.url,
             title: args.title,
-            focus: args.focus,
           });
+        }
+        if (args.focus === true) {
+          focusRequestWarning = await focusCreatedSurface(
+            result.surface,
+            result.workspace || targetWorkspace,
+          );
+        } else {
+          focusRestoreLease = await capturePostCreationFocus(
+            focusRestoreLease,
+          );
         }
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
@@ -5924,16 +6022,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : undefined,
           });
         }
-        await restoreFocusAfterRender(
-          priorFocus,
+        const focusRestoreWarning = await restoreFocusAfterRender(
+          focusRestoreLease,
           result.surface,
           result.workspace || targetWorkspace,
+          { waitForReady: !bootPromptPath },
         );
         const data: Record<string, unknown> = { ...result };
         data.placement = actualPlacement;
         data.direction = actualDirection;
-        if (targetResolution.warnings.length > 0) {
-          data.warnings = targetResolution.warnings;
+        const warnings = [
+          ...targetResolution.warnings,
+          ...(focusRequestWarning ? [focusRequestWarning] : []),
+          ...(focusRestoreWarning ? [focusRestoreWarning] : []),
+        ];
+        if (warnings.length > 0) {
+          data.warnings = warnings;
         }
         if (inferredRole) {
           data.role = inferredRole;
@@ -5957,6 +6061,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        // Creation or boot delivery may fail after cmuxlayer selected a target
+        // workspace. Return focus when the user has not moved since then.
+        await restoreFocusAfterRender(
+          focusRestoreLease,
+          result?.surface,
+          result?.workspace,
+          { waitForReady: false },
+        );
         if (e instanceof SurfaceGoneError) {
           return err(e, surfaceGonePayload(e));
         }
@@ -8469,24 +8581,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const spawnPrompt = hasInlinePrompt(args.prompt)
             ? args.prompt
             : (bootPromptText ?? "");
-          const result = await engine.spawnAgent({
-            repo: args.repo,
-            model: args.model,
-            cli: args.cli,
-            prompt: spawnPrompt,
-            boot_prompt_pending:
-              hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
-            workspace: spawnWorkspace,
-            cwd: worktree.prepared?.path,
-            mcp_env: worktree.mcpEnv,
-            mcp_profile_label: worktree.mcpProfileLabel,
-            worktree_branch: worktree.prepared?.branch,
-            parent_agent_id: args.parent_agent_id,
-            role: effectiveRole,
-            auto_archive_on_done: args.auto_archive_on_done ?? false,
-            max_cost_per_agent: args.max_cost_per_agent,
-            crash_recover: args.crash_recover,
-          });
+          let focusRestoreLease =
+            await focusTargetBeforeSplit(spawnWorkspace);
+          let result: Awaited<ReturnType<typeof engine.spawnAgent>>;
+          try {
+            result = await engine.spawnAgent({
+              repo: args.repo,
+              model: args.model,
+              cli: args.cli,
+              prompt: spawnPrompt,
+              boot_prompt_pending:
+                hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
+              workspace: spawnWorkspace,
+              cwd: worktree.prepared?.path,
+              mcp_env: worktree.mcpEnv,
+              mcp_profile_label: worktree.mcpProfileLabel,
+              worktree_branch: worktree.prepared?.branch,
+              parent_agent_id: args.parent_agent_id,
+              role: effectiveRole,
+              auto_archive_on_done: args.auto_archive_on_done ?? false,
+              max_cost_per_agent: args.max_cost_per_agent,
+              crash_recover: args.crash_recover,
+              on_surface_created: async () => {
+                focusRestoreLease = await capturePostCreationFocus(
+                  focusRestoreLease,
+                );
+              },
+            });
+          } catch (e) {
+            try {
+              await restoreFocusAfterRender(
+                focusRestoreLease,
+                undefined,
+                spawnWorkspace,
+              );
+            } catch {
+              // Preserve the original spawn error response.
+            }
+            throw e;
+          }
           const originalLaunchCommand = originalLaunchCommandsBySurface.get(
             result.surface_id,
           );
@@ -8581,6 +8714,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             } catch {
               // Preserve the original boot prompt error response.
             }
+            try {
+              // Boot delivery already performed its own readiness wait. On a
+              // timeout, restore immediately instead of starting a second wait.
+              await restoreFocusAfterRender(
+                focusRestoreLease,
+                result.surface_id,
+                spawnDeliveryWorkspace(result, spawnWorkspace),
+                { waitForReady: false },
+              );
+            } catch {
+              // Preserve the original boot prompt error response.
+            }
             const extra = {
               agent_id: result.agent_id,
               surface_id: result.surface_id,
@@ -8608,6 +8753,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               return err(e, { ...extra, delivered_chars: e.delivered_chars });
             }
             return err(e, extra);
+          }
+
+          const focusRestoreWarning = await restoreFocusAfterRender(
+            focusRestoreLease,
+            result.surface_id,
+            spawnDeliveryWorkspace(result, spawnWorkspace),
+            {
+              waitForReady:
+                !hasInlinePrompt(args.prompt) && !Boolean(bootPromptPath),
+            },
+          );
+          if (focusRestoreWarning) {
+            result.warnings = [
+              ...(result.warnings ?? []),
+              focusRestoreWarning,
+            ];
           }
 
           await refreshManagedMetadataBestEffort(result.agent_id);
@@ -8729,6 +8890,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        let focusRestoreLease: FocusRestoreLease | null = null;
+        let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
+        let mutationWorkspace: string | undefined;
         try {
           assertBootPromptMode(args.prompt, null);
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
@@ -8741,19 +8905,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             callerWorkspace: parentWorkspace,
             repo: args.repo,
           });
-          const mutationWorkspace = targetResolution.workspace;
+          mutationWorkspace = targetResolution.workspace;
           await assertWorkspaceMutationAllowed(
             "new_worktree_split",
             mutationWorkspace,
           );
-          const priorFocus = await focusTargetBeforeSplit(mutationWorkspace);
           const worktree = await prepareSpawnWorktree(
             args.repo,
             args.worktree ?? true,
             args.mcp_profile as McpProfile | undefined,
           );
+          focusRestoreLease = await focusTargetBeforeSplit(mutationWorkspace);
           const hasPrompt = hasInlinePrompt(args.prompt);
-          const result = await engine.spawnAgent({
+          result = await engine.spawnAgent({
             repo: args.repo,
             model: args.model,
             cli: args.cli,
@@ -8768,6 +8932,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role: "worker",
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
+            on_surface_created: async () => {
+              focusRestoreLease = await capturePostCreationFocus(
+                focusRestoreLease,
+              );
+            },
           });
           const originalLaunchCommand = originalLaunchCommandsBySurface.get(
             result.surface_id,
@@ -8791,17 +8960,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
               workspace: deliveryWorkspace,
-              resolveRoute: () => resolveManagedDeliveryRoute(result.agent_id),
+              resolveRoute: () => resolveManagedDeliveryRoute(result!.agent_id),
               cli: args.cli,
               prompt: args.prompt,
               timeout_ms: args.boot_prompt_timeout_ms,
               onUpdateShellRelaunch: () =>
                 relaunchSpawnAgentAfterUpdate({
-                  agentId: result.agent_id,
-                  surface: result.surface_id,
+                  agentId: result!.agent_id,
+                  surface: result!.surface_id,
                   workspace: deliveryWorkspace,
-                  model: result.model ?? args.model,
-                  mcpEnv: result.mcp_env,
+                  model: result!.model ?? args.model,
+                  mcpEnv: result!.mcp_env,
                   originalCommand: originalLaunchCommand,
                 }),
             });
@@ -8813,11 +8982,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             registry.set(result.agent_id, updated);
           }
 
-          await restoreFocusAfterRender(
-            priorFocus,
+          const focusRestoreWarning = await restoreFocusAfterRender(
+            focusRestoreLease,
             result.surface_id,
             spawnDeliveryWorkspace(result, mutationWorkspace),
+            { waitForReady: !hasPrompt },
           );
+          if (focusRestoreWarning) {
+            result.warnings = [
+              ...(result.warnings ?? []),
+              focusRestoreWarning,
+            ];
+          }
           await refreshManagedMetadataBestEffort(result.agent_id);
           await lifecycleSeatManifestPublisher({
             agentId: result.agent_id,
@@ -8861,6 +9037,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("new_worktree_split", formattedData),
           );
         } catch (e) {
+          await restoreFocusAfterRender(
+            focusRestoreLease,
+            result?.surface_id,
+            result
+              ? spawnDeliveryWorkspace(result, mutationWorkspace)
+              : mutationWorkspace,
+            { waitForReady: false },
+          );
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
               error_code: e.error_code,
@@ -8914,24 +9098,37 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const originFocus = await currentFocusTarget();
+        let focusRestoreLease: FocusRestoreLease | null = null;
+        let workspace: string | undefined;
+        let lastSurface: string | undefined;
         try {
           await assertWorkspaceMutationAllowed(
             "spawn_in_workspace",
             args.reuse_workspace ?? (await currentCallerWorkspace()),
           );
+          // A newly created workspace may auto-focus immediately, so capture
+          // the user's origin before createWorkspace can move it.
           const workspaceResult = args.reuse_workspace
             ? { workspace: args.reuse_workspace, title: args.workspace_title }
             : await client.createWorkspace(args.workspace_title);
-          const workspace = workspaceResult.workspace;
+          workspace = workspaceResult.workspace;
           if (!workspace) {
             throw new Error("create_workspace returned an empty workspace ref");
           }
 
-          const priorFocus = await focusTargetBeforeSplit(workspace);
-          // Always focus the target so agents spawn into it; harmless when the
-          // workspace was just created (and is already selected) or already
-          // focused. priorFocus drives the focus-back only when a jump happened.
-          await client.selectWorkspace(workspace);
+          focusRestoreLease = await focusTargetBeforeSplit(
+            workspace,
+            true,
+            originFocus,
+          );
+          // focusTargetBeforeSplit ensures the target is selected when cmux's
+          // current focus cannot prove it already is. The lease drives
+          // focus-back only while the user has not moved since cmuxlayer's
+          // latest placement mutation.
+          focusRestoreLease = await capturePostCreationFocus(
+            focusRestoreLease,
+          );
 
           const spawnedAgents: Array<{
             agent_id: string;
@@ -8957,6 +9154,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               workspace,
               role: agent.role,
               auto_archive_on_done: false,
+              on_surface_created: async () => {
+                focusRestoreLease = await capturePostCreationFocus(
+                  focusRestoreLease,
+                );
+              },
             });
             const originalLaunchCommand = originalLaunchCommandsBySurface.get(
               result.surface_id,
@@ -9064,16 +9266,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
 
-          const lastSurface =
-            spawnedAgents[spawnedAgents.length - 1]?.surface_id;
-          await restoreFocusAfterRender(priorFocus, lastSurface, workspace);
+          lastSurface = spawnedAgents[spawnedAgents.length - 1]?.surface_id;
+          const focusRestoreWarning = await restoreFocusAfterRender(
+            focusRestoreLease,
+            lastSurface,
+            workspace,
+          );
 
           // spawn_in_workspace builds its response from the per-agent objects,
           // which drop each result.warnings — so surface the stale-build warning
           // at the aggregate level (otherwise a stale MCP serving a multi-agent
           // workspace spawn would return NO warning).
           const staleWarning = staleBuildWarning();
-          const workspaceWarnings = staleWarning ? [staleWarning] : [];
+          const workspaceWarnings = [
+            ...(staleWarning ? [staleWarning] : []),
+            ...(focusRestoreWarning ? [focusRestoreWarning] : []),
+          ];
 
           const formattedData = {
             workspace,
@@ -9105,6 +9313,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          await restoreFocusAfterRender(
+            focusRestoreLease,
+            lastSurface,
+            workspace,
+            { waitForReady: false },
+          );
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
               error_code: e.error_code,

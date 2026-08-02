@@ -5355,6 +5355,7 @@ describe("tool handler integration", () => {
         title: "",
         type: "terminal",
       }),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
       renameTab: vi.fn().mockResolvedValue(undefined),
     };
     const server = createServer({
@@ -5441,6 +5442,7 @@ describe("tool handler integration", () => {
         title: "",
         type: "terminal",
       }),
+      selectWorkspace: vi.fn().mockResolvedValue(undefined),
       renameTab: vi.fn().mockResolvedValue(undefined),
     };
     const server = createServer({
@@ -6955,7 +6957,7 @@ describe("tool handler integration", () => {
     );
   });
 
-  it("new_split with role=worker rejects focus=false while seeding the worker column", async () => {
+  it("new_split with role=worker allows focus=false while seeding the worker column", async () => {
     const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-focus-state");
     rmSync(stateDir, { recursive: true, force: true });
     const stateMgr = new StateManager(stateDir);
@@ -7037,6 +7039,18 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
+      if (args.includes("new-surface") || args.includes("new-split")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:new-worker",
+            pane: "pane:right",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
       return { stdout: "{}", stderr: "" };
     });
 
@@ -7060,11 +7074,17 @@ describe("tool handler integration", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("unfocused splits");
+    expect(parsed.ok).toBe(true);
+    expect(parsed.surface).toBe("surface:new-worker");
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("new-surface") || args.includes("new-split"),
+      ),
+    ).toBe(true);
     expect(mockExec).not.toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["new-surface"]),
+      expect.arrayContaining(["surface.focus"]),
     );
   });
 

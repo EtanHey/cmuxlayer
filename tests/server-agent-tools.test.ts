@@ -8649,10 +8649,18 @@ describe("auto-focus discipline (focus target before split, restore after render
   // read-screen polls before reporting ready.
   function makeFocusExec(opts: {
     selectedWorkspace: string;
+    focusedSurface?: string;
     notReadyFor?: number;
+    moveFocusDuringReadinessTo?: {
+      workspace: string;
+      surface: string;
+    };
+    focusSurfaceFails?: boolean;
   }): { exec: ExecFn; calls: string[][]; readScreenCount: () => number } {
     const calls: string[][] = [];
     let readScreens = 0;
+    let focusedWorkspace = opts.selectedWorkspace;
+    let focusedSurface = opts.focusedSurface ?? "surface:origin";
     const exec = vi.fn(async (_cmd: string, args: string[]) => {
       calls.push(args);
       if (args.includes("list-workspaces")) {
@@ -8663,14 +8671,14 @@ describe("auto-focus discipline (focus target before split, restore after render
                 ref: "workspace:1",
                 title: "One",
                 index: 0,
-                selected: opts.selectedWorkspace === "workspace:1",
+                selected: focusedWorkspace === "workspace:1",
                 pinned: false,
               },
               {
                 ref: "workspace:2",
                 title: "Two",
                 index: 1,
-                selected: opts.selectedWorkspace === "workspace:2",
+                selected: focusedWorkspace === "workspace:2",
                 pinned: false,
               },
             ],
@@ -8678,9 +8686,30 @@ describe("auto-focus discipline (focus target before split, restore after render
           stderr: "",
         };
       }
+      if (args.includes("identify")) {
+        return {
+          stdout: JSON.stringify({
+            caller: {
+              workspace_ref: focusedWorkspace,
+              surface_ref: focusedSurface,
+              pane_ref: "pane:origin",
+            },
+            focused: {
+              workspace_ref: focusedWorkspace,
+              surface_ref: focusedSurface,
+              pane_ref: "pane:origin",
+            },
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("read-screen")) {
         readScreens++;
         const notReady = (opts.notReadyFor ?? 0) >= readScreens;
+        if (opts.moveFocusDuringReadinessTo) {
+          focusedWorkspace = opts.moveFocusDuringReadinessTo.workspace;
+          focusedSurface = opts.moveFocusDuringReadinessTo.surface;
+        }
         return {
           stdout: JSON.stringify({
             surface: "surface:new",
@@ -8692,6 +8721,23 @@ describe("auto-focus discipline (focus target before split, restore after render
           }),
           stderr: "",
         };
+      }
+      if (args.includes("select-workspace")) {
+        focusedWorkspace = args[args.indexOf("--workspace") + 1];
+        focusedSurface =
+          focusedWorkspace === "workspace:1"
+            ? "surface:origin"
+            : "surface:target";
+      }
+      if (args.includes("rpc") && args.includes("surface.focus")) {
+        if (opts.focusSurfaceFails) throw new Error("focus restore failed");
+        const payload = JSON.parse(args.at(-1) ?? "{}") as {
+          surface_id?: string;
+          workspace_id?: string;
+        };
+        focusedWorkspace = payload.workspace_id ?? focusedWorkspace;
+        focusedSurface = payload.surface_id ?? focusedSurface;
+        return { stdout: "{}", stderr: "" };
       }
       // Default: split/surface creation result.
       return {
@@ -8710,12 +8756,104 @@ describe("auto-focus discipline (focus target before split, restore after render
 
   const selectIdx = (calls: string[][], ws: string) =>
     calls.findIndex((a) => a.includes("select-workspace") && a.includes(ws));
+  const focusSurfaceIdx = (calls: string[][], surface: string) =>
+    calls.findIndex(
+      (a) =>
+        a.includes("rpc") &&
+        a.includes("surface.focus") &&
+        a.some((value) => value.includes(surface)),
+    );
   const firstReadScreenIdx = (calls: string[][]) =>
     calls.findIndex((a) => a.includes("read-screen"));
   const lastReadScreenIdx = (calls: string[][]) =>
     calls.reduce((last, a, i) => (a.includes("read-screen") ? i : last), -1);
 
-  it("new_split focuses the target workspace before the split and restores prior focus after readiness when a jump is needed", async () => {
+  function makeFocusLifecycleExec(opts?: {
+    selectedWorkspace?: string;
+    focusedSurface?: string;
+    moveFocusDuringReadinessTo?: {
+      workspace: string;
+      surface: string;
+    };
+    focusSurfaceFails?: boolean;
+  }): { exec: ExecFn; calls: string[][] } {
+    const calls: string[][] = [];
+    const lifecycleExec = makeLifecycleExec();
+    let focusedWorkspace = opts?.selectedWorkspace ?? "workspace:1";
+    let focusedSurface = opts?.focusedSurface ?? "surface:origin";
+    let spawnCreated = false;
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes("identify")) {
+        return {
+          stdout: JSON.stringify({
+            caller: {
+              workspace_ref: focusedWorkspace,
+              surface_ref: focusedSurface,
+              pane_ref: "pane:origin",
+            },
+            focused: {
+              workspace_ref: focusedWorkspace,
+              surface_ref: focusedSurface,
+              pane_ref: "pane:origin",
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("rpc") && args.includes("surface.focus")) {
+        if (opts?.focusSurfaceFails) throw new Error("focus restore failed");
+        const payload = JSON.parse(args.at(-1) ?? "{}") as {
+          surface_id?: string;
+          workspace_id?: string;
+        };
+        focusedWorkspace = payload.workspace_id ?? focusedWorkspace;
+        focusedSurface = payload.surface_id ?? focusedSurface;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("select-workspace")) {
+        focusedWorkspace = args[args.indexOf("--workspace") + 1];
+        focusedSurface =
+          focusedWorkspace === "workspace:1"
+            ? "surface:origin"
+            : "surface:target";
+      }
+      if (args.includes("create-workspace")) {
+        focusedWorkspace = "workspace:2";
+        focusedSurface = "surface:target";
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:2",
+            title: "Review team",
+          }),
+          stderr: "",
+        };
+      }
+      const result = await lifecycleExec(cmd, args);
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        spawnCreated = true;
+        return {
+          ...result,
+          stdout: JSON.stringify({
+            ...(JSON.parse(result.stdout) as Record<string, unknown>),
+            workspace: focusedWorkspace,
+          }),
+        };
+      }
+      if (
+        spawnCreated &&
+        args.includes("read-screen") &&
+        opts?.moveFocusDuringReadinessTo
+      ) {
+        focusedWorkspace = opts.moveFocusDuringReadinessTo.workspace;
+        focusedSurface = opts.moveFocusDuringReadinessTo.surface;
+      }
+      return result;
+    }) as unknown as ExecFn;
+    return { exec, calls };
+  }
+
+  it("new_split restores the prior surface after a cross-workspace spawn", async () => {
     const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
     const server = createLifecycleServer(exec);
     const tool = (server as any)._registeredTools["new_split"];
@@ -8729,7 +8867,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     expect(parsed.surface).toBe("surface:new");
 
     const focusTarget = selectIdx(calls, "workspace:2");
-    const restorePrior = selectIdx(calls, "workspace:1");
+    const restorePrior = focusSurfaceIdx(calls, "surface:origin");
     const readScreen = firstReadScreenIdx(calls);
 
     // Target was focused BEFORE the prior focus was restored.
@@ -8738,9 +8876,11 @@ describe("auto-focus discipline (focus target before split, restore after render
     // Readiness was awaited between the split and the focus-back.
     expect(readScreen).toBeGreaterThan(focusTarget);
     expect(readScreen).toBeLessThan(restorePrior);
+    // Restoring only the workspace can land on a different pane/tab.
+    expect(selectIdx(calls, "workspace:1")).toBe(-1);
   });
 
-  it("new_split does NOT touch focus when the target is already the focused workspace", async () => {
+  it("new_split restores the prior surface after a same-workspace spawn", async () => {
     const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:2" });
     const server = createLifecycleServer(exec);
     const tool = (server as any)._registeredTools["new_split"];
@@ -8752,6 +8892,325 @@ describe("auto-focus discipline (focus target before split, restore after render
 
     const selectCalls = calls.filter((a) => a.includes("select-workspace"));
     expect(selectCalls).toHaveLength(0);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("spawn_agent restores the prior surface after a same-workspace spawn", async () => {
+    const { exec, calls } = makeFocusLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        workspace: "workspace:1",
+        force_new: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("spawn_agent restores the prior surface after a cross-workspace spawn", async () => {
+    const { exec, calls } = makeFocusLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        workspace: "workspace:2",
+        force_new: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("new_worktree_split restores the prior surface after a cross-workspace spawn", async () => {
+    const { exec, calls } = makeFocusLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        model: "gpt-5.6-sol",
+        workspace: "workspace:2",
+        worktree: false,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("spawn_in_workspace restores the prior surface after a cross-workspace spawn", async () => {
+    const { exec, calls } = makeFocusLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "Review team",
+        reuse_workspace: "workspace:2",
+        agents: [
+          {
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "gpt-5.6-sol",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("spawn_in_workspace captures the origin before a new workspace auto-focuses", async () => {
+    const { exec, calls } = makeFocusLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "Review team",
+        agents: [
+          {
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "gpt-5.6-sol",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("spawn_agent keeps its success response when focus restoration fails", async () => {
+    const { exec } = makeFocusLifecycleExec({ focusSurfaceFails: true });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        workspace: "workspace:1",
+        force_new: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(result.structuredContent.agent_id).toEqual(expect.any(String));
+    expect(result.structuredContent.surface_id).toBe("surface:new");
+    expect(result.structuredContent.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/focus restore failed/i)]),
+    );
+  });
+
+  it("new_split keeps its success response when focus restoration fails", async () => {
+    const { exec } = makeFocusExec({
+      selectedWorkspace: "workspace:1",
+      focusSurfaceFails: true,
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(result.structuredContent.surface).toBe("surface:new");
+    expect(result.structuredContent.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/focus restore failed/i)]),
+    );
+  });
+
+  it("new_split does not steal focus back after the user moves during readiness", async () => {
+    const { exec, calls } = makeFocusExec({
+      selectedWorkspace: "workspace:1",
+      moveFocusDuringReadinessTo: {
+        workspace: "workspace:1",
+        surface: "surface:user-choice",
+      },
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    const result = await tool.handler(
+      { direction: "right", workspace: "workspace:2", type: "terminal" },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
+  });
+
+  it("spawn_agent does not steal focus back after the user moves during readiness", async () => {
+    const { exec, calls } = makeFocusLifecycleExec({
+      moveFocusDuringReadinessTo: {
+        workspace: "workspace:1",
+        surface: "surface:user-choice",
+      },
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        workspace: "workspace:1",
+        force_new: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
+  });
+
+  it("new_worktree_split does not steal focus back after the user moves during readiness", async () => {
+    const { exec, calls } = makeFocusLifecycleExec({
+      moveFocusDuringReadinessTo: {
+        workspace: "workspace:1",
+        surface: "surface:user-choice",
+      },
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        model: "gpt-5.6-sol",
+        workspace: "workspace:2",
+        worktree: false,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
+  });
+
+  it("spawn_in_workspace does not steal focus back after the user moves during readiness", async () => {
+    const { exec, calls } = makeFocusLifecycleExec({
+      moveFocusDuringReadinessTo: {
+        workspace: "workspace:1",
+        surface: "surface:user-choice",
+      },
+    });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await tool.handler(
+      {
+        workspace_title: "Review team",
+        reuse_workspace: "workspace:2",
+        agents: [
+          {
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "gpt-5.6-sol",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
+  });
+
+  it("spawn_agent restores the prior surface when pane creation fails", async () => {
+    const calls: string[][] = [];
+    const lifecycleExec = makeLifecycleExec();
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes("identify")) {
+        return {
+          stdout: JSON.stringify({
+            caller: {
+              workspace_ref: "workspace:1",
+              surface_ref: "surface:origin",
+              pane_ref: "pane:origin",
+            },
+            focused: {
+              workspace_ref: "workspace:1",
+              surface_ref: "surface:origin",
+              pane_ref: "pane:origin",
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        throw new Error("pane creation failed");
+      }
+      return lifecycleExec(cmd, args);
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        workspace: "workspace:2",
+        force_new: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.ok).toBe(false);
+    expect(result.structuredContent.error).toContain("pane creation failed");
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it("new_split with focus=true explicitly focuses and stays on the new surface", async () => {
+    const { exec, calls } = makeFocusExec({ selectedWorkspace: "workspace:1" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["new_split"];
+
+    await tool.handler(
+      {
+        direction: "right",
+        workspace: "workspace:2",
+        type: "terminal",
+        focus: true,
+      },
+      {} as any,
+    );
+
+    expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
+    expect(focusSurfaceIdx(calls, "surface:new")).toBeGreaterThanOrEqual(0);
+    expect(focusSurfaceIdx(calls, "surface:origin")).toBe(-1);
+    expect(selectIdx(calls, "workspace:1")).toBe(-1);
   });
 
   it("new_split waits for the new terminal to render before restoring focus", async () => {
@@ -8769,7 +9228,7 @@ describe("auto-focus discipline (focus target before split, restore after render
 
     // Polled until ready (2 not-ready + 1 ready) and only then restored focus.
     expect(readScreenCount()).toBeGreaterThanOrEqual(3);
-    const restorePrior = selectIdx(calls, "workspace:1");
+    const restorePrior = focusSurfaceIdx(calls, "surface:origin");
     expect(restorePrior).toBeGreaterThan(lastReadScreenIdx(calls));
   });
 });

@@ -158,6 +158,13 @@ export interface SpawnAgentParams {
   auto_archive_on_done?: boolean;
   max_cost_per_agent?: number;
   crash_recover?: boolean;
+  /** Internal lifecycle hook: runs immediately after cmux creates the surface,
+   * before launcher I/O or readiness polling can give the user time to move.
+   */
+  on_surface_created?: (surface: {
+    surface: string;
+    workspace?: string;
+  }) => void | Promise<void>;
 }
 
 export interface SpawnAgentResult {
@@ -4590,6 +4597,14 @@ export class AgentEngine {
     } catch (error) {
       await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
       throw error;
+    }
+    try {
+      await spawnParams.on_surface_created?.({
+        surface: surface.surface,
+        workspace: surface.actual_workspace ?? surface.workspace,
+      });
+    } catch {
+      // Focus observation is advisory and must never discard a created handle.
     }
 
     // 2. Write initial state (creating → booting)

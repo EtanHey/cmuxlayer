@@ -90,6 +90,7 @@ const MOCK_RESPONSES: Record<string, unknown> = {
   },
   "surface.send_text": {},
   "surface.send_key": {},
+  "surface.focus": {},
   "surface.read_text": {
     surface_ref: "surface:1",
     text: "$ echo hello\nhello\n$",
@@ -488,6 +489,31 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     expect(lastV2Request).not.toBeNull();
     expect(lastV2Request!.method).toBe("workspace.select");
     expect(lastV2Request!.params).toEqual({ workspace_id: "workspace:1" });
+  });
+
+  it("focusSurface sends a surface.focus request", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.focusSurface("surface:origin", {
+      workspace: "workspace:1",
+    });
+
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("surface.focus");
+    expect(lastV2Request!.params).toEqual({
+      surface_id: "surface:origin",
+      workspace_id: "workspace:1",
+    });
+  });
+
+  it("identify can read global focus without a caller surface", async () => {
+    const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+
+    await client.identify();
+
+    expect(lastV2Request).not.toBeNull();
+    expect(lastV2Request!.method).toBe("system.identify");
+    expect(lastV2Request!.params).toEqual({});
   });
 
   it("deleteWorkspace sends a workspace.close request", async () => {
@@ -1105,6 +1131,28 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient V2→CLI fallback", () 
       },
     } as unknown as CmuxClient;
   }
+
+  it("newSplit routes an explicit focus preference through the verified CLI contract", async () => {
+    const client = new CmuxSocketClient({
+      socketPath: MOCK_SOCKET_PATH,
+      cliFallback: createMockCli(),
+    });
+
+    await client.newSplit("right", {
+      workspace: "workspace:1",
+      focus: false,
+    });
+
+    expect(cliCalls).toEqual([
+      {
+        method: "newSplit",
+        args: [
+          "right",
+          { workspace: "workspace:1", focus: false },
+        ],
+      },
+    ]);
+  });
 
   it("newSplit falls back to CLI when surface.split returns method_not_found", async () => {
     const saved = MOCK_RESPONSES["surface.split"];
