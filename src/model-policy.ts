@@ -136,9 +136,24 @@ function ownModelAlias(cli: CliType, normalized: string): string | null {
   return typeof alias === "string" && alias ? alias : null;
 }
 
-function acceptedModelNames(cli: CliType): string[] {
+function modelAliasUsesUngatedLauncherPath(
+  cli: CliType,
+  alias: string,
+): boolean {
+  if (cli === "claude") return alias === "sonnet";
+  return cli === "gemini" || cli === "kiro";
+}
+
+function acceptedModelNames(
+  cli: CliType,
+  allowModelOverride: boolean,
+): string[] {
   const contract = MODEL_POLICY_CONTRACT.cli[cli];
-  return [...new Set([contract.defaultModel, ...Object.keys(contract.modelAliases)])];
+  const aliases = Object.keys(contract.modelAliases).filter(
+    (alias) =>
+      allowModelOverride || modelAliasUsesUngatedLauncherPath(cli, alias),
+  );
+  return [...new Set([contract.defaultModel, ...aliases])];
 }
 
 export function resolveSpawnEffort(
@@ -187,6 +202,13 @@ export function resolveLaunchModelFlag(
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
+  if (
+    cli === "claude" &&
+    alias !== "sonnet" &&
+    !opts?.allowModelOverride
+  ) {
+    return null;
+  }
   return alias ?? null;
 }
 
@@ -238,7 +260,7 @@ export function resolveSpawnModelPolicy(
     !modelMatchesDefault(cli, resolvedRequested) &&
     launcherModel === null
   ) {
-    const acceptedModels = acceptedModelNames(cli);
+    const acceptedModels = acceptedModelNames(cli, overrideAllowed);
     throw new Error(
       `Unsupported model "${requestedModel}" for cli "${cli}": without a valid alias, the launcher would actually run "${defaultModel}". Accepted models: ${acceptedModels.join(", ")}. No agent was spawned.`,
     );

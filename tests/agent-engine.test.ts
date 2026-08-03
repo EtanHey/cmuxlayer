@@ -664,7 +664,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("brainlayerClaude -s -m sonnet");
+      expect(launchCmd).toBe("brainlayerClaude -s -S");
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -10593,7 +10593,7 @@ describe("buildLaunchCommand", () => {
 
   it("adds safe model flags for recognized launcher model aliases", () => {
     expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
-      "brainlayerClaude -s -m sonnet",
+      "brainlayerClaude -s -S",
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
@@ -10694,7 +10694,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("claude", "golems", "sonnet", undefined, {
         cwd: "/p/wt",
       }),
-    ).toBe("golemsClaude -s -m sonnet -w '/p/wt'");
+    ).toBe("golemsClaude -s -S -w '/p/wt'");
     expect(
       buildLaunchCommand("kiro", "golems", undefined, undefined, {
         cwd: "/p/wt",
@@ -10725,7 +10725,7 @@ describe("buildLaunchCommand", () => {
         "sonnet",
         "agenthtmlhostClaude",
       ),
-    ).toBe("agenthtmlhostClaude -s -m sonnet");
+    ).toBe("agenthtmlhostClaude -s -S");
   });
 
   it("honors an explicitly resolved launcher name for gemini", () => {

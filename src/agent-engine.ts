@@ -772,6 +772,7 @@ export function buildLaunchCommand(
   const launcherModelArgs = formattedModelFlag
     ? ` -m ${formattedModelFlag}`
     : "";
+  const claudeModelArgs = modelFlag === "sonnet" ? " -S" : launcherModelArgs;
   const rawModelArgs = formattedModelFlag
     ? ` --model ${formattedModelFlag}`
     : "";
@@ -782,7 +783,7 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${claudeModelArgs}${launcherWorktreeArg}`;
     case "codex":
       return `${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":

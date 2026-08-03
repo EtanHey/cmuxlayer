@@ -97,4 +97,26 @@ describe("model policy contract", () => {
       "gemini-2.5-pro",
     );
   });
+
+  it("advertises only Claude models reachable without the override gate", () => {
+    let message = "";
+    try {
+      resolveSpawnModelPolicy("claude", "fable-5", {});
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain(
+      "Accepted models: claude-opus-5[1m], sonnet.",
+    );
+    expect(message).not.toMatch(/haiku|, opus/);
+    expect(() => resolveSpawnModelPolicy("claude", "haiku", {})).toThrow(
+      /Unsupported model "haiku"/,
+    );
+
+    expect(
+      resolveSpawnModelPolicy("claude", "haiku", {
+        [MODEL_OVERRIDE_ENV]: "1",
+      }).launcher_model,
+    ).toBe("haiku");
+  });
 });

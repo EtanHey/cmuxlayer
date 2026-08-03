@@ -686,22 +686,47 @@ describe("lean spawn tool responses", () => {
     );
   });
 
-  it("spawn_agent rejects an unsupported effort before creating a surface", async () => {
+  it("spawn_agent schema rejects max effort before invoking the handler", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "codex", effort: "max" },
-      {} as any,
+    const parsed = spawn.inputSchema.safeParse({
+      repo: "cmuxlayer",
+      cli: "codex",
+      effort: "max",
+    });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_enum_value",
+          received: "max",
+          options: ["medium", "high", "xhigh", "ultra"],
+        }),
+      ]),
     );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rejects Codex effort for another CLI before creating a surface", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      cli: "claude",
+      effort: "medium",
+    });
+
+    const result = await spawn.handler(args, {} as any);
 
     expect(result.structuredContent).toMatchObject({ ok: false });
     expect(result.structuredContent.error).toContain(
-      'Invalid Codex effort "max"',
-    );
-    expect(result.structuredContent.error).toContain(
-      "medium, high, xhigh, ultra",
+      'Codex effort "medium" cannot be used with cli "claude"',
     );
     expect(
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
@@ -726,7 +751,7 @@ describe("lean spawn tool responses", () => {
       'would actually run "claude-opus-5[1m]"',
     );
     expect(result.structuredContent.error).toContain(
-      "Accepted models: claude-opus-5[1m], opus, sonnet, haiku",
+      "Accepted models: claude-opus-5[1m], sonnet",
     );
     expect(
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
@@ -9511,7 +9536,7 @@ codex>
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     await spawn.handler(
-      { repo: "voicelayer", model: "opus", cli: "claude" },
+      { repo: "voicelayer", cli: "claude" },
       {} as any,
     );
     await spawn.handler(
@@ -9658,7 +9683,6 @@ codex>
     const parentResult = await spawn.handler(
       {
         repo: "orchestrator",
-        model: "opus",
         cli: "claude",
       },
       {} as any,
@@ -9779,7 +9803,7 @@ codex>
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     await spawn.handler(
-      { repo: "golems", model: "opus", cli: "claude", prompt: "audit" },
+      { repo: "golems", cli: "claude", prompt: "audit" },
       {} as any,
     );
 
@@ -9911,7 +9935,7 @@ codex>
     const engine = (server as any)._registeredTools["interact"]._engine;
 
     const spawnResult = await spawn.handler(
-      { repo: "voicelayer", model: "opus", cli: "claude", prompt: "fix tts" },
+      { repo: "voicelayer", cli: "claude", prompt: "fix tts" },
       {} as any,
     );
     const agentId = spawnResult.structuredContent.agent_id;
