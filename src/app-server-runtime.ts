@@ -57,6 +57,11 @@ const LAUNCH_SHELL_READY_POLL_MS = 100;
 
 type CmuxLikeClient = CmuxClient | CmuxSocketClient;
 
+interface AppServerFocusTarget {
+  workspace: string;
+  surface: string;
+}
+
 function controlModeFromStatusEntries(entries: unknown): ControlMode {
   if (!Array.isArray(entries)) return "autonomous";
   const entry = entries.find((candidate): candidate is CmuxStatusEntry => {
@@ -433,23 +438,40 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       observerEpoch,
       "app-server thread start",
     );
-    const result = await this.engine.spawnAgent({
-      repo,
-      model: input.model ?? "codex",
-      cli: "codex",
-      prompt: `App Server bridge session for ${repo}`,
-      ...(workspace ? { workspace } : {}),
-    });
+    const priorFocus = await this.currentFocusTargetBestEffort();
+    let createdFocus: AppServerFocusTarget | null = null;
+    try {
+      const result = await this.engine.spawnAgent({
+        repo,
+        model: input.model ?? "codex",
+        cli: "codex",
+        prompt: `App Server bridge session for ${repo}`,
+        ...(workspace ? { workspace } : {}),
+        ...(priorFocus
+          ? {
+              on_surface_created: async () => {
+                createdFocus = await this.currentFocusTargetBestEffort();
+              },
+            }
+          : {}),
+      });
 
-    this.threadCwds.set(result.agent_id, input.cwd);
-    await this.waitForCodexPrompt(result.agent_id);
+      this.threadCwds.set(result.agent_id, input.cwd);
+      await this.waitForCodexPrompt(result.agent_id);
 
-    const agent = this.engine.getAgentState(result.agent_id);
-    if (!agent) {
-      throw new Error(`Agent disappeared after spawn: ${result.agent_id}`);
+      const agent = this.engine.getAgentState(result.agent_id);
+      if (!agent) {
+        throw new Error(`Agent disappeared after spawn: ${result.agent_id}`);
+      }
+
+      return toBridgeThread(input.cwd, createdAt, agent);
+    } finally {
+      await this.restoreFocusIfUnmovedBestEffort(
+        priorFocus,
+        createdFocus,
+        observerEpoch,
+      );
     }
-
-    return toBridgeThread(input.cwd, createdAt, agent);
   }
 
   async readThread(threadId: string): Promise<BridgeThread | null> {
@@ -646,6 +668,48 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       return this.observerEpochProvider()?.trim() || null;
     } catch {
       return null;
+    }
+  }
+
+  private async currentFocusTargetBestEffort(): Promise<AppServerFocusTarget | null> {
+    try {
+      const focused = (await this.client.identify()).focused;
+      const workspace = focused?.workspace_ref?.trim();
+      const surface = focused?.surface_ref?.trim();
+      return workspace && surface ? { workspace, surface } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async restoreFocusIfUnmovedBestEffort(
+    prior: AppServerFocusTarget | null,
+    expected: AppServerFocusTarget | null,
+    observerEpoch: SurfaceObserverEpoch,
+  ): Promise<void> {
+    if (
+      !prior ||
+      !expected ||
+      !isSurfaceObserverEpochCurrent(observerEpoch, () =>
+        this.getSurfaceObserverEpoch(),
+      )
+    ) {
+      return;
+    }
+    const current = await this.currentFocusTargetBestEffort();
+    if (
+      !current ||
+      current.workspace !== expected.workspace ||
+      current.surface !== expected.surface
+    ) {
+      return;
+    }
+    try {
+      await this.client.focusSurface(prior.surface, {
+        workspace: prior.workspace,
+      });
+    } catch {
+      // Thread creation succeeded; keep focus restoration advisory.
     }
   }
 

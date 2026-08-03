@@ -59,6 +59,8 @@ function makeClient() {
       type: "terminal",
     }),
     newSurface: vi.fn(),
+    focusSurface: vi.fn().mockResolvedValue(undefined),
+    identify: vi.fn(),
     selectWorkspace: vi.fn(),
     send: vi.fn().mockResolvedValue(undefined),
     sendKey: vi.fn().mockResolvedValue(undefined),
@@ -870,6 +872,88 @@ describe("CmuxAppServerRuntime", () => {
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
       expect(client.newSurface).not.toHaveBeenCalled();
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: "restores the exact origin after a bridge thread initializes",
+      focusedAtRestore: "surface:new",
+      expectedRestoreCalls: 1,
+    },
+    {
+      name: "does not steal focus back after the user moves during initialization",
+      focusedAtRestore: "surface:user-move",
+      expectedRestoreCalls: 0,
+    },
+  ])("$name", async ({ focusedAtRestore, expectedRestoreCalls }) => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:app",
+          title: "brainlayer",
+          selected: true,
+          current_directory: "/Users/test/Gits/brainlayer",
+        },
+      ],
+    });
+    client.identify
+      .mockResolvedValueOnce({
+        focused: {
+          workspace_ref: "workspace:origin",
+          surface_ref: "surface:origin",
+        },
+      })
+      .mockResolvedValueOnce({
+        focused: {
+          workspace_ref: "workspace:app",
+          surface_ref: "surface:new",
+        },
+      })
+      .mockResolvedValueOnce({
+        focused: {
+          workspace_ref:
+            focusedAtRestore === "surface:new"
+              ? "workspace:app"
+              : "workspace:other",
+          surface_ref: focusedAtRestore,
+        },
+      });
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const record = makeRecord();
+    vi.spyOn((runtime as any).engine, "spawnAgent").mockImplementation(
+      async (params: any) => {
+        await params.on_surface_created?.({
+          surface: "surface:new",
+          workspace: "workspace:app",
+        });
+        return {
+          agent_id: record.agent_id,
+          surface_id: "surface:new",
+          workspace_id: "workspace:app",
+          state: "booting",
+        };
+      },
+    );
+    vi.spyOn(runtime as any, "waitForCodexPrompt").mockResolvedValue(undefined);
+    vi.spyOn((runtime as any).engine, "getAgentState").mockReturnValue(record);
+
+    try {
+      await expect(
+        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+      ).resolves.toMatchObject({ threadId: record.agent_id });
+      expect(client.focusSurface).toHaveBeenCalledTimes(expectedRestoreCalls);
+      if (expectedRestoreCalls > 0) {
+        expect(client.focusSurface).toHaveBeenCalledWith("surface:origin", {
+          workspace: "workspace:origin",
+        });
+      }
     } finally {
       runtime.dispose();
       rmSync(TEST_DIR, { recursive: true, force: true });
