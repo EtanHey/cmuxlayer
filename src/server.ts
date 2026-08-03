@@ -111,6 +111,7 @@ import {
   recommendedMonitorCommand,
   replayUndelivered,
   writeHeartbeat,
+  type InboxOpts,
 } from "./inbox.js";
 import {
   applyHarnessState,
@@ -2388,6 +2389,16 @@ export function createServerContext(
   return context;
 }
 
+export function resolveServerInboxBaseDir(input: {
+  explicitBaseDir?: string;
+  isVitest: boolean;
+}): string | undefined {
+  if (input.explicitBaseDir) return input.explicitBaseDir;
+  return input.isVitest
+    ? join(tmpdir(), `cmuxlayer-vitest-inbox-${process.pid}`)
+    : undefined;
+}
+
 function formatLifecycleChannelContent(
   event: AgentLifecycleEvent,
   agent: AgentRecord,
@@ -2518,9 +2529,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       result.warnings = [...(result.warnings ?? []), warning];
     }
   };
-  const inboxOpts = opts?.inboxBaseDir
-    ? { baseDir: opts.inboxBaseDir }
-    : undefined;
+  const inboxBaseDir = resolveServerInboxBaseDir({
+    explicitBaseDir: opts?.inboxBaseDir,
+    isVitest: process.env.VITEST === "true",
+  });
+  if (inboxBaseDir && process.env.VITEST === "true" && !opts?.inboxBaseDir) {
+    registerAutoVitestStateDir(inboxBaseDir);
+  }
+  const inboxOpts: InboxOpts = inboxBaseDir ? { baseDir: inboxBaseDir } : {};
   const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
     let monitorCommand = "";
     try {

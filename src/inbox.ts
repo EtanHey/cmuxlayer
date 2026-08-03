@@ -20,7 +20,14 @@
 //
 // send_input is KEPT as the fallback path — this channel is additive (belt-and-suspenders) until
 // proven in production.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -49,6 +56,23 @@ export interface InboxOpts {
   baseDir?: string;
   /** Injectable clock for determinism (default Date.now). */
   now?: () => number;
+}
+
+export const DEFAULT_CHANNEL_MARKER_RETENTION_MS = 24 * 60 * 60 * 1_000;
+
+export interface ChannelMarkerReaperOpts extends InboxOpts {
+  retentionMs?: number;
+  dryRun?: boolean;
+}
+
+export interface ChannelMarkerReapResult {
+  scanned: number;
+  reapable: number;
+  reaped: number;
+  retained_known: number;
+  retained_young: number;
+  retained_non_pending: number;
+  errors: number;
 }
 
 export type MonitorHeartbeatSource = "agent" | "server_boot";
@@ -96,6 +120,122 @@ function channelMarkerDir(opts?: InboxOpts): string {
 
 function channelMarkerPath(agentId: string, opts?: InboxOpts): string {
   return join(channelMarkerDir(opts), `${encodeURIComponent(agentId)}.created`);
+}
+
+const PENDING_AGENT_ID_RE = /^.+-pending-(\d+)-[a-z0-9]+$/i;
+
+function pendingAgentCreatedAtMs(agentId: string): number | null {
+  const match = agentId.match(PENDING_AGENT_ID_RE);
+  if (!match?.[1]) return null;
+  const seconds = Number.parseInt(match[1], 10);
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  return seconds * 1_000;
+}
+
+function markerAgentId(fileName: string): string | null {
+  if (!fileName.endsWith(".created")) return null;
+  try {
+    return decodeURIComponent(fileName.slice(0, -".created".length));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A completed pending-to-real registration makes the provisional marker
+ * meaningless. Call only after state and registry rename have both succeeded.
+ */
+export function removePendingChannelMarkerAfterRegistration(
+  previousAgentId: string,
+  finalAgentId: string,
+  opts?: InboxOpts,
+): boolean {
+  if (
+    previousAgentId === finalAgentId ||
+    pendingAgentCreatedAtMs(previousAgentId) === null ||
+    pendingAgentCreatedAtMs(finalAgentId) !== null
+  ) {
+    return false;
+  }
+  try {
+    unlinkSync(channelMarkerPath(previousAgentId, opts));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reap only retained markers for timestamped pending identities that are old
+ * enough and absent from the caller's authoritative known-agent snapshot.
+ * Non-pending and known-agent markers preserve the deleted-after-create health
+ * signal. The pending id timestamp avoids one stat per marker in a saturated
+ * directory.
+ */
+export function reapOrphanedPendingChannelMarkers(
+  knownAgentIds: Iterable<string>,
+  opts: ChannelMarkerReaperOpts = {},
+): ChannelMarkerReapResult {
+  const result: ChannelMarkerReapResult = {
+    scanned: 0,
+    reapable: 0,
+    reaped: 0,
+    retained_known: 0,
+    retained_young: 0,
+    retained_non_pending: 0,
+    errors: 0,
+  };
+  let fileNames: string[];
+  try {
+    fileNames = readdirSync(channelMarkerDir(opts));
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : null;
+    if (code !== "ENOENT") result.errors += 1;
+    return result;
+  }
+  const known = new Set(knownAgentIds);
+  const now = nowOf(opts);
+  const requestedRetentionMs =
+    opts.retentionMs ?? DEFAULT_CHANNEL_MARKER_RETENTION_MS;
+  const retentionMs = Number.isFinite(requestedRetentionMs)
+    ? Math.max(0, Math.trunc(requestedRetentionMs))
+    : DEFAULT_CHANNEL_MARKER_RETENTION_MS;
+
+  for (const fileName of fileNames) {
+    result.scanned += 1;
+    const agentId = markerAgentId(fileName);
+    const createdAt = agentId ? pendingAgentCreatedAtMs(agentId) : null;
+    if (!agentId || createdAt === null) {
+      result.retained_non_pending += 1;
+      continue;
+    }
+    if (known.has(agentId)) {
+      result.retained_known += 1;
+      continue;
+    }
+    if (now - createdAt < retentionMs) {
+      result.retained_young += 1;
+      continue;
+    }
+
+    result.reapable += 1;
+    if (opts.dryRun) continue;
+    try {
+      unlinkSync(join(channelMarkerDir(opts), fileName));
+      result.reaped += 1;
+    } catch (error) {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : null;
+      if (code !== "ENOENT") result.errors += 1;
+    }
+  }
+
+  return result;
 }
 
 function ensureChannelDirForWrite(agentId: string, opts?: InboxOpts): void {

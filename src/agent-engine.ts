@@ -133,7 +133,12 @@ import {
   type SurfaceObserverIdProvider,
   type SurfaceTopologySnapshot,
 } from "./surface-topology.js";
-import type { InboxOpts } from "./inbox.js";
+import {
+  DEFAULT_CHANNEL_MARKER_RETENTION_MS,
+  reapOrphanedPendingChannelMarkers,
+  removePendingChannelMarkerAfterRegistration,
+  type InboxOpts,
+} from "./inbox.js";
 import {
   buildFleetSidebarSnapshot,
   DEFAULT_FLEET_WORKING_NO_PROGRESS_TIMEOUT_MS,
@@ -400,6 +405,8 @@ const DEFAULT_SWEEP_IDLE_AFTER_SWEEPS = 3;
 const FLEET_SIDEBAR_WAKE_REPUBLISH_DELAY_MS = 500;
 const DEFAULT_POST_SPAWN_LIVENESS_MS = 5_000;
 const DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS = 1_000;
+const CHANNEL_MARKER_REAP_INTERVAL_MS = 60 * 60 * 1_000;
+const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS = 3;
@@ -815,6 +822,8 @@ export class AgentEngine {
   private launchCommandSender?: AgentEngineOptions["launchCommandSender"];
   private beforeCrashRecoveryMutation?: AgentEngineOptions["beforeCrashRecoveryMutation"];
   private inboxOpts?: InboxOpts;
+  private lastChannelMarkerReapAt: number | null = null;
+  private lastChannelMarkerReapFailureAt: number | null = null;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
@@ -2278,6 +2287,11 @@ export class AgentEngine {
         updated = this.stateMgr.renameState(previousAgentId, collisionAgentId);
         this.registry.rename(previousAgentId, collisionAgentId, updated);
         this.transferAgentRenameMemory(previousAgentId, collisionAgentId);
+        removePendingChannelMarkerAfterRegistration(
+          previousAgentId,
+          collisionAgentId,
+          this.inboxOpts,
+        );
         return updated;
       }
       const sessionPath =
@@ -2300,6 +2314,11 @@ export class AgentEngine {
       this.registry.rename(updated.agent_id, finalAgentId, canonicalFinal);
       this.transferAgentRenameMemory(updated.agent_id, finalAgentId);
       this.stateMgr.removeState(updated.agent_id);
+      removePendingChannelMarkerAfterRegistration(
+        updated.agent_id,
+        finalAgentId,
+        this.inboxOpts,
+      );
       return canonicalFinal;
     }
 
@@ -2307,6 +2326,11 @@ export class AgentEngine {
     updated = this.stateMgr.renameState(previousAgentId, finalAgentId);
     this.registry.rename(previousAgentId, finalAgentId, updated);
     this.transferAgentRenameMemory(previousAgentId, finalAgentId);
+    removePendingChannelMarkerAfterRegistration(
+      previousAgentId,
+      finalAgentId,
+      this.inboxOpts,
+    );
     return updated;
   }
 
@@ -4273,6 +4297,7 @@ export class AgentEngine {
       now: Date.now(),
     };
     await this.registry.reconcile(surfacelessConfirmation);
+    await this.reapChannelMarkersBestEffort();
     await this.registry.evictSurfaceless(surfacelessConfirmation);
     await this.recoverCrashedAgents();
 
@@ -4287,6 +4312,52 @@ export class AgentEngine {
     await this.reconcileRolePlacements("idle");
     await this.syncSidebar();
     await this.drainOutboxBestEffort();
+  }
+
+  private async reapChannelMarkersBestEffort(): Promise<void> {
+    if (!this.inboxOpts) return;
+    const now = Date.now();
+    if (
+      this.lastChannelMarkerReapAt !== null &&
+      now - this.lastChannelMarkerReapAt < CHANNEL_MARKER_REAP_INTERVAL_MS
+    ) {
+      return;
+    }
+    if (
+      this.lastChannelMarkerReapFailureAt !== null &&
+      now - this.lastChannelMarkerReapFailureAt < CHANNEL_MARKER_REAP_RETRY_MS
+    ) {
+      return;
+    }
+    try {
+      const knownAgentIds = new Set([
+        ...this.registry.list().map((agent) => agent.agent_id),
+        ...this.stateMgr.listStates().map((agent) => agent.agent_id),
+      ]);
+      const result = reapOrphanedPendingChannelMarkers(knownAgentIds, {
+        ...this.inboxOpts,
+        now: () => now,
+        retentionMs: DEFAULT_CHANNEL_MARKER_RETENTION_MS,
+      });
+      if (result.errors > 0) {
+        this.lastChannelMarkerReapFailureAt = now;
+      } else {
+        this.lastChannelMarkerReapAt = now;
+        this.lastChannelMarkerReapFailureAt = null;
+      }
+      if (result.reaped > 0 || result.errors > 0) {
+        await this.client.log(
+          `channel-marker reaper: reaped=${result.reaped} retained_known=${result.retained_known} retained_young=${result.retained_young} errors=${result.errors}`,
+          {
+            level: result.errors > 0 ? "warning" : "info",
+            source: "agent-engine",
+          },
+        );
+      }
+    } catch {
+      this.lastChannelMarkerReapFailureAt = now;
+      // Marker cleanup is maintenance; lifecycle reconciliation must continue.
+    }
   }
 
   /**

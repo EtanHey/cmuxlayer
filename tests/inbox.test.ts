@@ -1,5 +1,11 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,8 +17,10 @@ import {
   inboxPath,
   monitorAlive,
   pendingDispatches,
+  reapOrphanedPendingChannelMarkers,
   readInbox,
   readLastHeartbeat,
+  removePendingChannelMarkerAfterRegistration,
   recommendedCodexWatch,
   recommendedMonitorCommand,
   replayUndelivered,
@@ -27,6 +35,117 @@ const opts = { baseDir, now: () => clock };
 afterAll(() => rmSync(baseDir, { recursive: true, force: true }));
 
 describe("inbox write-channel", () => {
+  it("removes only the provisional marker after pending-to-real registration", () => {
+    const pendingId = "brainlayerClaude-pending-1000-dead";
+    const finalId = "brainlayerClaude-12345678";
+    writeHeartbeat(pendingId, opts);
+    writeHeartbeat(finalId, opts);
+
+    expect(
+      removePendingChannelMarkerAfterRegistration(pendingId, finalId, opts),
+    ).toBe(true);
+    expect(
+      existsSync(
+        join(baseDir, ".channel-dirs", `${encodeURIComponent(pendingId)}.created`),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        join(baseDir, ".channel-dirs", `${encodeURIComponent(finalId)}.created`),
+      ),
+    ).toBe(true);
+  });
+
+  it("reaps only retained pending markers that are old and unknown", () => {
+    const reapDir = mkdtempSync(join(tmpdir(), "cmux-inbox-reap-"));
+    const reapOpts = { baseDir: reapDir, now: () => 2_000_000 };
+    const oldOrphan = "brainlayerClaude-pending-1000-dead";
+    const oldKnown = "brainlayerClaude-pending-1000-live";
+    const youngOrphan = "brainlayerClaude-pending-1900-young";
+    const realAgent = "brainlayerClaude-12345678";
+    const malformedMarker = "malformed%ZZ.created";
+    try {
+      for (const agentId of [oldOrphan, oldKnown, youngOrphan, realAgent]) {
+        writeHeartbeat(agentId, reapOpts);
+      }
+      appendFileSync(join(reapDir, ".channel-dirs", malformedMarker), "");
+
+      const result = reapOrphanedPendingChannelMarkers(new Set([oldKnown]), {
+        ...reapOpts,
+        retentionMs: 500_000,
+      });
+
+      expect(result).toMatchObject({
+        scanned: 5,
+        reapable: 1,
+        reaped: 1,
+        retained_known: 1,
+        retained_young: 1,
+        retained_non_pending: 2,
+        errors: 0,
+      });
+      expect(
+        existsSync(
+          join(reapDir, ".channel-dirs", `${encodeURIComponent(oldOrphan)}.created`),
+        ),
+      ).toBe(false);
+      for (const agentId of [oldKnown, youngOrphan, realAgent]) {
+        expect(
+          existsSync(
+            join(reapDir, ".channel-dirs", `${encodeURIComponent(agentId)}.created`),
+          ),
+        ).toBe(true);
+      }
+      expect(
+        existsSync(join(reapDir, ".channel-dirs", malformedMarker)),
+      ).toBe(true);
+    } finally {
+      rmSync(reapDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps marker count bounded across repeated orphan creation and reaping", () => {
+    const reapDir = mkdtempSync(join(tmpdir(), "cmux-inbox-bounded-"));
+    try {
+      for (let cycle = 1; cycle <= 20; cycle += 1) {
+        const agentId = `testClaude-pending-${cycle * 10}-cycle${cycle}`;
+        writeHeartbeat(agentId, { baseDir: reapDir });
+        reapOrphanedPendingChannelMarkers([], {
+          baseDir: reapDir,
+          now: () => (cycle * 10 + 2) * 1_000,
+          retentionMs: 1_000,
+        });
+        expect(readdirSync(join(reapDir, ".channel-dirs"))).toHaveLength(0);
+      }
+    } finally {
+      rmSync(reapDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails safe when an invalid retention value is supplied", () => {
+    const reapDir = mkdtempSync(join(tmpdir(), "cmux-inbox-invalid-retention-"));
+    const pendingId = "testClaude-pending-1000-invalid";
+    try {
+      writeHeartbeat(pendingId, { baseDir: reapDir });
+
+      const result = reapOrphanedPendingChannelMarkers([], {
+        baseDir: reapDir,
+        now: () => 2_000_000,
+        retentionMs: Number.NaN,
+      });
+
+      expect(result.reaped).toBe(0);
+      expect(result.retained_young).toBe(1);
+      expect(
+        existsSync(
+          join(reapDir, ".channel-dirs", `${encodeURIComponent(pendingId)}.created`),
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(reapDir, { recursive: true, force: true });
+    }
+  });
+
   it("dispatch appends a message with defaults (to=agent, tag=dispatch) and id", () => {
     const m = dispatch("a1", { from: "orc", task: "do X" }, opts);
     expect(m.to).toBe("a1");
