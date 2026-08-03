@@ -732,6 +732,81 @@ describe("lean spawn tool responses", () => {
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
     ).toBe(false);
   });
+
+  it("new_worktree_split rejects an unsupported model before preparing a worktree", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+    const mockExec = makeLifecycleExec();
+    const worktreeExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const spawn = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "claude",
+        model: "fable-5",
+        worktree: { name: "must-not-exist" },
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_in_workspace validates every model before creating the workspace", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await spawn.handler(
+      {
+        workspace_title: "Must not exist",
+        agents: [
+          {
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "gpt-5.6-sol",
+            role: "worker",
+          },
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            model: "fable-5",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) =>
+        callArgs.includes("create-workspace"),
+      ),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
 });
 
 function moveOnlyAgentStateDir(prefix: string) {

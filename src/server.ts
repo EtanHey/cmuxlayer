@@ -9727,6 +9727,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
         let mutationWorkspace: string | undefined;
         try {
+          resolveSpawnModelPolicy(args.cli, args.model);
           assertBootPromptMode(args.prompt, null);
           assertSpawnPromptInputAllowed({
             tool: "new_worktree_split",
@@ -10046,6 +10047,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               compatibilityWarning: normalizedRole.warning,
             };
           });
+          for (const agent of normalizedAgents) {
+            resolveSpawnModelPolicy(agent.cli, agent.model);
+          }
           const compatibilityWarnings = normalizedAgents.flatMap((agent) =>
             agent.compatibilityWarning ? [agent.compatibilityWarning] : [],
           );
