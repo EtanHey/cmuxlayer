@@ -95,7 +95,9 @@ import {
 } from "./harness-session.js";
 import {
   resolveLaunchModelFlag,
+  resolveSpawnEffort,
   resolveSpawnModelPolicy,
+  type CodexEffort,
   type SpawnModelPolicy,
 } from "./model-policy.js";
 import {
@@ -151,6 +153,7 @@ type ProcessLiveness = "alive" | "gone" | "unknown";
 export interface SpawnAgentParams {
   repo: string;
   model?: string;
+  effort?: string;
   cli: CliType;
   prompt: string;
   boot_prompt_timeout_ms?: number;
@@ -754,7 +757,12 @@ export function buildLaunchCommand(
   // registry-prefix registrations launch correctly. Honored for the launcher
   // CLIs (claude/codex/cursor/gemini); ignored for kiro (raw cd+exec).
   launcherName?: string,
-  opts?: { cwd?: string; envPrefix?: string; allowModelOverride?: boolean },
+  opts?: {
+    cwd?: string;
+    envPrefix?: string;
+    allowModelOverride?: boolean;
+    effort?: CodexEffort;
+  },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveLaunchModelFlag(cli, model, {
@@ -768,6 +776,7 @@ export function buildLaunchCommand(
     ? ` --model ${formattedModelFlag}`
     : "";
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
+  const launcherEffortArg = opts?.effort ? ` -E ${opts.effort}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
   const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";
   switch (cli) {
@@ -775,7 +784,7 @@ export function buildLaunchCommand(
       // repoGolem launcher handles env vars via ralph-registry
       return `${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${launcherModelArgs}${launcherWorktreeArg}`;
     case "codex":
-      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
       return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`} -s${launcherModelArgs}${launcherWorktreeArg}`;
@@ -4673,6 +4682,7 @@ export class AgentEngine {
    */
   async spawnAgent(params: SpawnAgentParams): Promise<SpawnAgentResult> {
     const modelPolicy = resolveSpawnModelPolicy(params.cli, params.model);
+    const effort = resolveSpawnEffort(params.cli, params.effort);
     const spawnParams: SpawnAgentParams = {
       ...params,
       model: modelPolicy.effective_model,
@@ -4891,6 +4901,7 @@ export class AgentEngine {
         cwd: spawnParams.cwd,
         envPrefix: spawnParams.mcp_env,
         allowModelOverride: modelPolicy.override_allowed,
+        effort: effort ?? undefined,
       },
     );
     try {

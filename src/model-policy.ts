@@ -1,6 +1,13 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
+export const CODEX_EFFORT_VALUES = [
+  "medium",
+  "high",
+  "xhigh",
+  "ultra",
+] as const;
+export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];
 
 export interface CliModelPolicyContract {
   defaultModel: string;
@@ -129,6 +136,32 @@ function ownModelAlias(cli: CliType, normalized: string): string | null {
   return typeof alias === "string" && alias ? alias : null;
 }
 
+function acceptedModelNames(cli: CliType): string[] {
+  const contract = MODEL_POLICY_CONTRACT.cli[cli];
+  return [...new Set([contract.defaultModel, ...Object.keys(contract.modelAliases)])];
+}
+
+export function resolveSpawnEffort(
+  cli: CliType,
+  effort?: string,
+): CodexEffort | null {
+  const requested = effort?.trim();
+  if (!requested) return null;
+
+  if (!(CODEX_EFFORT_VALUES as readonly string[]).includes(requested)) {
+    throw new Error(
+      `Invalid Codex effort "${requested}". Accepted values: ${CODEX_EFFORT_VALUES.join(", ")}. No agent was spawned.`,
+    );
+  }
+  if (cli !== "codex") {
+    throw new Error(
+      `Codex effort "${requested}" cannot be used with cli "${cli}". Set cli to "codex" or omit effort. No agent was spawned.`,
+    );
+  }
+
+  return requested as CodexEffort;
+}
+
 export function resolveModelAlias(cli: CliType, model: string): string {
   const trimmed = model.trim();
   const normalized = normalizeModelKey(trimmed);
@@ -195,14 +228,27 @@ export function resolveSpawnModelPolicy(
     };
   }
 
+  const launcherModel = requestedWasOmitted
+    ? null
+    : resolveLaunchModelFlag(cli, resolvedRequested, {
+        allowModelOverride: overrideAllowed,
+      });
+  if (
+    !requestedWasOmitted &&
+    !modelMatchesDefault(cli, resolvedRequested) &&
+    launcherModel === null
+  ) {
+    const acceptedModels = acceptedModelNames(cli);
+    throw new Error(
+      `Unsupported model "${requestedModel}" for cli "${cli}": without a valid alias, the launcher would actually run "${defaultModel}". Accepted models: ${acceptedModels.join(", ")}. No agent was spawned.`,
+    );
+  }
+
   return {
     cli,
     requested_model: requestedModel,
     effective_model: resolvedRequested,
-    launcher_model:
-      requestedWasOmitted || modelMatchesDefault(cli, resolvedRequested)
-        ? null
-        : resolvedRequested,
+    launcher_model: launcherModel,
     coerced: false,
     warnings: [],
     override_env: MODEL_OVERRIDE_ENV,

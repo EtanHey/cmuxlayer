@@ -546,7 +546,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
     const parsed =
@@ -560,7 +560,7 @@ describe("lean spawn tool responses", () => {
         agent_id: parsed.agent_id,
         tab_name: "cmuxlayerClaude [surface:new]",
         session_name: null,
-        model: "fable-5",
+        model: "sonnet",
         permission_mode: "skip-permissions",
         cwd: join(homedir(), "Gits", "cmuxlayer"),
         repo: "cmuxlayer",
@@ -593,7 +593,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     await spawn.handler(
-      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
 
@@ -665,6 +665,72 @@ describe("lean spawn tool responses", () => {
       effective_model: "codex",
     });
     expect(result.structuredContent.warnings).not.toHaveLength(0);
+  });
+
+  it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      cli: "codex",
+      effort: "medium",
+    });
+
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "cmuxlayerCodex -s -E medium"]),
+    );
+  });
+
+  it("spawn_agent rejects an unsupported effort before creating a surface", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", cli: "codex", effort: "max" },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Invalid Codex effort "max"',
+    );
+    expect(result.structuredContent.error).toContain(
+      "medium, high, xhigh, ultra",
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rejects an unsupported model before creating a surface", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", cli: "claude", model: "fable-5" },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(result.structuredContent.error).toContain(
+      'would actually run "claude-opus-5[1m]"',
+    );
+    expect(result.structuredContent.error).toContain(
+      "Accepted models: claude-opus-5[1m], opus, sonnet, haiku",
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
   });
 });
 
