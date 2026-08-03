@@ -2237,8 +2237,22 @@ export interface CmuxServerContext {
 
 const DEFAULT_CONTROL_HEALTH_INTERVAL_MS = 60_000;
 const MIN_CONTROL_HEALTH_INTERVAL_MS = 5_000;
-const autoVitestStateDirs = new Set<string>();
-let autoVitestStateCleanupRegistered = false;
+interface AutoVitestTempCleanupState {
+  dirs: Set<string>;
+  registered: boolean;
+}
+
+type AutoVitestTempCleanupGlobal = typeof globalThis & {
+  __cmuxlayerAutoVitestTempCleanupV1?: AutoVitestTempCleanupState;
+};
+
+const autoVitestTempCleanupGlobal = globalThis as AutoVitestTempCleanupGlobal;
+const autoVitestTempCleanupState =
+  autoVitestTempCleanupGlobal.__cmuxlayerAutoVitestTempCleanupV1 ??
+  (autoVitestTempCleanupGlobal.__cmuxlayerAutoVitestTempCleanupV1 = {
+    dirs: new Set<string>(),
+    registered: false,
+  });
 
 function resolveControlHealthIntervalMs(input?: number): number {
   const raw =
@@ -2255,23 +2269,23 @@ function resolveControlHealthIntervalMs(input?: number): number {
   return Math.max(MIN_CONTROL_HEALTH_INTERVAL_MS, Math.floor(raw));
 }
 
-function registerAutoVitestStateDir(stateDir: string): void {
-  autoVitestStateDirs.add(stateDir);
-  if (autoVitestStateCleanupRegistered) {
+function registerAutoVitestTempDir(dir: string): void {
+  autoVitestTempCleanupState.dirs.add(dir);
+  if (autoVitestTempCleanupState.registered) {
     return;
   }
-  autoVitestStateCleanupRegistered = true;
+  autoVitestTempCleanupState.registered = true;
   process.once("exit", () => {
-    for (const dir of autoVitestStateDirs) {
+    for (const dir of autoVitestTempCleanupState.dirs) {
       rmSync(dir, { recursive: true, force: true });
     }
-    autoVitestStateDirs.clear();
+    autoVitestTempCleanupState.dirs.clear();
   });
 }
 
-function removeAutoVitestStateDir(stateDir: string): void {
-  autoVitestStateDirs.delete(stateDir);
-  rmSync(stateDir, { recursive: true, force: true });
+function removeAutoVitestTempDir(dir: string): void {
+  autoVitestTempCleanupState.dirs.delete(dir);
+  rmSync(dir, { recursive: true, force: true });
 }
 
 export function createServerContext(
@@ -2293,7 +2307,7 @@ export function createServerContext(
     autoVitestStateDir ??
     join(homedir(), ".local", "state", "cmux-agents");
   if (autoVitestStateDir) {
-    registerAutoVitestStateDir(autoVitestStateDir);
+    registerAutoVitestTempDir(autoVitestStateDir);
   }
   const stateMgr = opts?.stateManager ?? new StateManager(stateDir);
   const readObserverProvider = (
@@ -2381,7 +2395,7 @@ export function createServerContext(
       context.lifecycleStartPromise = null;
       context.lifecycleStartError = null;
       if (autoVitestStateDir) {
-        removeAutoVitestStateDir(autoVitestStateDir);
+        removeAutoVitestTempDir(autoVitestStateDir);
       }
     },
   };
@@ -2534,7 +2548,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     isVitest: process.env.VITEST === "true",
   });
   if (inboxBaseDir && process.env.VITEST === "true" && !opts?.inboxBaseDir) {
-    registerAutoVitestStateDir(inboxBaseDir);
+    registerAutoVitestTempDir(inboxBaseDir);
   }
   const inboxOpts: InboxOpts = inboxBaseDir ? { baseDir: inboxBaseDir } : {};
   const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
