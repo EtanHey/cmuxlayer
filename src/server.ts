@@ -601,6 +601,9 @@ class ManualModeMutationError extends Error {
   }
 }
 
+const PLACEMENT_WORKSPACE_UNRESOLVED =
+  "PLACEMENT_WORKSPACE_UNRESOLVED" as const;
+
 class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
@@ -792,6 +795,13 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
           error.submit_verification_error
         ? submitVerificationFailurePayload(error.submit_verification_error)
         : {};
+  const placementWorkspaceExtra =
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === PLACEMENT_WORKSPACE_UNRESOLVED
+      ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
+      : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -818,6 +828,7 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...modeExtra,
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
+    ...placementWorkspaceExtra,
     ...extra,
   };
   return {
@@ -4893,7 +4904,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   class PlacementWorkspaceError extends Error {
-    readonly code = "PLACEMENT_WORKSPACE_UNRESOLVED";
+    readonly code = PLACEMENT_WORKSPACE_UNRESOLVED;
 
     constructor(message: string) {
       super(message);
@@ -4960,6 +4971,93 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     throw new PlacementWorkspaceError(
       "Spawn placement requires an explicit workspace, per-request caller workspace, or matching repo workspace; focused workspace and shared-daemon environment fallbacks are forbidden",
     );
+  };
+
+  const resolveAnchorWorkspace = async (opts: {
+    pane?: string;
+    surface?: string;
+  }): Promise<string> => {
+    if (opts.surface) {
+      try {
+        const identified = await client.identify(opts.surface);
+        const workspace = identified.caller?.workspace_ref;
+        if (workspace) {
+          return (await canonicalWorkspaceRef(workspace)) ?? workspace;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? `: ${error.message}` : "";
+        throw new PlacementWorkspaceError(
+          `Unable to resolve current workspace for surface anchor ${opts.surface}${message}`,
+        );
+      }
+      throw new PlacementWorkspaceError(
+        `Unable to resolve current workspace for surface anchor ${opts.surface}`,
+      );
+    }
+
+    if (!opts.pane) {
+      throw new PlacementWorkspaceError(
+        "Anchored split requires a pane or surface anchor",
+      );
+    }
+
+    try {
+      const { workspaces } = await client.listWorkspaces();
+      const paneLists = await Promise.all(
+        workspaces.map(async (workspace) => ({
+          workspace: workspace.ref,
+          panes: (await client.listPanes({ workspace: workspace.ref })).panes,
+        })),
+      );
+      const matches = paneLists
+        .filter(({ panes }) =>
+          panes.some(
+            (pane) => pane.ref === opts.pane || pane.id === opts.pane,
+          ),
+        )
+        .map(({ workspace }) => workspace);
+      if (matches.length === 1) {
+        return matches[0]!;
+      }
+      if (matches.length > 1) {
+        throw new PlacementWorkspaceError(
+          `Pane anchor ${opts.pane} is ambiguous across workspaces: ${matches.join(", ")}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof PlacementWorkspaceError) throw error;
+      const message = error instanceof Error ? `: ${error.message}` : "";
+      throw new PlacementWorkspaceError(
+        `Unable to resolve current workspace for pane anchor ${opts.pane}${message}`,
+      );
+    }
+    throw new PlacementWorkspaceError(
+      `Unable to resolve current workspace for pane anchor ${opts.pane}`,
+    );
+  };
+
+  const resolveAnchoredPlacement = async (opts: {
+    explicitWorkspace?: string;
+    pane?: string;
+    surface?: string;
+    repo?: string | null;
+  }): Promise<{ workspace: string; warnings: string[] }> => {
+    const anchor = opts.surface ?? opts.pane ?? "anchor";
+    const anchorWorkspace = await resolveAnchorWorkspace({
+      pane: opts.pane,
+      surface: opts.surface,
+    });
+    const targetResolution = await resolvePlacementWorkspace({
+      explicitWorkspace: opts.explicitWorkspace,
+      repo: opts.repo,
+    });
+    const validatedWorkspace = targetResolution.workspace;
+    if (!validatedWorkspace || anchorWorkspace !== validatedWorkspace) {
+      throw new PlacementWorkspaceError(
+        `Refused ${anchor} anchored placement: anchor currently resolves to ${anchorWorkspace}, but validated placement workspace is ${validatedWorkspace ?? "unresolved"}`,
+      );
+    }
+    return { ...targetResolution, workspace: anchorWorkspace };
   };
 
   /** Capture origin focus, select the placement workspace, and record the
@@ -6106,15 +6204,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "role-based new_split placement",
           );
         }
+        const placementRepo = inferRepoFromLauncherTitle(args.title);
         const targetResolution =
           args.pane || args.surface
-            ? {
-                workspace: args.workspace,
-                warnings: [],
-              }
+            ? await resolveAnchoredPlacement({
+                explicitWorkspace: args.workspace,
+                pane: args.pane,
+                surface: args.surface,
+                repo: placementRepo,
+              })
             : await resolvePlacementWorkspace({
                 explicitWorkspace: args.workspace,
-                repo: inferRepoFromLauncherTitle(args.title),
+                repo: placementRepo,
               });
         if (inferredRole && (args.type ?? "terminal") === "terminal") {
           assertSurfaceObserverEpochCurrent(
@@ -6124,8 +6225,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const targetWorkspace = targetResolution.workspace;
         if (args.surface) {
-          await assertSurfaceMutationAllowed("new_split", args.surface);
-        } else if (targetWorkspace) {
+          await assertSurfaceMutationAllowed(
+            "new_split",
+            args.surface,
+            targetWorkspace,
+          );
+        } else {
           await assertWorkspaceMutationAllowed("new_split", targetWorkspace);
         }
 
@@ -6409,15 +6514,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await preflightBootPromptFile(bootPromptPath);
         }
 
+        const targetResolution = await resolveAnchoredPlacement({
+          explicitWorkspace: args.workspace,
+          pane: args.pane,
+          repo: inferRepoFromLauncherTitle(args.title),
+        });
+        const targetWorkspace = targetResolution.workspace;
+        await assertWorkspaceMutationAllowed("new_surface", targetWorkspace);
+
         result = await client.newSurface({
           pane: args.pane,
-          workspace: args.workspace,
+          workspace: targetWorkspace,
           type: args.type,
           url: args.url,
         });
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
-            workspace: result.workspace || args.workspace,
+            workspace: result.workspace || targetWorkspace,
           });
           result.title = args.title;
         }
@@ -6427,7 +6540,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const launcher = inferLauncherFromTitle(args.title ?? result.title);
           bootPromptDelivery = await deliverBootPrompt({
             surface: result.surface,
-            workspace: result.workspace || args.workspace,
+            workspace: result.workspace || targetWorkspace,
             cli: launcher?.cli,
             boot_prompt_path: bootPromptPath,
             timeout_ms: args.boot_prompt_timeout_ms,
@@ -6435,7 +6548,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? () =>
                   sendLauncherCommandToSurface({
                     surface: result!.surface,
-                    workspace: result!.workspace || args.workspace,
+                    workspace: result!.workspace || targetWorkspace,
                     command: buildLaunchCommand(
                       launcher.cli,
                       launcher.repo,
