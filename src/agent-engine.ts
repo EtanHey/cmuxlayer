@@ -1570,8 +1570,14 @@ export class AgentEngine {
       const evidence = this.readReadyEvidence(agent, screen.text);
       const hasTargetEvidence =
         evidence.ready || (targetState === "ready" && evidence.activeCodex);
+      const awaitingManagedBootPrompt =
+        targetState === "ready" &&
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered === false &&
+        !evidence.activeCodex;
       if (
         !hasTargetEvidence ||
+        awaitingManagedBootPrompt ||
         (targetState === "ready" &&
           !evidence.activeCodex &&
           this.screenShowsPendingBootPrompt(agent, screen.text))
@@ -2595,8 +2601,12 @@ export class AgentEngine {
         agent.boot_prompt_pending === true &&
         !evidence.activeCodex &&
         this.screenShowsPendingBootPrompt(agent, screen.text);
+      const awaitingManagedBootPrompt =
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered === false &&
+        !evidence.activeCodex;
 
-      if (agent.boot_prompt_pending && promptStillPending) {
+      if (promptStillPending || awaitingManagedBootPrompt) {
         this.readyPatternMatches.delete(agent.agent_id);
         if (this.isBootPromptPendingStale(agent)) {
           const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {

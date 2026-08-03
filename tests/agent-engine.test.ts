@@ -8233,6 +8233,75 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
+    it("does not promote an idle managed pane when its boot prompt was never delivered", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-undelivered-prompt",
+          state: "booting",
+          surface_id: "surface:undelivered-prompt",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          prompt_delivered: false,
+          submit_verified: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:undelivered-prompt")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:undelivered-prompt",
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-undelivered-prompt")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+        prompt_delivered: false,
+        submit_verified: false,
+      });
+    });
+
+    it("errors a stale managed pane whose boot prompt was never delivered", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stale-undelivered-prompt",
+          state: "booting",
+          surface_id: "surface:stale-undelivered-prompt",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          prompt_delivered: false,
+          submit_verified: null,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:stale-undelivered-prompt")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:stale-undelivered-prompt",
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("agent-stale-undelivered-prompt"),
+      ).toMatchObject({
+        state: "error",
+        boot_prompt_pending: false,
+        prompt_delivered: false,
+        submit_verified: false,
+        error: expect.stringMatching(/delivery was not verified/i),
+      });
+    });
+
     it("RC5: errors a stale pending boot prompt without readiness evidence even when its surface is alive", async () => {
       stateMgr.writeState(
         makeRecord({

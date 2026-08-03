@@ -291,6 +291,7 @@ describe("Sidebar Sync", () => {
         role: "worker",
         state: "booting",
         task_summary: "Await first prompt",
+        updated_at: new Date().toISOString(),
       }),
     );
     stateMgr.writeState(
@@ -1651,6 +1652,7 @@ describe("Sidebar Sync", () => {
         workspace_id: "workspace:cmuxlayer",
         cli_session_id: null,
         task_summary: "Boot worker",
+        updated_at: new Date().toISOString(),
       }),
     );
     stateMgr.writeState(

@@ -8905,7 +8905,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
               const agentId = record?.agent_id ?? result.agent_id;
               const updated = stateMgr.updateRecord(agentId, {
-                boot_prompt_pending: false,
+                // A readiness timeout happens before delivery. Preserve the
+                // pending marker so a later idle CLI cannot be mistaken for a
+                // successfully tasked agent by the lifecycle sweep.
+                boot_prompt_pending: e instanceof BootPromptTimeoutError,
                 prompt_delivered: false,
                 submit_verified:
                   e instanceof BootPromptDeliveryError ? false : null,
