@@ -805,7 +805,7 @@ describe("lean spawn tool responses", () => {
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
           {
@@ -10261,7 +10261,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       {
         repo: "cmuxlayer",
         cli: "codex",
-        model: "gpt-5.6-sol",
+        model: "codex",
         workspace: "workspace:2",
         worktree: false,
       },
@@ -10286,7 +10286,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],
@@ -10311,7 +10311,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],
@@ -10424,7 +10424,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       {
         repo: "cmuxlayer",
         cli: "codex",
-        model: "gpt-5.6-sol",
+        model: "codex",
         workspace: "workspace:2",
         worktree: false,
       },
@@ -10453,7 +10453,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],

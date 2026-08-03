@@ -8792,7 +8792,6 @@ To continue this session, run codex resume ${sessionId}`,
           await expect(
             defaultEngine.spawnAgent({
               repo: `missinglauncher${suffix}`,
-              model: "test",
               cli,
               prompt: "",
             }),

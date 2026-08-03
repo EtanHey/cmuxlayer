@@ -225,6 +225,22 @@ export function resolveSpawnModelPolicy(
   const requestedOrDefault = requestedWasOmitted ? defaultModel : requestedModel;
   const resolvedRequested = resolveModelAlias(cli, requestedOrDefault);
 
+  // Cursor deliberately accepts arbitrary model strings behind its escape
+  // hatch. Every launcher-backed CLI, however, has a finite alias table. Do
+  // not let the older Codex coercion branch turn an unknown alias into an
+  // apparently successful default-model spawn.
+  if (
+    !requestedWasOmitted &&
+    cli !== "cursor" &&
+    !modelMatchesDefault(cli, requestedModel) &&
+    ownModelAlias(cli, normalizeModelKey(requestedModel)) === null
+  ) {
+    const acceptedModels = acceptedModelNames(cli, overrideAllowed);
+    throw new Error(
+      `Unsupported model "${requestedModel}" for cli "${cli}": without a valid alias, the launcher would actually run "${defaultModel}". Accepted models: ${acceptedModels.join(", ")}. No agent was spawned.`,
+    );
+  }
+
   if (
     !requestedWasOmitted &&
     !contract.allowModelOverrideByDefault &&

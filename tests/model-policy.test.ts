@@ -119,4 +119,18 @@ describe("model policy contract", () => {
       }).launcher_model,
     ).toBe("haiku");
   });
+
+  it("rejects an unknown Codex model before the legacy override coercion", () => {
+    expect(() =>
+      resolveSpawnModelPolicy("codex", "gpt-5.6-sol", {}),
+    ).toThrow(
+      /Unsupported model "gpt-5\.6-sol".*would actually run "codex".*Accepted models: codex.*No agent was spawned/,
+    );
+
+    expect(() =>
+      resolveSpawnModelPolicy("codex", "gpt-5.6-sol", {
+        [MODEL_OVERRIDE_ENV]: "1",
+      }),
+    ).toThrow(/Unsupported model "gpt-5\.6-sol"/);
+  });
 });
