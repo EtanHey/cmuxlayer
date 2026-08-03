@@ -920,6 +920,9 @@ function toMinimalSurface(
       typeof surface.workspace_ref === "string" ? surface.workspace_ref : "",
   };
 
+  if (typeof surface.id === "string") {
+    minimal.id = surface.id;
+  }
   if (typeof surface.pane_ref === "string") {
     minimal.pane_ref = surface.pane_ref;
   }
@@ -2280,6 +2283,8 @@ export interface CmuxServerContext {
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
   /** First-seen stable identities for caller-visible mutable surface refs. */
   capturedSurfaceUuidByRef: Map<string, string>;
+  /** Refs observed with more than one UUID in one observer epoch are unsafe. */
+  ambiguousCapturedSurfaceRefs: Set<string>;
   capturedSurfaceObserverEpoch: string | null;
   codexRolloutFillProvider: CodexRolloutFillProvider;
   surfaceWriteLiveness: SurfaceWriteLivenessTracker;
@@ -2418,6 +2423,7 @@ export function createServerContext(
     surfacePtyDeadSince: new Map(),
     readScreenInflight: new Map(),
     capturedSurfaceUuidByRef: new Map(),
+    ambiguousCapturedSurfaceRefs: new Set(),
     capturedSurfaceObserverEpoch: null,
     codexRolloutFillProvider:
       opts?.codexRolloutFillProvider ?? makeCodexRolloutFillProvider(),
@@ -2466,6 +2472,7 @@ export function createServerContext(
       context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.originalLaunchCommandsBySurface.clear();
       context.capturedSurfaceUuidByRef.clear();
+      context.ambiguousCapturedSurfaceRefs.clear();
       context.capturedSurfaceObserverEpoch = null;
       context.lifecycleStarted = false;
       context.lifecycleStartPromise = null;
@@ -2656,6 +2663,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   let lifecycleSeatManifestPublisher: (input: {
     agentId?: string;
     surfaceId?: string;
+    surfaceUuid?: string;
     tabName?: string;
     model?: string;
   }) => Promise<void> = async () => {};
@@ -3648,6 +3656,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string;
     workspace?: string;
     rename_to_task?: string;
+    stableSurfaceIdentity?: string | null;
+    beforeMutation?: () => Promise<void>;
   }) => {
     if (!opts.rename_to_task) {
       return;
@@ -3659,11 +3669,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const surface = surfaces.surfaces.find((s) => s.ref === opts.surface);
     const currentTitle = surface?.title ?? "";
     const newTitle = replaceTaskSuffix(currentTitle, opts.rename_to_task);
+    await opts.beforeMutation?.();
     await client.renameTab(opts.surface, newTitle, {
       workspace: opts.workspace,
     });
     await lifecycleSeatManifestPublisher({
       surfaceId: opts.surface,
+      ...(opts.stableSurfaceIdentity
+        ? { surfaceUuid: opts.stableSurfaceIdentity }
+        : {}),
       tabName: newTitle,
     });
   };
@@ -3885,6 +3899,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
     submit_verify_timeout_ms?: number;
+    stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
   }): Promise<{
     bytes: number;
@@ -3968,6 +3983,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       surface: opts.surface,
       workspace: opts.workspace,
       rename_to_task: opts.rename_to_task,
+      stableSurfaceIdentity: opts.stableSurfaceIdentity,
+      beforeMutation: opts.beforeMutation,
     });
 
     if (opts.source_event) {
@@ -5199,6 +5216,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           chunk_delay_ms: record.chunk_delay_ms,
           press_enter: record.press_enter,
           rename_to_task: record.rename_to_task,
+          stableSurfaceIdentity: record.stableSurfaceIdentity,
           source_event: "send_input",
           verify_submit: record.verify_submit,
           beforeMutation: record.beforeMutation,
@@ -5290,6 +5308,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const observerEpoch = context.surfaceObserverEpoch;
     if (context.capturedSurfaceObserverEpoch !== observerEpoch) {
       context.capturedSurfaceUuidByRef.clear();
+      context.ambiguousCapturedSurfaceRefs.clear();
       context.capturedSurfaceObserverEpoch = observerEpoch;
     }
     return observerEpoch;
@@ -5297,13 +5316,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const captureSurfaceIdentities = (
     surfaceIdByRef: ReadonlyMap<string, string>,
+    observedEpoch: string | null,
   ): void => {
-    if (!resetCapturedSurfaceIdentitiesForObserver()) return;
+    const currentEpoch = context.surfaceObserverEpoch;
+    if (!observedEpoch || currentEpoch !== observedEpoch) return;
+    if (context.capturedSurfaceObserverEpoch !== observedEpoch) {
+      context.capturedSurfaceUuidByRef.clear();
+      context.ambiguousCapturedSurfaceRefs.clear();
+      context.capturedSurfaceObserverEpoch = observedEpoch;
+    }
     for (const [surfaceRef, surfaceUuid] of surfaceIdByRef) {
-      if (!context.capturedSurfaceUuidByRef.has(surfaceRef)) {
+      const capturedUuid = context.capturedSurfaceUuidByRef.get(surfaceRef);
+      if (!capturedUuid) {
         // A ref is a caller-visible handle for the first UUID observed there.
         // Never overwrite it with a later occupant after refs renumber/recycle.
         context.capturedSurfaceUuidByRef.set(surfaceRef, surfaceUuid);
+      } else if (capturedUuid.toLowerCase() !== surfaceUuid.toLowerCase()) {
+        context.ambiguousCapturedSurfaceRefs.add(surfaceRef);
       }
     }
   };
@@ -5348,11 +5377,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     const registryUuid = registryUuids.size === 1 ? [...registryUuids][0] : null;
     const expectedUuid = capturedUuid ?? registryUuid;
+    const topologyObserverEpoch = context.surfaceObserverEpoch;
     const topology = await collectSurfaceTopology();
 
     if (topology?.complete === true) {
       const uuidTargetRef = findSurfaceRefByUuid(topology, requestedSurface);
-      captureSurfaceIdentities(topology.surfaceIdByRef);
+      captureSurfaceIdentities(
+        topology.surfaceIdByRef,
+        topologyObserverEpoch,
+      );
+      const currentUuidAtRequestedRef =
+        topology.surfaceIdByRef.get(requestedSurface) ?? null;
+      if (
+        (expectedUuid &&
+          currentUuidAtRequestedRef &&
+          expectedUuid.toLowerCase() !==
+            currentUuidAtRequestedRef.toLowerCase()) ||
+        context.ambiguousCapturedSurfaceRefs.has(requestedSurface)
+      ) {
+        throw new Error(
+          `Mutable surface ref ${requestedSurface} was observed for multiple stable UUIDs; ` +
+            `refusing ${operation}. Re-address by agent_id or stable surface UUID.`,
+        );
+      }
       const stableUuid =
         expectedUuid ??
         (uuidTargetRef ? requestedSurface : null) ??
@@ -5409,12 +5456,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       if (!topology.workspaceBySurface.has(requestedSurface)) {
-        return {
-          surface: requestedSurface,
-          workspace: requestedWorkspace,
-          stableSurfaceIdentity: null,
-          assertCurrent: async () => {},
-        };
+        throw new Error(
+          `Fresh topology does not contain ${requestedSurface}; refusing ${operation} ` +
+            `rather than trusting an absent mutable ref.`,
+        );
       }
 
       const workspace =
@@ -5838,6 +5883,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.readOnly,
     async (args) => {
       try {
+        const listingObserverEpoch = context.surfaceObserverEpoch;
         const workspaces = await client.listWorkspaces();
         const targetWorkspaceRefs = args.workspace
           ? [args.workspace]
@@ -5911,7 +5957,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface.id ? [[surface.ref, surface.id] as const] : [],
           ),
         );
-        captureSurfaceIdentities(stableIdByRef);
+        captureSurfaceIdentities(stableIdByRef, listingObserverEpoch);
         const uniqueSurfaceEntries: Array<{
           group: {
             workspace_ref: string;
@@ -6844,16 +6890,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
-        await assertSurfaceMutationAllowed("move_surface", args.surface);
-        const result = await client.moveSurface({
-          surface: args.surface,
-          pane: args.pane,
-          workspace: args.workspace,
-          before: args.before,
-          after: args.after,
-          index: args.index,
-          focus: args.focus,
-        });
+        const route = await resolveRawSurfaceMutationRoute(
+          args.surface,
+          undefined,
+          "move_surface",
+        );
+        const result = await withSurfaceWrite(
+          route.surface,
+          async () => {
+            await route.assertCurrent();
+            return client.moveSurface({
+              surface: route.surface,
+              pane: args.pane,
+              workspace: args.workspace,
+              before: args.before,
+              after: args.after,
+              index: args.index,
+              focus: args.focus,
+            });
+          },
+          {
+            toolName: "move_surface",
+            workspace: route.workspace,
+            stableSurfaceIdentity: route.stableSurfaceIdentity,
+          },
+        );
         // F8: slim, phone-readable confirmation — drop the verbose passthrough.
         const data = {
           surface: result.surface,
@@ -7019,6 +7080,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
               press_enter: args.press_enter,
               rename_to_task: args.rename_to_task,
+              stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_input",
               verify_submit: shouldVerifySubmit,
               beforeMutation: route.assertCurrent,
@@ -7162,6 +7224,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
               chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
               press_enter: true,
+              stableSurfaceIdentity: route.stableSurfaceIdentity,
               source_event: "send_command",
               verify_submit: bootPromptPath ? false : shouldVerifySubmit,
               beforeMutation: route.assertCurrent,
@@ -7492,29 +7555,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const route = await resolveRawSurfaceMutationRoute(
+          args.surface,
+          args.workspace,
+          "rename_tab",
+        );
         let finalTitle = args.title;
         if (args.preserve_prefix) {
           const surfaces = await client.listPaneSurfaces({
-            workspace: args.workspace,
+            workspace: route.workspace,
           });
-          const surface = surfaces.surfaces.find((s) => s.ref === args.surface);
+          const surface = surfaces.surfaces.find((s) => s.ref === route.surface);
           const currentTitle = surface?.title ?? "";
           finalTitle = replaceTaskSuffix(currentTitle, args.title);
         }
         await withSurfaceWrite(
-          args.surface,
+          route.surface,
           async () => {
-            await client.renameTab(args.surface, finalTitle, {
-              workspace: args.workspace,
+            await route.assertCurrent();
+            await client.renameTab(route.surface, finalTitle, {
+              workspace: route.workspace,
             });
           },
-          { toolName: "rename_tab", workspace: args.workspace },
+          {
+            toolName: "rename_tab",
+            workspace: route.workspace,
+            stableSurfaceIdentity: route.stableSurfaceIdentity,
+          },
         );
         await lifecycleSeatManifestPublisher({
-          surfaceId: args.surface,
+          surfaceId: route.surface,
+          ...(route.stableSurfaceIdentity
+            ? { surfaceUuid: route.stableSurfaceIdentity }
+            : {}),
           tabName: finalTitle,
         });
-        const data = { surface: args.surface, title: finalTitle };
+        const data = { surface: route.surface, title: finalTitle };
         return okFormatted(formatOk("rename_tab", data), data);
       } catch (e) {
         return err(e);
@@ -7629,7 +7705,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close a surface (terminal or browser pane). SAFETY: if the surface still backs a live agent (not done/error), the close is REFUSED unless force:true, and the response includes a fresh read of the pane so you can confirm for yourself whether it is really finished before destroying it. Browser panes and surfaces with no tracked agent close normally.",
+    "Close a surface (terminal or browser pane). SAFETY: if the surface still backs a live agent (not done/error), the close is REFUSED unless force:true, and the response includes a fresh read of the pane so you can confirm for yourself whether it is really finished before destroying it. force:true bypasses only the live-agent lifecycle gate; it never bypasses stable surface identity checks. Browser panes and surfaces with no tracked agent close normally.",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -7638,7 +7714,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default(false)
         .describe(
-          "Close even when the backing agent is still live (not done/error). Without this, a live agent's surface is protected and the response returns the current pane contents instead of closing.",
+          "Close even when the backing agent is still live (not done/error). This never bypasses stable surface identity checks. Without force, a live agent's surface is protected and the response returns the current pane contents instead of closing.",
         ),
     },
     ANNOTATIONS.destructive,
@@ -8599,9 +8675,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         const existing = input.agentId
           ? engine.getAgentState(input.agentId)
-          : (registry
-              .list()
-              .find((record) => record.surface_id === input.surfaceId) ?? null);
+          : (registry.list().find((record) =>
+              input.surfaceUuid
+                ? record.surface_uuid?.toLowerCase() ===
+                  input.surfaceUuid.toLowerCase()
+                : record.surface_id === input.surfaceId,
+            ) ?? null);
         if (!existing) return;
 
         const updated =
@@ -8967,6 +9046,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
+            stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
             // Verify every relay to an interactive agent — not just long ones.
@@ -10585,7 +10665,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? { skipped_agents: skippedAgents }
               : {}),
           };
-          const formatted = formatListAgents(agents, agents.length);
+          const formatted = formatListAgents(
+            agents,
+            agents.length,
+            skippedAgents,
+          );
           return okFormatted(formatted, data);
         };
 

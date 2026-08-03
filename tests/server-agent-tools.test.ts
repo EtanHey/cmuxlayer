@@ -863,6 +863,12 @@ function makeUuidRouteClient(initialSurfaces: UuidRouteSurface[]) {
     closeSurface: vi.fn().mockImplementation(async (surface: string) => {
       liveSurfaces = liveSurfaces.filter((candidate) => candidate.ref !== surface);
     }),
+    moveSurface: vi.fn().mockImplementation(async (opts: { surface: string }) => ({
+      surface: opts.surface,
+      pane: null,
+      workspace: null,
+    })),
+    renameTab: vi.fn().mockResolvedValue(undefined),
     notify: vi.fn(),
     listStatus: vi.fn().mockResolvedValue([]),
     identify: vi.fn().mockResolvedValue({}),
@@ -4378,6 +4384,7 @@ describe("agent lifecycle tool handlers", () => {
         error: expect.stringMatching(/repo|launcher/i),
       }),
     ]);
+    expect(result.content[0]?.text).toMatch(/skipped.*corrupt-agent/i);
   });
 
   it("send_to keeps registry repo ownership when a title contains a surface suffix", async () => {
@@ -6485,7 +6492,7 @@ codex>
     );
   });
 
-  it("raw send_to follows the UUID captured before a numeric ref is renumbered", async () => {
+  it("raw send_to refuses an ambiguous numeric ref after it is recycled", async () => {
     const originalUuid = "11111111-2222-4333-8444-555555555555";
     const otherUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     const routeClient = makeUuidRouteClient([
@@ -6531,11 +6538,184 @@ codex>
       {} as any,
     );
 
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(/ambiguous|recycled|multiple/i);
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("raw send_to follows the captured UUID when the old ref is vacated", async () => {
+    const originalUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:230",
+        id: originalUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+    await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:236",
+        id: originalUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:230",
+        text: "follow the captured UUID",
+        press_enter: false,
+      },
+      {} as any,
+    );
+
     expect(result.isError).toBeFalsy();
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:236", text: "follow the captured UUID" },
     ]);
   });
+
+  it("raw send_to refuses an absent ref in complete ref-only topology", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:other",
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:missing",
+        text: "must not reach a later occupant",
+        press_enter: false,
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(/fresh topology|not live/i);
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("list_surfaces discards UUID captures when the observer changes mid-list", async () => {
+    const staleUuid = "11111111-2222-4333-8444-555555555555";
+    const currentUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:230",
+        id: staleUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    let observerEpoch = "test:1";
+    const listPaneSurfaces =
+      routeClient.client.listPaneSurfaces.getMockImplementation()!;
+    routeClient.client.listPaneSurfaces.mockImplementationOnce(async (opts) => {
+      const snapshot = await listPaneSurfaces(opts);
+      observerEpoch = "test:2";
+      return snapshot;
+    });
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+      surfaceObserverEpochProvider: () => observerEpoch,
+    });
+
+    const listed = await registeredTestTool(server, "list_surfaces").handler(
+      {},
+      {} as any,
+    );
+    expect(parseToolResult(listed)).toMatchObject({
+      surfaces: [expect.objectContaining({ ref: "surface:230", id: staleUuid })],
+    });
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:230",
+        id: currentUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:230",
+        text: "current observer only",
+        press_enter: false,
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(routeClient.sendCalls).toEqual([
+      { surface: "surface:230", text: "current observer only" },
+    ]);
+  });
+
+  it.each(["move_surface", "rename_tab"])(
+    "%s refuses a recycled raw ref",
+    async (toolName) => {
+      const originalUuid = "11111111-2222-4333-8444-555555555555";
+      const replacementUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const routeClient = makeUuidRouteClient([
+        {
+          ref: "surface:230",
+          id: originalUuid,
+          workspace_ref: "workspace:1",
+        },
+      ]);
+      const server = createTrackedServer({
+        client: routeClient.client as any,
+        stateDir: TEST_DIR,
+        lifecycleInitializer: async () => {},
+      });
+      await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+      routeClient.setLiveSurfaces([
+        {
+          ref: "surface:236",
+          id: originalUuid,
+          workspace_ref: "workspace:1",
+        },
+        {
+          ref: "surface:230",
+          id: replacementUuid,
+          workspace_ref: "workspace:1",
+        },
+      ]);
+
+      const args =
+        toolName === "move_surface"
+          ? { surface: "surface:230", pane: "pane:destination" }
+          : { surface: "surface:230", title: "must not rename replacement" };
+      const result = await registeredTestTool(server, toolName).handler(
+        args,
+        {} as any,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(parseToolResult(result).error).toMatch(/ambiguous|recycled|multiple/i);
+      expect(routeClient.client.moveSurface).not.toHaveBeenCalled();
+      expect(routeClient.client.renameTab).not.toHaveBeenCalled();
+    },
+  );
 
   it("raw send_to refuses when the UUID captured for a numeric ref is gone", async () => {
     const originalUuid = "11111111-2222-4333-8444-555555555555";

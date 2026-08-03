@@ -1464,6 +1464,7 @@ describe("tool handler integration", () => {
     ]);
     expect(parsed.surfaces[0]).toEqual({
       ref: "surface:1",
+      id: "surface-uuid-1",
       workspace_ref: "workspace:1",
       pane_ref: "pane:1",
       column: 0,
@@ -1476,6 +1477,7 @@ describe("tool handler integration", () => {
     });
     expect(parsed.surfaces[1]).toEqual({
       ref: "surface:2",
+      id: "surface-uuid-2",
       workspace_ref: "workspace:1",
       pane_ref: "pane:2",
       column: 1,
@@ -4050,7 +4052,30 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-workspaces")) {
         return Promise.resolve({
-          stdout: JSON.stringify({ workspaces: [] }),
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", title: "workspace" }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-panes")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{ ref: "pane:1", surface_refs: ["surface:1"] }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{ ref: "surface:1", type: "terminal" }],
+          }),
           stderr: "",
         });
       }
@@ -4510,7 +4535,30 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-workspaces")) {
         return Promise.resolve({
-          stdout: JSON.stringify({ workspaces: [] }),
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", title: "workspace" }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-panes")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{ ref: "pane:1", surface_refs: ["surface:1"] }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{ ref: "surface:1", type: "terminal" }],
+          }),
           stderr: "",
         });
       }
@@ -4638,7 +4686,30 @@ describe("tool handler integration", () => {
       }
       if (args.includes("list-workspaces")) {
         return Promise.resolve({
-          stdout: JSON.stringify({ workspaces: [] }),
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", title: "workspace" }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-panes")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{ ref: "pane:1", surface_refs: ["surface:agent-bg"] }],
+          }),
+          stderr: "",
+        });
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{ ref: "surface:agent-bg", type: "terminal" }],
+          }),
           stderr: "",
         });
       }

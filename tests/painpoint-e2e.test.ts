@@ -774,7 +774,33 @@ describe("Phase 10 painpoint e2e replay", () => {
         };
       }
       if (command === "list-workspaces") {
-        return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
+        return {
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:1", title: "workspace" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (command === "list-panes") {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [{ ref: "pane:1", surface_refs: ["surface:agent-bg"] }],
+          }),
+          stderr: "",
+        };
+      }
+      if (command === "list-pane-surfaces") {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [{ ref: "surface:agent-bg", type: "terminal" }],
+          }),
+          stderr: "",
+        };
       }
       return { stdout: "{}", stderr: "" };
     };
