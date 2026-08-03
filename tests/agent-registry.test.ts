@@ -2618,13 +2618,23 @@ describe("AgentRegistry", () => {
       });
     });
 
-    it("keeps absent terminal lead roles while purging absent terminal workers", async () => {
+    it("keeps absent terminal orchestrators while legacy IC records normalize and purge as workers", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "orchestrator-terminal",
           state: "done",
           surface_id: "surface:missing-orchestrator",
           role: "orchestrator",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "inferred-orchestrator-terminal",
+          state: "done",
+          surface_id: "surface:missing-inferred-orchestrator",
+          role: undefined,
+          cli: "claude",
+          repo: "cmuxlayer",
         }),
       );
       stateMgr.writeState(
@@ -2650,15 +2660,15 @@ describe("AgentRegistry", () => {
 
       const purged = await registry.purgeTerminal({ confirmationMs: 0 });
 
-      expect(purged).toBe(1);
+      expect(purged).toBe(2);
       expect(registry.get("orchestrator-terminal")).toMatchObject({
         agent_id: "orchestrator-terminal",
         role: "orchestrator",
       });
-      expect(registry.get("ic-terminal")).toMatchObject({
-        agent_id: "ic-terminal",
-        role: "ic",
+      expect(registry.get("inferred-orchestrator-terminal")).toMatchObject({
+        agent_id: "inferred-orchestrator-terminal",
       });
+      expect(registry.get("ic-terminal")).toBeNull();
       expect(registry.get("worker-terminal")).toBeNull();
     });
 

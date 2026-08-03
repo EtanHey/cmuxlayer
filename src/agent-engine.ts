@@ -73,6 +73,7 @@ import {
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
+  normalizeWorkspaceRefAlias,
   reposEquivalent,
   resolveWorkspaceRefForRepo,
 } from "./repo-workspace.js";
@@ -172,7 +173,6 @@ export interface SpawnAgentResult {
   agent_id: string;
   surface_id: string;
   workspace_id?: string;
-  actual_workspace_id?: string;
   state: AgentState;
   model?: string;
   requested_model?: string;
@@ -243,7 +243,6 @@ type AgentSurfacePlacement = CmuxNewSplitResult | CmuxNewSurfaceResult;
 
 type CreatedAgentSurface = AgentSurfacePlacement & {
   actual_workspace?: string;
-  warnings?: string[];
   observerEpoch: SurfaceObserverEpoch;
   observerId: string | null;
 };
@@ -981,7 +980,7 @@ export class AgentEngine {
       degraded: false,
       reason: null,
     };
-    if (agent.state !== "done" || role === "orchestrator" || role === "ic") {
+    if (agent.state !== "done" || role === "orchestrator") {
       return {
         closeable: false,
         closure_artifact_verified: null,
@@ -1732,7 +1731,7 @@ export class AgentEngine {
           surfaceObservation,
         ) ?? null;
       if (extraRoleSurfaceIds) {
-        for (const role of ["orchestrator", "ic", "worker"] as const) {
+        for (const role of ["orchestrator", "worker"] as const) {
           for (const surfaceId of extraRoleSurfaceIds[role]) {
             if (liveSurfaceIds.has(surfaceId)) {
               roleSurfaceIds[role].add(surfaceId);
@@ -1800,11 +1799,27 @@ export class AgentEngine {
       // Transfer the created handle to the caller before any post-mutation
       // epoch assertion can throw. The caller owns cleanup until it durably
       // binds this exact surface into agent state.
-      return {
-        ...this.withWorkspacePlacementWarning(surface, workspace),
+      const createdSurface: CreatedAgentSurface = {
+        ...this.withWorkspacePlacementObservation(surface, workspace),
         observerEpoch,
         observerId,
       };
+      if (
+        createdSurface.actual_workspace &&
+        normalizeWorkspaceRefAlias(createdSurface.actual_workspace) !==
+          normalizeWorkspaceRefAlias(createdSurface.workspace)
+      ) {
+        await this.cleanupUnboundCreatedSurface(
+          createdSurface,
+          "agent-placement",
+        );
+        throw new PlacementSurfaceBindingError(
+          `Spawn placement blocked: requested ${createdSurface.workspace} ` +
+            `but cmux returned ${createdSurface.actual_workspace} for surface ` +
+            `${createdSurface.surface}`,
+        );
+      }
+      return createdSurface;
     } catch (error) {
       if (
         isAgentRoleInferenceError(error) ||
@@ -1820,33 +1835,31 @@ export class AgentEngine {
         type: "terminal",
       });
       return {
-        ...this.withWorkspacePlacementWarning(surface, workspace),
+        ...this.withWorkspacePlacementObservation(surface, workspace),
         observerEpoch,
         observerId,
       };
     }
   }
 
-  private withWorkspacePlacementWarning(
+  private withWorkspacePlacementObservation(
     surface: AgentSurfacePlacement,
     requestedWorkspace: string | undefined,
   ): AgentSurfacePlacement & {
     actual_workspace?: string;
-    warnings?: string[];
   } {
+    if (!requestedWorkspace || !surface.workspace) {
+      return surface;
+    }
     if (
-      !requestedWorkspace ||
-      !surface.workspace ||
       surface.workspace === requestedWorkspace
     ) {
       return surface;
     }
-    const warning = `Spawn placement mismatch: requested ${requestedWorkspace} but cmux returned ${surface.workspace} for surface ${surface.surface}`;
     return {
       ...surface,
       workspace: requestedWorkspace,
       actual_workspace: surface.workspace,
-      warnings: [warning],
     };
   }
 
@@ -3857,7 +3870,7 @@ export class AgentEngine {
     const candidates = this.registry.list().filter((agent) => {
       if (opts.agentIds && !opts.agentIds.has(agent.agent_id)) return false;
       if (!eligibleForTrigger(agent)) return false;
-      if (canonicalRoleColumn(inferRecordRoleOrNull(agent) ?? "ic") === null) {
+      if (inferRecordRoleOrNull(agent) === null) {
         return false;
       }
       return true;
@@ -4598,6 +4611,13 @@ export class AgentEngine {
       launcherName: preflight?.launcherName ?? null,
       registry: this.seatRegistry,
     });
+    if (seatIdentity.seat_identity_status === "mismatch") {
+      throw new Error(
+        `Spawn blocked by seat identity mismatch: ${
+          seatIdentity.seat_identity_error ?? "registry identity mismatch"
+        }`,
+      );
+    }
 
     // 1. Create cmux surface using the deterministic worker layout policy.
     const surface = await this.createAgentSurface(spawnParams.workspace, {
@@ -4792,24 +4812,15 @@ export class AgentEngine {
       );
     }
     this.schedulePostSpawnLivenessAssertion(agentId);
-    const seatWarnings =
-      seatIdentity.seat_identity_status === "mismatch" &&
-      seatIdentity.seat_identity_error
-        ? [`Seat identity mismatch: ${seatIdentity.seat_identity_error}`]
-        : [];
-
     return {
       agent_id: agentId,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
-      actual_workspace_id: surface.actual_workspace,
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
       warnings: [
         ...modelPolicy.warnings,
-        ...(surface.warnings ?? []),
-        ...seatWarnings,
       ],
       model_policy: modelPolicy,
       cwd: spawnParams.cwd,

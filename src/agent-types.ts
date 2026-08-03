@@ -15,7 +15,7 @@ export type AgentState =
 export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
-export type AgentRole = "orchestrator" | "ic" | "worker";
+export type AgentRole = "orchestrator" | "worker";
 export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 

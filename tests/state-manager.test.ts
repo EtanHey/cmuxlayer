@@ -106,6 +106,22 @@ describe("StateManager", () => {
       const mgr = new StateManager(TEST_DIR);
       expect(mgr.readState("nonexistent-agent")).toBeNull();
     });
+
+    it("normalizes a persisted legacy IC record into the worker column", () => {
+      const mgr = new StateManager(TEST_DIR);
+      const record = makeRecord({ agent_id: "legacy-ic-agent" });
+      const agentDir = join(TEST_DIR, record.agent_id);
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(
+        join(agentDir, "state.json"),
+        JSON.stringify({ ...record, role: "ic" }),
+      );
+
+      expect(mgr.readState(record.agent_id)).toMatchObject({
+        agent_id: "legacy-ic-agent",
+        role: "worker",
+      });
+    });
   });
 
   describe("transition", () => {

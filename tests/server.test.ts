@@ -16,6 +16,10 @@ import { AgentRegistry } from "../src/agent-registry.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { dispatch, writeHeartbeat } from "../src/inbox.js";
 import type { FleetSidebarPublication } from "../src/fleet-sidebar.js";
+import {
+  currentCallerContext,
+  runWithCallerContext,
+} from "../src/caller-context.js";
 
 type InputDeliveryTestModule = typeof import("../src/server.js") & {
   SEND_INPUT_PASTE_BATCH_MAX_BYTES: number;
@@ -57,6 +61,43 @@ function createServerContext(
 }
 
 function createServer(
+  ...args: Parameters<typeof createServerImpl>
+): ReturnType<typeof createServerImpl> {
+  const server = createServerImpl(withTestObserver(args[0]));
+  const registeredTools = (server as any)._registeredTools as Record<
+    string,
+    { handler?: (...handlerArgs: any[]) => any }
+  >;
+  for (const toolName of [
+    "create_workspace",
+    "new_split",
+    "spawn_agent",
+    "new_worktree_split",
+    "spawn_in_workspace",
+  ]) {
+    const tool = registeredTools?.[toolName];
+    if (!tool?.handler) continue;
+    const handler = tool.handler.bind(tool);
+    tool.handler = (...handlerArgs: any[]) =>
+      currentCallerContext()
+        ? handler(...handlerArgs)
+        : runWithCallerContext({ workspaceId: "workspace:1" }, () =>
+            handler(...handlerArgs),
+          );
+  }
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try {
+      await close();
+    } finally {
+      openServers.delete(server);
+    }
+  };
+  openServers.add(server);
+  return server;
+}
+
+function createServerWithoutCallerContext(
   ...args: Parameters<typeof createServerImpl>
 ): ReturnType<typeof createServerImpl> {
   const server = createServerImpl(withTestObserver(args[0]));
@@ -361,6 +402,51 @@ describe("createServer", () => {
     });
 
     await client.close();
+  });
+
+  it("advertises only orchestrator and worker in every placement-role enum", async () => {
+    const stateDir = processScopedTmpDir("cmuxlayer-role-schema-test");
+    rmSync(stateDir, { recursive: true, force: true });
+    const server = createServer({
+      stateDir,
+      exec: vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({ workspaces: [] }),
+        stderr: "",
+      }),
+    });
+    const client = new Client({ name: "role-schema-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+
+    const tools = (await client.listTools()).tools;
+    const schemaFor = (name: string) => {
+      const schema = tools.find((tool) => tool.name === name)?.inputSchema as
+        | {
+            properties?: Record<string, any>;
+          }
+        | undefined;
+      expect(schema, `${name} must be tool-visible`).toBeDefined();
+      return schema!;
+    };
+    const publicRoles = ["orchestrator", "worker"];
+
+    expect(schemaFor("new_split").properties?.role.enum).toEqual(publicRoles);
+    expect(schemaFor("spawn_agent").properties?.role.enum).toEqual(publicRoles);
+    expect(schemaFor("spawn_agent").properties?.placement.enum).toEqual(
+      publicRoles,
+    );
+    expect(
+      schemaFor("spawn_in_workspace").properties?.agents.items.properties.role
+        .enum,
+    ).toEqual(publicRoles);
+
+    await client.close();
+    rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("registers Claude channel capability when enabled", () => {
@@ -961,7 +1047,10 @@ describe("tool handler integration", () => {
     });
     const tool = (server as any)._registeredTools["create_workspace"];
 
-    const result = await tool.handler({ title: "red-team" }, {} as any);
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:manual" },
+      () => tool.handler({ title: "red-team" }, {} as any),
+    );
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -5079,7 +5168,7 @@ describe("tool handler integration", () => {
   it("new_split defaults to the caller workspace instead of the selected workspace", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     const previousTabId = process.env.CMUX_TAB_ID;
-    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    process.env.CMUX_WORKSPACE_ID = "focused-workspace-uuid";
     delete process.env.CMUX_TAB_ID;
     try {
       const mockClient = {
@@ -5121,7 +5210,10 @@ describe("tool handler integration", () => {
       });
       const tool = (server as any)._registeredTools["new_split"];
 
-      const result = await tool.handler({ direction: "right" }, {} as any);
+      const result = await runWithCallerContext(
+        { workspaceId: "caller-workspace-uuid" },
+        () => tool.handler({ direction: "right" }, {} as any),
+      );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
 
@@ -5151,7 +5243,7 @@ describe("tool handler integration", () => {
   it("new_split honors an explicit workspace before caller and focused workspaces", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     const previousTabId = process.env.CMUX_TAB_ID;
-    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    process.env.CMUX_WORKSPACE_ID = "voice-workspace-uuid";
     delete process.env.CMUX_TAB_ID;
     try {
       const mockClient = {
@@ -5239,7 +5331,7 @@ describe("tool handler integration", () => {
               ref: "workspace:caller",
               title: "Caller",
               selected: false,
-              current_directory: "/repo/orchestrator",
+              current_directory: "/repo/voicelayer",
             },
             {
               id: "voice-workspace-uuid",
@@ -5284,9 +5376,13 @@ describe("tool handler integration", () => {
       });
       const tool = (server as any)._registeredTools["new_split"];
 
-      const result = await tool.handler(
-        { direction: "right", title: "voicelayerCodex" },
-        {} as any,
+      const result = await runWithCallerContext(
+        { workspaceId: "caller-workspace-uuid" },
+        () =>
+          tool.handler(
+            { direction: "right", title: "voicelayerCodex" },
+            {} as any,
+          ),
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -5313,7 +5409,7 @@ describe("tool handler integration", () => {
     }
   });
 
-  it("new_split warns when it falls back to the focused workspace", async () => {
+  it("new_split refuses missing caller and repo context without consulting focus", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     const previousTabId = process.env.CMUX_TAB_ID;
     delete process.env.CMUX_WORKSPACE_ID;
@@ -5352,7 +5448,7 @@ describe("tool handler integration", () => {
           scrollback_used: false,
         }),
       };
-      const server = createServer({
+      const server = createServerWithoutCallerContext({
         client: mockClient as any,
         skipAgentLifecycle: true,
       });
@@ -5362,14 +5458,9 @@ describe("tool handler integration", () => {
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
 
-      expect(parsed.ok).toBe(true);
-      expect(mockClient.newSplit).toHaveBeenCalledWith(
-        "right",
-        expect.objectContaining({ workspace: "workspace:focused" }),
-      );
-      expect(parsed.warnings).toEqual([
-        expect.stringContaining("focused workspace"),
-      ]);
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toMatch(/workspace.*(caller|repo|explicit)/i);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
     } finally {
       if (previousWorkspaceId === undefined) {
         delete process.env.CMUX_WORKSPACE_ID;
@@ -5445,7 +5536,7 @@ describe("tool handler integration", () => {
       selectWorkspace: vi.fn().mockResolvedValue(undefined),
       renameTab: vi.fn().mockResolvedValue(undefined),
     };
-    const server = createServer({
+    const server = createServerWithoutCallerContext({
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
@@ -5532,7 +5623,7 @@ describe("tool handler integration", () => {
       selectWorkspace: vi.fn().mockResolvedValue(undefined),
       renameTab: vi.fn().mockResolvedValue(undefined),
     };
-    const server = createServer({
+    const server = createServerWithoutCallerContext({
       client: mockClient as any,
       skipAgentLifecycle: true,
     });
@@ -6540,54 +6631,40 @@ describe("tool handler integration", () => {
 
   it("new_split follows a remembered role surface UUID instead of its recycled ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
-    let moved = false;
-    let splitCount = 0;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-panes")) {
         return {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
             window_ref: "window:1",
-            panes: moved
-              ? [
-                  {
-                    ref: "pane:left",
-                    index: 0,
-                    focused: false,
-                    surface_count: 1,
-                    surface_refs: ["surface:moved-worker"],
-                    surface_ids: [stableUuid],
-                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-                  },
-                  {
-                    ref: "pane:right-recycled",
-                    index: 1,
-                    focused: true,
-                    surface_count: 1,
-                    surface_refs: ["surface:remembered-worker"],
-                    surface_ids: ["uuid-recycled"],
-                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
-                  },
-                ]
-              : [
-                  {
-                    ref: "pane:left",
-                    index: 0,
-                    focused: true,
-                    surface_count: 1,
-                    surface_refs: ["surface:manual"],
-                    surface_ids: ["uuid-manual"],
-                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-                  },
-                ],
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:moved-worker"],
+                surface_ids: [stableUuid],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-recycled",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:remembered-worker"],
+                surface_ids: ["uuid-recycled"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
           }),
           stderr: "",
         };
       }
       if (args.includes("list-pane-surfaces")) {
         const pane = String(args[args.indexOf("--pane") + 1] ?? "");
-        const surface = moved
-          ? pane === "pane:left"
+        const surface =
+          pane === "pane:left"
             ? {
                 ref: "surface:moved-worker",
                 id: stableUuid,
@@ -6597,12 +6674,7 @@ describe("tool handler integration", () => {
                 ref: "surface:remembered-worker",
                 id: "uuid-recycled",
                 title: "foreign shell",
-              }
-          : {
-              ref: "surface:manual",
-              id: "uuid-manual",
-              title: "manual",
-            };
+              };
         return {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
@@ -6620,30 +6692,12 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("new-split")) {
-        splitCount += 1;
-        return {
-          stdout: JSON.stringify({
-            workspace: "workspace:1",
-            surface:
-              splitCount === 1
-                ? "surface:remembered-worker"
-                : "surface:second-worker",
-            surface_id:
-              splitCount === 1 ? stableUuid : "uuid-second-worker",
-            pane: splitCount === 1 ? "pane:right" : "pane:new-right",
-            title: "",
-            type: "terminal",
-          }),
-          stderr: "",
-        };
-      }
       if (args.includes("new-surface")) {
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
-            surface: "surface:wrong-recycled-tab",
-            surface_id: "uuid-wrong-tab",
+            surface: "surface:new-worker",
+            surface_id: "uuid-new-worker",
             pane: "pane:right-recycled",
             title: "",
             type: "terminal",
@@ -6653,44 +6707,169 @@ describe("tool handler integration", () => {
       }
       return { stdout: "{}", stderr: "" };
     });
-    const server = createServer({
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-uuid-memory");
+    rmSync(stateDir, { recursive: true, force: true });
+    const context = createServerContext({
       exec: mockExec,
       skipAgentLifecycle: true,
-      stateDir: join(CHANNEL_TEST_DIR, "new-split-role-uuid-memory"),
+      stateDir,
+      controlHealthIntervalMs: 0,
     });
-    const tool = (server as any)._registeredTools["new_split"];
+    context.roleSurfaceOverrides.set("surface:remembered-worker", {
+      role: "worker",
+      workspace: "workspace:1",
+      surfaceUuid: stableUuid,
+    });
+    const server = createServer({ context, skipAgentLifecycle: true });
 
-    await tool.handler(
-      { direction: "right", role: "worker", workspace: "workspace:1" },
-      {} as any,
-    );
-    moved = true;
-    const second = await tool.handler(
-      { direction: "right", role: "ic", workspace: "workspace:1" },
-      {} as any,
-    );
-    const parsed =
-      second.structuredContent ?? JSON.parse(second.content[0].text);
+    try {
+      const tool = (server as any)._registeredTools["new_split"];
+      const result = await tool.handler(
+        { direction: "right", role: "worker", workspace: "workspace:1" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.surface).toBe("surface:second-worker");
-    expect(parsed.placement).toBe("split");
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "new-split",
-        "up",
-        "--surface",
-        "surface:moved-worker",
-      ]),
-    );
-    expect(mockExec).not.toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "new-surface",
-        "--pane",
-        "pane:right-recycled",
-      ]),
-    );
+      expect(parsed.ok).toBe(true);
+      expect(context.roleSurfaceOverrides.has("surface:remembered-worker")).toBe(
+        false,
+      );
+      expect(
+        context.roleSurfaceOverrides.get("surface:moved-worker"),
+      ).toMatchObject({
+        role: "worker",
+        workspace: "workspace:1",
+        surfaceUuid: stableUuid,
+      });
+      expect(mockExec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["--surface", "surface:remembered-worker"]),
+      );
+    } finally {
+      await server.close();
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("new_split coerces legacy IC placement to the worker column without an up split", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:lead"],
+                surface_ids: ["uuid-lead"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-worker",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker"],
+                surface_ids: ["uuid-worker"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        const surface =
+          pane === "pane:left"
+            ? {
+                ref: "surface:lead",
+                id: "uuid-lead",
+                title: "cmuxlayerClaude",
+              }
+            : {
+                ref: "surface:worker",
+                id: "uuid-worker",
+                title: "cmuxlayerCodex",
+              };
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces: [
+              {
+                ...surface,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:second-worker",
+            surface_id: "uuid-second-worker",
+            pane: "pane:right-worker",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-legacy-ic-geometry");
+    rmSync(stateDir, { recursive: true, force: true });
+    const context = createServerContext({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context, skipAgentLifecycle: true });
+
+    try {
+      const tool = (server as any)._registeredTools["new_split"];
+      const result = await tool.handler(
+        { direction: "right", role: "ic", workspace: "workspace:1" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.surface).toBe("surface:second-worker");
+      expect(parsed.placement).toBe("surface");
+      expect(parsed.role).toBe("worker");
+      expect(parsed.warnings.join(" | ")).toMatch(/legacy.*ic.*worker/i);
+      expect(mockExec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["new-split", "up"]),
+      );
+      expect(mockExec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining([
+          "new-surface",
+          "--pane",
+          "pane:right-worker",
+        ]),
+      );
+    } finally {
+      await server.close();
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("new_split does not prune role overrides from other workspaces", async () => {

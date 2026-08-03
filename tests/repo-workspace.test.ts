@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   findWorkspaceRefForRepo,
+  normalizeWorkspaceRefAlias,
   repoNameMatchesWorkspaceDirectory,
   reposEquivalent,
   resolveWorkspaceRefForRepo,
   workspaceDirectoryRepoMatchScore,
 } from "../src/repo-workspace.js";
+
+describe("normalizeWorkspaceRefAlias", () => {
+  it("canonicalizes only the documented ws: ref alias", () => {
+    expect(normalizeWorkspaceRefAlias("ws:12")).toBe("workspace:12");
+    expect(normalizeWorkspaceRefAlias(" workspace:12 ")).toBe("workspace:12");
+    expect(normalizeWorkspaceRefAlias("scratch")).toBe("scratch");
+  });
+});
 
 describe("workspaceDirectoryRepoMatchScore", () => {
   it("scores an exact repo-root basename highest", () => {

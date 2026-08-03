@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   chooseAgentSpawnPlacement,
   chooseSurfaceClosePolicy,
+  collectRoleSurfaceIds,
   deriveColumnIndex,
   inferAgentRole,
   launcherNameForCli,
 } from "../src/layout-policy.js";
+import type { AgentRecord } from "../src/agent-types.js";
 import type { CmuxPane, CmuxPaneSurfaces, CmuxSurface } from "../src/types.js";
 
 function makePane(
@@ -186,7 +188,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       {
@@ -232,13 +233,51 @@ describe("layout policy", () => {
       ],
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker"]),
       },
       { role: "worker" },
     );
 
     expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+  });
+
+  it("refuses role placement when the workspace already has a third rendered column", () => {
+    const panes = [
+      makePane("pane:left", 0, ["surface:orchestrator"], {
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 900,
+      }),
+      makePane("pane:right", 1, ["surface:worker"], {
+        x: 400,
+        y: 0,
+        width: 400,
+        height: 900,
+      }),
+      makePane("pane:third", 2, ["surface:unexpected"], {
+        x: 800,
+        y: 0,
+        width: 400,
+        height: 900,
+      }),
+    ];
+
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        [
+          makePaneSurfaces("pane:left", ["surface:orchestrator"]),
+          makePaneSurfaces("pane:right", ["surface:worker"]),
+          makePaneSurfaces("pane:third", ["surface:unexpected"]),
+        ],
+        {
+          orchestrator: new Set(["surface:orchestrator"]),
+          worker: new Set(["surface:worker"]),
+        },
+        { role: "worker" },
+      ),
+    ).toThrow(/three columns|at most two|two-column/i);
   });
 
   it("infers default role from repoGolem launcher names", () => {
@@ -272,8 +311,8 @@ describe("layout policy", () => {
 
   it("lets an explicit role override launcher inference", () => {
     expect(
-      inferAgentRole({ launcherName: "skillcreatorClaude", role: "ic" }),
-    ).toBe("ic");
+      inferAgentRole({ launcherName: "skillcreatorClaude", role: "worker" }),
+    ).toBe("worker");
   });
 
   it("does not let repo names that end with launcher suffixes affect non-launcher CLIs", () => {
@@ -312,7 +351,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orc"]),
-        ic: new Set(),
         worker: new Set(["surface:worker-1"]),
       },
       { role: "orchestrator" },
@@ -346,7 +384,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "orchestrator" },
@@ -390,8 +427,7 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(["surface:voicelayer-lead"]),
-        worker: new Set(),
+        worker: new Set(["surface:voicelayer-lead"]),
       },
       { role: "orchestrator" },
     );
@@ -399,7 +435,7 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:left" });
   });
 
-  it("places orchestrators in pane:1 for the live lead-pane fixture with one IC record", () => {
+  it("places orchestrators in pane:1 when a normalized legacy IC record is a worker", () => {
     const panes = [
       makePane(
         "pane:1",
@@ -460,8 +496,7 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(["surface:voicelayer-lead"]),
-        worker: new Set(),
+        worker: new Set(["surface:voicelayer-lead"]),
       },
       { role: "orchestrator" },
     );
@@ -517,7 +552,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(),
         worker: new Set(["surface:stale-worker"]),
       },
       { role: "orchestrator" },
@@ -583,8 +617,7 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(["surface:stale-ic"]),
-        worker: new Set(),
+        worker: new Set(["surface:stale-ic"]),
       },
       { role: "orchestrator" },
     );
@@ -611,7 +644,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "worker" },
@@ -633,35 +665,28 @@ describe("layout policy", () => {
     });
   });
 
-  it("places the first IC in the right column above existing workers", () => {
-    const panes = [
-      makePane("pane:left", 0, ["surface:orc"]),
-      makePane("pane:right", 1, ["surface:worker-1"]),
-    ];
-    const paneSurfaces = [
-      makePaneSurfaces("pane:left", ["surface:orc"]),
-      makePaneSurfaces("pane:right", ["surface:worker-1"]),
-    ];
+  it("seeds the worker column to the right and never creates the old vertical IC split", () => {
+    const panes = [makePane("pane:left", 0, ["surface:orc"])];
+    const paneSurfaces = [makePaneSurfaces("pane:left", ["surface:orc"])];
 
     const placement = chooseAgentSpawnPlacement(
       panes,
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orc"]),
-        ic: new Set(),
-        worker: new Set(["surface:worker-1"]),
+        worker: new Set(),
       },
-      { role: "ic" },
+      { role: "worker" },
     );
 
     expect(placement).toEqual({
       kind: "split",
-      direction: "up",
-      pane: "pane:right",
+      direction: "right",
+      pane: "pane:left",
     });
   });
 
-  it("docks the first worker in column 1 without inventing a row rule", () => {
+  it("classifies an existing legacy IC-labelled surface as a right-column worker", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),
       makePane("pane:ic", 1, ["surface:ic"]),
@@ -676,12 +701,11 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orc"]),
-        ic: new Set(["surface:ic"]),
-        worker: new Set(),
+        worker: new Set(["surface:ic"]),
       },
       {
         role: "worker",
-        parentRole: "ic",
+        parentRole: "worker",
         parentSurfaceId: "surface:ic",
         childWorkerSurfaceIds: new Set(),
       },
@@ -690,7 +714,20 @@ describe("layout policy", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:ic" });
   });
 
-  it("ignores a third worker column for a parent IC's first child", () => {
+  it("normalizes an in-memory legacy IC record before collecting role surfaces", () => {
+    const legacyAgent = {
+      role: "ic",
+      cli: "claude",
+      repo: "cmuxlayer",
+      surface_id: "surface:legacy-ic",
+    } as unknown as Pick<AgentRecord, "role" | "cli" | "repo" | "surface_id">;
+    const ids = collectRoleSurfaceIds([legacyAgent]);
+
+    expect(ids.worker).toEqual(new Set(["surface:legacy-ic"]));
+    expect(ids.orchestrator).toEqual(new Set());
+  });
+
+  it("blocks a child worker spawn when a third rendered column exists", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),
       makePane("pane:ic", 1, ["surface:ic"]),
@@ -702,26 +739,20 @@ describe("layout policy", () => {
       makePaneSurfaces("pane:other-workers", ["surface:worker-1"]),
     ];
 
-    const placement = chooseAgentSpawnPlacement(
-      panes,
-      paneSurfaces,
-      {
-        orchestrator: new Set(["surface:orc"]),
-        ic: new Set(["surface:ic"]),
-        worker: new Set(["surface:worker-1"]),
-      },
-      {
-        role: "worker",
-        parentRole: "ic",
-        parentSurfaceId: "surface:ic",
-        childWorkerSurfaceIds: new Set(),
-      },
-    );
-
-    expect(placement).toEqual({ kind: "surface", pane: "pane:ic" });
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        {
+          orchestrator: new Set(["surface:orc"]),
+          worker: new Set(["surface:ic", "surface:worker-1"]),
+        },
+        { role: "worker", parentRole: "worker" },
+      ),
+    ).toThrow(/two-column/i);
   });
 
-  it("keeps sibling workers in canonical column 1 instead of a child row", () => {
+  it("blocks sibling worker placement when a third rendered column exists", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:orc"]),
       makePane("pane:ic", 1, ["surface:ic"]),
@@ -733,23 +764,17 @@ describe("layout policy", () => {
       makePaneSurfaces("pane:children", ["surface:child-1"]),
     ];
 
-    const placement = chooseAgentSpawnPlacement(
-      panes,
-      paneSurfaces,
-      {
-        orchestrator: new Set(["surface:orc"]),
-        ic: new Set(["surface:ic"]),
-        worker: new Set(["surface:child-1"]),
-      },
-      {
-        role: "worker",
-        parentRole: "ic",
-        parentSurfaceId: "surface:ic",
-        childWorkerSurfaceIds: new Set(["surface:child-1"]),
-      },
-    );
-
-    expect(placement).toEqual({ kind: "surface", pane: "pane:ic" });
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        {
+          orchestrator: new Set(["surface:orc"]),
+          worker: new Set(["surface:ic", "surface:child-1"]),
+        },
+        { role: "worker", parentRole: "worker" },
+      ),
+    ).toThrow(/two-column/i);
   });
 
   it("docks the first child worker into an existing right-column non-lead pane", () => {
@@ -767,7 +792,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       {
@@ -799,7 +823,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker-1"]),
       },
       {
@@ -831,7 +854,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:child-1", "surface:child-2"]),
       },
       {
@@ -995,7 +1017,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "worker" },
@@ -1076,7 +1097,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(),
         worker: new Set(),
         unknown: new Set(["surface:unknown-worker"]),
       },
@@ -1114,7 +1134,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
         unknown: new Set(["surface:unknown-worker"]),
       },
@@ -1149,7 +1168,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
         unknown: new Set(["surface:unknown-worker"]),
       },
@@ -1177,7 +1195,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
         unknown: new Set(["surface:unknown-worker"]),
       },
@@ -1205,7 +1222,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "worker" },
@@ -1215,7 +1231,7 @@ describe("layout policy", () => {
     expect(placement).not.toEqual({ kind: "split", direction: "right" });
   });
 
-  it("uses column 1 instead of a sparse third column for parentless workers", () => {
+  it("blocks parentless worker placement when a sparse third column exists", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"]),
       makePane("pane:ic", 1, ["surface:ic"]),
@@ -1227,18 +1243,17 @@ describe("layout policy", () => {
       makePaneSurfaces("pane:right", ["surface:shell"]),
     ];
 
-    const placement = chooseAgentSpawnPlacement(
-      panes,
-      paneSurfaces,
-      {
-        orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(["surface:ic"]),
-        worker: new Set(),
-      },
-      { role: "worker" },
-    );
-
-    expect(placement).toEqual({ kind: "surface", pane: "pane:ic" });
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        {
+          orchestrator: new Set(["surface:orchestrator"]),
+          worker: new Set(["surface:ic"]),
+        },
+        { role: "worker" },
+      ),
+    ).toThrow(/two-column/i);
   });
 
   it("uses the existing column-1 pane without imposing a worker row", () => {
@@ -1256,8 +1271,7 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(["surface:ic"]),
-        worker: new Set(),
+        worker: new Set(["surface:ic"]),
       },
       { role: "worker" },
     );
@@ -1280,7 +1294,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:stale-worker"]),
       },
       { role: "worker" },
@@ -1300,7 +1313,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "worker" },
@@ -1324,7 +1336,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       {
@@ -1358,7 +1369,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker-1"]),
       },
       { role: "worker", worktree: true },
@@ -1382,7 +1392,6 @@ describe("layout policy", () => {
       paneSurfaces,
       {
         orchestrator: new Set(),
-        ic: new Set(),
         worker: new Set(),
       },
       { role: "worker" },
@@ -1488,7 +1497,7 @@ describe("layout policy", () => {
     });
   });
 
-  it("uses canonical column 1 when multiple worker columns exist", () => {
+  it("blocks placement when workers already occupy multiple columns", () => {
     const panes = [
       makePane("pane:left", 0, ["surface:interactive"]),
       makePane("pane:right", 1, ["surface:worker-1"]),
@@ -1500,13 +1509,13 @@ describe("layout policy", () => {
       makePaneSurfaces("pane:rightmost", ["surface:worker-2"]),
     ];
 
-    const placement = chooseAgentSpawnPlacement(
-      panes,
-      paneSurfaces,
-      new Set(["surface:worker-1", "surface:worker-2"]),
-    );
-
-    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        new Set(["surface:worker-1", "surface:worker-2"]),
+      ),
+    ).toThrow(/two-column/i);
   });
 });
 
@@ -1539,7 +1548,6 @@ describe("worktree worker placement — always right, never left", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(),
       },
       {
@@ -1576,7 +1584,6 @@ describe("worktree worker placement — always right, never left", () => {
         paneSurfaces,
         {
           orchestrator: new Set(["surface:orchestrator"]),
-          ic: new Set(),
           worker: new Set(),
         },
         {
@@ -1611,7 +1618,6 @@ describe("worktree worker placement — always right, never left", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker-1"]),
       },
       {
@@ -1629,7 +1635,7 @@ describe("worktree worker placement — always right, never left", () => {
     assertNeverLeft(placement);
   });
 
-  it("(b2) ignores a stray third column and docks in the canonical right column", () => {
+  it("(b2) blocks worktree placement when a stray third column exists", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
       makePane("pane:right", 1, ["surface:worker-1"], rightColumn),
@@ -1646,24 +1652,17 @@ describe("worktree worker placement — always right, never left", () => {
       makePaneSurfaces("pane:rightmost", ["surface:worker-2"]),
     ];
 
-    const placement = chooseAgentSpawnPlacement(
-      panes,
-      paneSurfaces,
-      {
-        orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
-        worker: new Set(["surface:worker-1", "surface:worker-2"]),
-      },
-      {
-        role: "worker",
-        parentRole: "orchestrator",
-        parentSurfaceId: "surface:orchestrator",
-        worktree: true,
-      },
-    );
-
-    expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
-    assertNeverLeft(placement);
+    expect(() =>
+      chooseAgentSpawnPlacement(
+        panes,
+        paneSurfaces,
+        {
+          orchestrator: new Set(["surface:orchestrator"]),
+          worker: new Set(["surface:worker-1", "surface:worker-2"]),
+        },
+        { role: "worker", worktree: true },
+      ),
+    ).toThrow(/two-column/i);
   });
 
   it("docks at the current top of the right column regardless of pane fill", () => {
@@ -1693,7 +1692,6 @@ describe("worktree worker placement — always right, never left", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker"]),
       },
       { role: "worker", worktree: true },
@@ -1702,7 +1700,7 @@ describe("worktree worker placement — always right, never left", () => {
     expect(placement).toEqual({ kind: "surface", pane: "pane:right-top" });
   });
 
-  it("keeps N worker spawns in the same canonical right-column top pane", () => {
+  it("blocks repeated worker placement while a third column remains", () => {
     const panes = [
       makePane("pane:lead", 0, ["surface:orchestrator"], leftColumn),
       makePane("pane:right", 1, ["surface:worker-0"], rightColumn),
@@ -1713,33 +1711,24 @@ describe("worktree worker placement — always right, never left", () => {
         height: 900,
       }),
     ];
-    const workerSurfaceIds = new Set([
-      "surface:worker-0",
-      "surface:worker-leftover",
-    ]);
-    const rightSurfaces = ["surface:worker-0"];
-
-    for (let index = 1; index <= 5; index += 1) {
-      const placement = chooseAgentSpawnPlacement(
+    expect(() =>
+      chooseAgentSpawnPlacement(
         panes,
         [
           makePaneSurfaces("pane:lead", ["surface:orchestrator"]),
-          makePaneSurfaces("pane:right", rightSurfaces),
+          makePaneSurfaces("pane:right", ["surface:worker-0"]),
           makePaneSurfaces("pane:leftover", ["surface:worker-leftover"]),
         ],
         {
           orchestrator: new Set(["surface:orchestrator"]),
-          ic: new Set(),
-          worker: workerSurfaceIds,
+          worker: new Set([
+            "surface:worker-0",
+            "surface:worker-leftover",
+          ]),
         },
         { role: "worker", worktree: true },
-      );
-
-      expect(placement).toEqual({ kind: "surface", pane: "pane:right" });
-      const spawned = `surface:worker-${index}`;
-      rightSurfaces.push(spawned);
-      workerSurfaceIds.add(spawned);
-    }
+      ),
+    ).toThrow(/two-column/i);
   });
 
   it("docks a lead in the top of column 0 even when that pane is worker-filled", () => {
@@ -1768,7 +1757,6 @@ describe("worktree worker placement — always right, never left", () => {
       ],
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:stray-worker", "surface:worker"]),
       },
       { role: "orchestrator" },
@@ -1808,7 +1796,6 @@ describe("worktree worker placement — always right, never left", () => {
       paneSurfaces,
       {
         orchestrator: new Set(["surface:orchestrator"]),
-        ic: new Set(),
         worker: new Set(["surface:worker-left", "surface:worker-right"]),
       },
       { role: "worker", worktree: true },

@@ -4,6 +4,11 @@ export function pathBaseName(path: string): string {
   return index >= 0 ? normalized.slice(index + 1) : normalized;
 }
 
+/** Canonicalize only cmux's documented short workspace-ref alias. */
+export function normalizeWorkspaceRefAlias(value: string): string {
+  return value.trim().replace(/^ws:/, "workspace:");
+}
+
 function repoIdentityToken(input: string): string {
   const normalized = input.trim().replace(/\/+$/, "");
   if (!normalized) return "";

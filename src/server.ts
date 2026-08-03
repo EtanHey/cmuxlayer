@@ -149,7 +149,10 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
-import { currentCallerContext } from "./caller-context.js";
+import {
+  currentCallerContext,
+  type CallerContext,
+} from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   matchReadyPattern,
@@ -157,8 +160,10 @@ import {
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
+  normalizeWorkspaceRefAlias,
   reposEquivalent,
   resolveWorkspaceRefForRepo,
+  workspaceDirectoryRepoMatchScore,
 } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import {
@@ -457,6 +462,30 @@ export const THIN_CORE_LEGACY_REPLACEMENTS: Readonly<Record<string, string>> = {
 };
 
 const BroadcastRoleSchema = z.enum(["leads", "workers", "all"]);
+const legacyCompatibleAgentRoleSchema = () =>
+  z
+    .enum(["orchestrator", "worker"])
+    .catch((context) => context.input as AgentRole);
+
+function normalizeToolAgentRole(
+  input: unknown,
+  field: "role" | "placement",
+): { role: AgentRole | undefined; warning: string | undefined } {
+  if (input === undefined) return { role: undefined, warning: undefined };
+  if (input === "ic") {
+    return {
+      role: "worker",
+      warning: `Legacy ${field}=\"ic\" was coerced to \"worker\"; placement now has only orchestrator/worker columns`,
+    };
+  }
+  if (input === "orchestrator" || input === "worker") {
+    return { role: input, warning: undefined };
+  }
+  throw new Error(
+    `Invalid ${field}=${JSON.stringify(input)}; expected orchestrator or worker`,
+  );
+}
+
 const BroadcastArgsSchema = z.object({
   text: z.string(),
   role: BroadcastRoleSchema.optional().default("leads"),
@@ -1362,7 +1391,7 @@ function broadcastRoleMatches(
 ): boolean {
   if (requestedRole === "all") return true;
   if (requestedRole === "workers") return agentRole === "worker";
-  return agentRole === "orchestrator" || agentRole === "ic";
+  return agentRole === "orchestrator";
 }
 
 function inferBroadcastRecordRole(agent: AgentRecord): AgentRole | null {
@@ -2065,6 +2094,11 @@ export interface CreateServerOptions {
   lifecycleInitializer?: () => Promise<void>;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
+  /**
+   * In-process-only caller identity used by safety gates, never placement.
+   * Shared-daemon entrypoints intentionally leave this unset.
+   */
+  safetyCallerContextProvider?: () => CallerContext | undefined;
   /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
   defaultPalette?: string;
   /** Opt into Claude Code channel notifications for lifecycle events */
@@ -2928,7 +2962,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : roleRecords;
     const ids = collectRoleSurfaceIds(observedRoleRecords);
     if (liveSurfaceIds) {
-      for (const role of ["orchestrator", "ic", "worker"] as const) {
+      for (const role of ["orchestrator", "worker"] as const) {
         for (const surfaceId of ids[role]) {
           if (!liveSurfaceIds.has(surfaceId)) {
             ids[role].delete(surfaceId);
@@ -4661,7 +4695,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): boolean => {
     const normalized = candidate.trim();
     if (!normalized) return false;
-    const aliasNormalized = normalized.replace(/^ws:/, "workspace:");
+    const aliasNormalized = normalizeWorkspaceRefAlias(normalized);
     return (
       workspace.ref === normalized ||
       workspace.id === normalized ||
@@ -4692,24 +4726,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const callerWorkspaceStrict = async (): Promise<string | undefined> => {
+    const callerContext = currentCallerContext();
+    const workspaceCandidate = callerContext?.workspaceId?.trim();
+    const candidates = [workspaceCandidate, callerContext?.tabId].filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    );
     try {
       const { workspaces } = await client.listWorkspaces();
-      const callerContext = currentCallerContext();
-      const requestCandidates = [
-        callerContext?.workspaceId,
-        callerContext?.tabId,
-      ].filter(
-        (value): value is string =>
-          typeof value === "string" && value.trim().length > 0,
-      );
-      const envCandidates =
-        requestCandidates.length > 0
-          ? []
-          : [process.env.CMUX_WORKSPACE_ID, process.env.CMUX_TAB_ID].filter(
-              (value): value is string =>
-                typeof value === "string" && value.trim().length > 0,
-            );
-      const candidates = [...requestCandidates, ...envCandidates];
       for (const candidate of candidates) {
         const match = workspaces.find((workspace) =>
           envWorkspaceMatches(workspace, candidate),
@@ -4717,15 +4741,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (match) return match.ref;
       }
     } catch {
-      return undefined;
+      // A request-scoped workspace ID remains authoritative when enumeration
+      // is temporarily unavailable; only daemon env and UI focus are banned.
     }
-    return undefined;
+    return workspaceCandidate
+      ? normalizeWorkspaceRefAlias(workspaceCandidate)
+      : undefined;
   };
 
-  /** Caller pane workspace ref first, then focused workspace as fallback. */
+  /** Per-request caller workspace only; shared-daemon env/focus are not caller identity. */
   const currentCallerWorkspace = async (): Promise<string | undefined> => {
-    const callerWorkspace = await callerWorkspaceStrict();
-    return callerWorkspace ?? (await currentFocusedWorkspace());
+    return callerWorkspaceStrict();
+  };
+
+  /**
+   * Caller workspace for mutation safety only. In-process runtimes have no
+   * transport metadata, so their process-local env can supplement the strict
+   * request context without ever influencing spawn placement.
+   */
+  const currentSafetyCallerWorkspace = async (): Promise<
+    string | undefined
+  > => {
+    const requestWorkspace = await callerWorkspaceStrict();
+    if (requestWorkspace) return requestWorkspace;
+    const fallbackWorkspace =
+      opts?.safetyCallerContextProvider?.()?.workspaceId;
+    return fallbackWorkspace
+      ? await canonicalWorkspaceRef(fallbackWorkspace)
+      : undefined;
   };
 
   /** Currently-focused workspace ref, or undefined if it can't be read. */
@@ -4765,41 +4808,74 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return workspace ? { workspace } : null;
   };
 
-  const focusedWorkspaceFallbackWarning =
-    "No explicit workspace, caller workspace, or repo workspace could be resolved; falling back to the currently focused workspace.";
+  class PlacementWorkspaceError extends Error {
+    readonly code = "PLACEMENT_WORKSPACE_UNRESOLVED";
+
+    constructor(message: string) {
+      super(message);
+      this.name = "PlacementWorkspaceError";
+    }
+  }
+
+  const assertWorkspaceBelongsToRepo = async (
+    workspaceRef: string,
+    repo: string | null | undefined,
+  ): Promise<void> => {
+    if (!repo) return;
+    let workspace: CmuxWorkspace | undefined;
+    try {
+      const listed = await client.listWorkspaces();
+      workspace = listed.workspaces.find((candidate) =>
+        envWorkspaceMatches(candidate, workspaceRef),
+      );
+    } catch {
+      return;
+    }
+    const cwd = workspace?.current_directory?.trim();
+    if (!cwd || workspaceDirectoryRepoMatchScore(repo, cwd) > 0) return;
+    const title = workspace?.title?.trim();
+    const titleCandidates = [
+      inferRepoFromLauncherTitle(title),
+      title,
+    ].filter(
+      (candidate, index, all): candidate is string =>
+        Boolean(candidate) && all.indexOf(candidate) === index,
+    );
+    const identifiedRepo = titleCandidates.find(
+      (candidate) => workspaceDirectoryRepoMatchScore(candidate, cwd) > 0,
+    );
+    if (!identifiedRepo || reposEquivalent(identifiedRepo, repo)) return;
+    throw new PlacementWorkspaceError(
+      `Refused placement in ${workspace?.ref ?? workspaceRef}: workspace directory ${cwd} does not belong to repo ${repo}`,
+    );
+  };
 
   const resolvePlacementWorkspace = async (opts: {
     explicitWorkspace?: string;
     callerWorkspace?: string;
     repo?: string | null;
-    allowFocusedFallback?: boolean;
   }): Promise<{ workspace?: string; warnings: string[] }> => {
     const explicitWorkspace = opts.explicitWorkspace
       ? await canonicalWorkspaceRef(opts.explicitWorkspace)
       : undefined;
-    if (explicitWorkspace)
+    if (explicitWorkspace) {
+      await assertWorkspaceBelongsToRepo(explicitWorkspace, opts.repo);
       return { workspace: explicitWorkspace, warnings: [] };
+    }
 
     const callerWorkspace =
       opts.callerWorkspace ?? (await callerWorkspaceStrict());
-    if (callerWorkspace) return { workspace: callerWorkspace, warnings: [] };
+    if (callerWorkspace) {
+      await assertWorkspaceBelongsToRepo(callerWorkspace, opts.repo);
+      return { workspace: callerWorkspace, warnings: [] };
+    }
 
     const repoWorkspace = await resolveWorkspaceForRepo(opts.repo);
     if (repoWorkspace) return { workspace: repoWorkspace, warnings: [] };
 
-    if (opts.allowFocusedFallback === false) {
-      return { workspace: undefined, warnings: [] };
-    }
-
-    const focusedWorkspace = await currentFocusedWorkspace();
-    if (focusedWorkspace) {
-      return {
-        workspace: focusedWorkspace,
-        warnings: [focusedWorkspaceFallbackWarning],
-      };
-    }
-
-    return { workspace: undefined, warnings: [] };
+    throw new PlacementWorkspaceError(
+      "Spawn placement requires an explicit workspace, per-request caller workspace, or matching repo workspace; focused workspace and shared-daemon environment fallbacks are forbidden",
+    );
   };
 
   /** Capture origin focus, select the placement workspace, and record the
@@ -5244,23 +5320,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return evaluateAgentHealth(agent, input);
   };
 
-  const agentForSpawnHealth = (
-    agent: AgentRecord,
-    result: { workspace_id?: string; warnings?: string[] },
-  ): AgentRecord => {
-    const placementMismatch =
-      result.warnings?.some((warning) =>
-        warning.startsWith("Spawn placement mismatch:"),
-      ) ?? false;
-    if (!placementMismatch || !result.workspace_id) return agent;
-    return { ...agent, workspace_id: result.workspace_id };
-  };
-
   const spawnDeliveryWorkspace = (
-    result: { actual_workspace_id?: string; workspace_id?: string },
+    result: { workspace_id?: string },
     fallback?: string,
   ): string | undefined =>
-    result.actual_workspace_id ?? result.workspace_id ?? fallback;
+    result.workspace_id || fallback;
 
   const isLeadLikeSurfaceTitle = (title: string): boolean =>
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
@@ -5751,7 +5815,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         await assertWorkspaceMutationAllowed(
           "create_workspace",
-          await currentCallerWorkspace(),
+          await currentSafetyCallerWorkspace(),
         );
         const result = await client.createWorkspace(args.title);
         const data = {
@@ -5820,7 +5884,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const liveAgents = agents.filter(
           (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
         );
-        const callerWorkspace = await currentCallerWorkspace();
+        const callerWorkspace = await currentSafetyCallerWorkspace();
         const deletingCallerWorkspace = callerWorkspace === targetWorkspace;
 
         if (!args.force && (deletingCallerWorkspace || liveAgents.length > 0)) {
@@ -5890,11 +5954,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .describe("Surface type"),
       url: z.string().optional().describe("URL for browser surfaces"),
       title: z.string().optional().describe("Tab title"),
-      role: z
-        .enum(["orchestrator", "ic", "worker"])
+      role: legacyCompatibleAgentRoleSchema()
         .optional()
         .describe(
-          "Agent role drives deterministic column placement: orchestrator/ic → LEFT column (leads, the Claude that coordinates), worker → RIGHT column (Codex/Cursor that implement/gather). Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker. Pass this instead of trying to control left/right via direction.",
+          "Agent role drives deterministic column placement: orchestrator → LEFT column (leads, the Claude that coordinates), worker → RIGHT column (Codex/Cursor that implement/gather). Defaults from title launcher suffix: *Claude=orchestrator, *Codex/*Cursor=worker. Pass this instead of trying to control left/right via direction.",
         ),
       focus: z
         .boolean()
@@ -5922,14 +5985,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       let result: CmuxNewSplitResult | undefined;
       let focusRestoreLease: FocusRestoreLease | null = null;
       try {
+        const normalizedRole = normalizeToolAgentRole(args.role, "role");
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         const shouldInferRole =
-          Boolean(args.role) ||
+          Boolean(normalizedRole.role) ||
           (!args.pane &&
             !args.surface &&
             canInferAgentRole({ title: args.title }));
         const inferredRole = shouldInferRole
-          ? inferAgentRole({ role: args.role, title: args.title })
+          ? inferAgentRole({ role: normalizedRole.role, title: args.title })
           : null;
         if (
           inferredRole &&
@@ -6143,13 +6207,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data: Record<string, unknown> = { ...result };
         data.placement = actualPlacement;
         data.direction = actualDirection;
-        const warnings = [
+        const responseWarnings = [
           ...targetResolution.warnings,
+          ...(normalizedRole.warning ? [normalizedRole.warning] : []),
           ...(focusRequestWarning ? [focusRequestWarning] : []),
           ...(focusRestoreWarning ? [focusRestoreWarning] : []),
         ];
-        if (warnings.length > 0) {
-          data.warnings = warnings;
+        if (responseWarnings.length > 0) {
+          data.warning = responseWarnings.join(" | ");
+          data.warnings = responseWarnings;
         }
         if (inferredRole) {
           data.role = inferredRole;
@@ -8561,14 +8627,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "ID of the parent agent for hierarchical spawning. Parent must exist.",
           ),
-        role: z
-          .enum(["orchestrator", "ic", "worker"])
+        role: legacyCompatibleAgentRoleSchema()
           .optional()
           .describe(
             "Optional placement role. Defaults from launcher: *Claude=orchestrator, *Codex/*Cursor=worker.",
           ),
-        placement: z
-          .enum(["orchestrator", "ic", "worker"])
+        placement: legacyCompatibleAgentRoleSchema()
           .optional()
           .describe(
             "Canonical role-driven placement. role remains accepted as a compatibility spelling.",
@@ -8615,6 +8679,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          const selectedRoleField =
+            args.placement !== undefined ? "placement" : "role";
+          const normalizedRole = normalizeToolAgentRole(
+            args.placement ?? args.role,
+            selectedRoleField,
+          );
+          const effectiveRole = normalizedRole.role;
           const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
           assertBootPromptMode(args.prompt, bootPromptPath);
           assertInlineInputAllowed({
@@ -8663,7 +8734,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.worktree,
             args.mcp_profile as McpProfile | undefined,
           );
-          const effectiveRole = args.placement ?? args.role;
           const requestedRole = inferAgentRole({
             role: effectiveRole,
             cli: args.cli,
@@ -8755,10 +8825,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           originalLaunchCommandsBySurface.delete(result.surface_id);
           appendStaleBuildWarning(result);
-          if (targetResolution.warnings.length > 0) {
+          const placementWarnings = [
+            ...targetResolution.warnings,
+            ...(normalizedRole.warning ? [normalizedRole.warning] : []),
+          ];
+          if (placementWarnings.length > 0) {
             result.warnings = [
               ...(result.warnings ?? []),
-              ...targetResolution.warnings,
+              ...placementWarnings,
             ];
           }
 
@@ -8921,7 +8995,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
             ? await evaluateServerAgentHealth(
-                agentForSpawnHealth(currentAgent, result),
+                currentAgent,
                 {
                   ...healthTopologyOverrides(currentAgent, topology),
                 },
@@ -9164,7 +9238,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
             ? await evaluateServerAgentHealth(
-                agentForSpawnHealth(currentAgent, result),
+                currentAgent,
                 {
                   ...healthTopologyOverrides(currentAgent, topology),
                 },
@@ -9297,7 +9371,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               repo: z.string(),
               model: z.string(),
               cli: z.enum(["claude", "codex", "cursor", "gemini", "kiro"]),
-              role: z.enum(["orchestrator", "worker", "ic"]).optional(),
+              role: legacyCompatibleAgentRoleSchema().optional(),
               prompt: z.string().optional(),
             }),
           )
@@ -9348,9 +9422,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }> = [];
         const leanSpawnedAgents: Record<string, unknown>[] = [];
         try {
+          const normalizedAgents = args.agents.map((agent) => {
+            const normalizedRole = normalizeToolAgentRole(agent.role, "role");
+            return {
+              ...agent,
+              role: normalizedRole.role,
+              compatibilityWarning: normalizedRole.warning,
+            };
+          });
+          const compatibilityWarnings = normalizedAgents.flatMap((agent) =>
+            agent.compatibilityWarning ? [agent.compatibilityWarning] : [],
+          );
+          if (args.reuse_workspace) {
+            for (const agent of normalizedAgents) {
+              await assertWorkspaceBelongsToRepo(
+                args.reuse_workspace,
+                agent.repo,
+              );
+            }
+          }
           await assertWorkspaceMutationAllowed(
             "spawn_in_workspace",
-            args.reuse_workspace ?? (await currentCallerWorkspace()),
+            args.reuse_workspace ?? (await currentSafetyCallerWorkspace()),
           );
           // A newly created workspace may auto-focus immediately, so capture
           // the user's origin before createWorkspace can move it.
@@ -9375,7 +9468,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             focusRestoreLease,
           );
 
-          for (const agent of args.agents) {
+          for (const agent of normalizedAgents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
             activeSpawnIdentity = undefined;
             const result = await engine.spawnAgent({
@@ -9471,7 +9564,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : null;
             const health = currentAgent
               ? await evaluateServerAgentHealth(
-                  agentForSpawnHealth(currentAgent, result),
+                  currentAgent,
                   {
                     ...healthTopologyOverrides(currentAgent, topology),
                   },
@@ -9523,12 +9616,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const workspaceWarnings = [
             ...(staleWarning ? [staleWarning] : []),
             ...(focusRestoreWarning ? [focusRestoreWarning] : []),
+            ...compatibilityWarnings,
           ];
 
           const formattedData = {
             workspace,
             agents: spawnedAgents.length,
-            ...(staleWarning ? { warning: staleWarning } : {}),
+            ...(workspaceWarnings.length > 0
+              ? { warning: workspaceWarnings.join(" | ") }
+              : {}),
           };
           const responseData = {
             workspace,
@@ -10058,13 +10154,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "broadcast",
-      `Fan out a short pointer-style message to registered agents by role using the same guarded delivery path as send_to. Defaults to role=leads (orchestrator + ic). Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters; for larger payloads write a file and broadcast "Read and follow <path>". Returns per-agent receipts so one failed target never hides the rest. ${DENSE_INLINE_ROUTING_GUIDANCE} ${ZSH_BANG_INLINE_WARNING}`,
+      `Fan out a short pointer-style message to registered agents by role using the same guarded delivery path as send_to. Defaults to role=leads (orchestrator). Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters; for larger payloads write a file and broadcast "Read and follow <path>". Returns per-agent receipts so one failed target never hides the rest. ${DENSE_INLINE_ROUTING_GUIDANCE} ${ZSH_BANG_INLINE_WARNING}`,
       {
         text: BroadcastArgsSchema.shape.text.describe(
           `Message to broadcast. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline characters; write larger payloads to a file and broadcast "Read and follow <path>".`,
         ),
         role: BroadcastArgsSchema.shape.role.describe(
-          "Target role set: leads means orchestrator + ic; workers means worker; all means every registered agent.",
+          "Target role set: leads means orchestrator; workers means worker; all means every registered agent.",
         ),
         exclude: BroadcastArgsSchema.shape.exclude.describe(
           "Agent IDs to skip in addition to the caller's own agent.",

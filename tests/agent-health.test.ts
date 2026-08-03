@@ -205,7 +205,11 @@ describe("agent lifecycle health", () => {
 
   it("marks non-Claude orchestrators as role health failures", () => {
     const health = evaluateAgentHealth(
-      makeRecord({ cli: "codex", role: "orchestrator" }),
+      makeRecord({
+        cli: "codex",
+        role: "orchestrator",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
       { monitor_alive: true },
     );
 

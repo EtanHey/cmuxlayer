@@ -61,22 +61,22 @@ function mockSpawnExit(code: number): {
 
 function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
   return {
-    newSplit: vi.fn().mockResolvedValue({
-      workspace: "ws:1",
+    newSplit: vi.fn().mockImplementation(async (_direction, opts) => ({
+      workspace: opts?.workspace ?? "ws:1",
       surface: "surface:new",
       surface_id: "11111111-2222-4333-8444-555555555555",
       pane: "pane:1",
       title: "",
       type: "terminal",
-    } satisfies CmuxNewSplitResult),
-    newSurface: vi.fn().mockResolvedValue({
-      workspace: "ws:1",
+    }) satisfies CmuxNewSplitResult),
+    newSurface: vi.fn().mockImplementation(async (opts) => ({
+      workspace: opts?.workspace ?? "ws:1",
       surface: "surface:new",
       surface_id: "11111111-2222-4333-8444-555555555555",
-      pane: "pane:1",
+      pane: opts.pane,
       title: "",
       type: "terminal",
-    }),
+    })),
     send: vi.fn().mockResolvedValue(undefined),
     sendKey: vi.fn().mockResolvedValue(undefined),
     readScreen: vi.fn().mockResolvedValue({
@@ -727,6 +727,41 @@ describe("AgentEngine", () => {
       });
     });
 
+    it("blocks a seat identity mismatch before creating a surface", async () => {
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => ({ launcherName: "cmuxlayerCodex" }),
+        sessionIdentityResolver: () => null,
+        seatRegistry: {
+          brainlayerClaude: {
+            repo: "brainlayer",
+            launchers: { codex: "brainlayerCodex" },
+            lane: "brainlayer",
+            role: "worker",
+          },
+          cmuxlayerClaude: {
+            repo: "cmuxlayer",
+            launchers: { codex: "cmuxlayerCodex" },
+            lane: "cmuxlayer",
+            role: "worker",
+          },
+        },
+      });
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Must not occupy the wrong seat",
+        }),
+      ).rejects.toThrow(/Spawn blocked by seat identity mismatch.*cmuxlayer/i);
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(stateMgr.listStates()).toHaveLength(0);
+    });
+
     it("treats orchestrator repo spawns through orc launchers as the same registry seat", async () => {
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
@@ -983,7 +1018,7 @@ describe("AgentEngine", () => {
       );
     });
 
-    it("warns when cmux returns a spawned surface in a different workspace than requested", async () => {
+    it("blocks and cleans up when cmux returns a spawned surface in a different workspace than requested", async () => {
       (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
         panes: [
           {
@@ -1011,18 +1046,28 @@ describe("AgentEngine", () => {
         type: "terminal",
       });
 
-      const result = await engine.spawnAgent({
-        repo: "brainlayer",
-        model: "gpt-5.4",
-        cli: "codex",
-        prompt: "Fix placement",
-        workspace: "workspace:intended",
-      });
-
-      expect(result.workspace_id).toBe("workspace:intended");
-      expect(result.warnings).toContain(
-        "Spawn placement mismatch: requested workspace:intended but cmux returned workspace:wrong for surface surface:new",
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Fix placement",
+          workspace: "workspace:intended",
+        }),
+      ).rejects.toThrow(
+        "Spawn placement blocked: requested workspace:intended but cmux returned workspace:wrong for surface surface:new",
       );
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
+        "surface:new",
+        expect.objectContaining({
+          workspace: "workspace:wrong",
+          collapsePane: false,
+          beforeMutation: expect.any(Function),
+        }),
+      );
+      expect(stateMgr.listStates()).toHaveLength(0);
+      expect(mockClient.renameTab).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
     });
 
     it("inherits the workspace whose current directory matches the target repo", async () => {
@@ -1169,7 +1214,7 @@ describe("AgentEngine", () => {
         surface_uuid: persistedUuid,
         workspace_id: "workspace:old",
         state: "ready",
-        role: "ic",
+        role: "worker",
         cli: "claude",
         repo: "brainlayer",
         parent_agent_id: null,
@@ -1309,7 +1354,7 @@ describe("AgentEngine", () => {
         surface_uuid: parentUuid,
         workspace_id: "workspace:parent",
         state: "ready",
-        role: "ic",
+        role: "worker",
         cli: "claude",
         repo: "brainlayer",
       });
@@ -1382,7 +1427,7 @@ describe("AgentEngine", () => {
         surface_uuid: stableUuid,
         workspace_id: "workspace:parent",
         state: "ready",
-        role: "ic",
+        role: "worker",
         cli: "claude",
         repo: "brainlayer",
       });
@@ -1684,12 +1729,12 @@ describe("AgentEngine", () => {
         model: "sonnet",
         cli: "claude",
         prompt: "Coordinate gap F",
-        role: "ic",
+        role: "worker",
         workspace: "ws:1",
       });
 
-      expect(mockClient.newSplit).toHaveBeenCalledWith("up", {
-        pane: "pane:left",
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right-recycled",
         type: "terminal",
         workspace: "ws:1",
       });
@@ -1791,18 +1836,16 @@ describe("AgentEngine", () => {
         model: "sonnet",
         cli: "claude",
         prompt: "Coordinate gap F",
-        role: "ic",
+        role: "worker",
         workspace: "ws:1",
       });
 
-      expect(mockClient.newSplit).toHaveBeenCalledWith("right", {
-        type: "terminal",
+      expect(mockClient.newSurface).toHaveBeenCalledWith({
+        pane: "pane:right",
         workspace: "ws:1",
+        type: "terminal",
       });
-      expect(mockClient.newSplit).not.toHaveBeenCalledWith(
-        "up",
-        expect.objectContaining({ pane: "pane:right" }),
-      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
     });
 
     it("refuses placement from a successful truncated pane enumeration", async () => {
@@ -2247,6 +2290,70 @@ describe("AgentEngine", () => {
       expect(stateMgr.listStates()).toHaveLength(0);
     });
 
+    it("refuses a third-column workspace before creating an orphan surface", async () => {
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        panes: [
+          {
+            ref: "pane:left",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:lead"],
+            pixel_frame: { x: 0, y: 0, width: 400, height: 900 },
+          },
+          {
+            ref: "pane:right",
+            index: 1,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:worker"],
+            pixel_frame: { x: 400, y: 0, width: 400, height: 900 },
+          },
+          {
+            ref: "pane:third",
+            index: 2,
+            focused: false,
+            surface_count: 1,
+            surface_refs: ["surface:unexpected"],
+            pixel_frame: { x: 800, y: 0, width: 400, height: 900 },
+          },
+        ],
+      });
+      (
+        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
+      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
+        workspace_ref: "ws:1",
+        window_ref: "window:1",
+        pane_ref: pane,
+        surfaces: [
+          makeSurface(
+            pane === "pane:left"
+              ? "surface:lead"
+              : pane === "pane:right"
+                ? "surface:worker"
+                : "surface:unexpected",
+          ),
+        ],
+      }));
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          cli: "codex",
+          prompt: "Refuse placement into a third-column workspace",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(/three columns|at most two|two-column/i);
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(stateMgr.listStates()).toHaveLength(0);
+    });
+
     it("refuses launch when the surface observer changes during tab rename", async () => {
       engine.dispose();
       let currentObserverId = "cmux:/tmp/cmux-primary.sock";
@@ -2373,16 +2480,16 @@ describe("AgentEngine", () => {
       expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
-    it("persists explicit role on spawned agents", async () => {
+    it("persists the explicit worker role on spawned agents", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
         prompt: "Coordinate work",
-        role: "ic",
+        role: "worker",
       });
 
-      expect(stateMgr.readState(result.agent_id)?.role).toBe("ic");
+      expect(stateMgr.readState(result.agent_id)?.role).toBe("worker");
     });
 
     it("infers worker role for Codex spawns and uses the worker pane", async () => {
@@ -2407,7 +2514,6 @@ describe("AgentEngine", () => {
         spawnPreflight: async () => {},
         roleSurfaceIdsProvider: () => ({
           orchestrator: new Set(),
-          ic: new Set(),
           worker: new Set(["surface:worker-shell"]),
         }),
       });
@@ -2513,7 +2619,6 @@ describe("AgentEngine", () => {
         spawnPreflight: async () => {},
         roleSurfaceIdsProvider: () => ({
           orchestrator: new Set(["surface:orc"]),
-          ic: new Set(),
           worker: new Set(["surface:worker-shell"]),
         }),
       });
@@ -2633,7 +2738,7 @@ describe("AgentEngine", () => {
           state: "ready",
           surface_id: "surface:ic",
           cli: "claude",
-          role: "ic",
+          role: "worker",
         }),
       );
       liveSurfaces = [makeSurface("surface:ic")];
@@ -2816,7 +2921,7 @@ describe("AgentEngine", () => {
             state: "ready",
             surface_id: "surface:claude-ic-done",
             cli: "claude",
-            role: "ic",
+            role: "worker",
             auto_archive_on_done: true,
           }),
         );
@@ -3782,7 +3887,7 @@ describe("AgentEngine", () => {
       });
     });
 
-    it("sends crash recovery resume commands to the actual cmux workspace on placement mismatch", async () => {
+    it("blocks crash recovery and cleans the unbound surface on placement mismatch", async () => {
       engine.dispose();
       const observerId = "cmux:/tmp/recovery-owner.sock";
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, {
@@ -3838,20 +3943,23 @@ describe("AgentEngine", () => {
 
       await engine.runSweep();
 
-      expect(mockClient.send).toHaveBeenCalledWith(
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).toHaveBeenCalledWith(
         "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-        expect.objectContaining({ workspace: "workspace:wrong" }),
+        expect.objectContaining({
+          workspace: "workspace:wrong",
+          collapsePane: false,
+        }),
       );
-      expect(mockClient.sendKey).toHaveBeenCalledWith("surface:new", "return", {
-        workspace: "workspace:wrong",
-        stableSurfaceIdentity: SPAWN_SURFACE_UUID,
-      });
       expect(engine.getAgentState("agent-crash-mismatch")?.workspace_id).toBe(
-        "workspace:wrong",
+        "workspace:intended",
       );
       expect(engine.getAgentState("agent-crash-mismatch")?.state).toBe(
-        "booting",
+        "error",
+      );
+      expect(engine.getAgentState("agent-crash-mismatch")?.error).toContain(
+        "Spawn placement blocked: requested workspace:intended but cmux returned workspace:wrong",
       );
     });
 

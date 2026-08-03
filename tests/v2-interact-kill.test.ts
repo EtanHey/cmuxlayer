@@ -24,7 +24,10 @@ const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-v2-test.sock";
 function callTool(server: any, name: string, args: Record<string, unknown>) {
   const tool = server._registeredTools[name];
   if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool.handler(args, {} as any);
+  return tool.handler(
+    name === "spawn_agent" ? { workspace: "workspace:1", ...args } : args,
+    {} as any,
+  );
 }
 
 function parseResult(result: any): any {

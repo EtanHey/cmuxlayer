@@ -49,6 +49,7 @@ async function spawnReadyAgent(server: any) {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
+      workspace: "workspace:1",
     },
     {} as any,
   );
@@ -734,6 +735,7 @@ describe("pane input pointer discipline", () => {
         repo: "brainlayer",
         model: "codex",
         cli: "codex",
+        workspace: "workspace:1",
         prompt: "x".repeat(2_000),
         allow_long_inline: true,
       },
@@ -769,6 +771,7 @@ describe("pane input pointer discipline", () => {
         repo: "brainlayer",
         model: "codex",
         cli: "codex",
+        workspace: "workspace:1",
         boot_prompt_path: promptPath,
       },
       {} as any,

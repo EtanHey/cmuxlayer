@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../src/server.js";
 import { StateManager } from "../src/state-manager.js";
+import {
+  callerContextFromEnv,
+  runWithCallerContext,
+} from "../src/caller-context.js";
 
 const roots: string[] = [];
 
@@ -91,7 +95,10 @@ function mockClient(opts?: { callerTarget?: boolean; surface?: boolean }) {
 describe("delete_workspace", () => {
   it("is registered off-default for deferred ToolSearch loading", async () => {
     const { client } = mockClient();
-    const server = createServer({ client: client as any, skipAgentLifecycle: true });
+    const server = createServer({
+      client: client as any,
+      skipAgentLifecycle: true,
+    });
     const tool = (server as any)._registeredTools.delete_workspace;
 
     expect(tool._meta).toMatchObject({
@@ -103,7 +110,10 @@ describe("delete_workspace", () => {
 
   it("removes an empty workspace and returns the removed diff", async () => {
     const { client } = mockClient();
-    const server = createServer({ client: client as any, skipAgentLifecycle: true });
+    const server = createServer({
+      client: client as any,
+      skipAgentLifecycle: true,
+    });
     const tool = (server as any)._registeredTools.delete_workspace;
 
     const result = await tool.handler({ workspace: "workspace:7" }, {} as any);
@@ -198,7 +208,10 @@ describe("delete_workspace", () => {
     const server = createServer({ client: client as any, skipAgentLifecycle: true });
     const tool = (server as any)._registeredTools.delete_workspace;
 
-    const result = await tool.handler({ workspace: "workspace:7" }, {} as any);
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:7" },
+      () => tool.handler({ workspace: "workspace:7" }, {} as any),
+    );
 
     expect(client.deleteWorkspace).not.toHaveBeenCalled();
     expect(result.structuredContent).toMatchObject({
@@ -208,6 +221,38 @@ describe("delete_workspace", () => {
       agents: [],
     });
     await server.close();
+  });
+
+  it("refuses the in-process environment caller workspace without force", async () => {
+    const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
+    process.env.CMUX_WORKSPACE_ID = "workspace:7";
+    const { client } = mockClient({ callerTarget: true });
+    const server = createServer({
+      client: client as any,
+      skipAgentLifecycle: true,
+      safetyCallerContextProvider: () => callerContextFromEnv(),
+    });
+    const tool = (server as any)._registeredTools.delete_workspace;
+
+    try {
+      const result = await tool.handler(
+        { workspace: "workspace:7" },
+        {} as any,
+      );
+
+      expect(client.deleteWorkspace).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        refused: true,
+        caller_workspace: true,
+      });
+    } finally {
+      await server.close();
+      if (previousWorkspaceId === undefined) {
+        delete process.env.CMUX_WORKSPACE_ID;
+      } else {
+        process.env.CMUX_WORKSPACE_ID = previousWorkspaceId;
+      }
+    }
   });
 
   it.each(["ws:7", "7", "scratch"])(
@@ -220,9 +265,9 @@ describe("delete_workspace", () => {
       });
       const tool = (server as any)._registeredTools.delete_workspace;
 
-      const result = await tool.handler(
-        { workspace: workspaceAlias },
-        {} as any,
+      const result = await runWithCallerContext(
+        { workspaceId: "workspace:7" },
+        () => tool.handler({ workspace: workspaceAlias }, {} as any),
       );
 
       expect(client.deleteWorkspace).not.toHaveBeenCalled();

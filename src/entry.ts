@@ -9,6 +9,7 @@ import {
 } from "./proxy.js";
 import { defaultDaemonSocketPath as resolveDefaultDaemonSocketPath } from "./daemon-socket-path.js";
 import { spawnDaemonProcess, type SpawnDaemonOptions } from "./daemon-spawn.js";
+import { callerContextFromEnv } from "./caller-context.js";
 
 const DEFAULT_AUTOSTART_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTOSTART_POLL_MS = 50;
@@ -153,6 +154,8 @@ export async function startInProcessRuntime(
   const client = await createCmuxClient();
   const serverOpts: CreateServerOptions = {
     client,
+    safetyCallerContextProvider: () =>
+      callerContextFromEnv(opts.env ?? process.env),
     outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,

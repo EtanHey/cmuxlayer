@@ -38,6 +38,10 @@ import {
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import { makeCodexRolloutFillProvider } from "../src/codex-rollout-fill.js";
 import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
+import {
+  currentCallerContext,
+  runWithCallerContext,
+} from "../src/caller-context.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -79,6 +83,7 @@ const AGENT_TOOLS = [
 
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
+  createdWorkspace?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
@@ -216,9 +221,13 @@ function makeLifecycleExec(opts?: {
       };
     }
 
+    const workspaceIndex = args.indexOf("--workspace");
+    const workspace =
+      opts?.createdWorkspace ??
+      (workspaceIndex >= 0 ? String(args[workspaceIndex + 1]) : "ws:1");
     return {
       stdout: JSON.stringify({
-        workspace: "ws:1",
+        workspace,
         surface: "surface:new",
         ...(opts?.surfaceUuid ? { surface_id: opts.surfaceUuid } : {}),
         pane: "pane:1",
@@ -230,7 +239,10 @@ function makeLifecycleExec(opts?: {
   });
 }
 
-function createTrackedServer(opts: Omit<CreateServerOptions, "context">) {
+function createTrackedServer(
+  opts: Omit<CreateServerOptions, "context">,
+  defaultCallerContext = true,
+) {
   const testObserverOwnerId = (): string | null => {
     const currentSocketPath = (
       opts.client as { currentSocketPath?: () => string | null } | undefined
@@ -261,7 +273,30 @@ function createTrackedServer(opts: Omit<CreateServerOptions, "context">) {
   };
   const context = createServerContext(normalizedOpts);
   serverContexts.push(context);
-  return createServer({ ...normalizedOpts, context });
+  const server = createServer({ ...normalizedOpts, context });
+  if (defaultCallerContext) {
+    const registeredTools = (server as any)._registeredTools as Record<
+      string,
+      { handler?: (...handlerArgs: any[]) => any }
+    >;
+    for (const toolName of [
+      "spawn_agent",
+      "new_worktree_split",
+      "spawn_in_workspace",
+      "new_split",
+    ]) {
+      const tool = registeredTools?.[toolName];
+      if (!tool?.handler) continue;
+      const handler = tool.handler.bind(tool);
+      tool.handler = (...handlerArgs: any[]) =>
+        currentCallerContext()
+          ? handler(...handlerArgs)
+          : runWithCallerContext({ workspaceId: "workspace:1" }, () =>
+              handler(...handlerArgs),
+            );
+    }
+  }
+  return server;
 }
 
 function createLifecycleServer(exec: ExecFn) {
@@ -1665,12 +1700,15 @@ describe("agent lifecycle tool handlers", () => {
       identify: vi.fn().mockResolvedValue({}),
       browser: vi.fn().mockResolvedValue({}),
     };
-    const server = createTrackedServer({
-      client: mockClient as any,
-      stateDir: TEST_DIR,
-      disableSpawnPreflight: true,
-      sessionIdentityResolver: () => null,
-    });
+    const server = createTrackedServer(
+      {
+        client: mockClient as any,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      },
+      false,
+    );
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
@@ -1693,7 +1731,7 @@ describe("agent lifecycle tool handlers", () => {
   it("spawn_agent prefers the caller pane workspace over the selected workspace when workspace is omitted", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     const previousTabId = process.env.CMUX_TAB_ID;
-    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    process.env.CMUX_WORKSPACE_ID = "selected-workspace-uuid";
     delete process.env.CMUX_TAB_ID;
 
     try {
@@ -1710,14 +1748,14 @@ describe("agent lifecycle tool handlers", () => {
               ref: "workspace:1",
               title: "Voice Remediation",
               selected: false,
-              current_directory: "/repo/orchestrator",
+              current_directory: "/repo/voicelayer",
             },
             {
               id: "selected-workspace-uuid",
               ref: "workspace:5",
               title: "Other Active Workspace",
               selected: true,
-              current_directory: "/repo/voicelayer",
+              current_directory: "/repo/t3layer",
             },
           ],
         }),
@@ -1777,13 +1815,17 @@ describe("agent lifecycle tool handlers", () => {
       });
       const tool = (server as any)._registeredTools["spawn_agent"];
 
-      const result = await tool.handler(
-        {
-          repo: "voicelayer",
-          model: "gpt-5.5",
-          cli: "codex",
-        },
-        {} as any,
+      const result = await runWithCallerContext(
+        { workspaceId: "caller-workspace-uuid" },
+        () =>
+          tool.handler(
+            {
+              repo: "voicelayer",
+              model: "gpt-5.5",
+              cli: "codex",
+            },
+            {} as any,
+          ),
       );
       const parsed =
         result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -1804,6 +1846,103 @@ describe("agent lifecycle tool handlers", () => {
         process.env.CMUX_TAB_ID = previousTabId;
       }
     }
+  });
+
+  it("spawn_agent refuses an explicit workspace owned by another repo before mutation", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:brainlayer",
+                title: "brainlayer",
+                selected: false,
+                current_directory: "/Users/etanheyman/Gits/brainlayer",
+              },
+              {
+                ref: "workspace:t3layer",
+                title: "t3layer",
+                selected: true,
+                current_directory: "/Users/etanheyman/Gits/t3layer",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec as ExecFn);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "workspace:t3layer",
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/workspace.*t3layer.*brainlayer|brainlayer.*workspace.*t3layer/i);
+    expect(
+      exec.mock.calls.some(
+        ([, args]) =>
+          Array.isArray(args) &&
+          (args.includes("new-split") || args.includes("new-surface")),
+      ),
+    ).toBe(false);
+  });
+
+  it("spawn_agent allows an explicit workspace whose cwd does not identify a repo", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:brainlayer",
+                title: "brainlayerClaude",
+                selected: true,
+                current_directory: "/Users/etanheyman",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec as ExecFn);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "workspace:brainlayer",
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(
+      exec.mock.calls.some(
+        ([, args]) =>
+          Array.isArray(args) &&
+          (args.includes("new-split") || args.includes("new-surface")),
+      ),
+    ).toBe(true);
   });
 
   it("spawn_agent preserves parent workspace inheritance when workspace is omitted", async () => {
@@ -2069,25 +2208,26 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.model).toBe("claude-opus-5[1m]");
   });
 
-  it("spawn_agent accepts explicit role and returns persisted role", async () => {
+  it("spawn_agent coerces legacy placement=ic to worker and reports the compatibility correction", async () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
 
-    const result = await tool.handler(
-      {
-        repo: "brainlayer",
-        model: "sonnet",
-        cli: "claude",
-        role: "ic",
-        prompt: "coordinate task",
-      },
-      {} as any,
-    );
+    const args = tool.inputSchema.parse({
+      repo: "brainlayer",
+      model: "sonnet",
+      cli: "claude",
+      placement: "ic",
+      prompt: "coordinate task",
+    });
+    const result = await tool.handler(args, {} as any);
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.role).toBe("ic");
+    expect(parsed.role).toBe("worker");
+    expect(parsed.warnings.join(" | ")).toMatch(
+      /legacy.*ic.*worker|ic.*coerc.*worker/i,
+    );
     expect(parsed.health).toBeUndefined();
 
     const stateTool = (server as any)._registeredTools["get_agent_state"];
@@ -2097,7 +2237,7 @@ describe("agent lifecycle tool handlers", () => {
     );
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
-    expect(persisted.role).toBe("ic");
+    expect(persisted.role).toBe("worker");
   });
 
   it("spawn_agent sends inline prompt after the agent is ready", async () => {
@@ -2295,7 +2435,7 @@ describe("agent lifecycle tool handlers", () => {
     );
   });
 
-  it("spawn_agent delivers inline prompts to the actual workspace after placement mismatch", async () => {
+  it("spawn_agent canonicalizes a ws: alias and delivers inline prompts to the requested workspace", async () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
     const prompt = "fix placement mismatch prompt delivery";
@@ -2325,6 +2465,36 @@ describe("agent lifecycle tool handlers", () => {
     const workspaceIndex = argv.indexOf("--workspace");
     expect(workspaceIndex).toBeGreaterThanOrEqual(0);
     expect(argv[workspaceIndex + 1]).toBe("workspace:1");
+  });
+
+  it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
+    const exec = makeLifecycleExec({ createdWorkspace: "" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+    const prompt = "empty backend workspace fallback";
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    const promptSendCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([, args]) => {
+        const argv = args as string[];
+        return argv.includes("send") && argv.includes(prompt);
+      },
+    );
+    expect(promptSendCall).toBeDefined();
+    expect(promptSendCall![1]).toEqual(
+      expect.arrayContaining(["--workspace", "workspace:1"]),
+    );
   });
 
   it("spawn_agent deliberately allowed inline prompts preserve blank lines without empty chunks", async () => {
@@ -2753,7 +2923,7 @@ describe("agent lifecycle tool handlers", () => {
   it("new_worktree_split defaults to the caller workspace instead of the selected workspace", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     const previousTabId = process.env.CMUX_TAB_ID;
-    process.env.CMUX_WORKSPACE_ID = "caller-workspace-uuid";
+    process.env.CMUX_WORKSPACE_ID = "selected-workspace-uuid";
     delete process.env.CMUX_TAB_ID;
     try {
       const gitsDir = join(TEST_DIR, "Gits");
@@ -2778,7 +2948,7 @@ describe("agent lifecycle tool handlers", () => {
               ref: "workspace:caller",
               title: "Caller",
               selected: false,
-              current_directory: "/repo/orchestrator",
+              current_directory: repoRoot,
             },
             {
               id: "selected-workspace-uuid",
@@ -2847,14 +3017,18 @@ describe("agent lifecycle tool handlers", () => {
       });
       const tool = (server as any)._registeredTools["new_worktree_split"];
 
-      const result = await tool.handler(
-        {
-          repo: "cmuxlayer",
-          model: "codex",
-          cli: "codex",
-          worktree: { name: "caller worker" },
-        },
-        {} as any,
+      const result = await runWithCallerContext(
+        { workspaceId: "caller-workspace-uuid" },
+        () =>
+          tool.handler(
+            {
+              repo: "cmuxlayer",
+              model: "codex",
+              cli: "codex",
+              worktree: { name: "caller worker" },
+            },
+            {} as any,
+          ),
       );
       const parsed = parseToolResult(result);
 
@@ -3176,7 +3350,15 @@ describe("agent lifecycle tool handlers", () => {
         stderr: "",
       };
     });
-    const server = createLifecycleServer(mockExec);
+    const server = createTrackedServer(
+      {
+        exec: mockExec,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      },
+      false,
+    );
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
@@ -3318,7 +3500,15 @@ describe("agent lifecycle tool handlers", () => {
         stderr: "",
       };
     });
-    const server = createLifecycleServer(mockExec);
+    const server = createTrackedServer(
+      {
+        exec: mockExec,
+        stateDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      },
+      false,
+    );
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
@@ -3486,7 +3676,10 @@ describe("agent lifecycle tool handlers", () => {
     vi.useFakeTimers();
     try {
       const server = createLifecycleServer(
-        makeLifecycleExec({ shellNeverReady: true }),
+        makeLifecycleExec({
+          createdWorkspace: "ws:1",
+          shellNeverReady: true,
+        }),
       );
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const engine = (server as any)._registeredTools["interact"]._engine;
@@ -3679,7 +3872,10 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: "", stderr: "" };
       });
       const server = createTrackedServer({
-        exec: makeLifecycleExec({ shellNeverReady: true }),
+        exec: makeLifecycleExec({
+          createdWorkspace: "ws:1",
+          shellNeverReady: true,
+        }),
         stateDir: TEST_DIR,
         disableSpawnPreflight: true,
         sessionIdentityResolver: () => null,
@@ -4169,7 +4365,7 @@ describe("agent lifecycle tool handlers", () => {
           agent_id: "ic-target",
           surface_id: "surface:ic",
           state: "ready",
-          role: "ic",
+          role: "orchestrator",
           task_summary: "ic lane",
         }),
         makeServerAgentRecord({
@@ -4183,7 +4379,7 @@ describe("agent lifecycle tool handlers", () => {
           agent_id: "ic-excluded",
           surface_id: "surface:excluded",
           state: "ready",
-          role: "ic",
+          role: "orchestrator",
           task_summary: "excluded lane",
         }),
         makeServerAgentRecord({
@@ -4311,17 +4507,17 @@ describe("agent lifecycle tool handlers", () => {
   it("broadcast returns per-lead receipts when one delivery fails without aborting others", async () => {
     const records = [
       makeServerAgentRecord({
-        agent_id: "ic-ok-1",
+        agent_id: "orc-ok-1",
         surface_id: "surface:ok-1",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
         task_summary: "first ok lead",
       }),
       makeServerAgentRecord({
-        agent_id: "ic-fail",
+        agent_id: "orc-fail",
         surface_id: "surface:fail",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
         task_summary: "failing lead",
       }),
       makeServerAgentRecord({
@@ -4358,12 +4554,12 @@ describe("agent lifecycle tool handlers", () => {
     expect(receipts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          agent_id: "ic-ok-1",
+          agent_id: "orc-ok-1",
           delivered: true,
           submit_verified: true,
         }),
         expect.objectContaining({
-          agent_id: "ic-fail",
+          agent_id: "orc-fail",
           delivered: false,
           submit_verified: null,
           error: expect.stringContaining("send failed for surface:fail"),
@@ -4417,7 +4613,7 @@ describe("agent lifecycle tool handlers", () => {
         agent_id: "ic-target",
         surface_id: "surface:ic",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
       }),
     ];
     const { server, sendCalls, sendKeyCalls } =
@@ -4446,7 +4642,7 @@ describe("agent lifecycle tool handlers", () => {
         agent_id: "ic-target",
         surface_id: "surface:ic",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
       }),
     ];
     const { server, sendCalls, sendKeyCalls } = await createBroadcastServer(records);
@@ -4475,7 +4671,7 @@ describe("agent lifecycle tool handlers", () => {
         agent_id: "ic-stale",
         surface_id: "surface:stale",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
         task_summary: "possibly stale lead",
       }),
     ];
@@ -4504,13 +4700,13 @@ describe("agent lifecycle tool handlers", () => {
         agent_id: "ic-ready",
         surface_id: "surface:ready",
         state: "ready",
-        role: "ic",
+        role: "orchestrator",
       }),
       makeServerAgentRecord({
-        agent_id: "ic-working",
+        agent_id: "orc-working",
         surface_id: "surface:working",
         state: "working",
-        role: "ic",
+        role: "orchestrator",
       }),
       makeServerAgentRecord({
         agent_id: "orc-done",
@@ -4547,7 +4743,7 @@ describe("agent lifecycle tool handlers", () => {
           submit_verified: null,
         }),
         expect.objectContaining({
-          agent_id: "ic-working",
+          agent_id: "orc-working",
           delivered: false,
           submit_verified: null,
           skipped: "not_interactive:working",
@@ -4710,10 +4906,10 @@ describe("agent lifecycle tool handlers", () => {
         role: "orchestrator",
       }),
       makeServerAgentRecord({
-        agent_id: "ic-target",
-        surface_id: "surface:ic",
+        agent_id: "worker-target-2",
+        surface_id: "surface:worker-2",
         state: "ready",
-        role: "ic",
+        role: "worker",
       }),
       makeServerAgentRecord({
         agent_id: "worker-target",
@@ -4733,10 +4929,12 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed).toMatchObject({
       ok: true,
       role: "workers",
-      target_count: 1,
-      delivered_count: 1,
+      target_count: 2,
+      delivered_count: 2,
     });
-    expect(sendCalls.map((call) => call.surface)).toEqual(["surface:worker"]);
+    expect(sendCalls.map((call) => call.surface).sort()).toEqual(
+      ["surface:worker", "surface:worker-2"].sort(),
+    );
 
     sendCalls.splice(0);
 
@@ -4753,7 +4951,7 @@ describe("agent lifecycle tool handlers", () => {
       delivered_count: 3,
     });
     expect(sendCalls.map((call) => call.surface).sort()).toEqual(
-      ["surface:orc", "surface:ic", "surface:worker"].sort(),
+      ["surface:orc", "surface:worker-2", "surface:worker"].sort(),
     );
   });
 
@@ -5493,29 +5691,36 @@ describe("agent lifecycle tool handlers", () => {
     ).toContain("closure_without_artifact");
   });
 
-  it("get_agent_state does not require worker closure artifacts for done IC agents", async () => {
+  it("get_agent_state normalizes persisted legacy IC agents to workers that require closure artifacts", async () => {
     const server = createLifecycleServer(mockExec);
     const getState = registeredTestTool(server, "get_agent_state");
     const engine = testLifecycleEngine(server);
     const agentId = "claude-cmuxlayer-ic-done";
-    const doneIc = makeServerAgentRecord({
+    const doneWorker = makeServerAgentRecord({
       agent_id: agentId,
       cli: "claude",
-      role: "ic",
-      task_summary: "integration coordinator",
+      role: "worker",
+      task_summary: "legacy integration coordinator",
     });
-    engine.stateMgr.writeState(doneIc);
-    engine.getRegistry().set(agentId, doneIc);
+    engine.stateMgr.writeState(doneWorker);
+    writeFileSync(
+      join(TEST_DIR, agentId, "state.json"),
+      JSON.stringify({ ...doneWorker, role: "ic" }),
+      "utf8",
+    );
+    const normalized = engine.stateMgr.readState(agentId);
+    expect(normalized?.role).toBe("worker");
+    engine.getRegistry().set(agentId, normalized!);
 
     const result = await getState.handler({ agent_id: agentId }, {});
     const parsed = parseToolResult(result);
     expect(parsed.harvestability).toMatchObject({
       closeable: false,
-      closure_artifact_verified: null,
+      closure_artifact_verified: false,
     });
     expect(
       (parsed.health as { issue_codes: string[] }).issue_codes,
-    ).not.toContain("closure_without_artifact");
+    ).toContain("closure_without_artifact");
   });
 
   it("get_agent_state does not mark non-done workers unhealthy for missing completion evidence", async () => {

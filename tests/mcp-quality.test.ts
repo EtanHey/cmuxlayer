@@ -134,12 +134,14 @@ describe("close_surface cleans up agent registry", () => {
       agent_id: "done-agent",
       surface_id: "surface:99",
       state: "done",
+      role: "worker",
     });
     const errorRecord = makeRecord({
       agent_id: "errored-agent",
       surface_id: "surface:100",
       state: "error",
       error: "surface disappeared",
+      role: "worker",
     });
     stateMgr.writeState(doneRecord);
     stateMgr.writeState(errorRecord);
