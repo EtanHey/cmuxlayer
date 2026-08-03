@@ -4802,6 +4802,8 @@ export class AgentEngine {
       // Focus observation is advisory and must never discard a created handle.
     }
     if (surfaceFocusError) {
+      // Keep the unbound surface recoverable: AgentLaunchError returns its
+      // identity so the caller can inspect, retry, or close the failed tab.
       const message =
         surfaceFocusError instanceof Error
           ? surfaceFocusError.message
