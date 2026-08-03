@@ -449,8 +449,10 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         ...(workspace ? { workspace } : {}),
         ...(priorFocus
           ? {
-              on_surface_created: async () => {
-                createdFocus = await this.currentFocusTargetBestEffort();
+              on_surface_created: ({ surface, workspace: createdWorkspace }) => {
+                createdFocus = createdWorkspace
+                  ? { workspace: createdWorkspace, surface }
+                  : null;
               },
             }
           : {}),

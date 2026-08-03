@@ -912,12 +912,6 @@ describe("CmuxAppServerRuntime", () => {
       })
       .mockResolvedValueOnce({
         focused: {
-          workspace_ref: "workspace:app",
-          surface_ref: "surface:new",
-        },
-      })
-      .mockResolvedValueOnce({
-        focused: {
           workspace_ref:
             focusedAtRestore === "surface:new"
               ? "workspace:app"
@@ -948,6 +942,7 @@ describe("CmuxAppServerRuntime", () => {
       await expect(
         runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
       ).resolves.toMatchObject({ threadId: record.agent_id });
+      expect(client.identify).toHaveBeenCalledTimes(2);
       expect(client.focusSurface).toHaveBeenCalledTimes(expectedRestoreCalls);
       if (expectedRestoreCalls > 0) {
         expect(client.focusSurface).toHaveBeenCalledWith("surface:origin", {
