@@ -673,7 +673,9 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     }
   }
 
-  private async currentFocusTargetBestEffort(): Promise<AppServerFocusTarget | null> {
+  private async currentFocusTargetBestEffort(): Promise<
+    AppServerFocusTarget | null
+  > {
     try {
       const focused = (await this.client.identify()).focused;
       const workspace = focused?.workspace_ref?.trim();
@@ -707,11 +709,22 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       return;
     }
     try {
+      await this.assertWorkspaceMutationAllowed(
+        "focus_surface",
+        prior.workspace,
+      );
+      if (
+        !isSurfaceObserverEpochCurrent(observerEpoch, () =>
+          this.getSurfaceObserverEpoch(),
+        )
+      ) {
+        return;
+      }
       await this.client.focusSurface(prior.surface, {
         workspace: prior.workspace,
       });
     } catch {
-      // Thread creation succeeded; keep focus restoration advisory.
+      // Thread creation succeeded; keep policy/transport restore failures advisory.
     }
   }
 

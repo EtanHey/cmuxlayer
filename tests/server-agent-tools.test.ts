@@ -10101,15 +10101,24 @@ describe("auto-focus discipline (focus target before split, restore after render
     };
     focusSurfaceFails?: boolean;
     focusCreatedSurfaceFails?: boolean;
+    failFocusObservationAfterCreation?: boolean;
   }): { exec: ExecFn; calls: string[][] } {
     const calls: string[][] = [];
     const lifecycleExec = makeLifecycleExec();
     let focusedWorkspace = opts?.selectedWorkspace ?? "workspace:1";
     let focusedSurface = opts?.focusedSurface ?? "surface:origin";
     let spawnCreated = false;
+    let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
       calls.push(args);
       if (args.includes("identify")) {
+        if (
+          opts?.failFocusObservationAfterCreation &&
+          spawnCreated &&
+          !createdSurfaceReadStarted
+        ) {
+          throw new Error("transient post-creation identify failure");
+        }
         return {
           stdout: JSON.stringify({
             caller: {
@@ -10163,6 +10172,14 @@ describe("auto-focus discipline (focus target before split, restore after render
           }),
           stderr: "",
         };
+      }
+      if (
+        opts?.failFocusObservationAfterCreation &&
+        spawnCreated &&
+        !createdSurfaceReadStarted &&
+        args.includes("list-workspaces")
+      ) {
+        throw new Error("transient post-creation workspace-list failure");
       }
       if (opts?.roleTopology && args.includes("list-panes")) {
         return {
@@ -10242,6 +10259,13 @@ describe("auto-focus discipline (focus target before split, restore after render
           }),
           stderr: "",
         };
+      }
+      if (
+        spawnCreated &&
+        args.includes("read-screen") &&
+        args.includes("surface:new")
+      ) {
+        createdSurfaceReadStarted = true;
       }
       if (
         spawnCreated &&
@@ -10462,6 +10486,41 @@ describe("auto-focus discipline (focus target before split, restore after render
       expect(result.structuredContent.ok).toBe(true);
       expect(focusSurfaceIdx(calls, "surface:new")).toBeGreaterThanOrEqual(0);
       expect(focusSurfaceIdx(calls, "surface:worker")).toBe(-1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent restores the exact origin without re-observing post-creation focus", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = makeFocusLifecycleExec({
+        focusedSurface: "surface:worker",
+        roleTopology: true,
+        focusGatesCreatedSurfaceReadiness: true,
+        failFocusObservationAfterCreation: true,
+      });
+      const server = createLifecycleServer(exec);
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          cli: "claude",
+          placement: "orchestrator",
+          workspace: "workspace:1",
+          force_new: true,
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(result.structuredContent.ok).toBe(true);
+      expect(focusSurfaceIdx(calls, "surface:worker")).toBeGreaterThan(
+        firstReadScreenIdx(calls),
+      );
     } finally {
       vi.useRealTimers();
     }

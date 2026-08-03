@@ -5137,10 +5137,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   /** Refresh the lease immediately after the surface mutation. */
   const capturePostCreationFocus = async (
     lease: FocusRestoreLease | null,
+    created?: { surface: string; workspace?: string },
   ): Promise<FocusRestoreLease | null> => {
     if (!lease) return null;
+    if (created?.surface) {
+      return {
+        ...lease,
+        expected: {
+          workspace: created.workspace ?? lease.expected.workspace,
+          surface: created.surface,
+        },
+      };
+    }
     const expected = await currentFocusTarget();
-    return expected?.surface ? { ...lease, expected } : null;
+    return expected?.surface ? { ...lease, expected } : lease;
   };
 
   const sameExactFocus = (left: FocusTarget, right: FocusTarget): boolean =>
@@ -9398,9 +9408,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
-              on_surface_created: async () => {
+              on_surface_created: async (created) => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
+                  created,
                 );
               },
             });
@@ -9788,9 +9799,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role: "worker",
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
-            on_surface_created: async () => {
+            on_surface_created: async (created) => {
               focusRestoreLease = await capturePostCreationFocus(
                 focusRestoreLease,
+                created,
               );
             },
             boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
@@ -10116,9 +10128,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               workspace,
               role: agent.role,
               auto_archive_on_done: false,
-              on_surface_created: async () => {
+              on_surface_created: async (created) => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
+                  created,
                 );
               },
             });
