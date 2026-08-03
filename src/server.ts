@@ -528,6 +528,8 @@ export interface DeliveryRecord {
   failed_chunk?: number;
   /** Internal UUID guard; omitted from public delivery snapshots. */
   stableSurfaceIdentity?: string | null;
+  /** Ref-only provenance captured before an asynchronous write starts. */
+  surfaceObserverIdentity?: string | null;
   beforeMutation?: () => Promise<void>;
   lockKey?: string;
 }
@@ -3338,14 +3340,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       recordSurfaceWriteSuccess(
         record.surface,
         record.stableSurfaceIdentity,
-        context.surfaceObserverId,
+        record.surfaceObserverIdentity,
       );
     } else if (status === "failed") {
       recordSurfaceWriteFailure(
         record.surface,
         error,
         record.stableSurfaceIdentity,
-        context.surfaceObserverId,
+        record.surfaceObserverIdentity,
       );
     }
     record.status = status;
@@ -5197,6 +5199,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   };
 
   const startBackgroundDelivery = (record: DeliveryRecord) => {
+    // Preserve the backend owner that accepted the asynchronous write. Reading
+    // the observer after completion could attribute old-backend evidence to a
+    // new backend that reused the same mutable ref.
+    record.surfaceObserverIdentity = context.surfaceObserverId;
     record.lockKey = record.stableSurfaceIdentity
       ? `uuid:${record.stableSurfaceIdentity.toLowerCase()}`
       : record.surface;
@@ -5366,6 +5372,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     requestedWorkspace: string | undefined,
     operation: string,
   ): Promise<RawSurfaceMutationRoute> => {
+    const explicitWorkspace = requestedWorkspace
+      ? normalizeWorkspaceRefAlias(requestedWorkspace)
+      : undefined;
+    const assertExplicitWorkspace = (
+      observedWorkspace: string | undefined,
+    ): void => {
+      if (
+        explicitWorkspace &&
+        normalizeWorkspaceRefAlias(observedWorkspace ?? "") !==
+          explicitWorkspace
+      ) {
+        throw new Error(
+          `Stable surface binding for ${requestedSurface} belongs to ` +
+            `${observedWorkspace ?? "an unknown workspace"}, not the caller's ` +
+            `explicit workspace ${explicitWorkspace}; refusing ${operation}.`,
+        );
+      }
+    };
     resetCapturedSurfaceIdentitiesForObserver();
     const capturedUuid = context.capturedSurfaceUuidByRef.get(requestedSurface);
     const registryUuids = new Set(
@@ -5414,8 +5438,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `is no longer live; refusing ${operation} rather than using a recycled ref.`,
           );
         }
-        const workspace =
-          topology.workspaceBySurface.get(currentRef) ?? requestedWorkspace;
+        const observedWorkspace = topology.workspaceBySurface.get(currentRef);
+        assertExplicitWorkspace(observedWorkspace);
+        const workspace = observedWorkspace ?? explicitWorkspace;
         const assertCurrent = async (): Promise<void> => {
           const current = await collectSurfaceTopology();
           const currentRefForUuid =
@@ -5463,7 +5488,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const workspace =
-        topology.workspaceBySurface.get(requestedSurface) ?? requestedWorkspace;
+        topology.workspaceBySurface.get(requestedSurface) ?? explicitWorkspace;
+      assertExplicitWorkspace(workspace);
       return {
         surface: requestedSurface,
         workspace,
@@ -5495,7 +5521,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // complete topology. No stable claim has been made, so preserve ref I/O.
     return {
       surface: requestedSurface,
-      workspace: requestedWorkspace,
+      workspace: explicitWorkspace,
       stableSurfaceIdentity: null,
       assertCurrent: async () => {},
     };

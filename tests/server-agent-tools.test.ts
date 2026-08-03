@@ -6584,6 +6584,103 @@ codex>
     ]);
   });
 
+  it("raw send_to refuses to follow a UUID outside the caller's explicit workspace", async () => {
+    const originalUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:230",
+        id: originalUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+    await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:236",
+        id: originalUuid,
+        workspace_ref: "workspace:2",
+      },
+    ]);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:230",
+        workspace: "workspace:1",
+        text: "must stay workspace-scoped",
+        press_enter: false,
+      },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(/explicit workspace|workspace:1/i);
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("background ref-only delivery attributes failure to its start observer", async () => {
+    vi.useFakeTimers();
+    try {
+      const routeClient = makeUuidRouteClient([
+        {
+          ref: "surface:230",
+          workspace_ref: "workspace:1",
+        },
+      ]);
+      const tracker = new SurfaceWriteLivenessTracker({ now: () => 1_000 });
+      let observerOwner = "cmux:/tmp/observer-old.sock";
+      routeClient.client.send.mockImplementation(async () => {
+        observerOwner = "cmux:/tmp/observer-new.sock";
+        throw Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+      });
+      const server = createTrackedServer({
+        client: routeClient.client as any,
+        stateDir: TEST_DIR,
+        skipAgentLifecycle: true,
+        surfaceWriteLiveness: tracker,
+        surfaceObserverOwnerIdProvider: () => observerOwner,
+        surfaceObserverEpochProvider: () => "stable-test-epoch",
+      });
+
+      const accepted = await registeredTestTool(server, "send_input").handler(
+        {
+          surface: "surface:230",
+          text: "fail after observer capture",
+          background: true,
+          press_enter: false,
+        },
+        {} as any,
+      );
+      expect(parseToolResult(accepted)).toMatchObject({ status: "delivering" });
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(
+        tracker.observe(
+          "surface:230",
+          null,
+          "cmux:/tmp/observer-old.sock",
+        ),
+      ).toMatchObject({ consecutive_broken_pipe_failures: 1 });
+      expect(
+        tracker.observe(
+          "surface:230",
+          null,
+          "cmux:/tmp/observer-new.sock",
+        ),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("raw send_to refuses an absent ref in complete ref-only topology", async () => {
     const routeClient = makeUuidRouteClient([
       {
