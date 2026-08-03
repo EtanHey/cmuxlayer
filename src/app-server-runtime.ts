@@ -19,6 +19,7 @@ import {
 } from "./cmux-observer-identity.js";
 import { AgentDiscovery } from "./agent-discovery.js";
 import { StateManager } from "./state-manager.js";
+import type { InboxOpts } from "./inbox.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
@@ -180,6 +181,7 @@ function toBridgeThread(
 export interface CmuxAppServerRuntimeOptions {
   client: CmuxLikeClient;
   stateDir?: string;
+  inboxOpts?: InboxOpts;
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
   surfaceObserverOwnerIdProvider?: () => string | null | undefined;
   surfaceObserverEpochProvider?: () => string | null | undefined;
@@ -378,6 +380,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         monitorRegistryPath: defaultMonitorRegistryPath(),
         monitorRegistryNotify: httpNotifyMonitorDeadman,
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
+        inboxOpts: opts.inboxOpts,
         closeForensicsRunner: createDefaultCloseForensicsRunner({
           stateMgr: this.stateMgr,
           listSurfacesForRefMap: surfaceProvider,

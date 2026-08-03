@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -102,6 +102,35 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("passes its inbox directory to the engine marker reaper", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const inboxDir = join(TEST_DIR, "inbox");
+    const markerDir = join(inboxDir, ".channel-dirs");
+    const oldPendingId = `cmuxlayerCodex-pending-${Math.floor(
+      (Date.now() - 25 * 60 * 60 * 1_000) / 1_000,
+    )}-orphan`;
+    const markerPath = join(
+      markerDir,
+      `${encodeURIComponent(oldPendingId)}.created`,
+    );
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(markerPath, "");
+    const runtime = new CmuxAppServerRuntime({
+      client: makeClient(),
+      stateDir: TEST_DIR,
+      inboxOpts: { baseDir: inboxDir },
+    });
+
+    try {
+      await (runtime as any).engine.runSweep();
+      expect(existsSync(markerPath)).toBe(false);
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
   it("refreshes discovery within its TTL after an observer reconnect", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
