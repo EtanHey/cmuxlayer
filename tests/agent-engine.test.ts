@@ -40,6 +40,7 @@ import {
 } from "../src/agent-types.js";
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
+import { writeHeartbeat } from "../src/inbox.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 
@@ -252,6 +253,7 @@ describe("AgentEngine", () => {
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
+      inboxOpts: { baseDir: TEST_DIR },
     });
   });
 
@@ -4314,6 +4316,13 @@ To continue this session, run codex resume ${sessionId}`,
       expect(result.agent_id).toMatch(
         /^brainlayerCodex-pending-\d+-[a-z0-9]+$/,
       );
+      writeHeartbeat(result.agent_id, { baseDir: TEST_DIR });
+      const pendingMarker = join(
+        TEST_DIR,
+        ".channel-dirs",
+        `${encodeURIComponent(result.agent_id)}.created`,
+      );
+      expect(existsSync(pendingMarker)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(1000);
 
@@ -4329,6 +4338,66 @@ To continue this session, run codex resume ${sessionId}`,
       });
       expect(stateMgr.readState(result.agent_id)).toBeNull();
       expect(stateMgr.readState(finalAgentId)?.agent_id).toBe(finalAgentId);
+      expect(existsSync(pendingMarker)).toBe(false);
+    });
+
+    it("periodically reaps only old pending markers absent from registry and state", async () => {
+      vi.setSystemTime(new Date("2026-08-03T12:00:00.000Z"));
+      const nowSeconds = Math.floor(Date.now() / 1_000);
+      const oldOrphan = `brainlayerClaude-pending-${nowSeconds - 90_000}-dead`;
+      const oldKnown = `brainlayerClaude-pending-${nowSeconds - 90_000}-live`;
+      writeHeartbeat(oldOrphan, { baseDir: TEST_DIR });
+      writeHeartbeat(oldKnown, { baseDir: TEST_DIR });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: oldKnown,
+          surface_id: "surface:known-pending",
+          state: "error",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        existsSync(
+          join(
+            TEST_DIR,
+            ".channel-dirs",
+            `${encodeURIComponent(oldOrphan)}.created`,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        existsSync(
+          join(
+            TEST_DIR,
+            ".channel-dirs",
+            `${encodeURIComponent(oldKnown)}.created`,
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it("retries marker maintenance promptly after a filesystem error", async () => {
+      vi.setSystemTime(new Date("2026-08-03T12:00:00.000Z"));
+      const markerDir = join(TEST_DIR, ".channel-dirs");
+      writeFileSync(markerDir, "not a directory");
+
+      await engine.runSweep();
+
+      rmSync(markerDir, { force: true });
+      const oldOrphan = `brainlayerClaude-pending-${Math.floor(Date.now() / 1_000) - 90_000}-retry`;
+      writeHeartbeat(oldOrphan, { baseDir: TEST_DIR });
+      const markerPath = join(
+        markerDir,
+        `${encodeURIComponent(oldOrphan)}.created`,
+      );
+      vi.setSystemTime(new Date(Date.now() + 60_000));
+
+      await engine.runSweep();
+
+      expect(existsSync(markerPath)).toBe(false);
     });
 
     it("captures the real session id from transcript metadata when the screen has no UUID", async () => {

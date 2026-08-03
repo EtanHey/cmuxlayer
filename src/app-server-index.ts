@@ -15,7 +15,7 @@ function writeJson(message: unknown): void {
 
 async function main() {
   const client = await createCmuxClient();
-  const runtime = new CmuxAppServerRuntime({ client });
+  const runtime = new CmuxAppServerRuntime({ client, inboxOpts: {} });
   await runtime.initialize();
 
   const bridge = new CodexAppServerBridge({

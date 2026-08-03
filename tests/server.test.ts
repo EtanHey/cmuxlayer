@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import {
   createServer as createServerImpl,
   createServerContext as createServerContextImpl,
+  resolveServerInboxBaseDir,
   __submitEvidenceTestHooks,
   type CreateServerOptions,
 } from "../src/server.js";
@@ -40,6 +41,32 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmuxlayer-server-test.sock";
+
+describe("server inbox isolation", () => {
+  it("routes implicit Vitest inbox writes to the isolated state directory", () => {
+    expect(
+      resolveServerInboxBaseDir({
+        explicitBaseDir: undefined,
+        isVitest: true,
+      }),
+    ).toBe(join(tmpdir(), `cmuxlayer-vitest-inbox-${process.pid}`));
+  });
+
+  it("preserves explicit and production inbox locations", () => {
+    expect(
+      resolveServerInboxBaseDir({
+        explicitBaseDir: "/tmp/explicit-inbox",
+        isVitest: true,
+      }),
+    ).toBe("/tmp/explicit-inbox");
+    expect(
+      resolveServerInboxBaseDir({
+        explicitBaseDir: undefined,
+        isVitest: false,
+      }),
+    ).toBeUndefined();
+  });
+});
 
 function withTestObserver(opts: CreateServerOptions = {}): CreateServerOptions {
   if (opts.context) return opts;
