@@ -517,8 +517,7 @@ export function evaluateAgentHealth(
 
   if (
     agent.cli !== "claude" &&
-    role === "orchestrator" &&
-    agent.surface_provenance !== "cmuxlayer_spawn"
+    role === "orchestrator"
   ) {
     addIssue(
       issueCodes,

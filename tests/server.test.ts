@@ -6629,56 +6629,42 @@ describe("tool handler integration", () => {
     },
   );
 
-  it("new_split coerces legacy IC placement to the worker column without an up split", async () => {
+  it("new_split follows a remembered role surface UUID instead of its recycled ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
-    let moved = false;
-    let splitCount = 0;
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-panes")) {
         return {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
             window_ref: "window:1",
-            panes: moved
-              ? [
-                  {
-                    ref: "pane:left",
-                    index: 0,
-                    focused: false,
-                    surface_count: 1,
-                    surface_refs: ["surface:moved-worker"],
-                    surface_ids: [stableUuid],
-                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-                  },
-                  {
-                    ref: "pane:right-recycled",
-                    index: 1,
-                    focused: true,
-                    surface_count: 1,
-                    surface_refs: ["surface:remembered-worker"],
-                    surface_ids: ["uuid-recycled"],
-                    pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
-                  },
-                ]
-              : [
-                  {
-                    ref: "pane:left",
-                    index: 0,
-                    focused: true,
-                    surface_count: 1,
-                    surface_refs: ["surface:manual"],
-                    surface_ids: ["uuid-manual"],
-                    pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
-                  },
-                ],
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:moved-worker"],
+                surface_ids: [stableUuid],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-recycled",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:remembered-worker"],
+                surface_ids: ["uuid-recycled"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
           }),
           stderr: "",
         };
       }
       if (args.includes("list-pane-surfaces")) {
         const pane = String(args[args.indexOf("--pane") + 1] ?? "");
-        const surface = moved
-          ? pane === "pane:left"
+        const surface =
+          pane === "pane:left"
             ? {
                 ref: "surface:moved-worker",
                 id: stableUuid,
@@ -6688,12 +6674,7 @@ describe("tool handler integration", () => {
                 ref: "surface:remembered-worker",
                 id: "uuid-recycled",
                 title: "foreign shell",
-              }
-          : {
-              ref: "surface:manual",
-              id: "uuid-manual",
-              title: "manual",
-            };
+              };
         return {
           stdout: JSON.stringify({
             workspace_ref: "workspace:1",
@@ -6711,30 +6692,12 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
-      if (args.includes("new-split")) {
-        splitCount += 1;
-        return {
-          stdout: JSON.stringify({
-            workspace: "workspace:1",
-            surface:
-              splitCount === 1
-                ? "surface:remembered-worker"
-                : "surface:second-worker",
-            surface_id:
-              splitCount === 1 ? stableUuid : "uuid-second-worker",
-            pane: splitCount === 1 ? "pane:right" : "pane:new-right",
-            title: "",
-            type: "terminal",
-          }),
-          stderr: "",
-        };
-      }
       if (args.includes("new-surface")) {
         return {
           stdout: JSON.stringify({
             workspace: "workspace:1",
-            surface: "surface:wrong-recycled-tab",
-            surface_id: "uuid-wrong-tab",
+            surface: "surface:new-worker",
+            surface_id: "uuid-new-worker",
             pane: "pane:right-recycled",
             title: "",
             type: "terminal",
@@ -6744,46 +6707,169 @@ describe("tool handler integration", () => {
       }
       return { stdout: "{}", stderr: "" };
     });
-    const server = createServer({
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-role-uuid-memory");
+    rmSync(stateDir, { recursive: true, force: true });
+    const context = createServerContext({
       exec: mockExec,
       skipAgentLifecycle: true,
-      stateDir: join(CHANNEL_TEST_DIR, "new-split-role-uuid-memory"),
+      stateDir,
+      controlHealthIntervalMs: 0,
     });
-    const tool = (server as any)._registeredTools["new_split"];
+    context.roleSurfaceOverrides.set("surface:remembered-worker", {
+      role: "worker",
+      workspace: "workspace:1",
+      surfaceUuid: stableUuid,
+    });
+    const server = createServer({ context, skipAgentLifecycle: true });
 
-    await tool.handler(
-      { direction: "right", role: "worker", workspace: "workspace:1" },
-      {} as any,
-    );
-    moved = true;
-    const second = await tool.handler(
-      { direction: "right", role: "ic", workspace: "workspace:1" },
-      {} as any,
-    );
-    const parsed =
-      second.structuredContent ?? JSON.parse(second.content[0].text);
+    try {
+      const tool = (server as any)._registeredTools["new_split"];
+      const result = await tool.handler(
+        { direction: "right", role: "worker", workspace: "workspace:1" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.surface).toBe("surface:wrong-recycled-tab");
-    expect(parsed.placement).toBe("surface");
-    expect(parsed.role).toBe("worker");
-    expect(parsed.warnings.join(" | ")).toMatch(/legacy.*ic.*worker/i);
-    expect(mockExec).not.toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "new-split",
-        "up",
-        "--surface",
-        "surface:moved-worker",
-      ]),
-    );
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "new-surface",
-        "--pane",
-        "pane:right-recycled",
-      ]),
-    );
+      expect(parsed.ok).toBe(true);
+      expect(context.roleSurfaceOverrides.has("surface:remembered-worker")).toBe(
+        false,
+      );
+      expect(
+        context.roleSurfaceOverrides.get("surface:moved-worker"),
+      ).toMatchObject({
+        role: "worker",
+        workspace: "workspace:1",
+        surfaceUuid: stableUuid,
+      });
+      expect(mockExec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["--surface", "surface:remembered-worker"]),
+      );
+    } finally {
+      await server.close();
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("new_split coerces legacy IC placement to the worker column without an up split", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:left",
+                index: 0,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:lead"],
+                surface_ids: ["uuid-lead"],
+                pixel_frame: { x: 0, y: 0, width: 500, height: 900 },
+              },
+              {
+                ref: "pane:right-worker",
+                index: 1,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:worker"],
+                surface_ids: ["uuid-worker"],
+                pixel_frame: { x: 500, y: 0, width: 500, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        const pane = String(args[args.indexOf("--pane") + 1] ?? "");
+        const surface =
+          pane === "pane:left"
+            ? {
+                ref: "surface:lead",
+                id: "uuid-lead",
+                title: "cmuxlayerClaude",
+              }
+            : {
+                ref: "surface:worker",
+                id: "uuid-worker",
+                title: "cmuxlayerCodex",
+              };
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces: [
+              {
+                ...surface,
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:second-worker",
+            surface_id: "uuid-second-worker",
+            pane: "pane:right-worker",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const stateDir = join(CHANNEL_TEST_DIR, "new-split-legacy-ic-geometry");
+    rmSync(stateDir, { recursive: true, force: true });
+    const context = createServerContext({
+      exec: mockExec,
+      skipAgentLifecycle: true,
+      stateDir,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context, skipAgentLifecycle: true });
+
+    try {
+      const tool = (server as any)._registeredTools["new_split"];
+      const result = await tool.handler(
+        { direction: "right", role: "ic", workspace: "workspace:1" },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.surface).toBe("surface:second-worker");
+      expect(parsed.placement).toBe("surface");
+      expect(parsed.role).toBe("worker");
+      expect(parsed.warnings.join(" | ")).toMatch(/legacy.*ic.*worker/i);
+      expect(mockExec).not.toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["new-split", "up"]),
+      );
+      expect(mockExec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining([
+          "new-surface",
+          "--pane",
+          "pane:right-worker",
+        ]),
+      );
+    } finally {
+      await server.close();
+      context.dispose();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("new_split does not prune role overrides from other workspaces", async () => {

@@ -205,16 +205,6 @@ describe("agent lifecycle health", () => {
 
   it("marks non-Claude orchestrators as role health failures", () => {
     const health = evaluateAgentHealth(
-      makeRecord({ cli: "codex", role: "orchestrator" }),
-      { monitor_alive: true },
-    );
-
-    expect(health.status).toBe("unhealthy");
-    expect(health.issue_codes).toContain("non_claude_orchestrator");
-  });
-
-  it("accepts an explicitly managed non-Claude orchestrator as the single left-side coordinator", () => {
-    const health = evaluateAgentHealth(
       makeRecord({
         cli: "codex",
         role: "orchestrator",
@@ -223,7 +213,8 @@ describe("agent lifecycle health", () => {
       { monitor_alive: true },
     );
 
-    expect(health.issue_codes).not.toContain("non_claude_orchestrator");
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("non_claude_orchestrator");
   });
 
   it("marks unexpected three-column topology as unhealthy", () => {

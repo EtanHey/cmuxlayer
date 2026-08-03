@@ -1803,7 +1803,11 @@ export class AgentEngine {
         observerEpoch,
         observerId,
       };
-      if (createdSurface.actual_workspace) {
+      if (
+        createdSurface.actual_workspace &&
+        createdSurface.actual_workspace.replace(/^ws:/, "workspace:") !==
+          createdSurface.workspace.replace(/^ws:/, "workspace:")
+      ) {
         await this.cleanupUnboundCreatedSurface(
           createdSurface,
           "agent-placement",
@@ -1847,11 +1851,9 @@ export class AgentEngine {
       return surface;
     }
     if (
-      surface.workspace === requestedWorkspace ||
-      surface.workspace.replace(/^ws:/, "workspace:") ===
-        requestedWorkspace.replace(/^ws:/, "workspace:")
+      surface.workspace === requestedWorkspace
     ) {
-      return { ...surface, workspace: requestedWorkspace };
+      return surface;
     }
     return {
       ...surface,

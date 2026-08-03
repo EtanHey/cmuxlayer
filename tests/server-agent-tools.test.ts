@@ -83,6 +83,7 @@ const AGENT_TOOLS = [
 
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
+  createdWorkspace?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
@@ -222,7 +223,8 @@ function makeLifecycleExec(opts?: {
 
     const workspaceIndex = args.indexOf("--workspace");
     const workspace =
-      workspaceIndex >= 0 ? String(args[workspaceIndex + 1]) : "ws:1";
+      opts?.createdWorkspace ??
+      (workspaceIndex >= 0 ? String(args[workspaceIndex + 1]) : "ws:1");
     return {
       stdout: JSON.stringify({
         workspace,
@@ -3599,7 +3601,10 @@ describe("agent lifecycle tool handlers", () => {
     vi.useFakeTimers();
     try {
       const server = createLifecycleServer(
-        makeLifecycleExec({ shellNeverReady: true }),
+        makeLifecycleExec({
+          createdWorkspace: "ws:1",
+          shellNeverReady: true,
+        }),
       );
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const engine = (server as any)._registeredTools["interact"]._engine;
@@ -3792,7 +3797,10 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: "", stderr: "" };
       });
       const server = createTrackedServer({
-        exec: makeLifecycleExec({ shellNeverReady: true }),
+        exec: makeLifecycleExec({
+          createdWorkspace: "ws:1",
+          shellNeverReady: true,
+        }),
         stateDir: TEST_DIR,
         disableSpawnPreflight: true,
         sessionIdentityResolver: () => null,
