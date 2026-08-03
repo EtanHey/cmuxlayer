@@ -168,8 +168,8 @@ export interface SpawnAgentParams {
   auto_archive_on_done?: boolean;
   max_cost_per_agent?: number;
   crash_recover?: boolean;
-  /** Internal lifecycle hook: runs immediately after cmux creates the surface,
-   * before launcher I/O or readiness polling can give the user time to move.
+  /** Internal lifecycle hook: runs immediately after cmux creates and focuses
+   * the surface, before launcher I/O or readiness polling can give the user time to move.
    */
   on_surface_created?: (surface: {
     surface: string;
@@ -668,6 +668,10 @@ interface AgentEngineClient {
   renameTab(
     surface: string,
     title: string,
+    opts?: { workspace?: string },
+  ): Promise<void>;
+  focusSurface(
+    surface: string,
     opts?: { workspace?: string },
   ): Promise<void>;
   selectWorkspace(workspace: string): Promise<void>;
@@ -4778,13 +4782,37 @@ export class AgentEngine {
       await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
       throw error;
     }
+    const createdWorkspace = surface.actual_workspace ?? surface.workspace;
+    let surfaceFocusError: unknown = null;
+    try {
+      // A tab created in an unfocused pane does not initialize its terminal.
+      // Focus the exact returned surface before any shell/readiness I/O.
+      await this.client.focusSurface(surface.surface, {
+        workspace: createdWorkspace,
+      });
+    } catch (error) {
+      surfaceFocusError = error;
+    }
     try {
       await spawnParams.on_surface_created?.({
         surface: surface.surface,
-        workspace: surface.actual_workspace ?? surface.workspace,
+        workspace: createdWorkspace,
       });
     } catch {
       // Focus observation is advisory and must never discard a created handle.
+    }
+    if (surfaceFocusError) {
+      const message =
+        surfaceFocusError instanceof Error
+          ? surfaceFocusError.message
+          : String(surfaceFocusError);
+      throw new AgentLaunchError(
+        `Failed to focus created surface ${surface.surface}: ${message}`,
+        agentId,
+        surface.surface,
+        createdWorkspace,
+        surfaceFocusError,
+      );
     }
 
     // 2. Write initial state (creating → booting)

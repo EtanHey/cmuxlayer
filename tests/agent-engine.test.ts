@@ -86,6 +86,7 @@ function makeMockClient(overrides?: Partial<CmuxClient>): CmuxClient {
       lines: 20,
       scrollback_used: false,
     }),
+    focusSurface: vi.fn().mockResolvedValue(undefined),
     renameTab: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
     closeSurface: vi.fn().mockResolvedValue(undefined),

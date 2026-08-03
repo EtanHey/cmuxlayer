@@ -319,6 +319,12 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           this.runWorkspaceMutation("rename_tab", renameOpts?.workspace, () =>
             this.client.renameTab(surface, title, renameOpts),
           ),
+        focusSurface: (surface, focusOpts) =>
+          this.runWorkspaceMutation(
+            "focus_surface",
+            focusOpts?.workspace,
+            () => this.client.focusSurface(surface, focusOpts),
+          ),
         selectWorkspace: (workspace) =>
           this.runWorkspaceMutation("select_workspace", workspace, () =>
             this.client.selectWorkspace(workspace),
