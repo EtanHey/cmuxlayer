@@ -5178,14 +5178,20 @@ export class AgentEngine {
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    const resumeCommand = agent.cli_session_id
-      ? buildResumeCommand(
+    let resumeCommand: string | undefined;
+    if (agent.cli_session_id) {
+      try {
+        resumeCommand = buildResumeCommand(
           agent.cli,
           agent.repo,
           agent.cli_session_id,
           agent.launcher_name,
-        )
-      : undefined;
+        );
+      } catch {
+        // Terminal I/O depends on the stable surface binding, not optional
+        // resume metadata. A damaged legacy repo field must not disable send.
+      }
+    }
     return {
       agent_id: agent.agent_id,
       surface_id: agent.surface_id,

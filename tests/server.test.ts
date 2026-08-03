@@ -2674,27 +2674,31 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    // Should try to resolve mode scope, fail open when no workspace is known,
-    // preflight the screen, send text, and press enter. Raw uncached surfaces do
-    // not get submit_verified:true from prompt clearing alone.
-    expect(mockExec).toHaveBeenCalledTimes(4);
+    // Stable identity resolution runs first, then mode scope, screen preflight,
+    // text delivery, and Return. Legacy topology has no UUID to retain.
+    expect(mockExec).toHaveBeenCalledTimes(5);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:1"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["read-screen"]),
+      expect.arrayContaining(["identify", "--surface", "surface:1"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["send"]),
+      expect.arrayContaining(["read-screen"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
+      "cmux",
+      expect.arrayContaining(["send"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      5,
       "cmux",
       expect.arrayContaining(["send-key"]),
     );
@@ -2819,24 +2823,29 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(mockExec).toHaveBeenCalledTimes(4);
+    expect(mockExec).toHaveBeenCalledTimes(5);
     expect(mockExec).toHaveBeenNthCalledWith(
       1,
       "cmux",
-      expect.arrayContaining(["identify", "--surface", "surface:6"]),
+      expect.arrayContaining(["list-workspaces"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       2,
       "cmux",
-      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
+      expect.arrayContaining(["identify", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       3,
       "cmux",
-      expect.arrayContaining(["send", "--surface", "surface:6"]),
+      expect.arrayContaining(["read-screen", "--surface", "surface:6"]),
     );
     expect(mockExec).toHaveBeenNthCalledWith(
       4,
+      "cmux",
+      expect.arrayContaining(["send", "--surface", "surface:6"]),
+    );
+    expect(mockExec).toHaveBeenNthCalledWith(
+      5,
       "cmux",
       expect.arrayContaining(["send-key", "--surface", "surface:6", "return"]),
     );
@@ -10976,7 +10985,17 @@ describe("tool handler integration", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:worker-crash-recoverable"],
+            surface_ids: [stableSurfaceUuid],
+            selected_surface_ref: "surface:worker-crash-recoverable",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -11016,7 +11035,7 @@ describe("tool handler integration", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("close_surface does not make a stale UUID owner terminal when its ref was recycled", async () => {
+  it("close_surface refuses a recycled ref instead of closing its new occupant", async () => {
     const stateDir = processScopedTmpDir(
       "cmuxlayer-close-surface-recycled-ref-terminal",
     );
@@ -11065,7 +11084,17 @@ describe("tool handler integration", () => {
       listPanes: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
         window_ref: "window:1",
-        panes: [{ ref: "pane:1" }],
+        panes: [
+          {
+            ref: "pane:1",
+            index: 0,
+            focused: true,
+            surface_count: 1,
+            surface_refs: ["surface:recycled-worker"],
+            surface_ids: ["bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"],
+            selected_surface_ref: "surface:recycled-worker",
+          },
+        ],
       }),
       listPaneSurfaces: vi.fn().mockResolvedValue({
         workspace_ref: "workspace:1",
@@ -11095,8 +11124,9 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(result.isError).not.toBe(true);
-    expect(mockClient.closeSurface).toHaveBeenCalled();
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toMatch(/stable surface UUID/i);
+    expect(mockClient.closeSurface).not.toHaveBeenCalled();
     expect(stateMgr.readState("worker-stale-ref-owner")).toMatchObject({
       user_killed: false,
       crash_recover: true,
@@ -11125,9 +11155,12 @@ describe("tool handler integration", () => {
       {} as any,
     );
 
-    expect(degradedResult.isError).not.toBe(true);
+    expect(degradedResult.isError).toBe(true);
+    expect(degradedResult.structuredContent?.error).toMatch(
+      /could not be resolved in fresh topology/i,
+    );
     expect(stateMgr.readState("worker-degraded-ref-owner")).toMatchObject({
-      user_killed: true,
+      user_killed: false,
       crash_recover: true,
     });
 
