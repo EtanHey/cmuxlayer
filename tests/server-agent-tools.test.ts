@@ -1900,6 +1900,51 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(false);
   });
 
+  it("spawn_agent allows an explicit workspace whose cwd does not identify a repo", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:brainlayer",
+                title: "brainlayerClaude",
+                selected: true,
+                current_directory: "/Users/etanheyman",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec as ExecFn);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+        workspace: "workspace:brainlayer",
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(true);
+    expect(
+      exec.mock.calls.some(
+        ([, args]) =>
+          Array.isArray(args) &&
+          (args.includes("new-split") || args.includes("new-surface")),
+      ),
+    ).toBe(true);
+  });
+
   it("spawn_agent preserves parent workspace inheritance when workspace is omitted", async () => {
     const previousWorkspaceId = process.env.CMUX_WORKSPACE_ID;
     process.env.CMUX_WORKSPACE_ID = "workspace:caller";
@@ -2420,6 +2465,36 @@ describe("agent lifecycle tool handlers", () => {
     const workspaceIndex = argv.indexOf("--workspace");
     expect(workspaceIndex).toBeGreaterThanOrEqual(0);
     expect(argv[workspaceIndex + 1]).toBe("workspace:1");
+  });
+
+  it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
+    const exec = makeLifecycleExec({ createdWorkspace: "" });
+    const server = createLifecycleServer(exec);
+    const tool = (server as any)._registeredTools["spawn_agent"];
+    const prompt = "empty backend workspace fallback";
+
+    const result = await tool.handler(
+      {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt,
+      },
+      {} as any,
+    );
+
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    const promptSendCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([, args]) => {
+        const argv = args as string[];
+        return argv.includes("send") && argv.includes(prompt);
+      },
+    );
+    expect(promptSendCall).toBeDefined();
+    expect(promptSendCall![1]).toEqual(
+      expect.arrayContaining(["--workspace", "workspace:1"]),
+    );
   });
 
   it("spawn_agent deliberately allowed inline prompts preserve blank lines without empty chunks", async () => {
@@ -4432,14 +4507,14 @@ describe("agent lifecycle tool handlers", () => {
   it("broadcast returns per-lead receipts when one delivery fails without aborting others", async () => {
     const records = [
       makeServerAgentRecord({
-        agent_id: "ic-ok-1",
+        agent_id: "orc-ok-1",
         surface_id: "surface:ok-1",
         state: "ready",
         role: "orchestrator",
         task_summary: "first ok lead",
       }),
       makeServerAgentRecord({
-        agent_id: "ic-fail",
+        agent_id: "orc-fail",
         surface_id: "surface:fail",
         state: "ready",
         role: "orchestrator",
@@ -4479,12 +4554,12 @@ describe("agent lifecycle tool handlers", () => {
     expect(receipts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          agent_id: "ic-ok-1",
+          agent_id: "orc-ok-1",
           delivered: true,
           submit_verified: true,
         }),
         expect.objectContaining({
-          agent_id: "ic-fail",
+          agent_id: "orc-fail",
           delivered: false,
           submit_verified: null,
           error: expect.stringContaining("send failed for surface:fail"),
@@ -4628,7 +4703,7 @@ describe("agent lifecycle tool handlers", () => {
         role: "orchestrator",
       }),
       makeServerAgentRecord({
-        agent_id: "ic-working",
+        agent_id: "orc-working",
         surface_id: "surface:working",
         state: "working",
         role: "orchestrator",
@@ -4668,7 +4743,7 @@ describe("agent lifecycle tool handlers", () => {
           submit_verified: null,
         }),
         expect.objectContaining({
-          agent_id: "ic-working",
+          agent_id: "orc-working",
           delivered: false,
           submit_verified: null,
           skipped: "not_interactive:working",

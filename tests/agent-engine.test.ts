@@ -3943,11 +3943,7 @@ describe("AgentEngine", () => {
 
       await engine.runSweep();
 
-      expect(mockClient.send).not.toHaveBeenCalledWith(
-        "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-        expect.objectContaining({ workspace: "workspace:wrong" }),
-      );
+      expect(mockClient.send).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.closeSurface).toHaveBeenCalledWith(
         "surface:new",

@@ -73,6 +73,7 @@ import {
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
+  normalizeWorkspaceRefAlias,
   reposEquivalent,
   resolveWorkspaceRefForRepo,
 } from "./repo-workspace.js";
@@ -1805,8 +1806,8 @@ export class AgentEngine {
       };
       if (
         createdSurface.actual_workspace &&
-        createdSurface.actual_workspace.replace(/^ws:/, "workspace:") !==
-          createdSurface.workspace.replace(/^ws:/, "workspace:")
+        normalizeWorkspaceRefAlias(createdSurface.actual_workspace) !==
+          normalizeWorkspaceRefAlias(createdSurface.workspace)
       ) {
         await this.cleanupUnboundCreatedSurface(
           createdSurface,

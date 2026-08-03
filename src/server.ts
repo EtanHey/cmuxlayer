@@ -149,7 +149,10 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
-import { currentCallerContext } from "./caller-context.js";
+import {
+  currentCallerContext,
+  type CallerContext,
+} from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   matchReadyPattern,
@@ -157,6 +160,7 @@ import {
   screenHasReadyAgentIdentity,
 } from "./pattern-registry.js";
 import {
+  normalizeWorkspaceRefAlias,
   reposEquivalent,
   resolveWorkspaceRefForRepo,
   workspaceDirectoryRepoMatchScore,
@@ -2090,6 +2094,11 @@ export interface CreateServerOptions {
   lifecycleInitializer?: () => Promise<void>;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
+  /**
+   * In-process-only caller identity used by safety gates, never placement.
+   * Shared-daemon entrypoints intentionally leave this unset.
+   */
+  safetyCallerContextProvider?: () => CallerContext | undefined;
   /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
   defaultPalette?: string;
   /** Opt into Claude Code channel notifications for lifecycle events */
@@ -4686,7 +4695,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): boolean => {
     const normalized = candidate.trim();
     if (!normalized) return false;
-    const aliasNormalized = normalized.replace(/^ws:/, "workspace:");
+    const aliasNormalized = normalizeWorkspaceRefAlias(normalized);
     return (
       workspace.ref === normalized ||
       workspace.id === normalized ||
@@ -4735,12 +4744,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // A request-scoped workspace ID remains authoritative when enumeration
       // is temporarily unavailable; only daemon env and UI focus are banned.
     }
-    return workspaceCandidate?.replace(/^ws:/, "workspace:");
+    return workspaceCandidate
+      ? normalizeWorkspaceRefAlias(workspaceCandidate)
+      : undefined;
   };
 
   /** Per-request caller workspace only; shared-daemon env/focus are not caller identity. */
   const currentCallerWorkspace = async (): Promise<string | undefined> => {
     return callerWorkspaceStrict();
+  };
+
+  /**
+   * Caller workspace for mutation safety only. In-process runtimes have no
+   * transport metadata, so their process-local env can supplement the strict
+   * request context without ever influencing spawn placement.
+   */
+  const currentSafetyCallerWorkspace = async (): Promise<
+    string | undefined
+  > => {
+    const requestWorkspace = await callerWorkspaceStrict();
+    if (requestWorkspace) return requestWorkspace;
+    const fallbackWorkspace =
+      opts?.safetyCallerContextProvider?.()?.workspaceId;
+    return fallbackWorkspace
+      ? await canonicalWorkspaceRef(fallbackWorkspace)
+      : undefined;
   };
 
   /** Currently-focused workspace ref, or undefined if it can't be read. */
@@ -4805,6 +4833,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     }
     const cwd = workspace?.current_directory?.trim();
     if (!cwd || workspaceDirectoryRepoMatchScore(repo, cwd) > 0) return;
+    const title = workspace?.title?.trim();
+    const titleCandidates = [
+      inferRepoFromLauncherTitle(title),
+      title,
+    ].filter(
+      (candidate, index, all): candidate is string =>
+        Boolean(candidate) && all.indexOf(candidate) === index,
+    );
+    const identifiedRepo = titleCandidates.find(
+      (candidate) => workspaceDirectoryRepoMatchScore(candidate, cwd) > 0,
+    );
+    if (!identifiedRepo || reposEquivalent(identifiedRepo, repo)) return;
     throw new PlacementWorkspaceError(
       `Refused placement in ${workspace?.ref ?? workspaceRef}: workspace directory ${cwd} does not belong to repo ${repo}`,
     );
@@ -5284,7 +5324,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     result: { workspace_id?: string },
     fallback?: string,
   ): string | undefined =>
-    result.workspace_id ?? fallback;
+    result.workspace_id || fallback;
 
   const isLeadLikeSurfaceTitle = (title: string): boolean =>
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
@@ -5775,7 +5815,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         await assertWorkspaceMutationAllowed(
           "create_workspace",
-          await currentCallerWorkspace(),
+          await currentSafetyCallerWorkspace(),
         );
         const result = await client.createWorkspace(args.title);
         const data = {
@@ -5844,7 +5884,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const liveAgents = agents.filter(
           (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
         );
-        const callerWorkspace = await currentCallerWorkspace();
+        const callerWorkspace = await currentSafetyCallerWorkspace();
         const deletingCallerWorkspace = callerWorkspace === targetWorkspace;
 
         if (!args.force && (deletingCallerWorkspace || liveAgents.length > 0)) {
@@ -9403,7 +9443,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           await assertWorkspaceMutationAllowed(
             "spawn_in_workspace",
-            args.reuse_workspace ?? (await currentCallerWorkspace()),
+            args.reuse_workspace ?? (await currentSafetyCallerWorkspace()),
           );
           // A newly created workspace may auto-focus immediately, so capture
           // the user's origin before createWorkspace can move it.

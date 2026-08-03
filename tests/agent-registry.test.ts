@@ -2629,6 +2629,16 @@ describe("AgentRegistry", () => {
       );
       stateMgr.writeState(
         makeRecord({
+          agent_id: "inferred-orchestrator-terminal",
+          state: "done",
+          surface_id: "surface:missing-inferred-orchestrator",
+          role: undefined,
+          cli: "claude",
+          repo: "cmuxlayer",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
           agent_id: "ic-terminal",
           state: "error",
           surface_id: "surface:missing-ic",
@@ -2654,6 +2664,9 @@ describe("AgentRegistry", () => {
       expect(registry.get("orchestrator-terminal")).toMatchObject({
         agent_id: "orchestrator-terminal",
         role: "orchestrator",
+      });
+      expect(registry.get("inferred-orchestrator-terminal")).toMatchObject({
+        agent_id: "inferred-orchestrator-terminal",
       });
       expect(registry.get("ic-terminal")).toBeNull();
       expect(registry.get("worker-terminal")).toBeNull();

@@ -25,6 +25,7 @@ import type { CmuxSurface } from "./types.js";
 import { extractPrefix } from "./naming.js";
 import {
   inferAgentRole,
+  inferRecordRoleOrNull,
   isAgentRoleInferenceError,
 } from "./layout-policy.js";
 import {
@@ -2281,7 +2282,7 @@ export class AgentRegistry {
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }
-      if (agent.role === "orchestrator") {
+      if (inferRecordRoleOrNull(agent) === "orchestrator") {
         continue;
       }
       if (this.matchingLiveSurface(agent, surfaces)) {
