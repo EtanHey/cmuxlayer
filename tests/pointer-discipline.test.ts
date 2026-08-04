@@ -783,6 +783,127 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
+  it.each([
+    {
+      toolName: "new_worktree_split",
+      expectedError: "CMUXLAYER_MAX_INLINE_CHARS",
+      args: {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "x".repeat(1_801),
+        worktree: false,
+      },
+    },
+    {
+      toolName: "new_worktree_split",
+      expectedError: "routing policy threshold 1500",
+      args: {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: denseIncidentPayload,
+        worktree: false,
+      },
+    },
+    {
+      toolName: "new_worktree_split",
+      expectedError: "multi-paragraph inline text",
+      args: {
+        repo: "brainlayer",
+        model: "codex",
+        cli: "codex",
+        prompt: "first paragraph\n\nsecond paragraph",
+        worktree: false,
+      },
+    },
+    {
+      toolName: "spawn_in_workspace",
+      expectedError: "CMUXLAYER_MAX_INLINE_CHARS",
+      args: {
+        workspace_title: "prompt-guard",
+        agents: [
+          {
+            repo: "brainlayer",
+            model: "codex",
+            cli: "codex",
+            prompt: "x".repeat(1_801),
+          },
+        ],
+      },
+    },
+    {
+      toolName: "spawn_in_workspace",
+      expectedError: "routing policy threshold 1500",
+      args: {
+        workspace_title: "prompt-guard",
+        agents: [
+          {
+            repo: "brainlayer",
+            model: "codex",
+            cli: "codex",
+            prompt: denseIncidentPayload,
+          },
+        ],
+      },
+    },
+    {
+      toolName: "spawn_in_workspace",
+      expectedError: "multi-paragraph inline text",
+      args: {
+        workspace_title: "prompt-guard",
+        agents: [
+          {
+            repo: "brainlayer",
+            model: "codex",
+            cli: "codex",
+            prompt: "first paragraph\n\nsecond paragraph",
+          },
+        ],
+      },
+    },
+  ])("$toolName refuses an unsafe inline prompt before mutation", async ({
+    toolName,
+    expectedError,
+    args,
+  }) => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const mockExec = makeLifecycleExec();
+    const context = createServerContext({
+      exec: mockExec,
+      stateDir: testDir,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+    });
+    const server = createServer({ context });
+    const tool = (server as any)._registeredTools[toolName];
+    mockExec.mockClear();
+
+    const result = await tool.handler(args, {} as any);
+
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain(`${toolName}.prompt`);
+    expect(parsed.error).toContain(expectedError);
+    expect(parsed.error).toContain("Read and follow <path>");
+    expect(
+      mockExec.mock.calls.some(([, commandArgs]) =>
+        commandArgs.some((arg) =>
+          [
+            "new-workspace",
+            "new-split",
+            "new-surface",
+            "send",
+            "send-key",
+            "set-buffer",
+            "paste-buffer",
+          ].includes(arg),
+        ),
+      ),
+    ).toBe(false);
+    context.dispose();
+  });
+
   it("send_to refuses over-threshold text with file-pointer guidance and opt-out naming", async () => {
     process.env.CMUXLAYER_MAX_INLINE_CHARS = "600";
     const { createServer, createServerContext } = await loadServerModule();
@@ -1076,7 +1197,7 @@ describe("pane input pointer discipline", () => {
     context.dispose();
   });
 
-  it("send-class tool descriptions teach the dense payload routing policy", async () => {
+  it("pane-writing tool descriptions lead with the pane-breakage consequence", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     const context = createServerContext({
       exec: makeLifecycleExec(),
@@ -1086,23 +1207,68 @@ describe("pane input pointer discipline", () => {
     });
     const server = createServer({ context }) as any;
 
+    const breakageWarning =
+      "Max 2-3 short lines. Longer payloads BREAK the receiving pane — write the payload to a file and send one line: `Read and follow <path>`.";
     for (const toolName of [
       "send_input",
       "send_command",
       "spawn_agent",
+      "new_split",
+      "new_surface",
+      "new_worktree_split",
+      "spawn_in_workspace",
       "broadcast",
       "send_to",
       "send_to_agent",
     ]) {
       const description = server._registeredTools[toolName].description;
-      expect(description, toolName).toContain("1500");
-      expect(description, toolName).toMatch(/dense/i);
-      expect(description, toolName).toMatch(/routing policy/i);
-      expect(description, toolName).toContain("Read and follow <path>");
-      expect(description, toolName).toMatch(/zsh history expansion/i);
-      expect(description, toolName).toContain("!");
-      expect(description, toolName).not.toMatch(
-        /mid-token|break panes|pane break/i,
+      expect(description.startsWith(breakageWarning), toolName).toBe(true);
+    }
+
+    const fields = [
+      [
+        "send_input.text",
+        server._registeredTools.send_input.inputSchema.shape.text,
+      ],
+      [
+        "send_command.command",
+        server._registeredTools.send_command.inputSchema.shape.command,
+      ],
+      [
+        "spawn_agent.prompt",
+        server._registeredTools.spawn_agent.inputSchema.shape.prompt,
+      ],
+      [
+        "new_split.boot_prompt_path",
+        server._registeredTools.new_split.inputSchema.shape.boot_prompt_path,
+      ],
+      [
+        "new_surface.boot_prompt_path",
+        server._registeredTools.new_surface.inputSchema.shape.boot_prompt_path,
+      ],
+      [
+        "new_worktree_split.prompt",
+        server._registeredTools.new_worktree_split.inputSchema.shape.prompt,
+      ],
+      [
+        "broadcast.text",
+        server._registeredTools.broadcast.inputSchema.shape.text,
+      ],
+      ["send_to.text", server._registeredTools.send_to.inputSchema.shape.text],
+      [
+        "send_to_agent.text",
+        server._registeredTools.send_to_agent.inputSchema.shape.text,
+      ],
+      [
+        "spawn_in_workspace.agents[].prompt",
+        server._registeredTools.spawn_in_workspace.inputSchema.shape.agents.element
+          .shape.prompt,
+      ],
+    ] as const;
+
+    for (const [fieldName, schema] of fields) {
+      expect(schema.description.startsWith(breakageWarning), fieldName).toBe(
+        true,
       );
     }
 
