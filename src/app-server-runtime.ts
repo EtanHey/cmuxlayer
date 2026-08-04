@@ -416,9 +416,12 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
       observerEpoch,
       "app-server thread start",
     );
-    const workspace =
-      findWorkspaceRefForRepo(workspaces.workspaces, repo) ??
-      workspaces.workspaces.find((candidate) => candidate.selected)?.ref;
+    const workspace = findWorkspaceRefForRepo(workspaces.workspaces, repo);
+    if (!workspace) {
+      throw new Error(
+        `PLACEMENT_WORKSPACE_UNRESOLVED: App Server thread start requires a matching workspace for repo ${repo}; selected-workspace fallback is forbidden`,
+      );
+    }
     await this.assertWorkspaceMutationAllowed("spawn_agent", workspace);
     this.assertSurfaceObserverEpochCurrent(
       observerEpoch,

@@ -844,6 +844,38 @@ describe("CmuxAppServerRuntime", () => {
     }
   });
 
+  it("refuses to start a thread when no workspace belongs to its repo instead of using the selected workspace", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    client.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          ref: "workspace:t3layer",
+          title: "t3layer",
+          selected: true,
+          current_directory: "/Users/test/Gits/t3layer",
+        },
+      ],
+    });
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const spawnAgent = vi
+      .spyOn((runtime as any).engine, "spawnAgent")
+      .mockRejectedValue(new Error("spawn should not be reached"));
+
+    try {
+      await expect(
+        runtime.startThread({ cwd: "/Users/test/Gits/brainlayer" }),
+      ).rejects.toThrow(/matching workspace.*brainlayer/i);
+      expect(spawnAgent).not.toHaveBeenCalled();
+      expect(client.newSplit).not.toHaveBeenCalled();
+      expect(client.newSurface).not.toHaveBeenCalled();
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
   it("re-resolves the stable UUID before every bridge chunk and Return", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
