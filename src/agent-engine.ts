@@ -410,6 +410,7 @@ const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
 const STOP_POST_CONDITION_POLL_MS = 50;
 const BOOT_SESSION_CAPTURE_LINES = 80;
 const MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS = 3;
+const BOOT_READY_TIMEOUT_MS = 45_000;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const DONE_QUIESCENCE_MS = 1_500;
@@ -446,6 +447,20 @@ function toParsedScreenStatus(
     default:
       return null;
   }
+}
+
+/**
+ * Loosely compare the requested model with the model reported by the live CLI.
+ * A missing side is unknown rather than a match.
+ */
+export function computeModelMismatch(
+  requestedModel: string,
+  parsedModel: string | null,
+): boolean | null {
+  const requested = requestedModel.toLowerCase().trim();
+  const parsed = parsedModel?.toLowerCase().trim();
+  if (!requested || !parsed) return null;
+  return !parsed.includes(requested) && !requested.includes(parsed);
 }
 
 export { buildResumeCommand } from "./agent-command.js";
@@ -1564,8 +1579,14 @@ export class AgentEngine {
       const evidence = this.readReadyEvidence(agent, screen.text);
       const hasTargetEvidence =
         evidence.ready || (targetState === "ready" && evidence.activeCodex);
+      const awaitingManagedBootPrompt =
+        targetState === "ready" &&
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered === false &&
+        !evidence.activeCodex;
       if (
         !hasTargetEvidence ||
+        awaitingManagedBootPrompt ||
         (targetState === "ready" &&
           !evidence.activeCodex &&
           this.screenShowsPendingBootPrompt(agent, screen.text))
@@ -1586,9 +1607,21 @@ export class AgentEngine {
               screen: Promise.resolve(screen),
             })
           : agent;
-      if (targetState === "ready" && transitionAgent.boot_prompt_pending) {
+      if (targetState === "ready") {
+        const parsedModel = parseScreen(screen.text).model;
         transitionAgent = this.stateMgr.updateRecord(transitionAgent.agent_id, {
-          boot_prompt_pending: false,
+          parsed_model: parsedModel,
+          model_mismatch: computeModelMismatch(
+            transitionAgent.model,
+            parsedModel,
+          ),
+          ...(transitionAgent.boot_prompt_pending
+            ? {
+                boot_prompt_pending: false,
+                prompt_delivered: true,
+                submit_verified: true,
+              }
+            : {}),
         });
         this.registry.set(transitionAgent.agent_id, transitionAgent);
       }
@@ -2576,74 +2609,92 @@ export class AgentEngine {
       this.readyPatternMatches.delete(agent.agent_id);
       return agent;
     }
-    if (agent.boot_prompt_pending) {
-      try {
-        const screen = await this.readSweepScreen(agent, ctx);
-        const evidence = this.readReadyEvidence(agent, screen.text);
-        if (
-          (evidence.ready || evidence.activeCodex) &&
-          (evidence.activeCodex ||
-            !this.screenShowsPendingBootPrompt(agent, screen.text))
-        ) {
-          const count = (this.readyPatternMatches.get(agent.agent_id) ?? 0) + 1;
-          this.readyPatternMatches.set(agent.agent_id, count);
-          if (count < Math.max(1, evidence.consecutive)) {
-            return agent;
-          }
-
-          this.stateMgr.updateRecord(agent.agent_id, {
-            boot_prompt_pending: false,
-          });
-          let ready = this.stateMgr.transition(agent.agent_id, "ready", {
-            error: null,
-          });
-          if (
-            ready.quality === "degraded" &&
-            agent.error?.startsWith("Post-spawn liveness failed:")
-          ) {
-            ready = this.stateMgr.updateRecord(agent.agent_id, {
-              quality: "unknown",
-            });
-          }
-          this.registry.set(agent.agent_id, ready);
-          this.readyPatternMatches.delete(agent.agent_id);
-          return ready;
-        }
-        this.readyPatternMatches.delete(agent.agent_id);
-      } catch {
-        // Fall through to the explicit interrupted-delivery error below.
-      }
-
-      const since = Date.parse(agent.updated_at);
-      if (
-        !Number.isNaN(since) &&
-        Date.now() - since < BOOT_PROMPT_PENDING_STALE_MS
-      ) {
-        return agent;
-      }
-
-      try {
-        this.stateMgr.updateRecord(agent.agent_id, {
-          boot_prompt_pending: false,
-        });
-        const surfaceAlive = await this.registry.isSurfaceAlive(agent);
-        const reconciled = surfaceAlive
-          ? this.stateMgr.transition(agent.agent_id, "ready", { error: null })
-          : this.stateMgr.transition(agent.agent_id, "error", {
-              error: "Boot prompt delivery interrupted before completion",
-            });
-        this.registry.set(agent.agent_id, reconciled);
-        return reconciled;
-      } catch {
-        return agent;
-      }
+    if (agent.agent_id.startsWith("auto-")) {
+      return agent;
     }
 
     try {
       const screen = await this.readSweepScreen(agent, ctx);
+      const parsed = parseScreen(screen.text);
+      const settlement = {
+        parsed_model: parsed.model,
+        model_mismatch: computeModelMismatch(agent.model, parsed.model),
+      };
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const promptStillPending =
+        agent.boot_prompt_pending === true &&
+        !evidence.activeCodex &&
+        this.screenShowsPendingBootPrompt(agent, screen.text);
+      const awaitingManagedBootPrompt =
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered === false &&
+        !evidence.activeCodex;
+
+      if (promptStillPending || awaitingManagedBootPrompt) {
+        this.readyPatternMatches.delete(agent.agent_id);
+        if (this.isBootPromptPendingStale(agent)) {
+          const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
+            ...settlement,
+            boot_prompt_pending: false,
+            prompt_delivered: false,
+            submit_verified: false,
+          });
+          const failed = this.stateMgr.transition(
+            failedSettlement.agent_id,
+            "error",
+            {
+              error:
+                "Boot prompt delivery was not verified before the pending-input timeout",
+            },
+          );
+          this.registry.set(agent.agent_id, failed);
+          return failed;
+        }
+        if (
+          agent.submit_verified !== false ||
+          agent.prompt_delivered !== false ||
+          agent.parsed_model !== settlement.parsed_model ||
+          agent.model_mismatch !== settlement.model_mismatch
+        ) {
+          const pending = this.stateMgr.updateRecord(agent.agent_id, {
+            ...settlement,
+            prompt_delivered: false,
+            submit_verified: false,
+          });
+          this.registry.set(agent.agent_id, pending);
+          return pending;
+        }
+        return agent;
+      }
+
       if (!evidence.ready && !evidence.activeCodex) {
         this.readyPatternMatches.delete(agent.agent_id);
+        const since = Date.parse(agent.updated_at);
+        if (
+          !Number.isNaN(since) &&
+          Date.now() - since >= BOOT_READY_TIMEOUT_MS
+        ) {
+          const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
+            ...settlement,
+            ...(agent.boot_prompt_pending
+              ? {
+                  boot_prompt_pending: false,
+                  prompt_delivered: false,
+                  submit_verified: false,
+                }
+              : {}),
+          });
+          const failed = this.stateMgr.transition(
+            failedSettlement.agent_id,
+            "error",
+            {
+              error:
+                "Stuck booting — CLI never became interactive within the boot timeout",
+            },
+          );
+          this.registry.set(agent.agent_id, failed);
+          return failed;
+        }
         return agent;
       }
 
@@ -2653,7 +2704,17 @@ export class AgentEngine {
         return agent;
       }
 
-      let updated = this.stateMgr.transition(agent.agent_id, "ready", {
+      const settled = this.stateMgr.updateRecord(agent.agent_id, {
+        ...settlement,
+        ...(agent.boot_prompt_pending
+          ? {
+              boot_prompt_pending: false,
+              prompt_delivered: true,
+              submit_verified: true,
+            }
+          : {}),
+      });
+      let updated = this.stateMgr.transition(settled.agent_id, "ready", {
         error: agent.error?.startsWith("Post-spawn liveness failed:")
           ? null
           : agent.error,
@@ -4754,6 +4815,10 @@ export class AgentEngine {
       respawn_attempts: 0,
       user_killed: false,
       boot_prompt_pending: spawnParams.boot_prompt_pending ?? false,
+      submit_verified: null,
+      prompt_delivered: false,
+      parsed_model: null,
+      model_mismatch: null,
       launch_cwd: spawnParams.cwd ?? null,
       mcp_profile: spawnParams.mcp_profile_label ?? null,
       worktree_path: spawnParams.cwd ?? null,

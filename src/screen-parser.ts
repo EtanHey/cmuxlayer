@@ -236,6 +236,11 @@ const GEMINI_WORKING_RE = /^\s*(?:✦\s*)?Working(?:\.\.\.|…)?\s*$/im;
 const CLAUDE_DONE_LINE_RE = /^\s*[⏺●]\s+Completed(?: successfully)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
   /^\s*(?:[✻✢✳✶]|[⏺●])\s+(?:Thinking|Working|Running|Receiving|Preparing|Updating|Sending|Reading|Analyzing)\b/im;
+// Claude's context-limit/auto-compact banner wording is not stable. A pane
+// sitting at one of these blockers must not become "working" merely because
+// the same line also contains a busy-looking marker.
+const CONTEXT_LIMIT_BANNER_RE =
+  /\bcontext\s+(?:low|window\s+is\s+almost\s+full|limit\s+reached)\b|\bauto-compact(?:ing)?\b|\bcompacting\s+conversation\b/i;
 const THINKING_RE =
   /(?:^|\n)\s*(?:(?:[✻✢✳✶]\s*)?thinking(?:\s+with\s+[a-z-]+\s+effort)?(?:\s*(?:\.{3,}|…))?|(?:Reticulating splines|Perambulating|Cooked|Crunched|Razzmatazzing|Schlepping|Nucleating|Seasoning)(?:\s*(?:\.{3,}|…))?|(?:⬡\s*)?(?:Running|Generating)(?:\s*(?:\.{3,}|…))?\s+[0-9][0-9,]*(?:\.[0-9]+)?[km]?\s+tokens)\s*$/im;
 
@@ -1150,6 +1155,10 @@ function inferStatus(
 
   if (errors.length > 0) {
     return "frozen";
+  }
+
+  if (CONTEXT_LIMIT_BANNER_RE.test(joined)) {
+    return "idle";
   }
 
   if (THINKING_RE.test(text)) {

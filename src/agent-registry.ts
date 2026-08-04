@@ -2162,13 +2162,23 @@ export class AgentRegistry {
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
 
     for (const [id, agent] of [...this.agents.entries()]) {
-      if (agent.state !== "booting") {
+      const failedDuringBootReadiness =
+        agent.state === "error" &&
+        agent.error?.startsWith(
+          "Stuck booting — CLI never became interactive",
+        );
+      if (agent.state !== "booting" && !failedDuringBootReadiness) {
         continue;
       }
       if (!this.canMutateForObservedAbsence(agent)) {
         continue;
       }
-      const lastUpdated = Date.parse(agent.updated_at);
+      // The readiness transition stamps updated_at. Keep the original boot
+      // age when deciding whether an explicit resync may evict that exact
+      // no-CLI error, otherwise the transition would restart the ghost clock.
+      const lastUpdated = Date.parse(
+        failedDuringBootReadiness ? agent.created_at : agent.updated_at,
+      );
       if (Number.isNaN(lastUpdated)) {
         continue;
       }
@@ -2185,12 +2195,15 @@ export class AgentRegistry {
         continue;
       }
 
-      try {
-        this.stateMgr.transition(id, "error", {
-          error: "Launch failed — no agent detected in surface after boot timeout",
-        });
-      } catch {
-        // Best-effort transition before eviction.
+      if (agent.state === "booting") {
+        try {
+          this.stateMgr.transition(id, "error", {
+            error:
+              "Launch failed — no agent detected in surface after boot timeout",
+          });
+        } catch {
+          // Best-effort transition before eviction.
+        }
       }
 
       const removedAgentId = this.deleteAgentAndAliases(id);

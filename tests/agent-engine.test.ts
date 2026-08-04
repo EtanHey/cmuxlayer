@@ -7551,6 +7551,71 @@ To continue this session, run codex resume ${sessionId}`,
       expect(result.agent?.state).toBe("booting");
     });
 
+    it("does not promote a stale boot prompt that is still sitting in the composer", async () => {
+      const prompt = "Read and follow docs.local/phase-3.md";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stale-unsent-prompt",
+          state: "booting",
+          surface_id: "surface:stale-unsent-prompt",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: prompt,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:stale-unsent-prompt")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:stale-unsent-prompt",
+        text: [
+          "OpenAI Codex",
+          "Model: gpt-5.5",
+          "",
+          `› ${prompt}`,
+          "gpt-5.5 xhigh · ~/Gits/cmuxlayer",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-stale-unsent-prompt")).toMatchObject({
+        state: "error",
+        boot_prompt_pending: false,
+        submit_verified: false,
+        prompt_delivered: false,
+        error: expect.stringMatching(/prompt.*not.*verif/i),
+      });
+    });
+
+    it("errors a stale booting agent whose CLI never becomes interactive", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stale-shell",
+          state: "booting",
+          surface_id: "surface:stale-shell",
+          updated_at: "2020-01-01T00:00:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:stale-shell")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:stale-shell",
+        text: "$ ",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-stale-shell")).toMatchObject({
+        state: "error",
+        error: expect.stringMatching(/stuck booting|never became interactive/i),
+      });
+    });
+
     it("detects state change via sweep", async () => {
       vi.useFakeTimers();
       try {
@@ -7607,6 +7672,85 @@ To continue this session, run codex resume ${sessionId}`,
       expect(mockClient.readScreen).toHaveBeenCalledWith("surface:42", {
         lines: 80,
       });
+    });
+
+    it("records a model mismatch when the live CLI banner disagrees with the requested model", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-model-mismatch",
+          state: "booting",
+          surface_id: "surface:model-mismatch",
+          cli: "claude",
+          model: "opus",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:model-mismatch")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:model-mismatch",
+        text: [
+          "Claude Code",
+          "🤖 Sonnet 4.6",
+          "❯",
+          "⏵⏵ bypass permissions on",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-model-mismatch")).toMatchObject({
+        state: "ready",
+        parsed_model: "Sonnet 4.6",
+        model_mismatch: true,
+      });
+    });
+
+    it("leaves a fresh noninteractive boot record inside its boot window", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-fresh-shell",
+          state: "booting",
+          surface_id: "surface:fresh-shell",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:fresh-shell")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:fresh-shell",
+        text: "$ ",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-fresh-shell")?.state).toBe("booting");
+    });
+
+    it("does not advance an auto-discovered boot record", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "auto-brainlayer-1",
+          state: "booting",
+          surface_id: "surface:auto-boot",
+          cli: "claude",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:auto-boot")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:auto-boot",
+        text: "Claude Code\n🤖 Sonnet 4.6\n❯",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("auto-brainlayer-1")?.state).toBe("booting");
     });
 
     it("clears stale post-spawn liveness errors when a booting agent reaches ready", async () => {
@@ -8158,7 +8302,76 @@ To continue this session, run codex resume ${sessionId}`,
       );
     });
 
-    it("RC5: keeps a stale pending boot prompt agent reachable while its surface is alive", async () => {
+    it("does not promote an idle managed pane when its boot prompt was never delivered", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-undelivered-prompt",
+          state: "booting",
+          surface_id: "surface:undelivered-prompt",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          prompt_delivered: false,
+          submit_verified: null,
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:undelivered-prompt")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:undelivered-prompt",
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("agent-undelivered-prompt")).toMatchObject({
+        state: "booting",
+        boot_prompt_pending: true,
+        prompt_delivered: false,
+        submit_verified: false,
+      });
+    });
+
+    it("errors a stale managed pane whose boot prompt was never delivered", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stale-undelivered-prompt",
+          state: "booting",
+          surface_id: "surface:stale-undelivered-prompt",
+          cli: "codex",
+          boot_prompt_pending: true,
+          task_summary: "Read and follow docs.local/phase-3.md",
+          prompt_delivered: false,
+          submit_verified: null,
+          updated_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:stale-undelivered-prompt")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:stale-undelivered-prompt",
+        text: ["OpenAI Codex", "Model: gpt-5.5", "", "›"].join("\n"),
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("agent-stale-undelivered-prompt"),
+      ).toMatchObject({
+        state: "error",
+        boot_prompt_pending: false,
+        prompt_delivered: false,
+        submit_verified: false,
+        error: expect.stringMatching(/delivery was not verified/i),
+      });
+    });
+
+    it("RC5: errors a stale pending boot prompt without readiness evidence even when its surface is alive", async () => {
       stateMgr.writeState(
         makeRecord({
           agent_id: "agent-boot",
@@ -8175,9 +8388,11 @@ To continue this session, run codex resume ${sessionId}`,
       await engine.runSweep();
 
       expect(engine.getAgentState("agent-boot")).toMatchObject({
-        state: "ready",
+        state: "error",
         boot_prompt_pending: false,
-        error: null,
+        prompt_delivered: false,
+        submit_verified: false,
+        error: expect.stringMatching(/stuck booting|never became interactive/i),
       });
     });
 
@@ -8302,6 +8517,7 @@ To continue this session, run codex resume ${sessionId}`,
           surface_id: "surface:42",
           cli: "gemini",
           task_summary: "",
+          updated_at: new Date().toISOString(),
         }),
       );
       liveSurfaces = [makeSurface("surface:42")];

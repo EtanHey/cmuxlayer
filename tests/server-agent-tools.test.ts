@@ -2616,6 +2616,8 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.boot_prompt_pending).toBe(false);
+    expect(persisted.prompt_delivered).toBe(true);
+    expect(persisted.submit_verified).toBe(true);
     expect(persisted.task_summary).toBe("probe renamed state");
   });
 
@@ -4115,6 +4117,9 @@ describe("agent lifecycle tool handlers", () => {
     expect(["booting", "ready"]).toContain(state.state);
     expect(state.error).toBeNull();
     expect(state.task_summary).toBe("file prompt body");
+    expect(state.boot_prompt_pending).toBe(true);
+    expect(state.prompt_delivered).toBe(false);
+    expect(state.submit_verified).toBeNull();
     expect(state.cli_session_id).toBe(sessionId);
     expect(state.resumable).toBe(true);
     expect(state.health.issue_codes).not.toContain("missing_cli_session_id");

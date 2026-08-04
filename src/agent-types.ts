@@ -74,6 +74,13 @@ export interface AgentRecord {
   user_killed?: boolean;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
+  // Spawn settlement evidence (PR #326): a managed agent must not report
+  // ready without retaining what was actually observed about prompt delivery
+  // and the model shown by the CLI.
+  submit_verified?: boolean | null;
+  prompt_delivered?: boolean;
+  parsed_model?: string | null;
+  model_mismatch?: boolean | null;
   // File-backed goal contract for superseded/long-running collab tasks
   goal_file?: string | null;
   // Launch context for worktree/profile-aware spawns
@@ -96,6 +103,8 @@ export interface PublicAgent {
   session_id: string | null;
   resumable: boolean;
   resume_command?: string;
+  submit_verified?: boolean | null;
+  model_mismatch?: boolean | null;
 }
 
 export interface AgentRoute {
