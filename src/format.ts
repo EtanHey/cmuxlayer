@@ -159,8 +159,12 @@ export function formatReadScreen(
   return result.join("\n");
 }
 
-export function formatListAgents(agents: PublicAgent[], count: number): string {
-  if (count === 0) {
+export function formatListAgents(
+  agents: PublicAgent[],
+  count: number,
+  skippedAgents: Array<{ agent_id: string; error: string }> = [],
+): string {
+  if (count === 0 && skippedAgents.length === 0) {
     return "\u250c\u2500 cmux agents\n\u2502 No agents running.\n\u2514\u2500";
   }
 
@@ -168,12 +172,16 @@ export function formatListAgents(agents: PublicAgent[], count: number): string {
   lines.push(
     `\u250c\u2500 cmux agents \u2500 ${count} agent${count !== 1 ? "s" : ""}`,
   );
-  lines.push(
-    `\u2502 ${pad("ID", 20)} ${pad("Repo", 16)} ${pad("State", 8)} ${pad("Model", 18)} ${pad("Session", 14)}`,
-  );
-  lines.push(
-    `\u251c${"─".repeat(20)}${"─".repeat(17)}${"─".repeat(9)}${"─".repeat(19)}${"─".repeat(14)}`,
-  );
+  if (count > 0) {
+    lines.push(
+      `\u2502 ${pad("ID", 20)} ${pad("Repo", 16)} ${pad("State", 8)} ${pad("Model", 18)} ${pad("Session", 14)}`,
+    );
+    lines.push(
+      `\u251c${"─".repeat(20)}${"─".repeat(17)}${"─".repeat(9)}${"─".repeat(19)}${"─".repeat(14)}`,
+    );
+  } else {
+    lines.push("\u2502 No healthy agent rows.");
+  }
 
   for (const a of agents) {
     const id = pad(truncate(a.agent_id, 18), 20);
@@ -182,6 +190,13 @@ export function formatListAgents(agents: PublicAgent[], count: number): string {
     const model = pad(truncate(a.model, 16), 18);
     const session = pad(a.session_id ?? "\u2014", 14);
     lines.push(`\u2502 ${id} ${repo} ${state} ${model} ${session}`);
+  }
+
+  if (skippedAgents.length > 0) {
+    const skippedIds = skippedAgents.map((agent) => agent.agent_id).join(", ");
+    lines.push(
+      `\u2502 \u26a0 skipped ${skippedAgents.length} invalid agent row${skippedAgents.length === 1 ? "" : "s"}: ${skippedIds}`,
+    );
   }
 
   lines.push("\u2514\u2500");
