@@ -546,7 +546,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
     const parsed =
@@ -560,7 +560,7 @@ describe("lean spawn tool responses", () => {
         agent_id: parsed.agent_id,
         tab_name: "cmuxlayerClaude [surface:new]",
         session_name: null,
-        model: "fable-5",
+        model: "sonnet",
         permission_mode: "skip-permissions",
         cwd: join(homedir(), "Gits", "cmuxlayer"),
         repo: "cmuxlayer",
@@ -593,7 +593,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     await spawn.handler(
-      { repo: "cmuxlayer", model: "fable-5", cli: "claude" },
+      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
 
@@ -665,6 +665,172 @@ describe("lean spawn tool responses", () => {
       effective_model: "codex",
     });
     expect(result.structuredContent.warnings).not.toHaveLength(0);
+  });
+
+  it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      cli: "codex",
+      effort: "medium",
+    });
+
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent.ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["send", "cmuxlayerCodex -s -E medium"]),
+    );
+  });
+
+  it("spawn_agent schema rejects max effort before invoking the handler", () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const parsed = spawn.inputSchema.safeParse({
+      repo: "cmuxlayer",
+      cli: "codex",
+      effort: "max",
+    });
+
+    expect(parsed.success).toBe(false);
+    expect(parsed.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_enum_value",
+          received: "max",
+          options: ["medium", "high", "xhigh", "ultra"],
+        }),
+      ]),
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rejects Codex effort for another CLI before creating a surface", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      cli: "claude",
+      effort: "medium",
+    });
+
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Codex effort "medium" cannot be used with cli "claude"',
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rejects an unsupported model before creating a surface", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", cli: "claude", model: "fable-5" },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(result.structuredContent.error).toContain(
+      'would actually run "claude-opus-5[1m]"',
+    );
+    expect(result.structuredContent.error).toContain(
+      "Accepted models: claude-opus-5[1m], sonnet",
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("new_worktree_split rejects an unsupported model before preparing a worktree", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
+    const mockExec = makeLifecycleExec();
+    const worktreeExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const spawn = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "claude",
+        model: "fable-5",
+        worktree: { name: "must-not-exist" },
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("spawn_in_workspace validates every model before creating the workspace", async () => {
+    const mockExec = makeLifecycleExec();
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_in_workspace"];
+
+    const result = await spawn.handler(
+      {
+        workspace_title: "Must not exist",
+        agents: [
+          {
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "codex",
+            role: "worker",
+          },
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            model: "fable-5",
+            role: "worker",
+          },
+        ],
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Unsupported model "fable-5" for cli "claude"',
+    );
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) =>
+        callArgs.includes("create-workspace"),
+      ),
+    ).toBe(false);
+    expect(
+      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
   });
 });
 
@@ -9370,7 +9536,7 @@ codex>
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     await spawn.handler(
-      { repo: "voicelayer", model: "opus", cli: "claude" },
+      { repo: "voicelayer", cli: "claude" },
       {} as any,
     );
     await spawn.handler(
@@ -9517,7 +9683,6 @@ codex>
     const parentResult = await spawn.handler(
       {
         repo: "orchestrator",
-        model: "opus",
         cli: "claude",
       },
       {} as any,
@@ -9638,7 +9803,7 @@ codex>
     const myAgents = (server as any)._registeredTools["my_agents"];
 
     await spawn.handler(
-      { repo: "golems", model: "opus", cli: "claude", prompt: "audit" },
+      { repo: "golems", cli: "claude", prompt: "audit" },
       {} as any,
     );
 
@@ -9770,7 +9935,7 @@ codex>
     const engine = (server as any)._registeredTools["interact"]._engine;
 
     const spawnResult = await spawn.handler(
-      { repo: "voicelayer", model: "opus", cli: "claude", prompt: "fix tts" },
+      { repo: "voicelayer", cli: "claude", prompt: "fix tts" },
       {} as any,
     );
     const agentId = spawnResult.structuredContent.agent_id;
@@ -10096,7 +10261,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       {
         repo: "cmuxlayer",
         cli: "codex",
-        model: "gpt-5.6-sol",
+        model: "codex",
         workspace: "workspace:2",
         worktree: false,
       },
@@ -10121,7 +10286,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],
@@ -10146,7 +10311,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],
@@ -10259,7 +10424,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       {
         repo: "cmuxlayer",
         cli: "codex",
-        model: "gpt-5.6-sol",
+        model: "codex",
         workspace: "workspace:2",
         worktree: false,
       },
@@ -10288,7 +10453,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli: "codex",
-            model: "gpt-5.6-sol",
+            model: "codex",
             role: "worker",
           },
         ],

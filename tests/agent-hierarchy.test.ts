@@ -129,7 +129,7 @@ describe("Agent Hierarchy", () => {
     // Spawn a child (second newSplit call will also return surface:new — ok for test)
     const child = await engine.spawnAgent({
       repo: "voicelayer",
-      model: "haiku",
+      model: "sonnet",
       cli: "claude",
       prompt: "Sub task",
       parent_agent_id: root.agent_id,

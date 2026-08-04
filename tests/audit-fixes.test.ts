@@ -352,7 +352,7 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
     const childResult = await spawn.handler(
       {
         repo: "test",
-        model: "haiku",
+        model: "sonnet",
         cli: "claude",
         workspace: "workspace:1",
         parent_agent_id: parentId,
@@ -372,7 +372,6 @@ describe("spawn_agent MCP schema includes parent_agent_id and max_cost_per_agent
     const result = await spawn.handler(
       {
         repo: "test",
-        model: "opus",
         cli: "claude",
         workspace: "workspace:1",
         max_cost_per_agent: 5.0,

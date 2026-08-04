@@ -664,7 +664,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe("brainlayerClaude -s -m sonnet");
+      expect(launchCmd).toBe("brainlayerClaude -s -S");
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -4238,6 +4238,7 @@ describe("AgentEngine", () => {
     it.each([
       [
         "codex",
+        "codex",
         "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         `gpt-5.4
 Working (12s • esc to interrupt)
@@ -4245,25 +4246,28 @@ To continue this session, run codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e`
       ],
       [
         "claude",
+        "sonnet",
         "5b9f4f35-2942-4c8b-b1af-d89d4e36c95d",
         `Claude Code
 Session ID: 5b9f4f35-2942-4c8b-b1af-d89d4e36c95d`,
       ],
       [
         "cursor",
+        "auto",
         "9e26fe1a-2374-4b15-b9b2-646ac7a8c2ef",
         `Cursor Agent
 chatId: 9e26fe1a-2374-4b15-b9b2-646ac7a8c2ef`,
       ],
       [
         "gemini",
+        "pro",
         "8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274",
         `Gemini CLI
 Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       ],
     ] as const)(
       "captures %s session ids from the boot banner within the first sweep",
-      async (cli, sessionId, banner) => {
+      async (cli, model, sessionId, banner) => {
         liveSurfaces = [makeSpawnSurface()];
         (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
           surface: "surface:new",
@@ -4275,7 +4279,7 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
         engine.startSweep(1000);
         const result = await engine.spawnAgent({
           repo: "brainlayer",
-          model: "sonnet",
+          model,
           cli,
           prompt: "Fix gap F",
         });
@@ -8788,7 +8792,6 @@ To continue this session, run codex resume ${sessionId}`,
           await expect(
             defaultEngine.spawnAgent({
               repo: `missinglauncher${suffix}`,
-              model: "test",
               cli,
               prompt: "",
             }),
@@ -8815,7 +8818,6 @@ To continue this session, run codex resume ${sessionId}`,
         await expect(
           defaultEngine.spawnAgent({
             repo: "missinglauncher",
-            model: "test",
             cli: "claude",
             prompt: "",
             cwd: "/tmp/cmux-worktree",
@@ -10580,9 +10582,17 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("passes an explicit Codex effort to the repoGolem launcher", () => {
+    expect(
+      buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
+        effort: "medium",
+      }),
+    ).toBe("brainlayerCodex -s -E medium");
+  });
+
   it("adds safe model flags for recognized launcher model aliases", () => {
     expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
-      "brainlayerClaude -s -m sonnet",
+      "brainlayerClaude -s -S",
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
@@ -10683,7 +10693,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("claude", "golems", "sonnet", undefined, {
         cwd: "/p/wt",
       }),
-    ).toBe("golemsClaude -s -m sonnet -w '/p/wt'");
+    ).toBe("golemsClaude -s -S -w '/p/wt'");
     expect(
       buildLaunchCommand("kiro", "golems", undefined, undefined, {
         cwd: "/p/wt",
@@ -10714,7 +10724,7 @@ describe("buildLaunchCommand", () => {
         "sonnet",
         "agenthtmlhostClaude",
       ),
-    ).toBe("agenthtmlhostClaude -s -m sonnet");
+    ).toBe("agenthtmlhostClaude -s -S");
   });
 
   it("honors an explicitly resolved launcher name for gemini", () => {

@@ -1,6 +1,13 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
+export const CODEX_EFFORT_VALUES = [
+  "medium",
+  "high",
+  "xhigh",
+  "ultra",
+] as const;
+export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];
 
 export interface CliModelPolicyContract {
   defaultModel: string;
@@ -129,6 +136,47 @@ function ownModelAlias(cli: CliType, normalized: string): string | null {
   return typeof alias === "string" && alias ? alias : null;
 }
 
+function modelAliasUsesUngatedLauncherPath(
+  cli: CliType,
+  alias: string,
+): boolean {
+  if (cli === "claude") return alias === "sonnet";
+  return cli === "gemini" || cli === "kiro";
+}
+
+function acceptedModelNames(
+  cli: CliType,
+  allowModelOverride: boolean,
+): string[] {
+  const contract = MODEL_POLICY_CONTRACT.cli[cli];
+  const aliases = Object.keys(contract.modelAliases).filter(
+    (alias) =>
+      allowModelOverride || modelAliasUsesUngatedLauncherPath(cli, alias),
+  );
+  return [...new Set([contract.defaultModel, ...aliases])];
+}
+
+export function resolveSpawnEffort(
+  cli: CliType,
+  effort?: string,
+): CodexEffort | null {
+  const requested = effort?.trim();
+  if (!requested) return null;
+
+  if (!(CODEX_EFFORT_VALUES as readonly string[]).includes(requested)) {
+    throw new Error(
+      `Invalid Codex effort "${requested}". Accepted values: ${CODEX_EFFORT_VALUES.join(", ")}. No agent was spawned.`,
+    );
+  }
+  if (cli !== "codex") {
+    throw new Error(
+      `Codex effort "${requested}" cannot be used with cli "${cli}". Set cli to "codex" or omit effort. No agent was spawned.`,
+    );
+  }
+
+  return requested as CodexEffort;
+}
+
 export function resolveModelAlias(cli: CliType, model: string): string {
   const trimmed = model.trim();
   const normalized = normalizeModelKey(trimmed);
@@ -154,6 +202,13 @@ export function resolveLaunchModelFlag(
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
+  if (
+    cli === "claude" &&
+    alias !== "sonnet" &&
+    !opts?.allowModelOverride
+  ) {
+    return null;
+  }
   return alias ?? null;
 }
 
@@ -169,6 +224,22 @@ export function resolveSpawnModelPolicy(
   const defaultModel = contract.defaultModel;
   const requestedOrDefault = requestedWasOmitted ? defaultModel : requestedModel;
   const resolvedRequested = resolveModelAlias(cli, requestedOrDefault);
+
+  // Cursor deliberately accepts arbitrary model strings behind its escape
+  // hatch. Every launcher-backed CLI, however, has a finite alias table. Do
+  // not let the older Codex coercion branch turn an unknown alias into an
+  // apparently successful default-model spawn.
+  if (
+    !requestedWasOmitted &&
+    cli !== "cursor" &&
+    !modelMatchesDefault(cli, requestedModel) &&
+    ownModelAlias(cli, normalizeModelKey(requestedModel)) === null
+  ) {
+    const acceptedModels = acceptedModelNames(cli, overrideAllowed);
+    throw new Error(
+      `Unsupported model "${requestedModel}" for cli "${cli}": without a valid alias, the launcher would actually run "${defaultModel}". Accepted models: ${acceptedModels.join(", ")}. No agent was spawned.`,
+    );
+  }
 
   if (
     !requestedWasOmitted &&
@@ -195,14 +266,27 @@ export function resolveSpawnModelPolicy(
     };
   }
 
+  const launcherModel = requestedWasOmitted
+    ? null
+    : resolveLaunchModelFlag(cli, resolvedRequested, {
+        allowModelOverride: overrideAllowed,
+      });
+  if (
+    !requestedWasOmitted &&
+    !modelMatchesDefault(cli, resolvedRequested) &&
+    launcherModel === null
+  ) {
+    const acceptedModels = acceptedModelNames(cli, overrideAllowed);
+    throw new Error(
+      `Unsupported model "${requestedModel}" for cli "${cli}": without a valid alias, the launcher would actually run "${defaultModel}". Accepted models: ${acceptedModels.join(", ")}. No agent was spawned.`,
+    );
+  }
+
   return {
     cli,
     requested_model: requestedModel,
     effective_model: resolvedRequested,
-    launcher_model:
-      requestedWasOmitted || modelMatchesDefault(cli, resolvedRequested)
-        ? null
-        : resolvedRequested,
+    launcher_model: launcherModel,
     coerced: false,
     warnings: [],
     override_env: MODEL_OVERRIDE_ENV,

@@ -23,6 +23,11 @@ import { assertMutationAllowed, parseReservedModeKey } from "./mode-policy.js";
 import { extractPrefix, replaceTaskSuffix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
 import { buildSpawnToolReturn, shapeSpawnResponse } from "./spawn-response.js";
+import {
+  CODEX_EFFORT_VALUES,
+  resolveSpawnEffort,
+  resolveSpawnModelPolicy,
+} from "./model-policy.js";
 import { StateManager } from "./state-manager.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import {
@@ -9159,6 +9164,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default.",
           ),
+        effort: z
+          .enum(CODEX_EFFORT_VALUES)
+          .optional()
+          .describe(
+            "Optional Codex reasoning effort passed to the repoGolem launcher. Accepted values: medium, high, xhigh, ultra. The launcher defaults to xhigh when omitted; max is not accepted by the current launcher.",
+          ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
           .describe("CLI tool to launch"),
@@ -9264,6 +9275,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             selectedRoleField,
           );
           const effectiveRole = normalizedRole.role;
+          resolveSpawnModelPolicy(args.cli, args.model);
+          resolveSpawnEffort(args.cli, args.effort);
           const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
           assertBootPromptMode(args.prompt, bootPromptPath);
           assertSpawnPromptInputAllowed({
@@ -9353,6 +9366,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result = await engine.spawnAgent({
               repo: args.repo,
               model: args.model,
+              effort: args.effort,
               cli: args.cli,
               prompt: spawnPrompt,
               boot_prompt_pending:
@@ -9713,6 +9727,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
         let mutationWorkspace: string | undefined;
         try {
+          resolveSpawnModelPolicy(args.cli, args.model);
           assertBootPromptMode(args.prompt, null);
           assertSpawnPromptInputAllowed({
             tool: "new_worktree_split",
@@ -10032,6 +10047,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               compatibilityWarning: normalizedRole.warning,
             };
           });
+          for (const agent of normalizedAgents) {
+            resolveSpawnModelPolicy(agent.cli, agent.model);
+          }
           const compatibilityWarnings = normalizedAgents.flatMap((agent) =>
             agent.compatibilityWarning ? [agent.compatibilityWarning] : [],
           );
