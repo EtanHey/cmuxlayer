@@ -1002,6 +1002,17 @@ describe("tool handler integration", () => {
     expect(result.structuredContent.ok).toBe(true);
   });
 
+  it("list_surfaces describes verbose cost and the condensed default", () => {
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const tool = (server as any)._registeredTools["list_surfaces"];
+
+    expect(tool.description).toMatch(/condensed by default/i);
+    const verboseDescription = tool.inputSchema.shape.verbose.description;
+    expect(verboseDescription).toMatch(/raw cmux fields/i);
+    expect(verboseDescription).toMatch(/token/i);
+    expect(verboseDescription).toMatch(/rarely needed/i);
+  });
+
   it("select_workspace handler calls cmux select-workspace", async () => {
     mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({}),
