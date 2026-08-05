@@ -1,10 +1,15 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
+// Must stay in sync with golem-dispatch.zsh:446 — the launcher is the authority.
+// `low` and `max` were added there; omitting them here made `max` (Etan's pin for
+// some lanes) impossible to express through spawn_agent at all.
 export const CODEX_EFFORT_VALUES = [
+  "low",
   "medium",
   "high",
   "xhigh",
+  "max",
   "ultra",
 ] as const;
 export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];
@@ -202,11 +207,7 @@ export function resolveLaunchModelFlag(
   }
 
   const alias = ownModelAlias(cli, normalizeModelKey(requested));
-  if (
-    cli === "claude" &&
-    alias !== "sonnet" &&
-    !opts?.allowModelOverride
-  ) {
+  if (cli === "claude" && alias !== "sonnet" && !opts?.allowModelOverride) {
     return null;
   }
   return alias ?? null;
@@ -222,7 +223,9 @@ export function resolveSpawnModelPolicy(
   const requestedWasOmitted = requestedModel.length === 0;
   const overrideAllowed = envFlagEnabled(env[MODEL_OVERRIDE_ENV]);
   const defaultModel = contract.defaultModel;
-  const requestedOrDefault = requestedWasOmitted ? defaultModel : requestedModel;
+  const requestedOrDefault = requestedWasOmitted
+    ? defaultModel
+    : requestedModel;
   const resolvedRequested = resolveModelAlias(cli, requestedOrDefault);
 
   // Cursor deliberately accepts arbitrary model strings behind its escape

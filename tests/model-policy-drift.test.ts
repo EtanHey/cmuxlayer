@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+  CODEX_EFFORT_VALUES,
   MODEL_OVERRIDE_ENV,
   MODEL_POLICY_CONTRACT,
   resolveSpawnModelPolicy,
@@ -117,6 +118,47 @@ describe.skipIf(golemsAbsent)("model-policy parity with golem-dispatch", () => {
       contractDefault,
       `golem-dispatch default ${dispatchDefault} must match MODEL_POLICY_CONTRACT cli.claude.defaultModel ${contractDefault}`,
     ).toBe(dispatchDefault);
+  });
+
+  it("keeps the Codex effort ladder aligned with the launcher", () => {
+    // RED 2026-08-05: the launcher gained `low` and `max` and moved its default
+    // xhigh -> high; cmuxlayer's enum and tool description did not follow. The
+    // stale description is what agents read at dispatch time, so it normalised
+    // xhigh fleet-wide and cost real usage. Nothing guarded effort — only model.
+    const ladder = dispatchText.match(/low\|medium\|high\|xhigh\|max\|ultra/);
+    expect(
+      ladder,
+      "golem-dispatch.zsh must still expose the low|medium|high|xhigh|max|ultra ladder",
+    ).not.toBeNull();
+
+    for (const value of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
+      expect(
+        CODEX_EFFORT_VALUES as readonly string[],
+        `CODEX_EFFORT_VALUES must accept "${value}" — the launcher does`,
+      ).toContain(value);
+    }
+  });
+
+  it("states the launcher's REAL effort default, not a stale one", () => {
+    const declared = dispatchText.match(/_flag_codex_effort="([a-z]+)"/)?.[1];
+    expect(declared, "could not parse _flag_codex_effort default").toBeTruthy();
+
+    // The tool description is the text agents read at dispatch time. If it names
+    // a different default than the launcher actually uses, every agent inherits
+    // the wrong one.
+    const serverText = readFileSync(
+      join(process.cwd(), "src", "server.ts"),
+      "utf8",
+    );
+    const claimed = serverText.match(
+      /launcher defaults to ([A-Za-z]+) when omitted/i,
+    )?.[1];
+    if (claimed) {
+      expect(
+        claimed.toLowerCase(),
+        `spawn_agent effort description claims "${claimed}" but golem-dispatch.zsh defaults to "${declared}"`,
+      ).toBe(declared);
+    }
   });
 
   it("refuses Cursor agent -m overrides in both policy paths", () => {
