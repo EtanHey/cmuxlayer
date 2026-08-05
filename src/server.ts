@@ -156,10 +156,7 @@ import type {
   ParsedScreenResult,
 } from "./types.js";
 import { normalizeKeyName } from "./key-names.js";
-import {
-  currentCallerContext,
-  type CallerContext,
-} from "./caller-context.js";
+import { currentCallerContext, type CallerContext } from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   matchReadyPattern,
@@ -347,7 +344,7 @@ export const DEFAULT_SEND_INPUT_MAX_INLINE_CHARS = 1_800;
 const PANE_INPUT_BREAKAGE_GUIDANCE =
   "Max 2-3 short lines. Longer payloads BREAK the receiving pane — write the payload to a file and send one line: `Read and follow <path>`.";
 const ZSH_BANG_INLINE_WARNING =
-  'WARNING — a `!` in an inline brief may be consumed by zsh history expansion before it reaches the worker, leaving the worker idle with no task; file-backed payloads avoid that shell interpretation.';
+  "WARNING — a `!` in an inline brief may be consumed by zsh history expansion before it reaches the worker, leaving the worker idle with no task; file-backed payloads avoid that shell interpretation.";
 export const SEND_INPUT_PASTE_BATCH_MAX_BYTES = 16_000;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
 const SEND_INPUT_RETRY_ATTEMPTS = 3;
@@ -1404,10 +1401,7 @@ function assertDenseInlineInputAllowed(opts: {
   const inputCharacterCount = Array.from(opts.value).length;
   const longestUnbrokenRun = opts.value
     .split(/\r?\n/)
-    .reduce(
-      (longest, line) => Math.max(longest, Array.from(line).length),
-      0,
-    );
+    .reduce((longest, line) => Math.max(longest, Array.from(line).length), 0);
   if (longestUnbrokenRun <= DENSE_INLINE_POLICY_MAX_UNBROKEN_CHARS) {
     return;
   }
@@ -1463,7 +1457,11 @@ function assertBroadcastInlineInputAllowed(text: string): void {
     );
   }
 
-  assertDenseInlineInputAllowed({ tool: "broadcast", arg: "text", value: text });
+  assertDenseInlineInputAllowed({
+    tool: "broadcast",
+    arg: "text",
+    value: text,
+  });
 }
 
 function broadcastRoleMatches(
@@ -4976,10 +4974,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const cwd = workspace?.current_directory?.trim();
     if (!cwd || workspaceDirectoryRepoMatchScore(repo, cwd) > 0) return;
     const title = workspace?.title?.trim();
-    const titleCandidates = [
-      inferRepoFromLauncherTitle(title),
-      title,
-    ].filter(
+    const titleCandidates = [inferRepoFromLauncherTitle(title), title].filter(
       (candidate, index, all): candidate is string =>
         Boolean(candidate) && all.indexOf(candidate) === index,
     );
@@ -5058,9 +5053,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
       const matches = paneLists
         .filter(({ panes }) =>
-          panes.some(
-            (pane) => pane.ref === opts.pane || pane.id === opts.pane,
-          ),
+          panes.some((pane) => pane.ref === opts.pane || pane.id === opts.pane),
         )
         .map(({ workspace }) => workspace);
       if (matches.length === 1) {
@@ -5119,9 +5112,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): Promise<FocusRestoreLease | null> => {
     if (!targetWorkspace) return null;
     const prior =
-      capturedPrior === undefined
-        ? await currentFocusTarget()
-        : capturedPrior;
+      capturedPrior === undefined ? await currentFocusTarget() : capturedPrior;
     const placementFocus =
       capturedPrior === undefined ? prior : await currentFocusTarget();
     if (!placementFocus || placementFocus.workspace !== targetWorkspace) {
@@ -5157,9 +5148,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const sameExactFocus = (left: FocusTarget, right: FocusTarget): boolean =>
     Boolean(
       left.surface &&
-        right.surface &&
-        left.workspace === right.workspace &&
-        left.surface === right.surface,
+      right.surface &&
+      left.workspace === right.workspace &&
+      left.surface === right.surface,
     );
 
   /**
@@ -5415,17 +5406,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .map((record) => record.surface_uuid?.trim())
         .filter((uuid): uuid is string => Boolean(uuid)),
     );
-    const registryUuid = registryUuids.size === 1 ? [...registryUuids][0] : null;
+    const registryUuid =
+      registryUuids.size === 1 ? [...registryUuids][0] : null;
     const expectedUuid = capturedUuid ?? registryUuid;
     const topologyObserverEpoch = context.surfaceObserverEpoch;
     const topology = await collectSurfaceTopology();
 
     if (topology?.complete === true) {
       const uuidTargetRef = findSurfaceRefByUuid(topology, requestedSurface);
-      captureSurfaceIdentities(
-        topology.surfaceIdByRef,
-        topologyObserverEpoch,
-      );
+      captureSurfaceIdentities(topology.surfaceIdByRef, topologyObserverEpoch);
       const currentUuidAtRequestedRef =
         topology.surfaceIdByRef.get(requestedSurface) ?? null;
       if (
@@ -5638,8 +5627,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       .sort((a, b) => {
         if (b.version !== a.version) return b.version - a.version;
         return (
-          new Date(b.updated_at).getTime() -
-          new Date(a.updated_at).getTime()
+          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
         );
       });
 
@@ -5788,8 +5776,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const spawnDeliveryWorkspace = (
     result: { workspace_id?: string },
     fallback?: string,
-  ): string | undefined =>
-    result.workspace_id || fallback;
+  ): string | undefined => result.workspace_id || fallback;
 
   const isLeadLikeSurfaceTitle = (title: string): boolean =>
     /\b(?:lead|orchestrator|coordinator|coord)\b/i.test(title);
@@ -6644,9 +6631,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.workspace || targetWorkspace,
           );
         } else {
-          focusRestoreLease = await capturePostCreationFocus(
-            focusRestoreLease,
-          );
+          focusRestoreLease = await capturePostCreationFocus(focusRestoreLease);
         }
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
@@ -7450,12 +7435,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       try {
         let codexAgentBeforeRead: AgentRecord | null = null;
-        const hasCodexRolloutCandidate = stateMgr.listStates().some(
-          (agent) =>
-            agent.cli === "codex" &&
-            Boolean(agent.surface_uuid?.trim()) &&
-            Boolean(agent.cli_session_path),
-        );
+        const hasCodexRolloutCandidate = stateMgr
+          .listStates()
+          .some(
+            (agent) =>
+              agent.cli === "codex" &&
+              Boolean(agent.surface_uuid?.trim()) &&
+              Boolean(agent.cli_session_path),
+          );
         if (hasCodexRolloutCandidate) {
           const topologyBeforeRead = await collectSurfaceTopology(
             args.workspace,
@@ -7491,11 +7478,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               result.text,
               pickLatestSurfaceModel(stateMgr, result.surface),
             ),
-            resolveHarnessStateForSurface(
-              stateMgr,
-              result.surface,
-              codexAgent,
-            ),
+            resolveHarnessStateForSurface(stateMgr, result.surface, codexAgent),
           ),
           codexFill,
         );
@@ -7607,7 +7590,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const surfaces = await client.listPaneSurfaces({
             workspace: route.workspace,
           });
-          const surface = surfaces.surfaces.find((s) => s.ref === route.surface);
+          const surface = surfaces.surfaces.find(
+            (s) => s.ref === route.surface,
+          );
           const currentTitle = surface?.title ?? "";
           finalTitle = replaceTaskSuffix(currentTitle, args.title);
         }
@@ -7795,10 +7780,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             .listStates()
             .find(
               (record) =>
-                ((route.stableSurfaceIdentity && record.surface_uuid
+                (route.stableSurfaceIdentity && record.surface_uuid
                   ? record.surface_uuid.toLowerCase() ===
                     route.stableSurfaceIdentity.toLowerCase()
-                  : record.surface_id === route.surface)) &&
+                  : record.surface_id === route.surface) &&
                 !TERMINAL_AGENT_STATES.has(record.state),
             );
           if (backingAgent) {
@@ -7867,10 +7852,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 .listStates()
                 .find(
                   (record) =>
-                    ((route.stableSurfaceIdentity && record.surface_uuid
+                    (route.stableSurfaceIdentity && record.surface_uuid
                       ? record.surface_uuid.toLowerCase() ===
                         route.stableSurfaceIdentity.toLowerCase()
-                      : record.surface_id === route.surface)) &&
+                      : record.surface_id === route.surface) &&
                     !TERMINAL_AGENT_STATES.has(record.state),
                 );
               if (remainingLiveAgent) {
@@ -8747,12 +8732,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         const existing = input.agentId
           ? engine.getAgentState(input.agentId)
-          : (registry.list().find((record) =>
-              input.surfaceUuid
-                ? record.surface_uuid?.toLowerCase() ===
-                  input.surfaceUuid.toLowerCase()
-                : record.surface_id === input.surfaceId,
-            ) ?? null);
+          : (registry
+              .list()
+              .find((record) =>
+                input.surfaceUuid
+                  ? record.surface_uuid?.toLowerCase() ===
+                    input.surfaceUuid.toLowerCase()
+                  : record.surface_id === input.surfaceId,
+              ) ?? null);
         if (!existing) return;
 
         const updated =
@@ -9209,7 +9196,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .enum(CODEX_EFFORT_VALUES)
           .optional()
           .describe(
-            "Optional Codex reasoning effort passed to the repoGolem launcher. Accepted values: medium, high, xhigh, ultra. The launcher defaults to xhigh when omitted; max is not accepted by the current launcher.",
+            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. Accepted: low, medium, high, xhigh, max, ultra. The launcher defaults to HIGH when omitted (golem-dispatch.zsh:431). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
           ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
@@ -9501,8 +9488,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 const updated = stateMgr.updateRecord(result.agent_id, {
                   task_summary: bootPromptDelivery.prompt_text,
                   boot_prompt_pending: false,
-                  prompt_delivered:
-                    bootPromptDelivery.submit_verified === true,
+                  prompt_delivered: bootPromptDelivery.submit_verified === true,
                   submit_verified: bootPromptDelivery.submit_verified,
                 });
                 registry.set(result.agent_id, updated);
@@ -9615,10 +9601,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
           if (focusRestoreWarning) {
-            result.warnings = [
-              ...(result.warnings ?? []),
-              focusRestoreWarning,
-            ];
+            result.warnings = [...(result.warnings ?? []), focusRestoreWarning];
           }
 
           await refreshManagedMetadataBestEffort(result.agent_id);
@@ -9883,10 +9866,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             { waitForReady: !hasPrompt },
           );
           if (focusRestoreWarning) {
-            result.warnings = [
-              ...(result.warnings ?? []),
-              focusRestoreWarning,
-            ];
+            result.warnings = [...(result.warnings ?? []), focusRestoreWarning];
           }
           await refreshManagedMetadataBestEffort(result.agent_id);
           await lifecycleSeatManifestPublisher({
@@ -10136,9 +10116,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           // current focus cannot prove it already is. The lease drives
           // focus-back only while the user has not moved since cmuxlayer's
           // latest placement mutation.
-          focusRestoreLease = await capturePostCreationFocus(
-            focusRestoreLease,
-          );
+          focusRestoreLease = await capturePostCreationFocus(focusRestoreLease);
 
           for (const agent of normalizedAgents) {
             const hasPrompt = hasInlinePrompt(agent.prompt);
@@ -10366,10 +10344,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (e.launch_cause instanceof SurfaceGoneError) {
               return err(
                 e.launch_cause,
-                surfaceGonePayload(
-                  e.launch_cause,
-                  failureIdentityPayload,
-                ),
+                surfaceGonePayload(e.launch_cause, failureIdentityPayload),
               );
             }
             return err(e, failureIdentityPayload);
@@ -10390,10 +10365,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           if (e instanceof SurfaceGoneError) {
-            return err(
-              e,
-              surfaceGonePayload(e, failureIdentityPayload),
-            );
+            return err(e, surfaceGonePayload(e, failureIdentityPayload));
           }
           if (e instanceof BootPromptTimeoutError) {
             return err(e, {

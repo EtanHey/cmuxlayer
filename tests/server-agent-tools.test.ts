@@ -686,7 +686,14 @@ describe("lean spawn tool responses", () => {
     );
   });
 
-  it("spawn_agent schema rejects max effort before invoking the handler", () => {
+  // CHANGED 2026-08-05, deliberately, with rationale: this asserted `max` must be
+  // REJECTED, which was correct when golem-dispatch.zsh's ladder was
+  // medium|high|xhigh|ultra. golems #657 added `low` and `max`, and Etan pins some
+  // lanes at max — so cmuxlayer rejecting it made his own pin impossible to express.
+  // The launcher is the authority; this test encoded a contract that no longer holds.
+  // Inverted to assert acceptance, NOT deleted, so the ladder stays pinned in both
+  // directions.
+  it("spawn_agent schema accepts max effort — the launcher's ladder is the authority", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -697,19 +704,16 @@ describe("lean spawn tool responses", () => {
       effort: "max",
     });
 
-    expect(parsed.success).toBe(false);
-    expect(parsed.error.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: "invalid_enum_value",
-          received: "max",
-          options: ["medium", "high", "xhigh", "ultra"],
-        }),
-      ]),
-    );
-    expect(
-      mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
-    ).toBe(false);
+    expect(parsed.success).toBe(true);
+
+    // And a value the launcher genuinely does not accept must still be refused,
+    // so this stays a real gate rather than an open door.
+    const bogus = spawn.inputSchema.safeParse({
+      repo: "cmuxlayer",
+      cli: "codex",
+      effort: "turbo",
+    });
+    expect(bogus.success).toBe(false);
   });
 
   it("spawn_agent rejects Codex effort for another CLI before creating a surface", async () => {
