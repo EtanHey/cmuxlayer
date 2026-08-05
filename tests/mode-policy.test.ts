@@ -61,6 +61,7 @@ describe("isMutatingTool", () => {
     expect(isMutatingTool("stop_agent")).toBe(true);
     expect(isMutatingTool("kill")).toBe(true);
     expect(isMutatingTool("agent_engine")).toBe(true);
+    expect(isMutatingTool("focus_surface")).toBe(true);
   });
 
   it("returns false for list_surfaces", () => {
@@ -109,6 +110,9 @@ describe("assertMutationAllowed", () => {
       /manual/i,
     );
     expect(() => assertMutationAllowed("agent_engine", "manual")).toThrow(
+      /manual/i,
+    );
+    expect(() => assertMutationAllowed("focus_surface", "manual")).toThrow(
       /manual/i,
     );
     expect(() => assertMutationAllowed("kill", "manual")).toThrow(/manual/i);

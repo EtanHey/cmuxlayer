@@ -111,6 +111,7 @@ function makeWorkspaceClient() {
       };
     }),
     newSurface: vi.fn(),
+    focusSurface: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockResolvedValue(undefined),
     sendKey: vi.fn().mockResolvedValue(undefined),
     readScreen: vi.fn().mockResolvedValue({

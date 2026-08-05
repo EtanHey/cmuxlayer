@@ -1854,6 +1854,7 @@ describe("agent lifecycle tool handlers", () => {
         };
       }),
       newSurface: vi.fn(),
+      focusSurface: vi.fn().mockResolvedValue(undefined),
       send: vi.fn().mockResolvedValue(undefined),
       sendKey: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
@@ -1961,6 +1962,7 @@ describe("agent lifecycle tool handlers", () => {
           };
         }),
         newSurface: vi.fn(),
+        focusSurface: vi.fn().mockResolvedValue(undefined),
         send: vi.fn().mockResolvedValue(undefined),
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
@@ -3163,6 +3165,7 @@ describe("agent lifecycle tool handlers", () => {
           };
         }),
         newSurface: vi.fn(),
+        focusSurface: vi.fn().mockResolvedValue(undefined),
         send: vi.fn().mockResolvedValue(undefined),
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
@@ -6279,6 +6282,7 @@ codex>
         };
       }),
       newSurface: vi.fn(),
+      focusSurface: vi.fn().mockResolvedValue(undefined),
       send: vi.fn().mockResolvedValue(undefined),
       sendKey: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
@@ -10089,20 +10093,32 @@ describe("auto-focus discipline (focus target before split, restore after render
   function makeFocusLifecycleExec(opts?: {
     selectedWorkspace?: string;
     focusedSurface?: string;
+    roleTopology?: boolean;
+    focusGatesCreatedSurfaceReadiness?: boolean;
     moveFocusDuringReadinessTo?: {
       workspace: string;
       surface: string;
     };
     focusSurfaceFails?: boolean;
+    focusCreatedSurfaceFails?: boolean;
+    failFocusObservationAfterCreation?: boolean;
   }): { exec: ExecFn; calls: string[][] } {
     const calls: string[][] = [];
     const lifecycleExec = makeLifecycleExec();
     let focusedWorkspace = opts?.selectedWorkspace ?? "workspace:1";
     let focusedSurface = opts?.focusedSurface ?? "surface:origin";
     let spawnCreated = false;
+    let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
       calls.push(args);
       if (args.includes("identify")) {
+        if (
+          opts?.failFocusObservationAfterCreation &&
+          spawnCreated &&
+          !createdSurfaceReadStarted
+        ) {
+          throw new Error("transient post-creation identify failure");
+        }
         return {
           stdout: JSON.stringify({
             caller: {
@@ -10120,11 +10136,21 @@ describe("auto-focus discipline (focus target before split, restore after render
         };
       }
       if (args.includes("rpc") && args.includes("surface.focus")) {
-        if (opts?.focusSurfaceFails) throw new Error("focus restore failed");
         const payload = JSON.parse(args.at(-1) ?? "{}") as {
           surface_id?: string;
           workspace_id?: string;
         };
+        if (
+          (opts?.focusSurfaceFails && payload.surface_id !== "surface:new") ||
+          (opts?.focusCreatedSurfaceFails &&
+            payload.surface_id === "surface:new")
+        ) {
+          throw new Error(
+            payload.surface_id === "surface:new"
+              ? "created surface focus failed"
+              : "focus restore failed",
+          );
+        }
         focusedWorkspace = payload.workspace_id ?? focusedWorkspace;
         focusedSurface = payload.surface_id ?? focusedSurface;
         return { stdout: "{}", stderr: "" };
@@ -10143,6 +10169,117 @@ describe("auto-focus discipline (focus target before split, restore after render
           stdout: JSON.stringify({
             workspace: "workspace:2",
             title: "Review team",
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        opts?.failFocusObservationAfterCreation &&
+        spawnCreated &&
+        !createdSurfaceReadStarted &&
+        args.includes("list-workspaces")
+      ) {
+        throw new Error("transient post-creation workspace-list failure");
+      }
+      if (opts?.roleTopology && args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:lead",
+                index: 0,
+                focused:
+                  focusedSurface === "surface:lead" ||
+                  focusedSurface === "surface:new",
+                surface_count: spawnCreated ? 2 : 1,
+                surface_refs: [
+                  "surface:lead",
+                  ...(spawnCreated ? ["surface:new"] : []),
+                ],
+                selected_surface_ref: spawnCreated
+                  ? "surface:new"
+                  : "surface:lead",
+                pixel_frame: { x: 0, y: 0, width: 800, height: 900 },
+              },
+              {
+                ref: "pane:worker",
+                index: 1,
+                focused: focusedSurface === "surface:worker",
+                surface_count: 1,
+                surface_refs: ["surface:worker"],
+                selected_surface_ref: "surface:worker",
+                pixel_frame: { x: 800, y: 0, width: 800, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (opts?.roleTopology && args.includes("list-pane-surfaces")) {
+        const pane = args[args.indexOf("--pane") + 1];
+        const surfaces =
+          pane === "pane:worker"
+            ? [
+                {
+                  ref: "surface:worker",
+                  title: "cmuxlayerCodex",
+                  type: "terminal",
+                  index: 0,
+                  selected: true,
+                },
+              ]
+            : [
+                {
+                  ref: "surface:lead",
+                  title: "cmuxlayerClaude",
+                  type: "terminal",
+                  index: 0,
+                  selected: !spawnCreated,
+                },
+                ...(spawnCreated
+                  ? [
+                      {
+                        ref: "surface:new",
+                        title: "cmuxlayerClaude [surface:new]",
+                        type: "terminal",
+                        index: 1,
+                        selected: true,
+                      },
+                    ]
+                  : []),
+              ];
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: pane,
+            surfaces,
+          }),
+          stderr: "",
+        };
+      }
+      if (
+        spawnCreated &&
+        args.includes("read-screen") &&
+        args.includes("surface:new")
+      ) {
+        createdSurfaceReadStarted = true;
+      }
+      if (
+        spawnCreated &&
+        opts?.focusGatesCreatedSurfaceReadiness &&
+        args.includes("read-screen") &&
+        args.includes("surface:new") &&
+        focusedSurface !== "surface:new"
+      ) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: "terminal initializing",
+            lines: 20,
+            scrollback_used: false,
           }),
           stderr: "",
         };
@@ -10250,6 +10387,179 @@ describe("auto-focus discipline (focus target before split, restore after render
     expect(result.structuredContent.ok).toBe(true);
     expect(selectIdx(calls, "workspace:2")).toBeGreaterThanOrEqual(0);
     expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThanOrEqual(0);
+  });
+
+  it.each([
+    {
+      name: "orchestrator tab while the worker pane holds focus",
+      placement: "orchestrator" as const,
+      cli: "claude" as const,
+      origin: "surface:worker",
+    },
+    {
+      name: "orchestrator tab while the lead pane holds focus",
+      placement: "orchestrator" as const,
+      cli: "claude" as const,
+      origin: "surface:lead",
+    },
+    {
+      name: "worker tab while the lead pane holds focus",
+      placement: "worker" as const,
+      cli: "codex" as const,
+      origin: "surface:lead",
+    },
+  ])(
+    "spawn_agent boots a $name, then restores the exact origin",
+    async ({ placement, cli, origin }) => {
+      vi.useFakeTimers();
+      try {
+        const { exec, calls } = makeFocusLifecycleExec({
+          focusedSurface: origin,
+          roleTopology: true,
+          focusGatesCreatedSurfaceReadiness: true,
+        });
+        const server = createLifecycleServer(exec);
+        const tool = (server as any)._registeredTools["spawn_agent"];
+
+        const resultPromise = tool.handler(
+          {
+            repo: "cmuxlayer",
+            cli,
+            placement,
+            workspace: "workspace:1",
+            force_new: true,
+            boot_prompt_timeout_ms: 20,
+          },
+          {} as any,
+        );
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await resultPromise;
+
+        expect(result.structuredContent.ok).toBe(true);
+        expect(result.structuredContent.surface_id).toBe("surface:new");
+        const created = calls.findIndex((args) =>
+          args.includes("new-surface"),
+        );
+        const focusedCreated = focusSurfaceIdx(calls, "surface:new");
+        const firstCreatedRead = calls.findIndex(
+          (args, index) =>
+            index > created &&
+            args.includes("read-screen") &&
+            args.includes("surface:new"),
+        );
+        const restoredOrigin = focusSurfaceIdx(calls, origin);
+
+        expect(created).toBeGreaterThanOrEqual(0);
+        expect(focusedCreated).toBeGreaterThan(created);
+        expect(firstCreatedRead).toBeGreaterThan(focusedCreated);
+        expect(restoredOrigin).toBeGreaterThan(firstCreatedRead);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("spawn_agent with focus=true boots on and leaves focus on the created tab", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = makeFocusLifecycleExec({
+        focusedSurface: "surface:worker",
+        roleTopology: true,
+        focusGatesCreatedSurfaceReadiness: true,
+      });
+      const server = createLifecycleServer(exec);
+      const tool = (server as any)._registeredTools["spawn_agent"];
+      const args = tool.inputSchema.parse({
+        repo: "cmuxlayer",
+        cli: "claude",
+        placement: "orchestrator",
+        workspace: "workspace:1",
+        force_new: true,
+        focus: true,
+        boot_prompt_timeout_ms: 20,
+      });
+
+      const resultPromise = tool.handler(args, {} as any);
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(result.structuredContent.ok).toBe(true);
+      expect(focusSurfaceIdx(calls, "surface:new")).toBeGreaterThanOrEqual(0);
+      expect(focusSurfaceIdx(calls, "surface:worker")).toBe(-1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent restores the exact origin without re-observing post-creation focus", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = makeFocusLifecycleExec({
+        focusedSurface: "surface:worker",
+        roleTopology: true,
+        focusGatesCreatedSurfaceReadiness: true,
+        failFocusObservationAfterCreation: true,
+      });
+      const server = createLifecycleServer(exec);
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          cli: "claude",
+          placement: "orchestrator",
+          workspace: "workspace:1",
+          force_new: true,
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(result.structuredContent.ok).toBe(true);
+      expect(focusSurfaceIdx(calls, "surface:worker")).toBeGreaterThan(
+        firstReadScreenIdx(calls),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent fails fast with the created identity when the tab cannot be focused", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec } = makeFocusLifecycleExec({
+        focusedSurface: "surface:worker",
+        roleTopology: true,
+        focusGatesCreatedSurfaceReadiness: true,
+        focusCreatedSurfaceFails: true,
+      });
+      const server = createLifecycleServer(exec);
+      const tool = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = tool.handler(
+        {
+          repo: "cmuxlayer",
+          cli: "claude",
+          placement: "orchestrator",
+          workspace: "workspace:1",
+          force_new: true,
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(result.structuredContent.ok).toBe(false);
+      expect(result.structuredContent.error).toMatch(/focus.*surface:new/i);
+      expect(result.structuredContent.agent_id).toEqual(expect.any(String));
+      expect(result.structuredContent.surface_id).toBe("surface:new");
+      expect(result.structuredContent.error).not.toMatch(/readiness|timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("new_worktree_split restores the prior surface after a cross-workspace spawn", async () => {

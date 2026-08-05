@@ -25,6 +25,7 @@ const MUTATING_TOOLS = new Set([
   "boot_prompt",
   "send_key",
   "rename_tab",
+  "focus_surface",
   "close_surface",
   "browser_surface",
   "spawn_agent",

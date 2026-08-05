@@ -5137,10 +5137,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   /** Refresh the lease immediately after the surface mutation. */
   const capturePostCreationFocus = async (
     lease: FocusRestoreLease | null,
+    created?: { surface: string; workspace?: string },
   ): Promise<FocusRestoreLease | null> => {
     if (!lease) return null;
+    if (created?.surface) {
+      return {
+        ...lease,
+        expected: {
+          workspace: created.workspace ?? lease.expected.workspace,
+          surface: created.surface,
+        },
+      };
+    }
     const expected = await currentFocusTarget();
-    return expected?.surface ? { ...lease, expected } : null;
+    return expected?.surface ? { ...lease, expected } : lease;
   };
 
   const sameExactFocus = (left: FocusTarget, right: FocusTarget): boolean =>
@@ -8579,6 +8589,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? client.renameTab(surface, title, renameOpts)
               : undefined;
           },
+          focusSurface: async (surface, focusOpts) => {
+            const { beforeMutation, ...clientOpts } = focusOpts ?? {};
+            await assertWorkspaceMutationAllowed(
+              "agent_engine",
+              focusOpts?.workspace,
+            );
+            await beforeMutation?.();
+            return client.focusSurface(surface, clientOpts);
+          },
           selectWorkspace: async (workspace) => {
             await assertWorkspaceMutationAllowed("agent_engine", workspace);
             return client.selectWorkspace(workspace);
@@ -9153,7 +9172,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
+      `${PANE_INPUT_BREAKAGE_GUIDANCE} Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
       {
         repo: z
           .string()
@@ -9249,6 +9268,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .default(false)
           .describe(
             "When true, suppress same repo/workspace/role duplicate-lane warnings. Default false so collab leads see reusable existing agents before spawning another lane.",
+          ),
+        focus: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe(
+            "Leave focus on the created agent tab instead of restoring the exact origin after initialization.",
           ),
         allow_long_inline: z
           .boolean()
@@ -9359,8 +9385,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const spawnPrompt = hasInlinePrompt(args.prompt)
             ? args.prompt
             : (bootPromptText ?? "");
-          let focusRestoreLease =
-            await focusTargetBeforeSplit(spawnWorkspace);
+          let focusRestoreLease = await focusTargetBeforeSplit(
+            spawnWorkspace,
+            args.focus !== true,
+          );
           let result: Awaited<ReturnType<typeof engine.spawnAgent>>;
           try {
             result = await engine.spawnAgent({
@@ -9382,9 +9410,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
-              on_surface_created: async () => {
+              on_surface_created: async (created) => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
+                  created,
                 );
               },
             });
@@ -9772,9 +9801,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role: "worker",
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
-            on_surface_created: async () => {
+            on_surface_created: async (created) => {
               focusRestoreLease = await capturePostCreationFocus(
                 focusRestoreLease,
+                created,
               );
             },
             boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
@@ -10100,9 +10130,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               workspace,
               role: agent.role,
               auto_archive_on_done: false,
-              on_surface_created: async () => {
+              on_surface_created: async (created) => {
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
+                  created,
                 );
               },
             });
