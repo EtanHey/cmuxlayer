@@ -110,6 +110,7 @@ import {
 import {
   dispatch,
   ensureInboxFile,
+  inboxMonitorState,
   inboxPath,
   monitorAlive,
   pendingDispatches,
@@ -8155,7 +8156,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // directly into the agent's surface, regardless of registry state.
   server.tool(
     "dispatch_to_agent",
-    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. If the recipient's monitor heartbeat is stale/absent, nudge='auto' (default) best-effort types a one-line inbox pointer into the agent's surface — independent of agent lifecycle state. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. If the recipient's monitor heartbeat is stale/absent, nudge='auto' (default) best-effort types a one-line inbox pointer into the agent's surface — independent of agent lifecycle state. A never-armed reader returns a non-retryable error after the durable append; a previously armed but stale reader returns explicit degraded success. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
     {
       agent_id: z
         .string()
@@ -8199,11 +8200,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           inboxOpts,
         );
         context.lifecycleSweepEngine?.requestFleetSidebarRepublish();
-        const monitor_alive = monitorAlive(
+        const monitor_state = inboxMonitorState(
           args.agent_id,
           INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS,
           inboxOpts,
         );
+        const monitor_alive = monitor_state === "alive";
         const pending = pendingDispatches(
           args.agent_id,
           AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS,
@@ -8270,13 +8272,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               stale_count: pending.length,
             })
           : undefined;
-        return ok({
+        const delivery_status =
+          monitor_state === "alive"
+            ? "monitor_live"
+            : monitor_state === "stale"
+              ? "queued_monitor_stale"
+              : "queued_monitor_never_armed";
+        const receipt = {
           dispatched: msg,
           inbox: inboxPath(args.agent_id, inboxOpts),
+          durable: true,
+          delivery_status,
           monitor_alive,
+          monitor_state,
           health,
           nudge,
-        });
+        };
+        if (monitor_state === "never-armed") {
+          return err(
+            "inbox message was queued, but the recipient has never proved that its inbox monitor is armed",
+            {
+              error_code: "inbox_monitor_never_armed",
+              retryable: false,
+              ...receipt,
+            },
+          );
+        }
+        return ok(receipt);
       } catch (e) {
         return err(e);
       }

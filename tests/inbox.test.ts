@@ -14,6 +14,7 @@ import {
   agentDir,
   dispatch,
   dispatchOnce,
+  inboxMonitorState,
   inboxPath,
   monitorAlive,
   pendingDispatches,
@@ -219,13 +220,27 @@ describe("inbox write-channel", () => {
     clock = 20_000;
     writeHeartbeat("a5", opts);
     clock = 20_500;
+    expect(inboxMonitorState("a5", 1_000, opts)).toBe("alive");
     expect(monitorAlive("a5", 1_000, opts)).toBe(true);
     clock = 22_000; // 2000ms since heartbeat
+    expect(inboxMonitorState("a5", 1_000, opts)).toBe("stale");
     expect(monitorAlive("a5", 1_000, opts)).toBe(false);
   });
 
   it("FM#1 monitorAlive is false when no heartbeat exists", () => {
+    expect(inboxMonitorState("never-armed", 1_000, opts)).toBe(
+      "never-armed",
+    );
     expect(monitorAlive("never-armed", 1_000, opts)).toBe(false);
+  });
+
+  it("FM#1 treats a future-dated agent heartbeat as stale", () => {
+    clock = 50_000;
+    writeHeartbeat("clock-skewed", opts);
+    clock = 40_000;
+
+    expect(inboxMonitorState("clock-skewed", 1_000, opts)).toBe("stale");
+    expect(monitorAlive("clock-skewed", 1_000, opts)).toBe(false);
   });
 
   it("FM#1 server boot markers do not prove monitor liveness", () => {
@@ -236,6 +251,7 @@ describe("inbox write-channel", () => {
       ts_ms: 25_000,
       source: "server_boot",
     });
+    expect(inboxMonitorState("a5-boot", 1_000, opts)).toBe("never-armed");
     expect(monitorAlive("a5-boot", 1_000, opts)).toBe(false);
 
     writeHeartbeat("a5-boot", opts);
