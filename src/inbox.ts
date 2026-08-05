@@ -82,6 +82,8 @@ export interface MonitorHeartbeat {
   source: MonitorHeartbeatSource;
 }
 
+export type InboxMonitorState = "never-armed" | "alive" | "stale";
+
 export interface DispatchInput {
   from: string;
   to?: string;
@@ -452,9 +454,23 @@ export function monitorAlive(
   maxAgeMs: number,
   opts?: InboxOpts,
 ): boolean {
+  return inboxMonitorState(agentId, maxAgeMs, opts) === "alive";
+}
+
+/**
+ * Distinguish a reader that has never proved it was armed from one that was
+ * armed previously but is temporarily stale. Only agent-authored heartbeats
+ * count; server boot markers are audit metadata, not reader liveness.
+ */
+export function inboxMonitorState(
+  agentId: string,
+  maxAgeMs: number,
+  opts?: InboxOpts,
+): InboxMonitorState {
   const heartbeat = readLastAgentHeartbeat(agentId, opts);
-  if (!heartbeat) return false;
-  return nowOf(opts) - heartbeat.ts_ms <= maxAgeMs;
+  if (!heartbeat) return "never-armed";
+  const ageMs = nowOf(opts) - heartbeat.ts_ms;
+  return ageMs >= 0 && ageMs <= maxAgeMs ? "alive" : "stale";
 }
 
 /**

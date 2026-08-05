@@ -10,8 +10,10 @@
  *     stale/absent, best-effort type a one-line inbox pointer into the agent's
  *     surface — REGARDLESS of registry state (error/done included).
  *   - heartbeat fresh → no nudge (monitor will deliver).
- *   - agent unknown to the registry → dispatch still succeeds, nudge skipped.
- *   - nudge="never" → file append only.
+ *   - no agent-authored heartbeat ever → message remains durable, but the
+ *     receipt is a non-retryable error instead of false delivery success.
+ *   - stale heartbeat → explicit degraded success plus the recovery nudge.
+ *   - nudge="never" → file append only; receipt truth is unchanged.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -24,7 +26,11 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
-import { agentDir, writeHeartbeat, readInbox } from "../src/inbox.js";
+import {
+  agentDir,
+  writeHeartbeat,
+  readInbox,
+} from "../src/inbox.js";
 import type { ExecFn } from "../src/cmux-client.js";
 import {
   FleetSidebarPublisher,
@@ -231,7 +237,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     rmSync(inboxDir, { recursive: true, force: true });
   });
 
-  it("nudges via the agent's surface when heartbeat is absent — even in a TERMINAL state", async () => {
+  it("returns a non-success durable receipt when never armed, while still nudging a TERMINAL agent", async () => {
     const agentId = await spawnTestAgent(server);
 
     // Poison-equivalent: force a terminal state. The nudge must still go out.
@@ -254,7 +260,13 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(parsed.monitor_state).toBe("never-armed");
+    expect(parsed.delivery_status).toBe("queued_monitor_never_armed");
+    expect(parsed.retryable).toBe(false);
+    expect(parsed.durable).toBe(true);
+    expect(parsed.dispatched.task).toBe("GO");
     expect(parsed.monitor_alive).toBe(false);
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(true);
@@ -270,6 +282,34 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(
       readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
     ).toContain("GO");
+  });
+
+  it("returns explicit degraded success when a previously armed monitor is stale", async () => {
+    const agentId = await spawnTestAgent(server);
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => 1 });
+
+    const dispatchTool = server._registeredTools["dispatch_to_agent"];
+    const result = await dispatchTool.handler(
+      {
+        agent_id: agentId,
+        task: "GO",
+        from: "orc",
+        tag: "dispatch",
+        persist: false,
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.monitor_alive).toBe(false);
+    expect(parsed.monitor_state).toBe("stale");
+    expect(parsed.delivery_status).toBe("queued_monitor_stale");
+    expect(parsed.nudge.attempted).toBe(true);
+    expect(parsed.nudge.sent).toBe(true);
+    expect(readInbox(agentId, { baseDir: inboxDir })).toHaveLength(1);
   });
 
   it("does NOT nudge when the monitor heartbeat is fresh", async () => {
@@ -294,6 +334,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.monitor_alive).toBe(true);
+    expect(parsed.monitor_state).toBe("alive");
+    expect(parsed.delivery_status).toBe("monitor_live");
     expect(parsed.nudge.attempted).toBe(false);
     expect(sendCalls(exec).length).toBe(before);
   });
@@ -539,7 +581,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     ).toHaveLength(1);
   });
 
-  it("dispatch still succeeds for an agent unknown to the registry (nudge skipped, not failed)", async () => {
+  it("keeps an unknown agent's message durable but does not report false success", async () => {
     const dispatchTool = server._registeredTools["dispatch_to_agent"];
     const result = await dispatchTool.handler(
       {
@@ -555,7 +597,10 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(parsed.monitor_state).toBe("never-armed");
+    expect(parsed.retryable).toBe(false);
     expect(parsed.nudge.attempted).toBe(false);
     expect(parsed.nudge.sent).toBe(false);
     expect(readInbox("ghost-agent", { baseDir: inboxDir })).toHaveLength(1);
@@ -594,7 +639,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(false);
     expect(parsed.nudge.error_code).toBe("blocked_by_permission_prompt");
@@ -633,7 +679,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(false);
     expect(parsed.nudge.error_code).toBe("blocked_by_interactive_prompt");
@@ -663,12 +710,14 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(parsed.retryable).toBe(false);
     expect(parsed.nudge.attempted).toBe(false);
     expect(sendCalls(exec).length).toBe(before);
   });
 
-  it("a failed nudge send never fails the dispatch (file append is the contract)", async () => {
+  it("a failed nudge send does not lose the durable never-armed dispatch", async () => {
     const agentId = await spawnTestAgent(server);
     // Make subsequent send calls explode.
     (exec as ReturnType<typeof vi.fn>).mockImplementation(
@@ -693,7 +742,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(false);
     expect(parsed.nudge.reason).toMatch(/socket down|failed/i);
@@ -792,7 +842,8 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(false);
     expect(parsed.nudge.reason).toMatch(/recycled/i);
