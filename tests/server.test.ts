@@ -3024,6 +3024,7 @@ describe("tool handler integration", () => {
   });
 
   it("send_command fails closed when tracked-agent verification has no screen evidence (F8)", async () => {
+    vi.useFakeTimers();
     const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
@@ -3056,23 +3057,28 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_command"];
-    const result = await runWithFakeTimers(
-      () =>
-        tool.handler(
-          { surface: "surface:6", command: "codex resume 123" },
-          {} as any,
-        ),
-      6_000,
-    );
-    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(data.ok).toBe(false);
-    expect(data.submit_verified).toBe(false);
-    expect(data.submit_verification_reason).toBe("surface_screen_empty");
-    expect(data.retry_safe).toBe(false);
-    expect(data.retry_count).toBe(0);
-    expect(data.error).toContain("Enter submit could not be verified");
-    rmSync(stateDir, { recursive: true, force: true });
+    try {
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            { surface: "surface:6", command: "codex resume 123" },
+            {} as any,
+          ),
+        6_000,
+      );
+      const data =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(result.isError).toBe(true);
+      expect(data.ok).toBe(false);
+      expect(data.submit_verified).toBe(false);
+      expect(data.submit_verification_reason).toBe("surface_screen_empty");
+      expect(data.retry_safe).toBe(false);
+      expect(data.retry_count).toBe(0);
+      expect(data.error).toContain("Enter submit could not be verified");
+    } finally {
+      vi.useRealTimers();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("send_command returns delivered + cached identity after positive submit verification (F8)", async () => {

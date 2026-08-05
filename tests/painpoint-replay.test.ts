@@ -67,6 +67,7 @@ function readPainpointFixture(fileName: string): PainpointFixture {
     "claude-ask-user-question-overlay": "interactive_overlay",
     "claude-ask-user-question-picker-2026-07-13": "interactive_overlay",
     "claude-permission-confirmation": "permission_prompt",
+    "codex-pr343-live-queued-followup": "busy",
     "codex-update-menu": "interactive_overlay",
     "bare-shell-and-bare-gemini-prompt": "shell",
   };
@@ -173,6 +174,7 @@ describe("Phase 0 painpoint replay corpus", () => {
       "claude-ask-user-question-overlay",
       "claude-ask-user-question-picker-2026-07-13",
       "claude-permission-confirmation",
+      "codex-pr343-live-queued-followup",
       "codex-update-menu",
       "empty-dead-pane-submit",
       "long-inline-prompt-wedge",

@@ -1,0 +1,21 @@
+  Cursor Agent
+  v2026.07.23-e383d2b
+
+  Read and follow
+  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso
+  r.mdCURSOR_WORKING_PROBE
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 1ms                                                                    │
+  │ Running the read-only test command for CURSOR_WORKING_PROBE. Will respond with       │
+  │ CURSOR_WORKING_ACK upon completion. No edits, commits, or pushes will be made.       │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  Running the probe test, then I'll reply with the exact ACK.
+
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → Read and follow /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime
+    -target-cursor.mdCURSOR_WORKING_PROBE
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  Auto · 11.3%                                                              Run Everything
+  ~/Gits/cmuxlayer · 49bda98

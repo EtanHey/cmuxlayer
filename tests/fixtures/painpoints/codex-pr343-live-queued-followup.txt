@@ -1,0 +1,80 @@
+  └ brainlayer.brain_search({"query":"cmuxlayer PR 343 runtime target Codex defect lane
+        runtime-target-
+        codex","project":"cmuxlayer","source":"all","detail":"full","num_results":10})
+    ## Search results for "cmuxlayer PR 343 runtime target Codex defect lane…" - 10 of 10
+        shown
+
+    ### 1. WHAT: Completed the uncommitted Claude NOT_SHIP action round for cmuxlayer PR
+        #343 on source head 1…
+    - ID: brainbar-a3f7ab53-0ee
+    - Source: brainbar-store
+    - Date: 2026-08-01
+    - Preview: WHAT: Completed the uncommitted Claude NOT_SHIP action round for cmuxlayer PR
+        #343 on source head 191b963. Added fixture-backed Cursor accepted-text...
+
+• Explored
+  └ Read SKILL.md (systematic-debugging skill), SKILL.md (verification-before-completion
+  skill),
+         SKILL.md (test-driven-development skill), SKILL.md (never-fabricate skill)
+
+• Ran wc -l /Users/etanheyman/.codex/superpowers/skills/verification-before-completion/
+  │ SKILL.md /Users/etanheyman/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
+  └      139 /Users/etanheyman/.codex/superpowers/skills/verification-before-completion/
+    SKILL.md
+         448 /Users/etanheyman/Gits/golems/skills/golem-powers/never-fabricate/SKILL.md
+         587 total
+
+• Explored
+  └ Read SKILL.md (verification-before-completion skill), SKILL.md (never-fabricate skill),
+         pr343-runtime-target-codex.md
+
+• Called brainlayer.brain_expand({"chunk_id":"brainbar-a3f7ab53-0ee","before":0,"after":0})
+  └ ┌─ brain_expand: brainbar-a3f7ab53-0ee
+    ├─ Target
+    │ WHAT: Completed the uncommitted Claude NOT_SHIP action round for cmuxlayer PR #343 on
+        source head 191b963. Added fixture-backed Cursor accepted-text compatibility, exact
+        Codex/Cursor placeholder normalization, live-composer-scoped decorated/wrapped Codex
+        queue detection correlated to the current submitted prefix, explicit non-retry-safe
+        supersede_submit_unverified semantics with...
+
+• Called brainlayer.brain_expand({"chunk_id":"brainbar-d46a50f8-4f4","before":0,"after":0})
+  └ ┌─ brain_expand: brainbar-d46a50f8-4f4
+    ├─ Target
+    │ USER CORRECTION [fabrication]: I labeled the live Probe C runtime as source commit
+        e8021c4 even though only the worktree/source base was e8021c4. User corrected: the
+        parent verified the running MCP processes load /opt/homebrew/Cellar/
+        cmuxlayer/0.4.16/libexec/dist/index.js, which has no commit stamp and lacks the
+        merged dense-guard marker. Quote: 'do not call the live runtime e80...
+
+• Called brainlayer.brain_expand({"chunk_id":"brainbar-f51aafd0-f96","before":0,"after":0})
+  └ ┌─ brain_expand: brainbar-f51aafd0-f96
+    ├─ Target
+    │ WHAT: Independent Claude review of cmuxlayer PR #343 at head
+        191b963cdeb24ffe7d41862c40608c94927e87d1 returned NOT_SHIP and was posted at
+        https://github.com/EtanHey/cmuxlayer/pull/343#issuecomment-5153344489. WHY: the real
+        repo fixture tests/fixtures/cursor-2026-06-04-task-done.txt proves Cursor retains
+        accepted prompt text after TASK_DONE; the PR's global pending-text-over-work...
+
+────────────────────────────────────────────────────────────────────────────────────────────
+
+• CODEX_TARGET_READY
+
+─ Worked for 1m 08s ────────────────────────────────────────────────────────────────────────
+
+
+› Run the read-only command node -e 'setTimeout(()=>{},30000)' now; respond HOLD_30_DONE
+  only after it exits.
+
+
+Working (0s • esc to interrupt)
+
+• Messages to be submitted after next tool call (press esc to interrupt and send
+  immediately)
+  ↳ PR343_LIVE_QUEUE_CORRELATION_B_20260802T001445Z_abcdefghijklmnopqrstuvwxyz0123456789ABCD
+    EFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd
+    efghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
+    …
+ 
+› Summarize recent commits
+ 
+  gpt-5.6-sol xhigh · ~/Gits/cmuxlayer
