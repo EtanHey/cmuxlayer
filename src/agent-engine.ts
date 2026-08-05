@@ -672,7 +672,10 @@ interface AgentEngineClient {
   ): Promise<void>;
   focusSurface(
     surface: string,
-    opts?: { workspace?: string },
+    opts?: {
+      workspace?: string;
+      beforeMutation?: () => Promise<void>;
+    },
   ): Promise<void>;
   selectWorkspace(workspace: string): Promise<void>;
   listPanes(opts?: { workspace?: string }): Promise<{
@@ -4789,6 +4792,12 @@ export class AgentEngine {
       // Focus the exact returned surface before any shell/readiness I/O.
       await this.client.focusSurface(surface.surface, {
         workspace: createdWorkspace,
+        beforeMutation: async () => {
+          this.assertSurfaceObserverEpochCurrent(
+            surface.observerEpoch,
+            "agent focus",
+          );
+        },
       });
     } catch (error) {
       surfaceFocusError = error;

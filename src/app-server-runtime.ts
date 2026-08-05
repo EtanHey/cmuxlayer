@@ -324,12 +324,17 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
           this.runWorkspaceMutation("rename_tab", renameOpts?.workspace, () =>
             this.client.renameTab(surface, title, renameOpts),
           ),
-        focusSurface: (surface, focusOpts) =>
-          this.runWorkspaceMutation(
+        focusSurface: (surface, focusOpts) => {
+          const { beforeMutation, ...clientOpts } = focusOpts ?? {};
+          return this.runWorkspaceMutation(
             "focus_surface",
             focusOpts?.workspace,
-            () => this.client.focusSurface(surface, focusOpts),
-          ),
+            async () => {
+              await beforeMutation?.();
+              return this.client.focusSurface(surface, clientOpts);
+            },
+          );
+        },
         selectWorkspace: (workspace) =>
           this.runWorkspaceMutation("select_workspace", workspace, () =>
             this.client.selectWorkspace(workspace),
@@ -713,6 +718,14 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         "focus_surface",
         prior.workspace,
       );
+      const currentAfterPolicy = await this.currentFocusTargetBestEffort();
+      if (
+        !currentAfterPolicy ||
+        currentAfterPolicy.workspace !== expected.workspace ||
+        currentAfterPolicy.surface !== expected.surface
+      ) {
+        return;
+      }
       if (
         !isSurfaceObserverEpochCurrent(observerEpoch, () =>
           this.getSurfaceObserverEpoch(),

@@ -343,6 +343,49 @@ describe("AgentEngine", () => {
       );
     });
 
+    it("refuses created-surface focus when the observer changes before focus mutation", async () => {
+      engine.dispose();
+      const ownerId = "cmux:/tmp/cmux.sock#socket=1:2:3:4";
+      let observerEpoch = `${ownerId}@socket:1`;
+      const scopedRegistry = new AgentRegistry(
+        stateMgr,
+        async () => liveSurfaces,
+        {
+          observerIdProvider: () => ownerId,
+          observerEpochProvider: () => observerEpoch,
+        },
+      );
+      engine = new AgentEngine(stateMgr, scopedRegistry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+      });
+      (mockClient.focusSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (
+          _surface: string,
+          opts?: { beforeMutation?: () => Promise<void> },
+        ) => {
+          observerEpoch = `${ownerId}@socket:2`;
+          await opts?.beforeMutation?.();
+        },
+      );
+
+      await expect(
+        engine.spawnAgent({
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          prompt: "Do not focus across an observer epoch",
+          workspace: "ws:1",
+        }),
+      ).rejects.toThrow(/surface observer changed.*agent focus/i);
+
+      expect(mockClient.focusSurface).toHaveBeenCalledWith(
+        "surface:new",
+        expect.objectContaining({ beforeMutation: expect.any(Function) }),
+      );
+      expect(stateMgr.listStates()).toHaveLength(0);
+    });
+
     it.each([
       {
         label: "explicit Claude worker",

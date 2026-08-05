@@ -8590,11 +8590,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : undefined;
           },
           focusSurface: async (surface, focusOpts) => {
+            const { beforeMutation, ...clientOpts } = focusOpts ?? {};
             await assertWorkspaceMutationAllowed(
               "agent_engine",
               focusOpts?.workspace,
             );
-            return client.focusSurface(surface, focusOpts);
+            await beforeMutation?.();
+            return client.focusSurface(surface, clientOpts);
           },
           selectWorkspace: async (workspace) => {
             await assertWorkspaceMutationAllowed("agent_engine", workspace);
