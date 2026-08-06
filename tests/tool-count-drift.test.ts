@@ -5,6 +5,11 @@ import { describe, expect, it } from "vitest";
 const REPO_ROOT = join(import.meta.dirname, "..");
 const EXPECTED_TOOL_COUNT = 42;
 const EXPECTED_DEFAULT_PALETTE_COUNT = 12;
+// 42 is the callable-tool count; 12 is the signed default-palette count.
+const EXPECTED_DOCUMENTED_COUNTS = new Set([
+  EXPECTED_TOOL_COUNT,
+  EXPECTED_DEFAULT_PALETTE_COUNT,
+]);
 const RUN_DRIFT_CHECK = process.env.CMUXLAYER_RUN_TOOL_COUNT_DRIFT === "1";
 
 // The plan calls this registration source `registerTool(`. cmuxlayer's current
@@ -14,7 +19,8 @@ const RUN_DRIFT_CHECK = process.env.CMUXLAYER_RUN_TOOL_COUNT_DRIFT === "1";
 const REGISTRATION_PATTERN =
   /\b(?:registerTool|server\.tool)\s*\(\s*["']([^"']+)["']/g;
 const DOCUMENTED_COUNT_PATTERN =
-  /\b(\d+)( |%20)(?:MCP )?tools\b/gi;
+  /\b(\d+)(?:[ -]|%20)(?:MCP )?tools?\b/gi;
+// Known blind spot: "N registered" phrasing is intentionally not matched.
 
 const EXCLUDED_DIRECTORY_PARTS = new Set(["site", "out", ".next"]);
 const EXCLUDED_PATHS = new Set([
@@ -83,13 +89,14 @@ function claimsIn(documents: Document[]): CountClaim[] {
       // public claims. Dated release-note/changelog blocks follow the same rule.
       if (/^\s*-\s*(?:before|after):/i.test(line)) continue;
       for (const match of line.matchAll(DOCUMENTED_COUNT_PATTERN)) {
+        const count = Number(match[1]);
         const isDefaultPaletteClaim =
-          /default (?:MCP )?palette|palette/i.test(line) &&
-          Number(match[1]) === EXPECTED_DEFAULT_PALETTE_COUNT;
+          /default (?:MCP )?palette|thin-core default|palette/i.test(line) &&
+          count === EXPECTED_DEFAULT_PALETTE_COUNT;
         claims.push({
           path,
           line: lineIndex + 1,
-          count: Number(match[1]),
+          count,
           expected: isDefaultPaletteClaim
             ? EXPECTED_DEFAULT_PALETTE_COUNT
             : EXPECTED_TOOL_COUNT,
@@ -103,7 +110,9 @@ function claimsIn(documents: Document[]): CountClaim[] {
 
 function assertDocumentedCounts(documents: Document[], expected: number): void {
   const staleClaims = claimsIn(documents).filter(
-    (claim) => claim.count !== claim.expected,
+    (claim) =>
+      !EXPECTED_DOCUMENTED_COUNTS.has(claim.count) ||
+      claim.count !== claim.expected,
   );
   if (staleClaims.length === 0) return;
 
@@ -152,5 +161,14 @@ describe("tool-count drift guard", () => {
         EXPECTED_TOOL_COUNT,
       ),
     ).toThrow("fixtures/tool-count-badge.md:1 documents 41; source registers 42");
+  });
+
+  it("recognizes hyphenated singular tool counts", () => {
+    expect(() =>
+      assertDocumentedCounts(
+        [{ path: "fixtures/tool-count-hyphen.md", content: "The server exposes 41-tool default.\n" }],
+        EXPECTED_TOOL_COUNT,
+      ),
+    ).toThrow("fixtures/tool-count-hyphen.md:1 documents 41; source registers 42");
   });
 });
