@@ -9534,7 +9534,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "When set, create or reuse a git worktree before launch. true uses ~/Gits/<repo>.wt/<generated-name>; object fields can set name, path, branch, base, create, and reuse.",
+            "When set, create or reuse a git worktree before launch. true uses <repo>/.worktrees/<generated-name> (in-repo convention; legacy ~/Gits/<repo>.wt read-fallback until ~2026-09); object fields can set name, path, branch, base, create, and reuse.",
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -10042,7 +10042,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "Worktree options. Defaults to true, creating/reusing ~/Gits/<repo>.wt/<generated-name>.",
+            "Worktree options. Defaults to true, creating/reusing <repo>/.worktrees/<generated-name> (in-repo convention).",
           ),
         mcp_profile: mcpProfileSchema
           .optional()
