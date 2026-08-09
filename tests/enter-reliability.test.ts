@@ -1477,6 +1477,47 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
+  it("accepts the live v3 Cursor Working transition when the retained composer truncates the submitted token", async () => {
+    const submittedText = "CURSOR_WORKING_PROBE_V3_1785621661796_Q7";
+    const postReturnScreen =
+      CURSOR_PR343_V2_IMMEDIATE_WORKING_RESPONSE_SCREEN.replace(
+        "\n ⠀⠞ Working\n",
+        `\n  ${submittedText}\n\n ⠰⠰ Working\n`,
+      );
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 1;
+    client.cli = "cursor";
+    client.preReturnScreenText = CURSOR_PR343_V2_PRE_RETURN_SCREEN;
+    client.postReturnScreenText = postReturnScreen;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "ready", cli: "cursor" });
+
+    expect(postReturnScreen).toContain(submittedText);
+    expect(postReturnScreen).toContain("⠰⠰ Working");
+    expect(
+      __submitEvidenceTestHooks.screenShowsPendingInput(
+        postReturnScreen,
+        submittedText,
+      ),
+    ).toBe(false);
+
+    const result = await callToolInTimerSteps(server, "send_to", {
+      agent_id: "agent-1",
+      text: submittedText,
+      press_enter: true,
+      allow_busy: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(0);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+  }, 10_000);
+
   it("does not accept parsed Cursor working status without post-submit response evidence", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;

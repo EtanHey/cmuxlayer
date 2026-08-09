@@ -4013,7 +4013,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
       const cursorShowsSubmittedResponse =
         screenCli === "cursor" &&
-        hasPendingInput &&
         screenShowsFreshCursorResponseAfterSubmittedInput(
           snapshot.text,
           opts.text,

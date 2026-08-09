@@ -8270,6 +8270,7 @@ codex>
       expect(parsed).toMatchObject({
         error_code: "supersede_submit_unverified",
         submit_verified: false,
+        submit_verification_reason: "input_still_pending",
         retry_count: 0,
         registry_updated: false,
         goal_delivery_state: "unverified_pane_side_effect",

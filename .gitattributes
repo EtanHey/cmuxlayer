@@ -1,0 +1,3 @@
+# Raw terminal captures preserve right-padding spaces from the rendered pane.
+tests/fixtures/cursor-pr343-v2-immediate-working-response.txt whitespace=-blank-at-eol
+tests/fixtures/painpoints/codex-pr343-live-queued-followup.txt whitespace=-blank-at-eol
