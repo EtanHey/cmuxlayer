@@ -195,6 +195,16 @@ function parseWorktreeListPaths(stdout: string): string[] {
     .map((line) => line.slice("worktree ".length));
 }
 
+async function warnIfWorktreesNotIgnored(repoRoot: string, exec: WorktreeExec): Promise<void> {
+  try {
+    await exec("git", ["-C", repoRoot, "check-ignore", "-q", "--", ".worktrees"]);
+  } catch {
+    console.warn(
+      `[cmuxlayer] ${repoRoot} does not ignore .worktrees/; add it to .gitignore to keep generated worktrees out of commits`,
+    );
+  }
+}
+
 async function assertExistingWorktree(
   path: string,
   repoRoot: string,
@@ -235,9 +245,11 @@ export async function prepareWorktree(
   const exec = input.exec ?? defaultExec;
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
+  const defaultPath = join(repoRoot, ".worktrees", spec.name);
+  const legacyPath = join(homeGitsDir, `${repo}.wt`, spec.name);
   let worktreePath = spec.path
     ? resolve(spec.path)
-    : join(homeGitsDir, `${repo}.wt`, spec.name);
+    : defaultPath;
   if (spec.generatedName && !spec.path) {
     for (let attempts = 0; attempts < 10; attempts++) {
       const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
@@ -249,7 +261,7 @@ export async function prepareWorktree(
         break;
       }
       spec.name = defaultWorkerName(repo);
-      worktreePath = join(homeGitsDir, `${repo}.wt`, spec.name);
+      worktreePath = join(repoRoot, ".worktrees", spec.name);
     }
     const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
     if (
@@ -260,6 +272,18 @@ export async function prepareWorktree(
     }
   }
   assertInside(homeGitsDir, worktreePath);
+
+  // Read the legacy sibling location during migration, but always create new
+  // worktrees under <repo>/.worktrees. TODO remove .wt read-path after migration, ~2026-09.
+  if (
+    !spec.path &&
+    !spec.generatedName &&
+    !existsSync(worktreePath) &&
+    spec.reuse &&
+    existsSync(legacyPath)
+  ) {
+    worktreePath = legacyPath;
+  }
 
   if (existsSync(worktreePath)) {
     if (!spec.reuse) {
@@ -287,6 +311,7 @@ export async function prepareWorktree(
   }
 
   mkdirSync(dirname(worktreePath), { recursive: true });
+  await warnIfWorktreesNotIgnored(repoRoot, exec);
   const branch = spec.branch ?? defaultWorktreeBranch(spec.name);
   await exec("git", [
     "-C",
@@ -298,6 +323,7 @@ export async function prepareWorktree(
     worktreePath,
     spec.base,
   ]);
+  mkdirSync(worktreePath, { recursive: true });
 
   return {
     path: worktreePath,

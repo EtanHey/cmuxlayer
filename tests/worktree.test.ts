@@ -59,8 +59,8 @@ describe("worktree helpers", () => {
     expect(second.name).toMatch(/^cmuxlayer-worker-[a-z0-9]{6}$/);
     expect(first.name).not.toBe(second.name);
     expect(first.name).not.toContain("1783204101457");
-    expect(first.path).toBe(join(TEST_ROOT, "cmuxlayer.wt", first.name));
-    expect(second.path).toBe(join(TEST_ROOT, "cmuxlayer.wt", second.name));
+    expect(first.path).toBe(join(repoRoot, ".worktrees", first.name));
+    expect(second.path).toBe(join(repoRoot, ".worktrees", second.name));
   });
 
   it("retries generated default names instead of reusing a colliding worktree", async () => {
@@ -69,8 +69,8 @@ describe("worktree helpers", () => {
     const secondId = (0.25).toString(36).slice(2, 8).padEnd(6, "0");
     const collidingName = `cmuxlayer-worker-${firstId}`;
     const nextName = `cmuxlayer-worker-${secondId}`;
-    const collidingPath = join(TEST_ROOT, "cmuxlayer.wt", collidingName);
-    const nextPath = join(TEST_ROOT, "cmuxlayer.wt", nextName);
+    const collidingPath = join(repoRoot, ".worktrees", collidingName);
+    const nextPath = join(repoRoot, ".worktrees", nextName);
     mkdirSync(repoRoot, { recursive: true });
     mkdirSync(collidingPath, { recursive: true });
     vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
@@ -124,7 +124,7 @@ describe("worktree helpers", () => {
     const collidingName = `cmuxlayer-worker-${firstId}`;
     const nextName = `cmuxlayer-worker-${secondId}`;
     const collidingBranch = `wt/${collidingName}`;
-    const nextPath = join(TEST_ROOT, "cmuxlayer.wt", nextName);
+    const nextPath = join(repoRoot, ".worktrees", nextName);
     mkdirSync(repoRoot, { recursive: true });
     vi.spyOn(Math, "random").mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
     const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
@@ -180,7 +180,7 @@ describe("worktree helpers", () => {
     });
 
     expect(result).toMatchObject({
-      path: join(TEST_ROOT, "cmuxlayer.wt", "skill-eval"),
+      path: join(repoRoot, ".worktrees", "skill-eval"),
       branch: "fix/skill-eval",
       base: "origin/main",
       created: true,
@@ -193,7 +193,7 @@ describe("worktree helpers", () => {
       "add",
       "-b",
       "fix/skill-eval",
-      join(TEST_ROOT, "cmuxlayer.wt", "skill-eval"),
+      join(repoRoot, ".worktrees", "skill-eval"),
       "origin/main",
     ]);
   });
@@ -250,6 +250,57 @@ describe("worktree helpers", () => {
     );
   });
 
+  it("reuses a legacy sibling worktree during the migration window", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const legacyPath = join(TEST_ROOT, "cmuxlayer.wt", "legacy");
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(legacyPath, { recursive: true });
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("list")) {
+        return { stdout: worktreeListOutput([repoRoot, legacyPath]), stderr: "" };
+      }
+      return { stdout: "true\n", stderr: "" };
+    });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "legacy", reuse: true },
+      exec,
+    });
+
+    expect(result).toMatchObject({ path: legacyPath, reused: true, created: false });
+    expect(exec).not.toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["worktree", "add"]),
+    );
+  });
+
+  it("warns when the target repo does not ignore the in-repo worktree directory", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(repoRoot, ".worktrees", "unignored");
+    mkdirSync(repoRoot, { recursive: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("check-ignore")) throw new Error("not ignored");
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: { name: "unignored" },
+      exec,
+    });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("does not ignore .worktrees/"));
+  });
+
   it("reuses a repo worktree when git reports canonical paths through a symlink", async () => {
     const actualGitsDir = join(TEST_ROOT, "actual-gits");
     const linkedGitsDir = join(TEST_ROOT, "linked-gits");
@@ -289,7 +340,7 @@ describe("worktree helpers", () => {
     const repoRoot = join(TEST_ROOT, "repo");
     mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
     const exec = vi.fn().mockImplementation(async () => {
-      const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "deps");
+      const worktreePath = join(repoRoot, ".worktrees", "deps");
       mkdirSync(worktreePath, { recursive: true });
       return { stdout: "", stderr: "" };
     });
@@ -307,7 +358,7 @@ describe("worktree helpers", () => {
 
   it("copies .mcp.json byte-for-byte into a newly created worktree", async () => {
     const repoRoot = join(TEST_ROOT, "repo");
-    const worktreePath = join(TEST_ROOT, "cmuxlayer.wt", "with-mcp");
+    const worktreePath = join(repoRoot, ".worktrees", "with-mcp");
     const mcpConfig = '{\n  "mcpServers": {\n    "cmuxlayer": {}\n  }\n}\n';
     mkdirSync(repoRoot, { recursive: true });
     writeFileSync(join(repoRoot, ".mcp.json"), mcpConfig);
