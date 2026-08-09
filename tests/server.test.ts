@@ -3024,7 +3024,6 @@ describe("tool handler integration", () => {
   });
 
   it("send_command fails closed when tracked-agent verification has no screen evidence (F8)", async () => {
-    vi.useFakeTimers();
     const stateDir = processScopedTmpDir("cmuxlayer-f8-send-command");
     rmSync(stateDir, { recursive: true, force: true });
     mkdirSync(stateDir, { recursive: true });
@@ -3057,6 +3056,7 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_command"];
+    vi.useFakeTimers();
     try {
       const result = await runWithFakeTimers(
         () =>

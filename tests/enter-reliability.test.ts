@@ -219,13 +219,13 @@ class FakeClaudeSurfaceClient {
     }
 
     this.returnCount += 1;
+    this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     if (this.returnCount >= this.requiredReturns) {
       this.pendingText = "";
       this.mode = this.completionMode;
       return;
     }
 
-    this.queuedCodexReadsRemaining = this.queuedCodexReadsAfterReturn;
     this.mode = this.keepWorkingStatusWhilePending ? "working" : "idle";
   }
 
@@ -277,7 +277,11 @@ class FakeClaudeSurfaceClient {
     if (this.returnCount === 0 && this.preReturnScreenText !== null) {
       return this.preReturnScreenText;
     }
-    if (this.pendingText && this.postReturnPendingScreenText !== null) {
+    if (
+      this.returnCount > 0 &&
+      this.pendingText &&
+      this.postReturnPendingScreenText !== null
+    ) {
       return this.postReturnPendingScreenText;
     }
     if (!this.pendingText && this.postReturnScreenText !== null) {
@@ -285,7 +289,10 @@ class FakeClaudeSurfaceClient {
     }
     if (this.cli === "codex") {
       const status = this.mode === "working" ? "Working (11s)" : "";
-      if (this.pendingText && this.queuedCodexReadsRemaining > 0) {
+      if (
+        (this.pendingText || this.queuedCodexVisibleText !== null) &&
+        this.queuedCodexReadsRemaining > 0
+      ) {
         this.queuedCodexReadsRemaining -= 1;
         const queueText = this.queuedCodexVisibleText ?? this.pendingText;
         const truncated = `${queueText.slice(0, 42)}…`;
@@ -1269,7 +1276,7 @@ describe("enter reliability", () => {
 
   it("ignores adjacent Codex queue chrome for another sender's visible prefix", async () => {
     const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 99;
+    client.requiredReturns = 1;
     client.cli = "codex";
     client.keepWorkingStatusWhilePending = true;
     client.queuedCodexReadsAfterReturn = 1;
@@ -1312,6 +1319,10 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
+    expect(parsed.submit_verification_reason).toBe(
+      "surface_read_unavailable",
+    );
+    expect(parsed.retry_safe).toBe(false);
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -1467,7 +1478,7 @@ describe("enter reliability", () => {
 
     expect(CURSOR_PR343_V2_PRE_RETURN_SCREEN).not.toContain("⠀⠞ Working");
     expect(client.screenReads.at(-1)).toContain("⠀⠞ Working");
-    expect(parsed.screen?.status).toBe("idle");
+    expect(parsed.screen?.status).toBe("working");
     expect(result.isError).not.toBe(true);
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
