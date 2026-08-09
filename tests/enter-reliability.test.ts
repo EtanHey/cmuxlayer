@@ -1601,6 +1601,29 @@ describe("enter reliability", () => {
     ).toBe(true);
   });
 
+  it.each([
+    {
+      cli: "codex" as const,
+      screen: CODEX_PLACEHOLDER_SCREEN,
+      submittedText: "Implement {feature}",
+    },
+    {
+      cli: "cursor" as const,
+      screen: CURSOR_BOOT_READY_SCREEN,
+      submittedText: "Plan, search, build anything",
+    },
+  ])(
+    "keeps a literal submitted $cli placeholder pending when Return is missed",
+    ({ screen, submittedText }) => {
+      expect(
+        __submitEvidenceTestHooks.screenShowsPendingInput(
+          screen,
+          submittedText,
+        ),
+      ).toBe(true);
+    },
+  );
+
   it("does not verify send_input to an uncached shell from prompt clearing", async () => {
     const client = new FakeShellSurfaceClient();
     server = createReliabilityServer(client as any);

@@ -8287,6 +8287,62 @@ codex>
     }
   }, 10_000);
 
+  it("supersede_agent_goal rejects a null submit receipt without patching an error-state agent", async () => {
+    const goalPath = join(TEST_DIR, "unverified-error-state-mission.md");
+    writeFileSync(goalPath, "# Mission\n\nDo not record without proof.\n", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine.stateMgr;
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const registry = engine.getRegistry();
+    const errored = stateMgr.updateRecord(currentAgentId, {
+      state: "error",
+      error: "stale terminal error",
+      task_summary: "original mission",
+      goal_file: null,
+    });
+    registry.set(currentAgentId, errored);
+
+    const result = await supersede.handler(
+      {
+        agent_id: agentId,
+        goal_file: goalPath,
+        summary: "unverified replacement mission",
+        allow_busy: false,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      error_code: "supersede_submit_unverified",
+      submit_verified: false,
+      registry_updated: false,
+      retry_safe: false,
+    });
+    const state = stateMgr.readState(currentAgentId);
+    expect(state?.state).toBe("error");
+    expect(state?.task_summary).toBe("original mission");
+    expect(state?.goal_file).toBeNull();
+  });
+
   it("supersede_agent_goal updates the canonical record when called through an alias", async () => {
     const goalPath = join(TEST_DIR, "alias-mission.md");
     writeFileSync(goalPath, "# Mission\n\nUse the canonical state.\n", "utf8");

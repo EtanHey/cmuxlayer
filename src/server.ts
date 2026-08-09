@@ -1816,6 +1816,7 @@ function matchLegacyClaudePromptLine(
 function normalizeKnownPlaceholderComposerInput(
   cli: CliType | null,
   input: string,
+  submittedText?: string,
 ): string {
   const withoutCursorBorders = input
     .split("\n")
@@ -1827,12 +1828,18 @@ function normalizeKnownPlaceholderComposerInput(
     (cli === "cursor" &&
       withoutCursorBorders === "Plan, search, build anything")
   ) {
+    if (withoutCursorBorders === submittedText?.trim()) {
+      return input;
+    }
     return "";
   }
   return input;
 }
 
-function extractComposerInputRegion(screenText: string): string | null {
+function extractComposerInputRegion(
+  screenText: string,
+  submittedText?: string,
+): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
@@ -1858,6 +1865,7 @@ function extractComposerInputRegion(screenText: string): string | null {
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
+      submittedText,
     );
   }
 
@@ -1878,6 +1886,7 @@ function extractComposerInputRegion(screenText: string): string | null {
     return normalizeKnownPlaceholderComposerInput(
       cli,
       inputLines.join("\n").trimEnd(),
+      submittedText,
     );
   }
 
@@ -1900,7 +1909,7 @@ function screenShowsPendingInput(
 
   const tail = trimmed.slice(-Math.min(80, trimmed.length));
   const compactTail = tail.replace(/\s+/g, "");
-  const composerInput = extractComposerInputRegion(screenText);
+  const composerInput = extractComposerInputRegion(screenText, submittedText);
   return (
     composerInput !== null &&
     (composerInput.includes(tail) ||
@@ -9414,7 +9423,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : undefined,
             beforeMutation: assertDeliveryRouteCurrent,
           });
-          if (args.press_enter) {
+          if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id);
           }
           return delivery;
@@ -12187,6 +12196,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
             }
             throw e;
+          }
+          if (delivery.submit_verified !== true) {
+            const error = new SubmitVerificationError(
+              `Supersede submission could not be verified for ${args.agent_id}`,
+              delivery.retry_count,
+              "submit_evidence_absent",
+            );
+            return err(error, {
+              error_code: "supersede_submit_unverified",
+              ...submitVerificationFailurePayload(error),
+              registry_updated: false,
+              goal_delivery_state: "unverified_pane_side_effect",
+              recovery:
+                "Do not retry automatically; inspect the target composer/queue and reconcile the pane before attempting another supersede.",
+            });
           }
           const canonicalAgentId = current.agent_id;
           const supersedePatch = {
