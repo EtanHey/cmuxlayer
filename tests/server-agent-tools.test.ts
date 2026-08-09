@@ -8197,6 +8197,152 @@ codex>
     expect(state.goal_file).toBe(goalPath);
   });
 
+  it("supersede_agent_goal reports an unverified pane side effect without patching the registry", async () => {
+    const goalPath = join(TEST_DIR, "queued-mission.md");
+    writeFileSync(goalPath, "# Queued mission\n\nReplace the active work.\n", "utf8");
+    const baseExec = makeLifecycleExec();
+    let goalWasWritten = false;
+    const supersedeExec = vi.fn(async (cmd, args) => {
+      const text = String(args[args.length - 1] ?? "");
+      if (args.includes("send") && text.startsWith("/goal ")) {
+        goalWasWritten = true;
+      }
+      const result = await baseExec(cmd, args);
+      if (goalWasWritten && args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: `OpenAI Codex\nWorking (3s • esc to interrupt)\n\n• Messages to be submitted after next tool call (press esc to interrupt and send\n  immediately)\n  ↳ /goal Read and execute this goal file until complete: ${goalPath}\n\n› Summarize recent commits\n\n  gpt-5.6-sol xhigh`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return result;
+    });
+    const server = createLifecycleServer(supersedeExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine.stateMgr;
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const registry = engine.getRegistry();
+    const ready = stateMgr.transition(currentAgentId, "ready");
+    registry.set(currentAgentId, ready);
+    const working = stateMgr.transition(currentAgentId, "working", {
+      task_summary: "original mission",
+      goal_file: null,
+    });
+    registry.set(currentAgentId, working);
+
+    vi.useFakeTimers();
+    try {
+      const resultPromise = supersede.handler(
+        {
+          agent_id: agentId,
+          goal_file: goalPath,
+          summary: "queued replacement mission",
+        },
+        {} as any,
+      );
+      for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      const result = await resultPromise;
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBe(true);
+      expect(parsed).toMatchObject({
+        error_code: "supersede_submit_unverified",
+        submit_verified: false,
+        submit_verification_reason: "input_still_pending",
+        retry_count: 0,
+        registry_updated: false,
+        goal_delivery_state: "unverified_pane_side_effect",
+        retry_safe: false,
+      });
+      expect(parsed.recovery).toContain("Do not retry");
+      expect(goalWasWritten).toBe(true);
+
+      const state = stateMgr.readState(currentAgentId);
+      expect(state?.task_summary).not.toBe("queued replacement mission");
+      expect(state?.goal_file).not.toBe(goalPath);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("supersede_agent_goal rejects a null submit receipt without patching an error-state agent", async () => {
+    const goalPath = join(TEST_DIR, "unverified-error-state-mission.md");
+    writeFileSync(goalPath, "# Mission\n\nDo not record without proof.\n", "utf8");
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const supersede = (server as any)._registeredTools["supersede_agent_goal"];
+
+    const spawnResult = await spawn.handler(
+      {
+        repo: "brainlayer",
+        model: "gpt-5.5",
+        cli: "codex",
+        role: "worker",
+      },
+      {} as any,
+    );
+    const agentId = (
+      spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+    ).agent_id;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const stateMgr = engine.stateMgr;
+    const currentAgentId = resolveCurrentTestAgentId(stateMgr, agentId);
+    const registry = engine.getRegistry();
+    const errored = stateMgr.updateRecord(currentAgentId, {
+      state: "error",
+      error: "stale terminal error",
+      task_summary: "original mission",
+      goal_file: null,
+    });
+    registry.set(currentAgentId, errored);
+
+    const result = await supersede.handler(
+      {
+        agent_id: agentId,
+        goal_file: goalPath,
+        summary: "unverified replacement mission",
+        allow_busy: false,
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({
+      error_code: "supersede_submit_unverified",
+      submit_verified: false,
+      registry_updated: false,
+      retry_safe: false,
+    });
+    const state = stateMgr.readState(currentAgentId);
+    expect(state?.state).toBe("error");
+    expect(state?.task_summary).toBe("original mission");
+    expect(state?.goal_file).toBeNull();
+  });
+
   it("supersede_agent_goal updates the canonical record when called through an alias", async () => {
     const goalPath = join(TEST_DIR, "alias-mission.md");
     writeFileSync(goalPath, "# Mission\n\nUse the canonical state.\n", "utf8");

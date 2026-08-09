@@ -1,0 +1,100 @@
+  $ bun run test -- tests/screen-parser.test.ts 2.9s in current dir
+    … 9 output lines hidden · ctrl+o to expand
+       Duration  235ms (transform 59ms, setup 7ms, collect 56ms, tests 22ms, environment …
+
+  CURSOR_WORKING_ACK
+
+                                                                                           
+  Read and follow                                                                          
+  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
+  tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.           
+                                                                                           
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 2.0s                                                                   │
+  │ Reading the defect lane instructions and preparing to run the specified test.        │
+  │                                                                                      │
+  │ Noted a conflict between the CURSOR_WORKING_PROBE response and the                   │
+  │ FANOUT_PREP_DONE                                                                     │
+  │ instruction. The latter appears to override the former for this specific message.    │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 1ms                                                                    │
+  │ The test exited successfully. I will respond with FANOUT_PREP_DONE.                  │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  $ bun run test -- tests/screen-parser.test.ts 1.1s in current dir
+    … 9 output lines hidden · ctrl+o to expand
+       Duration  246ms (transform 57ms, setup 5ms, collect 60ms, tests 22ms, environment …
+
+  FANOUT_PREP_DONE
+
+                                                                                           
+  Read and follow                                                                          
+  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
+  tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
+  the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
+  FANOUT_PREP_2_DONE only after it exits.                                                  
+                                                                                           
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 1ms                                                                    │
+  │ Running the screen parser test again. FANOUT_PREP_2_DONE will be sent only after     │
+  │ the                                                                                  │
+  │ process exits.                                                                       │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 1ms                                                                    │
+  │ The test exited successfully. The response will be FANOUT_PREP_2_DONE.               │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  $ bun run test -- tests/screen-parser.test.ts 1.6s in current dir
+    … 9 output lines hidden · ctrl+o to expand
+       Duration  236ms (transform 61ms, setup 6ms, collect 59ms, tests 24ms, environment …
+
+  FANOUT_PREP_2_DONE
+
+                                                                                           
+  Read and follow                                                                          
+  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
+  tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
+  the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
+  FANOUT_PREP_2_DONE only after it exits.PR343_FANOUT_LATENCY_PROBE_DO_NOT_ACT             
+                                                                                           
+
+  ┌──────────────────────────────────────────────────────────────────────────────────────┐
+  │ … Thought for 1.9s                                                                   │
+  │ The message ends with a latency probe flag instructing not to act.                   │
+  │                                                                                      │
+  │ I will remain silent and skip both test commands and the FANOUT responses.           │
+  └──────────────────────────────────────────────────────────────────────────────────────┘
+
+  Waiting — no action taken.
+
+                                                                                           
+  Read and follow                                                                          
+  /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-curso       
+  r.mdCURSOR_WORKING_PROBERun the read-only command bun run test --                        
+  tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run        
+  the read-only command bun run test -- tests/screen-parser.test.ts now; respond           
+  FANOUT_PREP_2_DONE only after it                                                         
+  exits.PR343_FANOUT_LATENCY_PROBE_DO_NOT_ACTCURSOR_WORKING_PROBE                          
+                                                                                           
+
+ ⠀⠞ Working
+    Tip: Use /debug to instrument and debug complex problems.
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → Read and follow                                                                        
+    /Users/etanheyman/Gits/cmuxlayer/docs.local/defect-lane/pr343-runtime-target-cursor.m  
+    dCURSOR_WORKING_PROBERun the read-only command bun run test --                         
+    tests/screen-parser.test.ts now; respond FANOUT_PREP_DONE only after it exits.Run the  
+     read-only command bun run test -- tests/screen-parser.test.ts now; respond            
+    FANOUT_PREP_2_DONE only after it                                                       
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  Auto · 11.9%                                                              Run Everything
+  ~/Gits/cmuxlayer · 49bda98

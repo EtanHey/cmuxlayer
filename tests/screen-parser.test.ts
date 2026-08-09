@@ -1033,6 +1033,15 @@ ctrl+c to stop
     expect(parsed.context_pct).toBe(23);
   });
 
+  it("parses the live Cursor braille Working spinner as working", () => {
+    const parsed = parseScreen(
+      readFixture("cursor-pr343-v2-immediate-working-response.txt"),
+    );
+
+    expect(parsed.agent_type).toBe("cursor");
+    expect(parsed.status).toBe("working");
+  });
+
   it("parses Cursor Agent idle with Idle line, comma tokens, and Model line", () => {
     const parsed = parseScreen(`
 Auto · 10% · 1 file edited

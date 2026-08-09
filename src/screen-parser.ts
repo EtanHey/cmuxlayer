@@ -259,6 +259,7 @@ const CURSOR_CWD_FOOTER_RE =
 const CURSOR_MODE_BAR_RE =
   /\/ commands · @ files · ! shell · ctrl\+r to review edits/i;
 const CURSOR_HEX_RUNNING_RE = /⬡\s+Running\.\.\./i;
+const CURSOR_BRAILLE_WORKING_RE = /^\s*[\u2800-\u28ff]+\s+Working\b/im;
 const CURSOR_HEX_IDLE_RE = /⬡\s+Idle\b/i;
 const CURSOR_TOKEN_LINE_RE =
   /⬡\s+(?:Running\.\.\.|Idle)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*([km])?\s*tokens\b/i;
@@ -1174,7 +1175,10 @@ function inferStatus(
   }
 
   if (agentType === "cursor") {
-    if (CURSOR_HEX_RUNNING_RE.test(text)) {
+    if (
+      CURSOR_HEX_RUNNING_RE.test(text) ||
+      CURSOR_BRAILLE_WORKING_RE.test(text)
+    ) {
       return "working";
     }
     if (CURSOR_FOLLOWUP_RE.test(text) || CURSOR_HEX_IDLE_RE.test(text)) {

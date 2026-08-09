@@ -3056,23 +3056,29 @@ describe("tool handler integration", () => {
       skipAgentLifecycle: true,
     });
     const tool = (server as any)._registeredTools["send_command"];
-    const result = await runWithFakeTimers(
-      () =>
-        tool.handler(
-          { surface: "surface:6", command: "codex resume 123" },
-          {} as any,
-        ),
-      6_000,
-    );
-    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(result.isError).toBe(true);
-    expect(data.ok).toBe(false);
-    expect(data.submit_verified).toBe(false);
-    expect(data.submit_verification_reason).toBe("surface_screen_empty");
-    expect(data.retry_safe).toBe(false);
-    expect(data.retry_count).toBe(0);
-    expect(data.error).toContain("Enter submit could not be verified");
-    rmSync(stateDir, { recursive: true, force: true });
+    vi.useFakeTimers();
+    try {
+      const result = await runWithFakeTimers(
+        () =>
+          tool.handler(
+            { surface: "surface:6", command: "codex resume 123" },
+            {} as any,
+          ),
+        6_000,
+      );
+      const data =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      expect(result.isError).toBe(true);
+      expect(data.ok).toBe(false);
+      expect(data.submit_verified).toBe(false);
+      expect(data.submit_verification_reason).toBe("surface_screen_empty");
+      expect(data.retry_safe).toBe(false);
+      expect(data.retry_count).toBe(0);
+      expect(data.error).toContain("Enter submit could not be verified");
+    } finally {
+      vi.useRealTimers();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("send_command returns delivered + cached identity after positive submit verification (F8)", async () => {
@@ -3126,7 +3132,6 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-
     expect(result.isError).not.toBe(true);
     expect(data.delivered).toBe(true);
     expect(data.submit_verified).toBe(true);

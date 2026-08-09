@@ -377,6 +377,10 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
   DEFAULT_SEND_INPUT_MAX_INLINE_CHARS,
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
+// Busy relays are interjections into an already-running UI. Observe several
+// repaint frames, but fail quickly when the submitted text remains queued or
+// in the composer so fleet fan-out does not inherit the general 5s timeout.
+const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 500;
 const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
 const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
@@ -1809,7 +1813,33 @@ function matchLegacyClaudePromptLine(
   return match ? { input: match[1] ?? "" } : null;
 }
 
-function extractComposerInputRegion(screenText: string): string | null {
+function normalizeKnownPlaceholderComposerInput(
+  cli: CliType | null,
+  input: string,
+  submittedText?: string,
+): string {
+  const withoutCursorBorders = input
+    .split("\n")
+    .filter((line) => !/^\s*[▄▀]{8,}\s*$/.test(line))
+    .join("\n")
+    .trim();
+  if (
+    (cli === "codex" && withoutCursorBorders === "Implement {feature}") ||
+    (cli === "cursor" &&
+      withoutCursorBorders === "Plan, search, build anything")
+  ) {
+    if (withoutCursorBorders === submittedText?.trim()) {
+      return input;
+    }
+    return "";
+  }
+  return input;
+}
+
+function extractComposerInputRegion(
+  screenText: string,
+  submittedText?: string,
+): string | null {
   const lines = normalizeTerminalText(screenText).split("\n");
   const cli = inferComposerCli(screenText);
   const start = currentComposerRegionStart(cli, lines);
@@ -1832,7 +1862,11 @@ function extractComposerInputRegion(screenText: string): string | null {
       inputLines.push(line);
     }
 
-    return inputLines.join("\n").trimEnd();
+    return normalizeKnownPlaceholderComposerInput(
+      cli,
+      inputLines.join("\n").trimEnd(),
+      submittedText,
+    );
   }
 
   for (let index = end - 1; index >= start; index -= 1) {
@@ -1849,7 +1883,11 @@ function extractComposerInputRegion(screenText: string): string | null {
       inputLines.push(line);
     }
 
-    return inputLines.join("\n").trimEnd();
+    return normalizeKnownPlaceholderComposerInput(
+      cli,
+      inputLines.join("\n").trimEnd(),
+      submittedText,
+    );
   }
 
   const lastActiveLine = lines[end - 1] ?? "";
@@ -1871,13 +1909,221 @@ function screenShowsPendingInput(
 
   const tail = trimmed.slice(-Math.min(80, trimmed.length));
   const compactTail = tail.replace(/\s+/g, "");
-  const composerInput = extractComposerInputRegion(screenText);
+  const composerInput = extractComposerInputRegion(screenText, submittedText);
   return (
     composerInput !== null &&
     (composerInput.includes(tail) ||
       (compactTail.length > 0 &&
         composerInput.replace(/\s+/g, "").includes(compactTail)))
   );
+}
+
+function stripCodexQueueGutter(line: string): string {
+  return line.replace(/^\s*[│┃║┆┊]\s?/, "").trimEnd();
+}
+
+function compactQueueCorrelationText(text: string): string {
+  return normalizeTerminalText(text).replace(/\s+/g, "");
+}
+
+function cursorSubmittedResponseEvidenceSignatures(
+  screenText: string,
+  submittedText: string,
+): string[] {
+  const trimmed = submittedText.trim();
+  if (!trimmed || inferComposerCli(screenText) !== "cursor") {
+    return [];
+  }
+
+  const lines = normalizeTerminalText(screenText).split("\n");
+  let composerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (matchComposerPromptLine(lines[index] ?? "")) {
+      composerIndex = index;
+      break;
+    }
+  }
+  if (composerIndex < 0) {
+    return [];
+  }
+
+  const correlationTail = compactQueueCorrelationText(
+    trimmed.slice(-Math.min(80, trimmed.length)),
+  );
+  let regionStart = 0;
+  for (let index = composerIndex - 1; index >= 0; index -= 1) {
+    if (lineIsCurrentComposerRegionAnchor("cursor", lines[index] ?? "")) {
+      regionStart = index + 1;
+      break;
+    }
+  }
+  const evidence: string[] = [];
+  for (let index = composerIndex - 1; index >= regionStart; index -= 1) {
+    const submittedTranscriptWindow = compactQueueCorrelationText(
+      lines.slice(Math.max(regionStart, index - 16), index).join("\n"),
+    );
+    if (!submittedTranscriptWindow.includes(correlationTail)) {
+      continue;
+    }
+
+    const activityMatch = (lines[index] ?? "").match(
+      /^\s*(?:[\u2800-\u28ff]+\s*)?(Working|Thinking|Running)\b/i,
+    );
+    if (activityMatch?.[1]) {
+      evidence.push(`activity:${activityMatch[1].toLowerCase()}`);
+      continue;
+    }
+
+    if (
+      !/^\s*[│┃║]\s*(?:…|\.\.\.)?\s*Thought for \d+(?:\.\d+)?(?:ms|s|m)\b/i.test(
+        lines[index] ?? "",
+      )
+    ) {
+      continue;
+    }
+
+    const responseRows: string[] = [];
+    for (
+      let rowIndex = index + 1;
+      rowIndex < Math.min(composerIndex, index + 17);
+      rowIndex += 1
+    ) {
+      const row = lines[rowIndex] ?? "";
+      if (/^\s*[└╰].*[┘╯]\s*$/.test(row)) {
+        break;
+      }
+      const content = row.replace(/^\s*[│┃║]\s?/, "").trim();
+      if (content && !/^[─━┌┐└┘╭╮╰╯]+$/.test(content)) {
+        responseRows.push(content);
+      }
+    }
+    if (responseRows.length > 0) {
+      evidence.push(
+        `thought:${responseRows.join(" ").replace(/\s+/g, " ").trim()}`,
+      );
+    }
+  }
+
+  return evidence;
+}
+
+function screenShowsFreshCursorResponseAfterSubmittedInput(
+  screenText: string,
+  submittedText: string,
+  baselineEvidence: readonly string[] | null,
+): boolean {
+  if (baselineEvidence === null) {
+    return false;
+  }
+
+  const baselineCounts = new Map<string, number>();
+  for (const signature of baselineEvidence) {
+    baselineCounts.set(signature, (baselineCounts.get(signature) ?? 0) + 1);
+  }
+  for (const signature of cursorSubmittedResponseEvidenceSignatures(
+    screenText,
+    submittedText,
+  )) {
+    const remaining = baselineCounts.get(signature) ?? 0;
+    if (remaining === 0) {
+      return true;
+    }
+    baselineCounts.set(signature, remaining - 1);
+  }
+
+  return false;
+}
+
+function screenShowsQueuedAgentInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const lines = normalizeTerminalText(screenText).split("\n");
+  if (inferComposerCli(screenText) !== "codex") {
+    return false;
+  }
+
+  let composerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (matchComposerPromptLine(stripCodexQueueGutter(lines[index] ?? ""))) {
+      composerIndex = index;
+      break;
+    }
+  }
+  if (composerIndex < 0) {
+    return false;
+  }
+
+  let index = composerIndex - 1;
+  while (
+    index >= 0 &&
+    (!stripCodexQueueGutter(lines[index] ?? "").trim() ||
+      /^[•✻✢✳✶]?\s*(?:Working|Thinking)\b/i.test(
+        stripCodexQueueGutter(lines[index] ?? ""),
+      ))
+  ) {
+    index -= 1;
+  }
+
+  const queuedItemRows: string[] = [];
+  let foundQueuedItem = false;
+  while (index >= 0) {
+    const rawLine = lines[index] ?? "";
+    const activeLine = stripCodexQueueGutter(rawLine).trim();
+    const itemMatch = /^↳(?:\s+(.*)|\s*$)/.exec(activeLine);
+    if (itemMatch) {
+      queuedItemRows.unshift(itemMatch[1] ?? "");
+      foundQueuedItem = true;
+      index -= 1;
+      break;
+    }
+    const isWrappedItemRow =
+      /^\s*[│┃║┆┊]/.test(rawLine) || /^\s{2,}\S/.test(rawLine);
+    if (!activeLine || !isWrappedItemRow) {
+      return false;
+    }
+    queuedItemRows.unshift(activeLine);
+    index -= 1;
+  }
+  if (!foundQueuedItem) {
+    return false;
+  }
+
+  while (
+    index >= 0 &&
+    !stripCodexQueueGutter(lines[index] ?? "").trim()
+  ) {
+    index -= 1;
+  }
+  const queueHeadingPattern =
+    /^messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?$/i;
+  let wrappedHeading = "";
+  let foundHeading = false;
+  for (let headingRows = 0; index >= 0 && headingRows < 4; headingRows += 1) {
+    const headingRow = stripCodexQueueGutter(lines[index] ?? "")
+      .trim()
+      .replace(/^•\s*/, "");
+    if (!headingRow) {
+      break;
+    }
+    wrappedHeading = `${headingRow} ${wrappedHeading}`
+      .replace(/\s+/g, " ")
+      .trim();
+    if (queueHeadingPattern.test(wrappedHeading)) {
+      foundHeading = true;
+      break;
+    }
+    index -= 1;
+  }
+  if (!foundHeading) {
+    return false;
+  }
+
+  const visiblePrefix = compactQueueCorrelationText(
+    queuedItemRows.join(" ").replace(/(?:…|\.\.\.)+\s*$/, ""),
+  );
+  const submitted = compactQueueCorrelationText(submittedText.trim());
+  return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
 }
 
 export function screenShowsPendingShellInput(
@@ -3635,12 +3881,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     surface: string,
     workspace?: string,
     cli?: CliType,
-  ): Promise<void> => {
+  ): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
     });
     if (!snapshot) {
-      return;
+      return null;
     }
 
     if (snapshot.parsed.control_state === "permission_prompt") {
@@ -3656,6 +3902,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         snapshot.parsed,
       );
     }
+
+    return snapshot;
   };
 
   const maybeRenameTask = async (opts: {
@@ -3699,6 +3947,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     require_working_status?: boolean;
     allow_recovery_enter_retry?: boolean;
     timeout_ms?: number;
+    cursor_response_baseline: readonly string[] | null;
     beforeMutation?: () => Promise<void>;
   }): Promise<{
     submit_verified: boolean | null;
@@ -3726,7 +3975,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let retryCount = 0;
     let sawClearedComposerEvidence = false;
     let sawAllowedClearedComposerEvidence = false;
-    let lastHasPendingInput = false;
+    let lastHasPendingSubmitEvidence = false;
     let lastRetryEligiblePendingInput = false;
     let retryEligiblePendingSince: number | null = null;
     let retriedAt: number | null = null;
@@ -3758,21 +4007,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       sawReadableScreen = true;
 
-      if (isSubmitVerifiedStatus(snapshot.parsed.status)) {
+      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
+      const hasQueuedAgentInput = screenShowsQueuedAgentInput(
+        snapshot.text,
+        opts.text,
+      );
+      if (hasQueuedAgentInput) {
+        return {
+          submit_verified: false,
+          submit_verification_reason: "input_still_pending",
+          retry_count: retryCount,
+        };
+      }
+      const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
+      const cursorShowsSubmittedResponse =
+        screenCli === "cursor" &&
+        screenShowsFreshCursorResponseAfterSubmittedInput(
+          snapshot.text,
+          opts.text,
+          opts.cursor_response_baseline,
+        );
+      const hasPendingSubmitEvidence =
+        hasPendingInput && !cursorShowsSubmittedResponse;
+      lastHasPendingSubmitEvidence = hasPendingSubmitEvidence;
+      const composerInput = extractComposerInputRegion(snapshot.text);
+      if (
+        !hasPendingSubmitEvidence &&
+        (isSubmitVerifiedStatus(snapshot.parsed.status) ||
+          cursorShowsSubmittedResponse)
+      ) {
         return {
           submit_verified: true,
           submit_verification_reason: null,
           retry_count: retryCount,
         };
       }
-
-      const hasPendingInput = screenShowsPendingInput(snapshot.text, opts.text);
-      lastHasPendingInput = hasPendingInput;
-      const composerInput = extractComposerInputRegion(snapshot.text);
       const hasClearedAgentComposer =
         composerInput !== null &&
         composerInput.trim() === "" &&
-        !hasPendingInput &&
+        !hasPendingSubmitEvidence &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       if (hasClearedAgentComposer) {
         sawClearedComposerEvidence = true;
@@ -3867,7 +4140,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const submitVerified =
       opts.require_working_status ||
-      lastHasPendingInput ||
+      lastHasPendingSubmitEvidence ||
       lastRetryEligiblePendingInput ||
       !sawReadableScreen
         ? false
@@ -3875,7 +4148,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const failureReason: SubmitVerificationFailureReason | null =
       submitVerified !== false
         ? null
-        : lastHasPendingInput || lastRetryEligiblePendingInput
+        : lastHasPendingSubmitEvidence || lastRetryEligiblePendingInput
           ? "input_still_pending"
           : !sawReadableScreen
             ? sawBlankScreen
@@ -3913,7 +4186,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
   }> => {
     await opts.beforeMutation?.();
-    await assertDeliveryTargetIsSafe(opts.surface, opts.workspace);
+    const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
+      opts.surface,
+      opts.workspace,
+    );
     const deliveryBatches = buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
       opts.chunks,
@@ -3944,12 +4220,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       (sum, chunk) => sum + Buffer.byteLength(chunk, "utf-8"),
       0,
     );
+    const submittedText = opts.chunks.join("");
     let submit_verified: boolean | null = null;
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
 
     if (opts.press_enter) {
+      let cursorResponseBaseline: readonly string[] | null = null;
+      if (
+        opts.verify_submit &&
+        deliverySafetySnapshot &&
+        inferComposerCli(
+          deliverySafetySnapshot.text,
+          deliverySafetySnapshot.parsed,
+        ) === "cursor"
+      ) {
+        await opts.beforeMutation?.();
+        const preReturnSnapshot = await readParsedSurface(
+          opts.surface,
+          opts.workspace,
+          { throwOnSurfaceGone: true },
+        );
+        cursorResponseBaseline = preReturnSnapshot
+          ? cursorSubmittedResponseEvidenceSignatures(
+              preReturnSnapshot.text,
+              submittedText,
+            )
+          : null;
+      }
       await delay(computeEnterDelayMs(bytes, opts.chunks.length));
       await sendKeyWithRetry(
         opts.surface,
@@ -3970,13 +4269,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const verification = await verifySubmitAfterEnter({
         surface: opts.surface,
         workspace: opts.workspace,
-        text: opts.chunks.join(""),
+        text: submittedText,
         bytes,
         source_event: opts.source_event ?? "send_command",
         source_agent: opts.source_agent,
         verify_submit: opts.verify_submit ?? false,
         allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
         timeout_ms: opts.submit_verify_timeout_ms,
+        cursor_response_baseline: cursorResponseBaseline,
         require_working_status: opts.source_event === "boot_prompt",
         beforeMutation: opts.beforeMutation,
       });
@@ -9108,19 +9408,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
-            // Verify every relay to an interactive agent — not just long ones.
-            // A short relay (the common agent-to-agent case) to a frozen
-            // terminal must be caught, never reported as ok. allow_busy sends
-            // are deliberate queue/interjection writes and stay unverified to
-            // avoid false-failing accepted queued input.
+            // Verify every submitted agent relay — not just long ones. A short
+            // relay (the common agent-to-agent case) to a frozen terminal must
+            // be caught, never reported as ok. Busy sends do not retry Return:
+            // accepted queued input can repaint slowly, but text still proven
+            // inside the active composer must not receive a success receipt.
             verify_submit:
               args.press_enter &&
-              !args.allow_busy &&
-              INTERACTIVE_AGENT_STATES.has(deliveryRoute.state),
+              (args.allow_busy ||
+                INTERACTIVE_AGENT_STATES.has(deliveryRoute.state)),
             allow_recovery_enter_retry: !args.allow_busy,
+            submit_verify_timeout_ms: args.allow_busy
+              ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
+              : undefined,
             beforeMutation: assertDeliveryRouteCurrent,
           });
-          if (args.press_enter) {
+          if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id);
           }
           return delivery;
@@ -11612,7 +11915,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the lifecycle-state gate so a working agent can receive an interjection. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
+          "If true, bypass the lifecycle-state gate so a working agent can receive an interjection. Queued-but-unsubmitted input returns an error and must not be retried blindly. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
@@ -11761,7 +12064,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state (matches send_input behavior).",
+          "If true, bypass the interactive-state gate and deliver raw keystrokes regardless of agent state. Queued-but-unsubmitted input returns an error and must not be retried blindly.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
@@ -11840,7 +12143,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "supersede_agent_goal",
-      "Replace an existing managed agent's active mission with a file-backed /goal contract. Updates registry task_summary/goal_file, sends `/goal Read and execute this goal file until complete: <path>` through the guarded agent relay, and returns delivery evidence plus health. Use this to reuse an existing pane instead of spawning a duplicate lane.",
+      "Replace an existing managed agent's active mission with a file-backed /goal contract. Sends `/goal Read and execute this goal file until complete: <path>` through the guarded agent relay, then applies the supersede registry patch only after verified submission. An unverified submission does not apply that patch but may have mutated the target pane, so it is not safe to retry blindly. Use this to reuse an existing pane instead of spawning a duplicate lane.",
       {
         agent_id: z.string().describe("Managed agent_id to supersede"),
         goal_file: z
@@ -11857,7 +12160,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default(true)
           .describe(
-            "If true, supersede even while the agent is working. Defaults true because supersession intentionally replaces the active mission.",
+            "If true, supersede even while the agent is working. Defaults true because supersession intentionally replaces the active mission. Queued-but-unsubmitted input returns an error and may require manual pane reconciliation before retrying.",
           ),
       },
       ANNOTATIONS.mutating,
@@ -11870,13 +12173,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           await preflightBootPromptFile(args.goal_file);
           const taskSummary = args.summary?.trim() || args.goal_file;
-          const delivery = await deliverAgentInput({
-            agent_id: args.agent_id,
-            text: `/goal Read and execute this goal file until complete: ${args.goal_file}`,
-            press_enter: true,
-            allow_busy: args.allow_busy ?? true,
-            source_event: "supersede_agent_goal",
-          });
+          let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
+          try {
+            delivery = await deliverAgentInput({
+              agent_id: args.agent_id,
+              text: `/goal Read and execute this goal file until complete: ${args.goal_file}`,
+              press_enter: true,
+              allow_busy: args.allow_busy ?? true,
+              source_event: "supersede_agent_goal",
+            });
+          } catch (e) {
+            if (e instanceof SubmitVerificationError) {
+              return err(e, {
+                error_code: "supersede_submit_unverified",
+                submit_verified: false,
+                retry_count: e.retry_count,
+                registry_updated: false,
+                goal_delivery_state: "unverified_pane_side_effect",
+                retry_safe: false,
+                recovery:
+                  "Do not retry automatically; inspect the target composer/queue and reconcile the pane before attempting another supersede.",
+              });
+            }
+            throw e;
+          }
+          if (delivery.submit_verified !== true) {
+            const error = new SubmitVerificationError(
+              `Supersede submission could not be verified for ${args.agent_id}`,
+              delivery.retry_count,
+              "submit_evidence_absent",
+            );
+            return err(error, {
+              error_code: "supersede_submit_unverified",
+              ...submitVerificationFailurePayload(error),
+              registry_updated: false,
+              goal_delivery_state: "unverified_pane_side_effect",
+              recovery:
+                "Do not retry automatically; inspect the target composer/queue and reconcile the pane before attempting another supersede.",
+            });
+          }
           const canonicalAgentId = current.agent_id;
           const supersedePatch = {
             task_summary: taskSummary,
