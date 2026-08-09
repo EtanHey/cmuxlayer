@@ -91,13 +91,25 @@ function canonicalPath(path: string): string {
   }
 }
 
-function assertInside(root: string, path: string): void {
-  const resolvedRoot = resolve(root);
-  const resolvedPath = resolve(path);
-  const rel = relative(resolvedRoot, resolvedPath);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`Worktree path ${path} must be inside ${root}`);
+function isInside(root: string, path: string): boolean {
+  const rel = relative(resolve(root), resolve(path));
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+function assertAllowedWorktreePath(
+  repoRoot: string,
+  homeGitsDir: string,
+  path: string,
+): void {
+  if (
+    isInside(repoRoot, path) ||
+    (isInside(homeGitsDir, repoRoot) && isInside(homeGitsDir, path))
+  ) {
+    return;
   }
+  throw new Error(
+    `Worktree path ${path} must be inside ${repoRoot} or ${homeGitsDir}`,
+  );
 }
 
 function normalizeWorktreeRequest(
@@ -241,7 +253,6 @@ export async function prepareWorktree(
   const repo = sanitizeRepoName(input.repo);
   const homeGitsDir = resolve(input.homeGitsDir ?? join(homedir(), "Gits"));
   const repoRoot = resolve(input.repoRoot ?? join(homeGitsDir, repo));
-  assertInside(homeGitsDir, repoRoot);
   const exec = input.exec ?? defaultExec;
 
   const spec = normalizeWorktreeRequest(repo, input.worktree);
@@ -271,13 +282,14 @@ export async function prepareWorktree(
       throw new Error(`Unable to generate a unique worktree path for ${repo}`);
     }
   }
-  assertInside(homeGitsDir, worktreePath);
+  assertAllowedWorktreePath(repoRoot, homeGitsDir, worktreePath);
 
   // Read the legacy sibling location during migration, but always create new
   // worktrees under <repo>/.worktrees. TODO remove .wt read-path after migration, ~2026-09.
   if (
     !spec.path &&
     !spec.generatedName &&
+    isInside(homeGitsDir, repoRoot) &&
     !existsSync(worktreePath) &&
     spec.reuse &&
     existsSync(legacyPath)
@@ -323,16 +335,71 @@ export async function prepareWorktree(
     worktreePath,
     spec.base,
   ]);
-  mkdirSync(worktreePath, { recursive: true });
-
-  return {
+  const prepared: PreparedWorktree = {
     path: worktreePath,
     name: basename(worktreePath),
     branch,
     base: spec.base,
     created: true,
     reused: false,
-    node_modules_linked: linkNodeModules(repoRoot, worktreePath),
-    mcp_json_copied: copyMcpJson(repoRoot, worktreePath),
+    node_modules_linked: false,
+    mcp_json_copied: false,
   };
+  try {
+    mkdirSync(worktreePath, { recursive: true });
+    prepared.node_modules_linked = linkNodeModules(repoRoot, worktreePath);
+    prepared.mcp_json_copied = copyMcpJson(repoRoot, worktreePath);
+    return prepared;
+  } catch (error) {
+    try {
+      await rollbackPreparedWorktree(repoRoot, prepared, exec);
+    } catch (rollbackError) {
+      const original = error instanceof Error ? error.message : String(error);
+      const rollback =
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : String(rollbackError);
+      throw new Error(
+        `${original}. Worktree rollback also failed for ${prepared.path} (${prepared.branch}): ${rollback}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+export async function rollbackPreparedWorktree(
+  repoRoot: string,
+  prepared: PreparedWorktree,
+  exec: WorktreeExec = defaultExec,
+): Promise<void> {
+  if (!prepared.created) return;
+
+  const failures: string[] = [];
+  try {
+    await exec("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "remove",
+      "--force",
+      prepared.path,
+    ]);
+  } catch (error) {
+    failures.push(
+      `worktree remove failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    await exec("git", ["-C", repoRoot, "branch", "-D", prepared.branch]);
+  } catch (error) {
+    failures.push(
+      `branch delete failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `Cleanup required for worktree ${prepared.path} and branch ${prepared.branch}: ${failures.join("; ")}`,
+    );
+  }
 }

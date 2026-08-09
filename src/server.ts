@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants, mkdtempSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { CmuxClient, type ExecFn } from "./cmux-client.js";
 import {
   CMUXLAYER_DEFAULT_PALETTE_ENV,
@@ -198,9 +198,11 @@ import {
 import {
   formatMcpProfileEnv,
   prepareWorktree,
+  rollbackPreparedWorktree,
   type McpProfile,
   type WorktreeExec,
 } from "./worktree.js";
+import { resolveRepoRootFromLauncherRegistry } from "./launcher-registry.js";
 import {
   loadSeatRegistryFromConfig,
   type SeatRegistry,
@@ -9236,14 +9238,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const profile = mcpProfile ?? "inherit";
+      const repoRoot = disableSpawnPreflight
+        ? resolve(opts?.worktreeHomeDir ?? join(homedir(), "Gits"), repo)
+        : resolveRepoRootFromLauncherRegistry(repo);
       const prepared = await prepareWorktree({
         repo,
+        repoRoot,
         worktree: worktree as Parameters<typeof prepareWorktree>[0]["worktree"],
         exec: opts?.worktreeExec,
         homeGitsDir: opts?.worktreeHomeDir,
       });
       return {
         prepared,
+        repoRoot,
         mcpProfileLabel: typeof profile === "string" ? profile : "custom",
         mcpEnv: formatMcpProfileEnv(profile),
       };
@@ -9534,7 +9541,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "When set, create or reuse a git worktree before launch. true uses <repo>/.worktrees/<generated-name> (in-repo convention; legacy ~/Gits/<repo>.wt read-fallback until ~2026-09); object fields can set name, path, branch, base, create, and reuse.",
+            "When set, create or reuse a git worktree before launch. A repoGolem registration with an absolute path is required; that registry path is the repo root. true uses <registered-root>/.worktrees/<generated-name> (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09). If a later spawn step fails before a recoverable surface exists, a newly created worktree and branch are rolled back. Object fields can set name, path, branch, base, create, and reuse.",
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -9646,11 +9653,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "spawn_agent",
             comparisonWorkspace,
           );
-          const worktree = await prepareSpawnWorktree(
-            args.repo,
-            args.worktree,
-            args.mcp_profile as McpProfile | undefined,
-          );
           const requestedRole = inferAgentRole({
             role: effectiveRole,
             cli: args.cli,
@@ -9697,10 +9699,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const spawnPrompt = hasInlinePrompt(args.prompt)
             ? args.prompt
             : (bootPromptText ?? "");
+          // Prepare only after every non-spawn gate has passed. From this point
+          // onward the catch below owns rollback for any newly created worktree.
+          const worktree = await prepareSpawnWorktree(
+            args.repo,
+            args.worktree,
+            args.mcp_profile as McpProfile | undefined,
+          );
           let focusRestoreLease = await focusTargetBeforeSplit(
             spawnWorkspace,
             args.focus !== true,
           );
+          let surfaceCreated = false;
           let result: Awaited<ReturnType<typeof engine.spawnAgent>>;
           try {
             result = await engine.spawnAgent({
@@ -9723,6 +9733,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               crash_recover: args.crash_recover,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
+                surfaceCreated = true;
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
                   created,
@@ -9730,6 +9741,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             });
           } catch (e) {
+            let rollbackError: unknown = null;
+            if (
+              !surfaceCreated &&
+              worktree.prepared?.created &&
+              worktree.repoRoot
+            ) {
+              try {
+                await rollbackPreparedWorktree(
+                  worktree.repoRoot,
+                  worktree.prepared,
+                  opts?.worktreeExec,
+                );
+              } catch (error) {
+                rollbackError = error;
+              }
+            }
             try {
               await restoreFocusAfterRender(
                 focusRestoreLease,
@@ -9738,6 +9765,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               );
             } catch {
               // Preserve the original spawn error response.
+            }
+            if (rollbackError) {
+              const rollback =
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError);
+              if (e instanceof Error) {
+                e.message = `${e.message}. Worktree rollback also failed: ${rollback}`;
+                throw e;
+              }
+              throw new Error(
+                `${String(e)}. Worktree rollback also failed: ${rollback}`,
+                { cause: e },
+              );
             }
             throw e;
           }
@@ -10042,7 +10083,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "Worktree options. Defaults to true, creating/reusing <repo>/.worktrees/<generated-name> (in-repo convention).",
+            "Worktree options. A repoGolem registration with an absolute path is required. Defaults to true, creating/reusing <registered-root>/.worktrees/<generated-name>; a newly created worktree and branch are rolled back if spawn fails before a recoverable surface exists (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09).",
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -10063,6 +10104,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let focusRestoreLease: FocusRestoreLease | null = null;
         let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
         let mutationWorkspace: string | undefined;
+        let surfaceCreated = false;
+        let worktree:
+          | Awaited<ReturnType<typeof prepareSpawnWorktree>>
+          | undefined;
         try {
           resolveSpawnModelPolicy(args.cli, args.model);
           assertBootPromptMode(args.prompt, null);
@@ -10087,12 +10132,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "new_worktree_split",
             mutationWorkspace,
           );
-          const worktree = await prepareSpawnWorktree(
+          focusRestoreLease = await focusTargetBeforeSplit(mutationWorkspace);
+          worktree = await prepareSpawnWorktree(
             args.repo,
             args.worktree ?? true,
             args.mcp_profile as McpProfile | undefined,
           );
-          focusRestoreLease = await focusTargetBeforeSplit(mutationWorkspace);
           const hasPrompt = hasInlinePrompt(args.prompt);
           result = await engine.spawnAgent({
             repo: args.repo,
@@ -10110,6 +10155,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
             on_surface_created: async (created) => {
+              surfaceCreated = true;
               focusRestoreLease = await capturePostCreationFocus(
                 focusRestoreLease,
                 created,
@@ -10214,6 +10260,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("new_worktree_split", formattedData),
           );
         } catch (e) {
+          let caught: unknown = e;
+          if (
+            !result &&
+            !surfaceCreated &&
+            worktree?.prepared?.created &&
+            worktree.repoRoot
+          ) {
+            try {
+              await rollbackPreparedWorktree(
+                worktree.repoRoot,
+                worktree.prepared,
+                opts?.worktreeExec,
+              );
+            } catch (rollbackError) {
+              const rollback =
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError);
+              if (e instanceof Error) {
+                e.message = `${e.message}. Worktree rollback also failed: ${rollback}`;
+                caught = e;
+              } else {
+                caught = new Error(
+                  `${String(e)}. Worktree rollback also failed: ${rollback}`,
+                  { cause: e },
+                );
+              }
+            }
+          }
           await restoreFocusAfterRender(
             focusRestoreLease,
             result?.surface_id,
@@ -10229,72 +10304,72 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 workspace_id: result.workspace_id ?? mutationWorkspace,
               }
             : {};
-          if (e instanceof AgentLaunchError) {
-            if (e.launch_cause instanceof DeliverySafetyGateError) {
-              return err(e.launch_cause, {
-                agent_id: e.agent_id,
-                surface_id: e.surface_id,
-                workspace_id: e.workspace_id,
-                error_code: e.launch_cause.error_code,
-                submit_verified: e.launch_cause.submit_verified,
-                screen: e.launch_cause.screen,
+          if (caught instanceof AgentLaunchError) {
+            if (caught.launch_cause instanceof DeliverySafetyGateError) {
+              return err(caught.launch_cause, {
+                agent_id: caught.agent_id,
+                surface_id: caught.surface_id,
+                workspace_id: caught.workspace_id,
+                error_code: caught.launch_cause.error_code,
+                submit_verified: caught.launch_cause.submit_verified,
+                screen: caught.launch_cause.screen,
               });
             }
-            if (e.launch_cause instanceof SurfaceGoneError) {
+            if (caught.launch_cause instanceof SurfaceGoneError) {
               return err(
-                e.launch_cause,
-                surfaceGonePayload(e.launch_cause, {
-                  agent_id: e.agent_id,
-                  surface_id: e.surface_id,
-                  workspace_id: e.workspace_id,
+                caught.launch_cause,
+                surfaceGonePayload(caught.launch_cause, {
+                  agent_id: caught.agent_id,
+                  surface_id: caught.surface_id,
+                  workspace_id: caught.workspace_id,
                 }),
               );
             }
-            return err(e, {
-              agent_id: e.agent_id,
-              surface_id: e.surface_id,
-              workspace_id: e.workspace_id,
+            return err(caught, {
+              agent_id: caught.agent_id,
+              surface_id: caught.surface_id,
+              workspace_id: caught.workspace_id,
             });
           }
-          if (e instanceof DeliverySafetyGateError) {
-            return err(e, {
+          if (caught instanceof DeliverySafetyGateError) {
+            return err(caught, {
               ...createdIdentity,
-              error_code: e.error_code,
-              submit_verified: e.submit_verified,
-              screen: e.screen,
+              error_code: caught.error_code,
+              submit_verified: caught.submit_verified,
+              screen: caught.screen,
             });
           }
-          if (e instanceof SubmitVerificationError) {
-            return err(e, {
+          if (caught instanceof SubmitVerificationError) {
+            return err(caught, {
               ...createdIdentity,
               submit_verified: false,
-              retry_count: e.retry_count,
+              retry_count: caught.retry_count,
             });
           }
-          if (e instanceof SurfaceGoneError) {
-            return err(e, surfaceGonePayload(e, createdIdentity));
+          if (caught instanceof SurfaceGoneError) {
+            return err(caught, surfaceGonePayload(caught, createdIdentity));
           }
-          if (e instanceof BootPromptTimeoutError) {
-            return err(e, {
+          if (caught instanceof BootPromptTimeoutError) {
+            return err(caught, {
               ...createdIdentity,
-              last_10_lines: e.last_10_lines,
+              last_10_lines: caught.last_10_lines,
             });
           }
-          if (e instanceof BootPromptUpdateMenuBlockedError) {
-            return err(e, {
+          if (caught instanceof BootPromptUpdateMenuBlockedError) {
+            return err(caught, {
               ...createdIdentity,
-              error_code: e.error_code,
-              last_10_lines: e.last_10_lines,
-              recovery: e.recovery,
+              error_code: caught.error_code,
+              last_10_lines: caught.last_10_lines,
+              recovery: caught.recovery,
             });
           }
-          if (e instanceof BootPromptDeliveryError) {
-            return err(e, {
+          if (caught instanceof BootPromptDeliveryError) {
+            return err(caught, {
               ...createdIdentity,
-              delivered_chars: e.delivered_chars,
+              delivered_chars: caught.delivered_chars,
             });
           }
-          return err(e, createdIdentity);
+          return err(caught, createdIdentity);
         }
       },
     );
