@@ -2812,7 +2812,7 @@ describe("agent lifecycle tool handlers", () => {
     const repoRoot = join(gitsDir, "cmuxlayer");
     mkdirSync(repoRoot, { recursive: true });
     const worktreeExec = vi.fn().mockImplementation(async () => {
-      mkdirSync(join(gitsDir, "cmuxlayer.wt", "skill-eval"), {
+      mkdirSync(join(gitsDir, "cmuxlayer", ".worktrees", "skill-eval"), {
         recursive: true,
       });
       return { stdout: "", stderr: "" };
@@ -2844,7 +2844,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    const worktreePath = join(gitsDir, "cmuxlayer.wt", "skill-eval");
+    const worktreePath = join(gitsDir, "cmuxlayer", ".worktrees", "skill-eval");
     expect(parsed.ok).toBe(true);
     expect(parsed.worktree).toMatchObject({
       path: worktreePath,
@@ -2881,7 +2881,7 @@ describe("agent lifecycle tool handlers", () => {
     const repoRoot = join(gitsDir, "cmuxlayer");
     mkdirSync(repoRoot, { recursive: true });
     const worktreeExec = vi.fn().mockImplementation(async () => {
-      mkdirSync(join(gitsDir, "cmuxlayer.wt", "sterile-worker"), {
+      mkdirSync(join(gitsDir, "cmuxlayer", ".worktrees", "sterile-worker"), {
         recursive: true,
       });
       return { stdout: "", stderr: "" };
@@ -2910,7 +2910,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    const worktreePath = join(gitsDir, "cmuxlayer.wt", "sterile-worker");
+    const worktreePath = join(gitsDir, "cmuxlayer", ".worktrees", "sterile-worker");
     expect(parsed.ok).toBe(true);
     expect(parsed.role).toBe("worker");
     expect(parsed.mcp_profile).toBe("sterile");
@@ -2931,7 +2931,7 @@ describe("agent lifecycle tool handlers", () => {
   it("new_worktree_split publishes its worktree cwd through the injected manifest writer", async () => {
     const gitsDir = join(TEST_DIR, "Gits");
     mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
-    const worktreePath = join(gitsDir, "cmuxlayer.wt", "manifest-worker");
+    const worktreePath = join(gitsDir, "cmuxlayer", ".worktrees", "manifest-worker");
     const worktreeExec = vi.fn().mockImplementation(async () => {
       mkdirSync(worktreePath, { recursive: true });
       return { stdout: "", stderr: "" };
@@ -3118,7 +3118,7 @@ describe("agent lifecycle tool handlers", () => {
       const repoRoot = join(gitsDir, "cmuxlayer");
       mkdirSync(repoRoot, { recursive: true });
       const worktreeExec = vi.fn().mockImplementation(async () => {
-        mkdirSync(join(gitsDir, "cmuxlayer.wt", "caller-worker"), {
+        mkdirSync(join(gitsDir, "cmuxlayer", ".worktrees", "caller-worker"), {
           recursive: true,
         });
         return { stdout: "", stderr: "" };
@@ -4053,7 +4053,8 @@ describe("agent lifecycle tool handlers", () => {
       mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
       const worktreePath = join(
         gitsDir,
-        "cmuxlayer.wt",
+        "cmuxlayer",
+        ".worktrees",
         "readiness-failure-worker",
       );
       const worktreeExec = vi.fn().mockImplementation(async () => {
@@ -4106,7 +4107,8 @@ describe("agent lifecycle tool handlers", () => {
       mkdirSync(join(gitsDir, "cmuxlayer"), { recursive: true });
       const worktreePath = join(
         gitsDir,
-        "cmuxlayer.wt",
+        "cmuxlayer",
+        ".worktrees",
         "boot-verification-failure-worker",
       );
       const worktreeExec = vi.fn().mockImplementation(async () => {
