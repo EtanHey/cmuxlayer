@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CliType } from "./agent-types.js";
 import { sanitizeRepoName } from "./agent-command.js";
 
@@ -141,17 +141,34 @@ export function resolveLauncherPrefix(
   input: string,
   entries: readonly LauncherRegistryEntry[],
 ): string | null {
+  return resolveLauncherEntry(input, entries)?.prefix ?? null;
+}
+
+function resolveLauncherEntry(
+  input: string,
+  entries: readonly LauncherRegistryEntry[],
+): LauncherRegistryEntry | null {
   const normalized = normalizeLauncherKey(input);
-  for (const entry of entries) {
-    if (
-      normalizeLauncherKey(entry.prefix) === normalized ||
+  const exactPrefix = entries.find(
+    (entry) => normalizeLauncherKey(entry.prefix) === normalized,
+  );
+  if (exactPrefix) return exactPrefix;
+
+  const fallbackMatches = entries.filter(
+    (entry) =>
       normalizeLauncherKey(entry.repoBasename) === normalized ||
-      normalizeLauncherKey(entry.path) === normalized
-    ) {
-      return entry.prefix;
-    }
+      normalizeLauncherKey(entry.path) === normalized,
+  );
+  if (fallbackMatches.length === 0) return null;
+  const paths = new Set(fallbackMatches.map((entry) => resolve(entry.path)));
+  if (paths.size > 1) {
+    throw new Error(
+      `Ambiguous launcher registry match for repo "${input}": ${fallbackMatches
+        .map((entry) => `${entry.prefix}=${entry.path}`)
+        .join(", ")}. Use the exact launcher prefix.`,
+    );
   }
-  return null;
+  return fallbackMatches[0] ?? null;
 }
 
 function launcherName(prefix: string, suffix: LauncherSuffix): string {
@@ -205,4 +222,26 @@ export function resolveLauncherNameFromRegistry(
       `Registry source: ${sourcePath}. ` +
       `Registered launchers: ${registeredLauncherSummary(entries)}.`,
   );
+}
+
+export function resolveRepoRootFromLauncherRegistry(
+  repo: string,
+  options?: LauncherRegistryOptions,
+): string {
+  const { entries, sourcePath } = loadLauncherRegistry(options);
+  const entry = resolveLauncherEntry(repo, entries);
+  if (!entry) {
+    throw new Error(
+      `Launcher registry miss for repo "${repo}". ` +
+        `Registry source: ${sourcePath}. ` +
+        `Registered launchers: ${registeredLauncherSummary(entries)}.`,
+    );
+  }
+  if (!isAbsolute(entry.path)) {
+    throw new Error(
+      `Launcher registry path for repo "${repo}" must be absolute: ` +
+        `"${entry.path}" in ${sourcePath}.`,
+    );
+  }
+  return resolve(entry.path);
 }

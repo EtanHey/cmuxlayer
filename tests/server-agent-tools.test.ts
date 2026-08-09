@@ -47,8 +47,16 @@ let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
 const hermeticSpawnStateDirs: string[] = [];
 let hermeticSpawnFixtureSequence = 0;
+const originalLauncherRegistryPath =
+  process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH;
 
 afterEach(async () => {
+  if (originalLauncherRegistryPath === undefined) {
+    delete process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH;
+  } else {
+    process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH =
+      originalLauncherRegistryPath;
+  }
   await Promise.allSettled(
     serverContexts.map(
       (context) => context.lifecycleStartPromise ?? Promise.resolve(),
@@ -2874,6 +2882,331 @@ describe("agent lifecycle tool handlers", () => {
         `cmuxlayerCodex -s -w '${worktreePath}'`,
       ]),
     );
+  });
+
+  it("spawn_agent resolves a mismatched repo key from the launcher registry path", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "skill-creator");
+    const registryPath = join(TEST_DIR, "launchers.zsh");
+    const worktreePath = join(repoRoot, ".worktrees", "registry-root");
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(
+      registryPath,
+      `repoGolem skillcreator "${repoRoot}"\n`,
+    );
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const worktreeExec = vi.fn().mockImplementation(async () => {
+      mkdirSync(worktreePath, { recursive: true });
+      return { stdout: "", stderr: "" };
+    });
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "skillcreator",
+        cli: "codex",
+        role: "worker",
+        worktree: { name: "registry-root" },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.worktree.path).toBe(worktreePath);
+    expect(worktreeExec).toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["-C", repoRoot, "worktree", "add"]),
+    );
+    expect(worktreeExec).not.toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["-C", join(gitsDir, "skillcreator")]),
+    );
+  });
+
+  it("spawn_agent supports a registry repo path outside the Gits directory without redirecting", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(TEST_DIR, ".config", "ralph");
+    const registryPath = join(TEST_DIR, "launchers-outside-gits.zsh");
+    const worktreePath = join(repoRoot, ".worktrees", "outside-root");
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const worktreeExec = vi.fn().mockImplementation(async () => {
+      mkdirSync(worktreePath, { recursive: true });
+      return { stdout: "", stderr: "" };
+    });
+    const server = createTrackedServer({
+      exec: mockExec,
+      stateDir: TEST_DIR,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "ralph",
+        cli: "codex",
+        role: "worker",
+        worktree: { name: "outside-root" },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.worktree.path).toBe(worktreePath);
+    expect(
+      worktreeExec.mock.calls.some(([, args]) =>
+        args.includes(join(gitsDir, "ralph")),
+      ),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rejects an unregistered repo before worktree or focus mutation", async () => {
+    const registryPath = join(TEST_DIR, "launchers-missing-repo.zsh");
+    writeFileSync(
+      registryPath,
+      `repoGolem cmuxlayer "${join(TEST_DIR, "Gits", "cmuxlayer")}"\n`,
+    );
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const lifecycleExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(lifecycleExec);
+    const worktreeExec = vi.fn();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: join(TEST_DIR, "Gits"),
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "wt-eval-scratch",
+        cli: "codex",
+        role: "worker",
+        worktree: true,
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/Launcher registry miss.*wt-eval-scratch/s);
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(
+      exec.mock.calls.some(([, args]) =>
+        args.includes("select-workspace") || args.includes("surface.focus"),
+      ),
+    ).toBe(false);
+  });
+
+  it("spawn_agent rolls back a newly created worktree and branch when spawning fails", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(TEST_DIR, ".config", "ralph");
+    const registryPath = join(TEST_DIR, "launchers-rollback.zsh");
+    const worktreePath = join(repoRoot, ".worktrees", "spawn-failure");
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      if (args.includes("worktree") && args.includes("remove")) {
+        rmSync(worktreePath, { recursive: true, force: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const lifecycleExec = makeLifecycleExec();
+    const failingExec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        throw new Error("deliberate spawn failure");
+      }
+      return lifecycleExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec: failingExec,
+      stateDir: TEST_DIR,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "ralph",
+        cli: "codex",
+        role: "worker",
+        worktree: {
+          name: "spawn-failure",
+          branch: "wt/spawn-failure",
+        },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("deliberate spawn failure");
+    expect(worktreeExec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    expect(worktreeExec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "branch",
+      "-D",
+      "wt/spawn-failure",
+    ]);
+    expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("spawn_agent preserves a newly created worktree when a recoverable surface survives", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "cmuxlayer");
+    const worktreePath = join(repoRoot, ".worktrees", "recoverable-surface");
+    mkdirSync(repoRoot, { recursive: true });
+    const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const lifecycleExec = makeLifecycleExec();
+    const failingFocusExec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (
+        args.includes("rpc") &&
+        args.includes("surface.focus") &&
+        args.some((value) => String(value).includes("surface:new"))
+      ) {
+        throw new Error("deliberate created-surface focus failure");
+      }
+      return lifecycleExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec: failingFocusExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        worktree: {
+          name: "recoverable-surface",
+          branch: "wt/recoverable-surface",
+        },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("deliberate created-surface focus failure");
+    expect(parsed.surface_id).toBe("surface:new");
+    expect(worktreeExec).not.toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["worktree", "remove"]),
+    );
+    expect(worktreeExec).not.toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["branch", "-D"]),
+    );
+    expect(existsSync(worktreePath)).toBe(true);
+  });
+
+  it("new_worktree_split rolls back a newly created worktree and branch when spawning fails", async () => {
+    const gitsDir = join(TEST_DIR, "Gits");
+    const repoRoot = join(gitsDir, "cmuxlayer");
+    const worktreePath = join(repoRoot, ".worktrees", "legacy-spawn-failure");
+    mkdirSync(repoRoot, { recursive: true });
+    const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      if (args.includes("worktree") && args.includes("remove")) {
+        rmSync(worktreePath, { recursive: true, force: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const lifecycleExec = makeLifecycleExec();
+    const failingExec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (args.includes("new-split") || args.includes("new-surface")) {
+        throw new Error("deliberate legacy spawn failure");
+      }
+      return lifecycleExec(cmd, args);
+    });
+    const server = createTrackedServer({
+      exec: failingExec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: gitsDir,
+      worktreeExec,
+    });
+    const tool = (server as any)._registeredTools["new_worktree_split"];
+
+    const result = await tool.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        worktree: {
+          name: "legacy-spawn-failure",
+          branch: "wt/legacy-spawn-failure",
+        },
+      },
+      {} as any,
+    );
+
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("deliberate legacy spawn failure");
+    expect(worktreeExec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    expect(worktreeExec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "branch",
+      "-D",
+      "wt/legacy-spawn-failure",
+    ]);
+    expect(existsSync(worktreePath)).toBe(false);
   });
 
   it("new_worktree_split launches a worker with the requested MCP profile", async () => {

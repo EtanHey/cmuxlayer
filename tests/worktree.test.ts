@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import {
   formatMcpProfileEnv,
   prepareWorktree,
+  rollbackPreparedWorktree,
 } from "../src/worktree.js";
 
 const TEST_ROOT = join(tmpdir(), "cmuxlayer-worktree-test");
@@ -379,6 +380,73 @@ describe("worktree helpers", () => {
     expect(readFileSync(join(worktreePath, ".mcp.json"), "utf8")).toBe(
       mcpConfig,
     );
+  });
+
+  it("rolls back a newly created worktree when post-add setup fails", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    const worktreePath = join(repoRoot, ".worktrees", "setup-failure");
+    mkdirSync(repoRoot, { recursive: true });
+    mkdirSync(join(repoRoot, ".mcp.json"));
+    const exec = vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args.includes("worktree") && args.includes("add")) {
+        mkdirSync(worktreePath, { recursive: true });
+      }
+      if (args.includes("worktree") && args.includes("remove")) {
+        rmSync(worktreePath, { recursive: true, force: true });
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await expect(
+      prepareWorktree({
+        repo: "cmuxlayer",
+        repoRoot,
+        homeGitsDir: TEST_ROOT,
+        worktree: {
+          name: "setup-failure",
+          branch: "wt/setup-failure",
+        },
+        exec,
+      }),
+    ).rejects.toThrow();
+
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    expect(exec).toHaveBeenCalledWith("git", [
+      "-C",
+      repoRoot,
+      "branch",
+      "-D",
+      "wt/setup-failure",
+    ]);
+    expect(existsSync(worktreePath)).toBe(false);
+  });
+
+  it("never rolls back a reused worktree", async () => {
+    const exec = vi.fn();
+
+    await rollbackPreparedWorktree(
+      join(TEST_ROOT, "repo"),
+      {
+        path: join(TEST_ROOT, "repo", ".worktrees", "existing"),
+        name: "existing",
+        branch: "wt/existing",
+        base: "HEAD",
+        created: false,
+        reused: true,
+        node_modules_linked: false,
+        mcp_json_copied: false,
+      },
+      exec,
+    );
+
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it("copies .mcp.json when reusing an existing worktree", async () => {

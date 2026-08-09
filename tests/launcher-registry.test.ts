@@ -3,6 +3,7 @@ import {
   parseLauncherRegistry,
   resolveLauncherNameFromRegistry,
   resolveLauncherPrefix,
+  resolveRepoRootFromLauncherRegistry,
 } from "../src/launcher-registry.js";
 
 const REGISTRY = `
@@ -56,6 +57,60 @@ describe("launcher registry", () => {
         sourcePath: "/tmp/launchers.zsh",
       }),
     ).toBe("mmClaude");
+  });
+
+  it("resolves the registered repo path independently of the registry key", () => {
+    const entries = parseLauncherRegistry(REGISTRY, "/tmp/launchers.zsh");
+
+    expect(
+      resolveRepoRootFromLauncherRegistry("hyphen", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toBe("/Users/etanheyman/Gits/hyphen-repo");
+  });
+
+  it("prefers an exact registry prefix over an earlier basename alias", () => {
+    const entries = parseLauncherRegistry(
+      `repoGolem alias "/tmp/other/golems"\nrepoGolem golems "/tmp/canonical"\n`,
+      "/tmp/launchers.zsh",
+    );
+
+    expect(
+      resolveRepoRootFromLauncherRegistry("golems", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toBe("/tmp/canonical");
+  });
+
+  it("rejects an ambiguous basename match across different registry paths", () => {
+    const entries = parseLauncherRegistry(
+      `repoGolem first "/tmp/one/shared"\nrepoGolem second "/tmp/two/shared"\n`,
+      "/tmp/launchers.zsh",
+    );
+
+    expect(() =>
+      resolveRepoRootFromLauncherRegistry("shared", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toThrow(/Ambiguous launcher registry match.*first=.*second=.*exact launcher prefix/s);
+  });
+
+  it("rejects a relative registry repo path instead of resolving it from cmuxlayer cwd", () => {
+    expect(() =>
+      resolveRepoRootFromLauncherRegistry("relative", {
+        entries: [
+          {
+            prefix: "relative",
+            path: "../somewhere-else",
+            repoBasename: "somewhere-else",
+          },
+        ],
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toThrow(/must be absolute.*\.\.\/somewhere-else.*launchers\.zsh/s);
   });
 
   it("throws a self-answering miss error with source and registered launchers", () => {
