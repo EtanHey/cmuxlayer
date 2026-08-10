@@ -143,7 +143,7 @@ function makeLifecycleExec(opts?: {
       }
       if (text.includes("Claude")) {
         activeCli = "claude";
-        readyText = "What can I help you with?\n>";
+        readyText = "Claude Code\nWhat can I help you with?\n>";
       }
       if (text.includes("Cursor")) {
         activeCli = "cursor";
@@ -6996,6 +6996,60 @@ codex>
   });
 
   it.each(["send_to", "send_to_agent"] as const)(
+    "%s refuses routed delivery when the agent pane has fallen back to a bare shell",
+    async (toolName) => {
+      let showBareShell = false;
+      const base = makeLifecycleExec({
+        surfaceUuid: "11111111-2222-4333-8444-555555555555",
+      });
+      const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+        if (showBareShell && args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "etan@mac cmuxlayer %",
+              lines: 1,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return base(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const sendTo = (server as any)._registeredTools[toolName];
+      const spawnResult = await spawn.handler(
+        { repo: "test", model: "sonnet", cli: "claude" },
+        {} as any,
+      );
+      const agentId = parseToolResult(spawnResult).agent_id as string;
+      const engine = (server as any)._registeredTools["interact"]._engine;
+      const registry = engine.getRegistry();
+      const exited = engine.stateMgr.updateRecord(agentId, {
+        state: "error",
+        error: "Agent CLI exited",
+      });
+      registry.set(agentId, exited);
+      showBareShell = true;
+      exec.mockClear();
+
+      const result = await sendTo.handler(
+        { agent_id: agentId, text: "Etan routed message", press_enter: false },
+        {} as any,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(parseToolResult(result).error).toMatch(
+        /exited \/ no agent currently initiated/i,
+      );
+      expect(
+        exec.mock.calls.filter(([, args]) => args.includes("send")),
+      ).toEqual([]);
+    },
+  );
+
+  it.each(["send_to", "send_to_agent"] as const)(
     "RC3: %s delivers to an error-state agent whose surface is alive",
     async (toolName) => {
       const server = createLifecycleServer(mockExec);
@@ -7147,6 +7201,68 @@ codex>
       expect.anything(),
       expect.anything(),
     );
+  });
+
+  it("send_to rechecks for a bare shell after its final agent route resolution", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:agent",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "uuid-route-rebinds-to-shell",
+      surface_id: "surface:agent",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = testLifecycleEngine(server) as any;
+    const originalResolveAgentIoRoute =
+      engine.resolveAgentIoRoute.bind(engine);
+    let resolveCount = 0;
+    vi.spyOn(engine, "resolveAgentIoRoute").mockImplementation(
+      async (agentId: string) => {
+        resolveCount += 1;
+        if (resolveCount === 2) {
+          routeClient.setLiveSurfaces([
+            {
+              ref: "surface:shell",
+              id: stableUuid,
+              workspace_ref: "workspace:1",
+            },
+          ]);
+          routeClient.setScreenText("etan@mac cmuxlayer %");
+        }
+        return originalResolveAgentIoRoute(agentId);
+      },
+    );
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "must not execute after route rebind",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error).toMatch(
+      /exited \/ no agent currently initiated/i,
+    );
+    expect(routeClient.sendCalls).toEqual([]);
+    expect(routeClient.client.send).not.toHaveBeenCalled();
   });
 
   it("raw send_to refuses an ambiguous numeric ref after it is recycled", async () => {

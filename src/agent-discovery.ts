@@ -3,6 +3,7 @@ import type { AgentState, CliType } from "./agent-types.js";
 import type {
   CmuxReadScreenResult,
   CmuxSurface,
+  ParsedControlPlaneState,
   ParsedScreenStatus,
 } from "./types.js";
 
@@ -13,6 +14,7 @@ export interface DiscoveredAgent {
   surface_title: string;
   workspace_id?: string | null;
   cli: CliType | "unknown";
+  control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
   model: string | null;
   token_count: number | null;
@@ -132,6 +134,7 @@ export class AgentDiscovery {
             surface_title: surface.title,
             workspace_id: workspaceId,
             cli,
+            control_state: parsed.control_state,
             parsed_status: parsed.status,
             model: parsed.model,
             token_count: parsed.token_count,
@@ -150,6 +153,7 @@ export class AgentDiscovery {
             surface_title: surface.title,
             workspace_id: workspaceId,
             cli: "unknown",
+            control_state: "unknown",
             parsed_status: null,
             model: null,
             token_count: null,
