@@ -6004,6 +6004,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     overrides?: AgentHealthInputOverrides,
     topologyOverride?: SurfaceTopologySnapshot | null,
   ) => {
+    const parent = agent.parent_agent_id
+      ? (context.lifecycleRegistry?.get(agent.parent_agent_id) ??
+        stateMgr.readState(agent.parent_agent_id))
+      : null;
+    const parentRole = parent ? inferRecordRoleOrNull(parent) : null;
     const topology =
       topologyOverride === undefined
         ? await collectSurfaceTopology()
@@ -6069,6 +6074,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       {
         ...overrides,
+        parent_role: overrides?.parent_role ?? parentRole,
         ...safeSurfaceOverrides,
       },
     );
@@ -9129,6 +9135,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return registryDirect;
     };
 
+    const resolveCurrentCallerAgent = (): AgentRecord | null => {
+      const callerSurface = currentCallerContext()?.surfaceId?.trim();
+      if (!callerSurface) return null;
+      const normalizedSurface = callerSurface.toLowerCase();
+      const records = [...registry.list(), ...stateMgr.listStates()].filter(
+        (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
+      );
+      return (
+        records.find(
+          (agent) =>
+            agent.surface_uuid?.trim().toLowerCase() === normalizedSurface,
+        ) ??
+        records.find((agent) => agent.surface_id === callerSurface) ??
+        null
+      );
+    };
+
     const resolveManagedDeliveryRoute = async (
       agentId: string,
     ): Promise<{ surface: string; workspace?: string }> => {
@@ -9491,7 +9514,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
+      `${PANE_INPUT_BREAKAGE_GUIDANCE} Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Declared role/placement is authoritative; CLI and launcher identity are fallback hints only. A managed worker caller is recorded as parent and its child is forced to worker with a warning. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
       {
         repo: z
           .string()
@@ -9552,17 +9575,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "ID of the parent agent for hierarchical spawning. Parent must exist.",
+            "ID of the parent agent for hierarchical spawning. Normally inferred from the managed caller surface; pass explicitly only when no managed caller supplies the hierarchy. Parent must exist.",
           ),
         role: legacyCompatibleAgentRoleSchema()
           .optional()
           .describe(
-            "Optional placement role. Defaults from launcher: *Claude=orchestrator, *Codex/*Cursor=worker.",
+            "Optional placement role. An explicit declaration is authoritative; CLI/launcher identity is only a fallback hint. A managed worker caller is the safety exception and forces its child to worker with a warning.",
           ),
         placement: legacyCompatibleAgentRoleSchema()
           .optional()
           .describe(
-            "Canonical role-driven placement. role remains accepted as a compatibility spelling.",
+            "Canonical role-driven placement. An explicit declaration is authoritative; CLI/launcher identity is only a fallback hint. role remains accepted as a compatibility spelling.",
           ),
         auto_archive_on_done: z
           .boolean()
@@ -9619,7 +9642,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.placement ?? args.role,
             selectedRoleField,
           );
-          const effectiveRole = normalizedRole.role;
           resolveSpawnModelPolicy(args.cli, args.model);
           resolveSpawnEffort(args.cli, args.effort);
           const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
@@ -9638,8 +9660,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : null;
 
           await refreshManagedMetadataBestEffort(args.parent_agent_id);
-          const parentWorkspace = args.parent_agent_id
-            ? (engine.getAgentState(args.parent_agent_id)?.workspace_id ??
+          await refreshManagedMetadataBestEffort();
+          const callerAgent = resolveCurrentCallerAgent();
+          const callerRole = callerAgent
+            ? inferRecordRoleOrNull(callerAgent)
+            : null;
+          const callerIsWorker = callerRole === "worker";
+          const effectiveParentAgentId = callerIsWorker
+            ? callerAgent!.agent_id
+            : (args.parent_agent_id ?? callerAgent?.agent_id);
+          const effectiveRole = callerIsWorker
+            ? "worker"
+            : normalizedRole.role;
+          const workerCallerWarning = callerIsWorker
+            ? `Worker caller ${callerAgent!.agent_id} forced child role to worker and recorded itself as parent; worker-spawned agents cannot claim orchestrator placement.`
+            : undefined;
+          // TODO(#378): a future policy decision may refuse worker-initiated
+          // spawn_agent calls entirely. Current binding is force+warn.
+          if (
+            effectiveParentAgentId &&
+            effectiveParentAgentId !== args.parent_agent_id
+          ) {
+            await refreshManagedMetadataBestEffort(effectiveParentAgentId);
+          }
+          const parentWorkspace = effectiveParentAgentId
+            ? (engine.getAgentState(effectiveParentAgentId)?.workspace_id ??
               undefined)
             : undefined;
           const targetResolution = await resolvePlacementWorkspace({
@@ -9658,7 +9703,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: args.cli,
             launcherName: launcherNameForCli(args.repo, args.cli),
           });
-          await refreshManagedMetadataBestEffort();
           const existingSameLaneAgents = args.force_new
             ? []
             : registry
@@ -9726,7 +9770,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               mcp_env: worktree.mcpEnv,
               mcp_profile_label: worktree.mcpProfileLabel,
               worktree_branch: worktree.prepared?.branch,
-              parent_agent_id: args.parent_agent_id,
+              parent_agent_id: effectiveParentAgentId,
               role: effectiveRole,
               auto_archive_on_done: args.auto_archive_on_done ?? false,
               max_cost_per_agent: args.max_cost_per_agent,
@@ -9790,6 +9834,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const placementWarnings = [
             ...targetResolution.warnings,
             ...(normalizedRole.warning ? [normalizedRole.warning] : []),
+            ...(workerCallerWarning ? [workerCallerWarning] : []),
           ];
           if (placementWarnings.length > 0) {
             result.warnings = [

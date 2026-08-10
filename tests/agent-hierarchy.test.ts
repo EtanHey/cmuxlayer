@@ -142,6 +142,65 @@ describe("Agent Hierarchy", () => {
     expect(childAgent!.parent_agent_id).toBe(root.agent_id);
   });
 
+  it("#378 binding: an unclassified Claude child of a worker inherits worker role", async () => {
+    const parent = makeRecord({
+      agent_id: "parent-worker",
+      surface_id: "surface:parent",
+      role: "worker",
+    });
+    stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+
+    await engine.spawnAgent({
+      repo: "cmuxlayer",
+      model: "sonnet",
+      cli: "claude",
+      prompt: "Review PR #380",
+      parent_agent_id: parent.agent_id,
+    });
+
+    const child = engine
+      .getRegistry()
+      .list()
+      .find((agent) => agent.parent_agent_id === parent.agent_id);
+    expect(child).toMatchObject({
+      cli: "claude",
+      role: "worker",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+    });
+  });
+
+  it("#378 binding: a declared orchestrator role is authoritative over parent and CLI hints", async () => {
+    const parent = makeRecord({
+      agent_id: "parent-worker-explicit-role",
+      surface_id: "surface:parent-explicit-role",
+      role: "worker",
+    });
+    stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+
+    await engine.spawnAgent({
+      repo: "cmuxlayer",
+      model: "sonnet",
+      cli: "claude",
+      role: "orchestrator",
+      prompt: "Lead the next scoped task",
+      parent_agent_id: parent.agent_id,
+    });
+
+    const child = engine
+      .getRegistry()
+      .list()
+      .find((agent) => agent.parent_agent_id === parent.agent_id);
+    expect(child).toMatchObject({
+      cli: "claude",
+      role: "orchestrator",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+    });
+  });
+
   it("spawnAgent rejects when spawn_depth would exceed MAX_SPAWN_DEPTH", async () => {
     // Build a chain: root → depth1 → depth2
     const root = await engine.spawnAgent({

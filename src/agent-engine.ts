@@ -3620,6 +3620,14 @@ export class AgentEngine {
         },
         {
           ...healthTopologyOverrides(agent, surfaceTopology),
+          parent_role: agent.parent_agent_id
+            ? (() => {
+                const parent =
+                  this.registry.get(agent.parent_agent_id) ??
+                  this.stateMgr.readState(agent.parent_agent_id);
+                return parent ? inferRecordRoleOrNull(parent) : null;
+              })()
+            : null,
           harvestability,
         },
       );
@@ -4701,11 +4709,6 @@ export class AgentEngine {
     let spawnDepth = 0;
     let parentAgentId: string | null = null;
     let parentAgent: AgentRecord | null = null;
-    const role = inferAgentRole({
-      role: spawnParams.role,
-      cli: spawnParams.cli,
-      launcherName: launcherNameForCli(spawnParams.repo, spawnParams.cli),
-    });
 
     if (spawnParams.parent_agent_id) {
       let parent =
@@ -4751,6 +4754,22 @@ export class AgentEngine {
       parentAgentId = parent.agent_id;
       parentAgent = parent;
     }
+
+    // Job role is authoritative. When no role was declared, spawn context is
+    // stronger evidence than the CLI: a worker's child is worker work even if
+    // the selected harness is Claude. CLI/launcher inference is the final
+    // compatibility fallback only (#378).
+    const role = spawnParams.role !== undefined
+      ? inferAgentRole({ role: spawnParams.role })
+      : parentAgent && inferRecordRoleOrNull(parentAgent) === "worker"
+        ? "worker"
+        : inferAgentRole({
+            cli: spawnParams.cli,
+            launcherName: launcherNameForCli(
+              spawnParams.repo,
+              spawnParams.cli,
+            ),
+          });
 
     this.spawnGuard.check(spawnParams.workspace);
 

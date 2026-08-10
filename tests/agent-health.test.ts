@@ -217,6 +217,21 @@ describe("agent lifecycle health", () => {
     expect(health.issue_codes).toContain("non_claude_orchestrator");
   });
 
+  it("#378 health: flags a Claude orchestrator spawned by a worker", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({
+        cli: "claude",
+        role: "orchestrator",
+        parent_agent_id: "parent-worker",
+        surface_provenance: "cmuxlayer_spawn",
+      }),
+      { monitor_alive: true, parent_role: "worker" },
+    );
+
+    expect(health.status).toBe("unhealthy");
+    expect(health.issue_codes).toContain("worker_spawned_orchestrator");
+  });
+
   it("marks unexpected three-column topology as unhealthy", () => {
     const health = evaluateAgentHealth(makeRecord(), {
       monitor_alive: true,

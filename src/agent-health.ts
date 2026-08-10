@@ -31,6 +31,7 @@ export type AgentHealthIssueCode =
   | "ambiguous_repo_cwd_label"
   | "seat_identity_mismatch"
   | "non_claude_orchestrator"
+  | "worker_spawned_orchestrator"
   | "topology_three_or_more_columns"
   | "orchestrator_not_leftmost"
   | "worker_in_leftmost_column";
@@ -54,6 +55,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   orchestrator_not_leftmost: "blocking",
   worker_in_leftmost_column: "blocking",
   non_claude_orchestrator: "blocking",
+  worker_spawned_orchestrator: "blocking",
   inbox_channel_dir_deleted: "blocking",
   monitor_collapsed: "blocking",
   stale_inbox_dispatches: "blocking",
@@ -72,6 +74,7 @@ export interface AgentTopologyHealthInput {
 }
 
 export interface AgentHealthInput {
+  parent_role?: AgentRole | null;
   monitor_alive?: boolean | null;
   inbox_channel_dir_deleted?: boolean | null;
   stale_count?: number;
@@ -524,6 +527,18 @@ export function evaluateAgentHealth(
       issues,
       "non_claude_orchestrator",
       "non-Claude agent was assigned orchestrator topology role; use worker unless this is the single explicit left-side coordinator",
+    );
+  }
+  if (
+    agent.cli === "claude" &&
+    role === "orchestrator" &&
+    input.parent_role === "worker"
+  ) {
+    addIssue(
+      issueCodes,
+      issues,
+      "worker_spawned_orchestrator",
+      "Claude agent spawned by a worker was assigned orchestrator topology role; reviewer and other worker-spawned jobs must remain workers",
     );
   }
 
