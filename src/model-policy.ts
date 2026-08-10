@@ -1,15 +1,14 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
-// Must stay in sync with golem-dispatch.zsh:446 — the launcher is the authority.
-// `low` and `max` were added there; omitting them here made `max` (Etan's pin for
-// some lanes) impossible to express through spawn_agent at all.
+// Match the installed repoGolem launcher sourced by fresh interactive shells
+// (~/.config/ralphtools/golem-dispatch.zsh), not the potentially newer golems
+// checkout. The drift gate fails when that live contract changes; validation
+// must still reject mismatches before any worktree or surface is created.
 export const CODEX_EFFORT_VALUES = [
-  "low",
   "medium",
   "high",
   "xhigh",
-  "max",
   "ultra",
 ] as const;
 export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];
@@ -170,7 +169,7 @@ export function resolveSpawnEffort(
 
   if (!(CODEX_EFFORT_VALUES as readonly string[]).includes(requested)) {
     throw new Error(
-      `Invalid Codex effort "${requested}". Accepted values: ${CODEX_EFFORT_VALUES.join(", ")}. No agent was spawned.`,
+      `Invalid Codex effort "${requested}" (expected: ${CODEX_EFFORT_VALUES.join(", ")}). No agent was spawned.`,
     );
   }
   if (cli !== "codex") {

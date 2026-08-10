@@ -694,34 +694,72 @@ describe("lean spawn tool responses", () => {
     );
   });
 
-  // CHANGED 2026-08-05, deliberately, with rationale: this asserted `max` must be
-  // REJECTED, which was correct when golem-dispatch.zsh's ladder was
-  // medium|high|xhigh|ultra. golems #657 added `low` and `max`, and Etan pins some
-  // lanes at max — so cmuxlayer rejecting it made his own pin impossible to express.
-  // The launcher is the authority; this test encoded a contract that no longer holds.
-  // Inverted to assert acceptance, NOT deleted, so the ladder stays pinned in both
-  // directions.
-  it("spawn_agent schema accepts max effort — the launcher's ladder is the authority", () => {
+  it("spawn_agent schema advertises only the cross-version Codex effort set", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    const parsed = spawn.inputSchema.safeParse({
-      repo: "cmuxlayer",
-      cli: "codex",
-      effort: "max",
-    });
+    for (const effort of ["medium", "high", "xhigh", "ultra"]) {
+      expect(
+        spawn.inputSchema.safeParse({
+          repo: "cmuxlayer",
+          cli: "codex",
+          effort,
+        }).success,
+      ).toBe(true);
+    }
 
-    expect(parsed.success).toBe(true);
+    for (const effort of ["low", "max", "turbo"]) {
+      expect(
+        spawn.inputSchema.safeParse({
+          repo: "cmuxlayer",
+          cli: "codex",
+          effort,
+        }).success,
+      ).toBe(false);
+    }
+  });
 
-    // And a value the launcher genuinely does not accept must still be refused,
-    // so this stays a real gate rather than an open door.
-    const bogus = spawn.inputSchema.safeParse({
-      repo: "cmuxlayer",
-      cli: "codex",
-      effort: "turbo",
+  it("spawn_agent rejects launcher-incompatible effort before creating a worktree or surface", async () => {
+    const repoRoot = join(TEST_DIR, "Gits", "cmuxlayer");
+    const registryPath = join(TEST_DIR, "launchers-effort-preflight.zsh");
+    mkdirSync(repoRoot, { recursive: true });
+    writeFileSync(registryPath, `repoGolem cmuxlayer "${repoRoot}"\n`);
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const worktreeExec = vi.fn();
+    const exec = makeLifecycleExec();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      sessionIdentityResolver: () => null,
+      worktreeHomeDir: join(TEST_DIR, "Gits"),
+      worktreeExec,
     });
-    expect(bogus.success).toBe(false);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "codex",
+        effort: "low",
+        worktree: {
+          name: "incompatible-effort",
+          branch: "wt/incompatible-effort",
+        },
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toContain(
+      'Invalid Codex effort "low" (expected: medium, high, xhigh, ultra)',
+    );
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(
+      (exec as any).mock.calls.some(([, args]: [string, string[]]) =>
+        args.includes("new-split") || args.includes("new-surface"),
+      ),
+    ).toBe(false);
   });
 
   it("spawn_agent rejects Codex effort for another CLI before creating a surface", async () => {

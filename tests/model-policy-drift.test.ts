@@ -38,6 +38,24 @@ function parseCursorLauncher(dispatchText: string): string {
   return launcher![1];
 }
 
+function parseCodexEffortValues(dispatchText: string): string[] {
+  const parser = dispatchText.match(
+    /_golem_parse_codex_flags\(\)\s*\{([\s\S]*?)\n\}/,
+  );
+  expect(
+    parser,
+    "could not parse _golem_parse_codex_flags from installed launcher",
+  ).not.toBeNull();
+  const ladder = parser![1].match(
+    /\n\s*([a-z]+(?:\|[a-z]+)+)\)\s+_flag_codex_effort="\$2"/,
+  );
+  expect(
+    ladder,
+    "could not parse Codex effort ladder from installed launcher",
+  ).not.toBeNull();
+  return ladder![1].split("|");
+}
+
 describe("model-policy drift gate", () => {
   it("pins the server-side model policy contract used by spawn_agent", () => {
     expect(MODEL_OVERRIDE_ENV).toBe("REPOGOLEM_ALLOW_MODEL");
@@ -92,14 +110,14 @@ describe("model-policy drift gate", () => {
 
 const dispatchPath = join(
   homedir(),
-  "Gits/golems/scripts/repogolem/golem-dispatch.zsh",
+  ".config/ralphtools/golem-dispatch.zsh",
 );
-const golemsAbsent = !existsSync(dispatchPath);
+const launcherAbsent = !existsSync(dispatchPath);
 
-describe.skipIf(golemsAbsent)("model-policy parity with golem-dispatch", () => {
+describe.skipIf(launcherAbsent)("model-policy parity with installed golem-dispatch", () => {
   // Read lazily in beforeAll, not at describe-body collection time: a skipped
-  // suite (golems absent, e.g. CI) still evaluates the describe body, so a
-  // top-level readFileSync would throw ENOENT before the skip takes effect.
+  // suite (installed launcher absent, e.g. CI) still evaluates the describe
+  // body, so a top-level readFileSync would throw before the skip takes effect.
   let dispatchText: string;
   beforeAll(() => {
     dispatchText = readFileSync(dispatchPath, "utf8");
@@ -120,23 +138,12 @@ describe.skipIf(golemsAbsent)("model-policy parity with golem-dispatch", () => {
     ).toBe(dispatchDefault);
   });
 
-  it("keeps the Codex effort ladder aligned with the launcher", () => {
-    // RED 2026-08-05: the launcher gained `low` and `max` and moved its default
-    // xhigh -> high; cmuxlayer's enum and tool description did not follow. The
-    // stale description is what agents read at dispatch time, so it normalised
-    // xhigh fleet-wide and cost real usage. Nothing guarded effort — only model.
-    const ladder = dispatchText.match(/low\|medium\|high\|xhigh\|max\|ultra/);
+  it("keeps the advertised Codex effort ladder compatible with the launcher", () => {
+    const installedValues = parseCodexEffortValues(dispatchText);
     expect(
-      ladder,
-      "golem-dispatch.zsh must still expose the low|medium|high|xhigh|max|ultra ladder",
-    ).not.toBeNull();
-
-    for (const value of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
-      expect(
-        CODEX_EFFORT_VALUES as readonly string[],
-        `CODEX_EFFORT_VALUES must accept "${value}" — the launcher does`,
-      ).toContain(value);
-    }
+      CODEX_EFFORT_VALUES,
+      "spawn_agent must advertise exactly the values accepted by the launcher sourced by fresh interactive shells",
+    ).toEqual(installedValues);
   });
 
   it("states the launcher's REAL effort default, not a stale one", () => {
