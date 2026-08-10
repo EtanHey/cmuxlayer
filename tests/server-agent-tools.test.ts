@@ -2252,6 +2252,57 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("#378 binding: a worker caller forces reviewer-Claude to worker and records parentage", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const parent = makeServerAgentRecord({
+      agent_id: "cmuxlayerCodex-parent",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      cli: "codex",
+      role: "worker",
+      task_summary: "Implement #379",
+      task_done_detected_at: null,
+    });
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    mockExec.mockClear();
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: parent.surface_id },
+      () =>
+        spawn.handler(
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            role: "orchestrator",
+            prompt: "Review PR #380",
+            force_new: true,
+          },
+          {} as any,
+        ),
+    );
+    const parsed = parseToolResult(result);
+    const child = engine.getAgentState(parsed.agent_id);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.role).toBe("worker");
+    expect(parsed.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/worker caller.*forced.*role.*worker/i),
+      ]),
+    );
+    expect(child).toMatchObject({
+      cli: "claude",
+      role: "worker",
+      parent_agent_id: parent.agent_id,
+      spawn_depth: 1,
+    });
+  });
+
   it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
     const server = createLifecycleServer(mockExec);
     const stopTool = (server as any)._registeredTools["stop_agent"];

@@ -315,6 +315,17 @@ describe("layout policy", () => {
     ).toBe("worker");
   });
 
+  it("#378 binding: declared worker role is authoritative over the Claude CLI hint", () => {
+    expect(
+      inferAgentRole({
+        cli: "claude",
+        launcherName: "cmuxlayerClaude",
+        title: "cmuxlayerClaude: review PR #380",
+        role: "worker",
+      }),
+    ).toBe("worker");
+  });
+
   it("does not let repo names that end with launcher suffixes affect non-launcher CLIs", () => {
     expect(
       inferAgentRole({

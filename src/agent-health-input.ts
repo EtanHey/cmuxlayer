@@ -1,4 +1,4 @@
-import type { AgentRecord } from "./agent-types.js";
+import type { AgentRecord, AgentRole } from "./agent-types.js";
 import type {
   AgentHealthInput,
   AgentTopologyHealthInput,
@@ -22,6 +22,7 @@ export interface ParsedSurfaceHealthInput {
 }
 
 export interface AgentHealthInputOverrides {
+  parent_role?: AgentRole | null;
   monitor_alive?: boolean | null;
   stale_count?: number;
   screen_status?: string | null;
@@ -130,6 +131,7 @@ export async function buildAgentHealthInput(
       : (await deps.resolveCollapsedMonitors?.(ownerSeats)) ?? [];
 
   return {
+    parent_role: overrides.parent_role,
     monitor_alive: alive,
     inbox_channel_dir_deleted: inboxChannelDirDeleted,
     stale_count: staleCount,
