@@ -129,7 +129,7 @@ function makeSpawnReadyExec(opts?: { closeKeepsSurface?: boolean }): ExecFn {
           text: agentMessageSubmitted
             ? "Claude Code\n✻ Working\n"
             : launchSent
-              ? "What can I help you with?\n>"
+              ? "Claude Code\nWhat can I help you with?\n>"
               : "$ ",
           lines: 20,
           scrollback_used: false,

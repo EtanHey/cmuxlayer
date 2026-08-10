@@ -9338,16 +9338,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         route = reresolved;
       }
+      // Agent-path delivery requires a live agent TUI. A crashed CLI leaves its
+      // terminal surface alive at a bare shell; typing a routed message there
+      // executes fleet text as shell input. Target-scoped discovery validates
+      // only this route's stable UUID/ref binding around read-screen, so
+      // unrelated pane churn cannot block a healthy relay. Raw
+      // surface/command/key modes bypass this helper and remain available for
+      // deliberate recovery.
+      const assertAgentRouteHasTui = async (candidateRoute: typeof route) => {
+        const freshOccupant = await discovery.scanTarget(candidateRoute);
+        if (
+          freshOccupant &&
+          !freshOccupant.read_error &&
+          freshOccupant.control_state === "shell"
+        ) {
+          throw new Error(
+            `Agent "${args.agent_id}" exited / no agent currently initiated on ` +
+              `surface ${candidateRoute.surface_id} (control_state=${freshOccupant.control_state}, ` +
+              `agent_type=${freshOccupant.cli}); refusing routed agent delivery. ` +
+              `Use send_to mode=surface, command, or key for deliberate raw terminal input.`,
+          );
+        }
+        return freshOccupant;
+      };
+      const freshOccupant = await assertAgentRouteHasTui(route);
+
       // Identity guard: a live surface ref may have been RECYCLED — a crashed
       // agent's pane reused by a different agent. If the live surface now hosts
       // a known CLI that differs from this agent's recorded CLI, refuse rather
-      // than delivering to the new occupant. Fails OPEN when the live CLI is
-      // unknown/unreadable so a parse miss never blocks a healthy relay.
+      // than delivering to the new occupant. Fresh shell evidence was already
+      // refused above; other unknown/unreadable evidence remains inconclusive.
       const expectedCli = engine.getAgentState(args.agent_id)?.cli;
       if (requiresMutableRefGuards && expectedCli) {
-        const cachedOccupant = (await discovery.scan(false)).find(
-          (entry) => entry.surface_id === route.surface_id,
-        );
+        const cachedOccupant = freshOccupant;
         const isForeign = (occ: typeof cachedOccupant): boolean =>
           Boolean(
             occ &&
@@ -9357,13 +9380,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             occ.cli !== expectedCli,
           );
         if (isForeign(cachedOccupant)) {
-          // Confirm against a FRESH scan before refusing. discovery.scan(false)
-          // serves a 2s cache that can predate the current occupant; refusing
-          // on it alone would false-refuse a healthy relay.
-          discovery.invalidate();
-          const freshOccupant = (await discovery.scan(true)).find(
-            (entry) => entry.surface_id === route.surface_id,
-          );
+          // Confirm against another target-scoped fresh read before refusing;
+          // one parse alone can be transient, while a fleet-wide scan would
+          // couple this route to unrelated pane churn.
+          const freshOccupant = await discovery.scanTarget(route);
           if (isForeign(freshOccupant)) {
             throw new Error(
               `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +
@@ -9407,6 +9427,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // landed, following a moved UUID would split one logical message across
       // terminals, so route changes fail closed instead.
       route = await engine.resolveAgentIoRoute(args.agent_id);
+      await assertAgentRouteHasTui(route);
       const deliveryRoute = route;
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
         const current = await engine.resolveAgentIoRoute(args.agent_id);

@@ -3,6 +3,7 @@ import type { AgentState, CliType } from "./agent-types.js";
 import type {
   CmuxReadScreenResult,
   CmuxSurface,
+  ParsedControlPlaneState,
   ParsedScreenStatus,
 } from "./types.js";
 
@@ -13,6 +14,7 @@ export interface DiscoveredAgent {
   surface_title: string;
   workspace_id?: string | null;
   cli: CliType | "unknown";
+  control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
   model: string | null;
   token_count: number | null;
@@ -96,6 +98,107 @@ export class AgentDiscovery {
     return this.deps.observerIdProvider?.()?.trim() || null;
   }
 
+  private async scanSurface(surface: CmuxSurface): Promise<DiscoveredAgent> {
+    const workspaceId =
+      typeof surface.workspace_ref === "string" ? surface.workspace_ref : null;
+    try {
+      const screen = await this.deps.readScreen(surface.ref, {
+        lines: 30,
+        workspace: workspaceId ?? undefined,
+      });
+      const parsed = parseScreen(screen.text);
+      const cli =
+        parsed.agent_type === "unknown"
+          ? "unknown"
+          : (parsed.agent_type as CliType);
+
+      return {
+        surface_id: surface.ref,
+        surface_uuid: surface.id ?? null,
+        surface_title: surface.title,
+        workspace_id: workspaceId,
+        cli,
+        control_state: parsed.control_state,
+        parsed_status: parsed.status,
+        model: parsed.model,
+        token_count: parsed.token_count,
+        context_pct: parsed.context_pct,
+        has_agent: cli !== "unknown",
+        read_error: false,
+      };
+    } catch (error) {
+      console.warn(
+        `[AgentDiscovery] Failed to scan surface ${surface.ref} (${surface.title})`,
+        error,
+      );
+      return {
+        surface_id: surface.ref,
+        surface_uuid: surface.id ?? null,
+        surface_title: surface.title,
+        workspace_id: workspaceId,
+        cli: "unknown",
+        control_state: "unknown",
+        parsed_status: null,
+        model: null,
+        token_count: null,
+        context_pct: null,
+        has_agent: false,
+        read_error: true,
+      };
+    }
+  }
+
+  async scanTarget(target: {
+    surface_id: string;
+    surface_uuid?: string | null;
+  }): Promise<DiscoveredAgent | null> {
+    const observerId = this.getObserverId();
+    const uuidKey = (value: string | null | undefined): string | null =>
+      value?.trim().toLowerCase() || null;
+    const expectedUuid = uuidKey(target.surface_uuid);
+    const matchesTarget = (surface: CmuxSurface): boolean =>
+      expectedUuid
+        ? uuidKey(surface.id) === expectedUuid
+        : surface.ref === target.surface_id;
+
+    const initialMatches = (await this.deps.listSurfaces())
+      .filter((surface) => surface.type === "terminal")
+      .filter(matchesTarget);
+    if (initialMatches.length !== 1) return null;
+
+    const initial = initialMatches[0];
+    const result = await this.scanSurface(initial);
+    const completedObserverId = this.getObserverId();
+    if (completedObserverId !== observerId) {
+      throw new Error(
+        `Surface observer changed during target discovery (${observerId ?? "unknown"} -> ${completedObserverId ?? "unknown"})`,
+      );
+    }
+
+    const completedMatches = (await this.deps.listSurfaces())
+      .filter((surface) => surface.type === "terminal")
+      .filter(matchesTarget);
+    const completed = completedMatches[0];
+    if (
+      completedMatches.length !== 1 ||
+      completed?.ref !== initial.ref ||
+      (completed.workspace_ref ?? null) !== (initial.workspace_ref ?? null)
+    ) {
+      throw new SurfaceBindingChangedDuringDiscoveryError(
+        `Target surface binding changed during discovery for ${initial.ref}` +
+          `${initial.id ? ` (UUID ${initial.id})` : ""}; refusing stale screen evidence`,
+      );
+    }
+
+    const validatedObserverId = this.getObserverId();
+    if (validatedObserverId !== observerId) {
+      throw new Error(
+        `Surface observer changed during target discovery (${observerId ?? "unknown"} -> ${validatedObserverId ?? "unknown"})`,
+      );
+    }
+    return result;
+  }
+
   async scan(force = false): Promise<DiscoveredAgent[]> {
     const observerScoped =
       typeof this.deps.observerIdProvider === "function";
@@ -112,53 +215,7 @@ export class AgentDiscovery {
       (surface) => surface.type === "terminal",
     );
     const result = await Promise.all(
-      surfaces.map(async (surface): Promise<DiscoveredAgent> => {
-        const workspaceId =
-          typeof surface.workspace_ref === "string" ? surface.workspace_ref : null;
-        try {
-          const screen = await this.deps.readScreen(surface.ref, {
-            lines: 30,
-            workspace: workspaceId ?? undefined,
-          });
-          const parsed = parseScreen(screen.text);
-          const cli =
-            parsed.agent_type === "unknown"
-              ? "unknown"
-              : (parsed.agent_type as CliType);
-
-          return {
-            surface_id: surface.ref,
-            surface_uuid: surface.id ?? null,
-            surface_title: surface.title,
-            workspace_id: workspaceId,
-            cli,
-            parsed_status: parsed.status,
-            model: parsed.model,
-            token_count: parsed.token_count,
-            context_pct: parsed.context_pct,
-            has_agent: cli !== "unknown",
-            read_error: false,
-          };
-        } catch (error) {
-          console.warn(
-            `[AgentDiscovery] Failed to scan surface ${surface.ref} (${surface.title})`,
-            error,
-          );
-          return {
-            surface_id: surface.ref,
-            surface_uuid: surface.id ?? null,
-            surface_title: surface.title,
-            workspace_id: workspaceId,
-            cli: "unknown",
-            parsed_status: null,
-            model: null,
-            token_count: null,
-            context_pct: null,
-            has_agent: false,
-            read_error: true,
-          };
-        }
-      }),
+      surfaces.map((surface) => this.scanSurface(surface)),
     );
 
     const completedObserverId = this.getObserverId();
