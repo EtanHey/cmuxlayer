@@ -9506,7 +9506,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .enum(CODEX_EFFORT_VALUES)
           .optional()
           .describe(
-            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. Accepted cross-version Codex values: medium, high, xhigh, ultra. Newer launchers may support additional values, but spawn_agent rejects them before creating a worktree or surface because already-loaded launcher functions can be older. The launcher defaults to HIGH when omitted (golem-dispatch.zsh:431). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
+            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: medium, high, xhigh, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to XHIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
           ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])

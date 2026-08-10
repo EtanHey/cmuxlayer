@@ -1,10 +1,10 @@
 import type { CliType } from "./agent-types.js";
 
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
-// Cross-version repoGolem compatibility set. A shell can retain an older loaded
-// launcher function after the source file is upgraded, so values supported only
-// by newer launchers must not be advertised by spawn_agent: validation has to
-// reject them before any worktree or surface is created.
+// Match the installed repoGolem launcher sourced by fresh interactive shells
+// (~/.config/ralphtools/golem-dispatch.zsh), not the potentially newer golems
+// checkout. The drift gate fails when that live contract changes; validation
+// must still reject mismatches before any worktree or surface is created.
 export const CODEX_EFFORT_VALUES = [
   "medium",
   "high",
