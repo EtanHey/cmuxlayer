@@ -120,23 +120,30 @@ describe.skipIf(golemsAbsent)("model-policy parity with golem-dispatch", () => {
     ).toBe(dispatchDefault);
   });
 
-  it("keeps the Codex effort ladder aligned with the launcher", () => {
-    // RED 2026-08-05: the launcher gained `low` and `max` and moved its default
-    // xhigh -> high; cmuxlayer's enum and tool description did not follow. The
-    // stale description is what agents read at dispatch time, so it normalised
-    // xhigh fleet-wide and cost real usage. Nothing guarded effort — only model.
+  it("keeps the advertised Codex effort ladder compatible with the launcher", () => {
     const ladder = dispatchText.match(/low\|medium\|high\|xhigh\|max\|ultra/);
     expect(
       ladder,
       "golem-dispatch.zsh must still expose the low|medium|high|xhigh|max|ultra ladder",
     ).not.toBeNull();
 
-    for (const value of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
+    for (const value of CODEX_EFFORT_VALUES) {
       expect(
-        CODEX_EFFORT_VALUES as readonly string[],
-        `CODEX_EFFORT_VALUES must accept "${value}" — the launcher does`,
-      ).toContain(value);
+        ladder?.[0].split("|") ?? [],
+        `the launcher must accept every effort advertised by spawn_agent: "${value}"`,
+      ).toContain(value as string);
     }
+
+    // Do not widen this assertion to equality. A running interactive shell can
+    // retain an older launcher function after golem-dispatch.zsh is upgraded;
+    // cmuxlayer intentionally advertises the cross-version safe subset so its
+    // preflight rejects unsupported values before creating resources (#379).
+    expect(CODEX_EFFORT_VALUES).toEqual([
+      "medium",
+      "high",
+      "xhigh",
+      "ultra",
+    ]);
   });
 
   it("states the launcher's REAL effort default, not a stale one", () => {
