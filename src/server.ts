@@ -9340,20 +9340,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       // Agent-path delivery requires a live agent TUI. A crashed CLI leaves its
       // terminal surface alive at a bare shell; typing a routed message there
-      // executes fleet text as shell input. Fresh discovery validates the
-      // stable UUID/ref binding around read-screen, so readable shell evidence
-      // can fail closed before any terminal mutation. Raw surface/command/key
-      // modes bypass this helper and remain available for deliberate recovery.
-      const normalizedUuid = (value: string | null | undefined): string | null =>
-        value?.trim().toLowerCase() || null;
+      // executes fleet text as shell input. Target-scoped discovery validates
+      // only this route's stable UUID/ref binding around read-screen, so
+      // unrelated pane churn cannot block a healthy relay. Raw
+      // surface/command/key modes bypass this helper and remain available for
+      // deliberate recovery.
       const assertAgentRouteHasTui = async (candidateRoute: typeof route) => {
-        discovery.invalidate();
-        const freshOccupant = (await discovery.scan(true)).find((entry) =>
-          candidateRoute.surface_uuid
-            ? normalizedUuid(entry.surface_uuid) ===
-              normalizedUuid(candidateRoute.surface_uuid)
-            : entry.surface_id === candidateRoute.surface_id,
-        );
+        const freshOccupant = await discovery.scanTarget(candidateRoute);
         if (
           freshOccupant &&
           !freshOccupant.read_error &&
@@ -9387,13 +9380,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             occ.cli !== expectedCli,
           );
         if (isForeign(cachedOccupant)) {
-          // Confirm against a FRESH scan before refusing. discovery.scan(false)
-          // serves a 2s cache that can predate the current occupant; refusing
-          // on it alone would false-refuse a healthy relay.
-          discovery.invalidate();
-          const freshOccupant = (await discovery.scan(true)).find(
-            (entry) => entry.surface_id === route.surface_id,
-          );
+          // Confirm against another target-scoped fresh read before refusing;
+          // one parse alone can be transient, while a fleet-wide scan would
+          // couple this route to unrelated pane churn.
+          const freshOccupant = await discovery.scanTarget(route);
           if (isForeign(freshOccupant)) {
             throw new Error(
               `Agent "${args.agent_id}" (${expectedCli}) no longer occupies ` +

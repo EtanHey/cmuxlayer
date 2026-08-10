@@ -7265,6 +7265,79 @@ codex>
     expect(routeClient.client.send).not.toHaveBeenCalled();
   });
 
+  it("send_to ignores unrelated surface churn while the target agent stays healthy", async () => {
+    const targetUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:agent",
+        id: targetUuid,
+        workspace_ref: "workspace:1",
+      },
+      {
+        ref: "surface:other",
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "healthy-target-during-unrelated-churn",
+      surface_id: "surface:agent",
+      surface_uuid: targetUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = testLifecycleEngine(server) as any;
+    const originalResolveAgentIoRoute =
+      engine.resolveAgentIoRoute.bind(engine);
+    let resolveCount = 0;
+    vi.spyOn(engine, "resolveAgentIoRoute").mockImplementation(
+      async (agentId: string) => {
+        const route = await originalResolveAgentIoRoute(agentId);
+        resolveCount += 1;
+        if (resolveCount === 1) {
+          moveUuidRouteAfterNextSurfaceSnapshot(routeClient, [
+            {
+              ref: "surface:agent",
+              id: targetUuid,
+              workspace_ref: "workspace:1",
+            },
+            {
+              ref: "surface:replacement",
+              id: "99999999-8888-4777-8666-555555555555",
+              workspace_ref: "workspace:1",
+            },
+          ]);
+        }
+        return route;
+      },
+    );
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "deliver despite foreign pane churn",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(routeClient.sendCalls).toEqual([
+      {
+        surface: "surface:agent",
+        text: "deliver despite foreign pane churn",
+      },
+    ]);
+  });
+
   it("raw send_to refuses an ambiguous numeric ref after it is recycled", async () => {
     const originalUuid = "11111111-2222-4333-8444-555555555555";
     const otherUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
