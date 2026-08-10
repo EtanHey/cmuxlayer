@@ -3830,22 +3830,31 @@ export class AgentEngine {
             });
             this.registry.set(agentId, updated);
 
-            if (agent.spawn_depth === 0) {
-              // Root agent: send /compact
-              const compactRoute = await this.resolveAgentIoRoute(agentId);
-              await this.client.send(compactRoute.surface_id, "/compact", {
-                workspace: compactRoute.workspace_id ?? undefined,
-                ...this.stableSurfaceWriteOptions(compactRoute.surface_uuid),
-              });
-              const returnRoute = await this.resolveAgentIoRoute(agentId);
-              await this.client.sendKey(returnRoute.surface_id, "return", {
-                workspace: returnRoute.workspace_id ?? undefined,
-                ...this.stableSurfaceWriteOptions(returnRoute.surface_uuid),
-              });
-            } else {
+            try {
               await this.client.log(
-                `context-limit: depth ${agent.spawn_depth} agent ${agent.repo} degraded; leaving pane running for orchestrator decision`,
+                `context-limit: depth ${agent.spawn_depth} agent ${agent.repo} degraded at ${contextPct}%; leaving pane running for orchestrator decision`,
                 { level: "warning", source: "cmuxlayer" },
+              );
+            } catch {
+              // Logging is advisory; a root-agent nudge must still be attempted.
+            }
+
+            if (agent.spawn_depth === 0) {
+              const nudgeRoute = await this.resolveAgentIoRoute(agentId);
+              await this.client.send(
+                nudgeRoute.surface_id,
+                `[cmuxlayer] context at ${contextPct}% — checkpoint at-risk work and /compact when safe`,
+                {
+                  workspace: nudgeRoute.workspace_id ?? undefined,
+                  ...this.stableSurfaceWriteOptions(nudgeRoute.surface_uuid),
+                  beforeMutation: async () => {
+                    await this.resolveUnchangedAgentIoRoute(
+                      agentId,
+                      nudgeRoute,
+                      "context-limit nudge",
+                    );
+                  },
+                },
               );
             }
           }
