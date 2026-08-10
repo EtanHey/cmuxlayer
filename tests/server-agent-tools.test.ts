@@ -2303,6 +2303,65 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("#378 MEDIUM-A: a terminal caller record cannot shadow the live registry on a reused surface", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const deadWorker = makeServerAgentRecord({
+      agent_id: "cmuxlayerCodex-dead",
+      surface_id: "surface:reused",
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      cli: "codex",
+      role: "worker",
+      task_done_detected_at: "2026-08-10T00:00:00Z",
+    });
+    const liveLead = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-live",
+      surface_id: "surface:reused",
+      workspace_id: "workspace:1",
+      state: "working",
+      repo: "cmuxlayer",
+      cli: "claude",
+      role: "orchestrator",
+      task_done_detected_at: null,
+    });
+    engine.stateMgr.writeState(deadWorker);
+    engine.stateMgr.writeState(liveLead);
+    engine.getRegistry().set(deadWorker.agent_id, deadWorker);
+    engine.getRegistry().set(liveLead.agent_id, liveLead);
+    mockExec.mockClear();
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: "surface:reused" },
+      () =>
+        spawn.handler(
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            role: "orchestrator",
+            prompt: "Lead the next task",
+            force_new: true,
+          },
+          {} as any,
+        ),
+    );
+    const parsed = parseToolResult(result);
+    const child = engine.getAgentState(parsed.agent_id);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.role).toBe("orchestrator");
+    expect(parsed.warnings ?? []).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/worker caller/i)]),
+    );
+    expect(child).toMatchObject({
+      role: "orchestrator",
+      parent_agent_id: liveLead.agent_id,
+      spawn_depth: 1,
+    });
+  });
+
   it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
     const server = createLifecycleServer(mockExec);
     const stopTool = (server as any)._registeredTools["stop_agent"];

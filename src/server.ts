@@ -9139,7 +9139,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const callerSurface = currentCallerContext()?.surfaceId?.trim();
       if (!callerSurface) return null;
       const normalizedSurface = callerSurface.toLowerCase();
-      const records = [...registry.list(), ...stateMgr.listStates()];
+      const records = [...registry.list(), ...stateMgr.listStates()].filter(
+        (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
+      );
       return (
         records.find(
           (agent) =>
