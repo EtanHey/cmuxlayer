@@ -3462,9 +3462,8 @@ describe("AgentEngine", () => {
       expect(mockClient.readScreen).toHaveBeenCalledTimes(1);
     });
 
-    it("auto-compacts with workspace scope and re-resolves before Return", async () => {
+    it("sends an unsubmitted context nudge with workspace scope", async () => {
       const stableUuid = "11111111-2222-4333-8444-555555555555";
-      const recycledUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
       const record = makeRecord({
         agent_id: "agent-auto-compact-route",
         state: "ready",
@@ -3490,41 +3489,22 @@ describe("AgentEngine", () => {
         lines: 20,
         scrollback_used: false,
       });
-      (mockClient.send as ReturnType<typeof vi.fn>).mockImplementation(
-        async (_surface: string, text: string) => {
-          if (text !== "/compact") return;
-          liveSurfaces = [
-            {
-              ...makeSurface("surface:compact-old"),
-              id: recycledUuid,
-              workspace_ref: "workspace:compact-old",
-            },
-            {
-              ...makeSurface("surface:compact-final"),
-              id: stableUuid,
-              workspace_ref: "workspace:compact-final",
-            },
-          ];
-        },
-      );
-
       await engine.runSweep();
 
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:compact-old",
+        "[cmuxlayer] context at 95% — checkpoint at-risk work and /compact when safe",
+        expect.objectContaining({
+          workspace: "workspace:compact-old",
+          beforeMutation: expect.any(Function),
+        }),
+      );
+      expect(mockClient.send).not.toHaveBeenCalledWith(
+        expect.anything(),
         "/compact",
-        { workspace: "workspace:compact-old" },
-      );
-      expect(mockClient.sendKey).toHaveBeenCalledWith(
-        "surface:compact-final",
-        "return",
-        { workspace: "workspace:compact-final" },
-      );
-      expect(mockClient.sendKey).not.toHaveBeenCalledWith(
-        "surface:compact-old",
-        "return",
         expect.anything(),
       );
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
     it("respawns a crashed agent with its captured session id when crash recovery is enabled", async () => {

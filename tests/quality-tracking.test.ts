@@ -1,6 +1,6 @@
 /**
  * TDD tests for Task 19 — Quality Tracking.
- * Tests parseContextPercent, quality field, /compact at 80%, warn for depth>0.
+ * Tests parseContextPercent and quality warnings/nudges at high context usage.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
@@ -191,7 +191,7 @@ describe("Quality Tracking (sweep)", () => {
     expect(agent!.quality).toBe("unknown");
   });
 
-  it("at 80% context, depth-0 agent sends /compact command", async () => {
+  it("at 80% context, depth-0 agent is degraded and nudged without submitting /compact", async () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: "a1",
@@ -213,16 +213,60 @@ describe("Quality Tracking (sweep)", () => {
 
     await engine.runSweep();
 
-    // Should send /compact + return
-    expect(mockClient.send).toHaveBeenCalledWith("s:1", "/compact", {
-      workspace: "workspace:quality",
-    });
-    expect(mockClient.sendKey).toHaveBeenCalledWith("s:1", "return", {
-      workspace: "workspace:quality",
-    });
+    expect(engine.getAgentState("a1")?.quality).toBe("degraded");
+    expect(mockClient.log).toHaveBeenCalledWith(
+      expect.stringContaining("context-limit: depth 0 agent brainlayer degraded at 80%"),
+      { level: "warning", source: "cmuxlayer" },
+    );
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "s:1",
+      "[cmuxlayer] context at 80% — checkpoint at-risk work and /compact when safe",
+      expect.objectContaining({
+        workspace: "workspace:quality",
+        beforeMutation: expect.any(Function),
+      }),
+    );
+    expect(mockClient.send).not.toHaveBeenCalledWith(
+      "s:1",
+      "/compact",
+      expect.anything(),
+    );
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
   });
 
-  it("auto-compact follows a stable UUID after its cached surface ref is recycled", async () => {
+  it("still nudges a depth-0 agent when warning logging fails", async () => {
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: "log-failure",
+        state: "working",
+        surface_id: "s:log-failure",
+        spawn_depth: 0,
+      }),
+    );
+    liveSurfaces = [makeSurface("s:log-failure")];
+    await engine.getRegistry().reconstitute();
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: "s:log-failure",
+      text: "gpt-5.5 · 5% left · ~/Gits/cmuxlayer\nWorking (1m • esc to interrupt)",
+      lines: 5,
+      scrollback_used: false,
+    });
+    (mockClient.log as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("log unavailable"),
+    );
+
+    await engine.runSweep();
+
+    expect(engine.getAgentState("log-failure")?.quality).toBe("degraded");
+    expect(mockClient.send).toHaveBeenCalledWith(
+      "s:log-failure",
+      "[cmuxlayer] context at 95% — checkpoint at-risk work and /compact when safe",
+      expect.objectContaining({ workspace: "workspace:quality" }),
+    );
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
+  });
+
+  it("context nudge follows a stable UUID after its cached surface ref is recycled", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     stateMgr.writeState(
       makeRecord({
@@ -262,19 +306,18 @@ describe("Quality Tracking (sweep)", () => {
 
     expect(mockClient.send).toHaveBeenCalledWith(
       "surface:new",
-      "/compact",
-      { workspace: "workspace:quality" },
-    );
-    expect(mockClient.sendKey).toHaveBeenCalledWith(
-      "surface:new",
-      "return",
-      { workspace: "workspace:quality" },
+      "[cmuxlayer] context at 95% — checkpoint at-risk work and /compact when safe",
+      expect.objectContaining({
+        workspace: "workspace:quality",
+        beforeMutation: expect.any(Function),
+      }),
     );
     expect(mockClient.send).not.toHaveBeenCalledWith(
-      "surface:old",
+      expect.anything(),
       "/compact",
       expect.anything(),
     );
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
   });
 
   it("at 80% context, depth-1 agent is warned but not killed", async () => {
