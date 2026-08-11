@@ -76,6 +76,9 @@ function repoLabelFromFixturePath(path: string): string {
 function makeWorkspaceClient() {
   let surfaceIndex = 0;
   const calls: string[] = [];
+  const activeCli = new Map<string, "claude" | "codex">();
+  const submitted = new Set<string>();
+  const returnCount = new Map<string, number>();
   const client = {
     calls,
     createWorkspace: vi.fn().mockImplementation(async (title: string) => {
@@ -88,16 +91,36 @@ function makeWorkspaceClient() {
     listWorkspaces: vi.fn().mockResolvedValue({
       workspaces: [{ ref: "workspace:grid", title: "grid" }],
     }),
-    listPanes: vi.fn().mockResolvedValue({
+    listPanes: vi.fn().mockImplementation(async () => ({
       workspace_ref: "workspace:grid",
       window_ref: "window:1",
-      panes: [],
-    }),
-    listPaneSurfaces: vi.fn().mockResolvedValue({
-      workspace_ref: "workspace:grid",
-      window_ref: "window:1",
-      pane_ref: "pane:1",
-      surfaces: [],
+      panes: Array.from({ length: surfaceIndex }, (_unused, index) => ({
+        ref: `pane:${index + 1}`,
+        index,
+        focused: index === surfaceIndex - 1,
+        surface_count: 1,
+        surface_refs: [`surface:${index + 1}`],
+        selected_surface_ref: `surface:${index + 1}`,
+      })),
+    })),
+    listPaneSurfaces: vi.fn().mockImplementation(async (opts) => {
+      const pane = opts?.pane ?? "pane:1";
+      const index = Number(pane.split(":").at(-1) ?? "1");
+      return {
+        workspace_ref: "workspace:grid",
+        window_ref: "window:1",
+        pane_ref: pane,
+        surfaces:
+          index <= surfaceIndex
+            ? [{
+                ref: `surface:${index}`,
+                title: "agent-pane",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              }]
+            : [],
+      };
     }),
     newSplit: vi.fn().mockImplementation(async (_direction, opts) => {
       surfaceIndex += 1;
@@ -112,13 +135,35 @@ function makeWorkspaceClient() {
     }),
     newSurface: vi.fn(),
     focusSurface: vi.fn().mockResolvedValue(undefined),
-    send: vi.fn().mockResolvedValue(undefined),
-    sendKey: vi.fn().mockResolvedValue(undefined),
-    readScreen: vi.fn().mockResolvedValue({
-      surface: "surface:1",
-      text: "Claude Code\n>",
-      lines: 1,
-      scrollback_used: false,
+    send: vi.fn().mockImplementation(async (surface: string, text: string) => {
+      if (/Codex/.test(text)) activeCli.set(surface, "codex");
+      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+    }),
+    pasteText: vi.fn().mockImplementation(async (surface: string, text: string) => {
+      if (/Codex/.test(text)) activeCli.set(surface, "codex");
+      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+    }),
+    sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
+      if (key === "return") {
+        const count = (returnCount.get(surface) ?? 0) + 1;
+        returnCount.set(surface, count);
+        if (count >= 2) submitted.add(surface);
+      }
+    }),
+    readScreen: vi.fn().mockImplementation(async (surface: string) => {
+      const cli = activeCli.get(surface) ?? "claude";
+      return {
+        surface,
+        text: submitted.has(surface)
+          ? cli === "codex"
+            ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+            : "Claude Code\n✻ Working"
+          : cli === "codex"
+            ? "OpenAI Codex\ncodex> "
+            : "Claude Code\nWhat can I help you with?\n>",
+        lines: 2,
+        scrollback_used: false,
+      };
     }),
     log: vi.fn().mockResolvedValue(undefined),
     setStatus: vi.fn().mockResolvedValue(undefined),
@@ -205,9 +250,12 @@ describe("workspace spawn tools", () => {
         surface_id: "surface:2",
         repo: "cmuxlayer",
         cli: "codex",
+        monitor_boot: expect.objectContaining({
+          status: "bootstrapped",
+          cursor_update_env: "CMUX_INBOX_MSG_ID",
+        }),
       }),
     ]);
-    expect(parsed.agents[1].monitor_boot).toBeUndefined();
     expect(
       existsSync(inboxPath(parsed.agents[0].agent_id, { baseDir: inboxDir })),
     ).toBe(true);
@@ -224,11 +272,13 @@ describe("workspace spawn tools", () => {
   it("spawn_in_workspace reports every created identity when a later launch fails", async () => {
     const client = makeWorkspaceClient();
     let launcherSends = 0;
-    client.send.mockImplementation(async () => {
-      launcherSends += 1;
-      if (launcherSends === 2) {
+    const normalSend = client.send.getMockImplementation()!;
+    client.send.mockImplementation(async (surface: string, text: string) => {
+      if (!text.includes("cmuxlayer mailbox contract")) launcherSends += 1;
+      if (launcherSends === 2 && !text.includes("cmuxlayer mailbox contract")) {
         throw new Error("second launcher send failed");
       }
+      await normalSend(surface, text);
     });
     const server = createServer({
       client: client as any,

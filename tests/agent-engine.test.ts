@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AgentEngine,
+  RetryableDeliveryError,
   assertLauncherAvailable,
   buildLaunchCommand,
   buildResumeCommand,
@@ -11181,6 +11182,128 @@ Session ID: ${sessionId}`,
         terminal: true,
         error: expect.stringMatching(/timed out|uncertain/i),
       });
+    });
+
+    it("keeps an accepted receipt queued across a transient posture mismatch and retries after capped backoff", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "posture-race-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        const submitter = vi
+          .fn()
+          .mockRejectedValueOnce(
+            new RetryableDeliveryError(
+              'Agent "posture-race-delivery" is not in an interactive state (current: working)',
+            ),
+          )
+          .mockResolvedValueOnce({ retry_count: 0, submit_verified: true });
+        engine.setDeliverySubmitter(submitter);
+        const receipt = engine.queueDelivery({
+          agent_id: "posture-race-delivery",
+          text: "accepted means eventual",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        await engine.drainDeliveryQueue();
+
+        const deferred = engine.getDeliveryReceipt(receipt.delivery_id);
+        expect(deferred).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          retry_count: 1,
+          submission_started_at: null,
+          error: expect.stringMatching(/not in an interactive state/),
+        });
+        expect(deferred?.next_attempt_at).toBe("2026-08-11T18:00:00.250Z");
+        await engine.drainDeliveryQueue();
+        expect(submitter).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(new Date("2026-08-11T18:00:00.250Z"));
+        await engine.drainDeliveryQueue();
+
+        expect(submitter).toHaveBeenCalledTimes(2);
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "submitted",
+          terminal: true,
+          retry_count: 1,
+          submit_verified: true,
+          error: null,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("terminal-fails a queued receipt only when its target is gone", async () => {
+      const submitter = vi.fn();
+      engine.setDeliverySubmitter(submitter);
+      const receipt = engine.queueDelivery({
+        agent_id: "gone-queued-delivery",
+        text: "cannot arrive",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(submitter).not.toHaveBeenCalled();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        error: expect.stringMatching(/target.*gone|no longer exists/i),
+      });
+    });
+
+    it("caps repeated retryable delivery backoff at thirty seconds", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "bounded-backoff-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        engine.setDeliverySubmitter(async () => {
+          throw new RetryableDeliveryError("route posture changed");
+        });
+        const receipt = engine.queueDelivery({
+          agent_id: "bounded-backoff-delivery",
+          text: "keep accepted",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        let previousAttemptAt = Date.now();
+        for (let attempt = 1; attempt <= 8; attempt += 1) {
+          await engine.drainDeliveryQueue();
+          const deferred = engine.getDeliveryReceipt(receipt.delivery_id)!;
+          expect(deferred).toMatchObject({
+            delivery_state: "queued",
+            terminal: false,
+            retry_count: attempt,
+          });
+          const nextAttemptAt = Date.parse(deferred.next_attempt_at!);
+          const expectedDelay = Math.min(30_000, 250 * 2 ** (attempt - 1));
+          expect(nextAttemptAt - previousAttemptAt).toBe(expectedDelay);
+          vi.setSystemTime(nextAttemptAt);
+          previousAttemptAt = nextAttemptAt;
+        }
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("does not replay a queued receipt whose persisted submission had started", () => {

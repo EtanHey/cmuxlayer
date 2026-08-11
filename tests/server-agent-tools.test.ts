@@ -100,11 +100,13 @@ function makeLifecycleExec(opts?: {
   let surfaceLive = true;
   let promptPending = false;
   let activeCli: "claude" | "codex" | "cursor" = "claude";
+  let createdSurfaceCount = 0;
+  let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
       ? {
           paneRef: "pane:1",
-          surfaceRef: "surface:new",
+          surfaceRef: currentSurface,
           title: "agent-pane",
         }
       : {
@@ -124,6 +126,13 @@ function makeLifecycleExec(opts?: {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
       surfaceLive = true;
+      createdSurfaceCount += 1;
+      currentSurface =
+        createdSurfaceCount === 1
+          ? "surface:new"
+          : `surface:new-${createdSurfaceCount}`;
+      readyText = "$ ";
+      promptPending = false;
     }
     if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
       surfaceLive = false;
@@ -136,7 +145,7 @@ function makeLifecycleExec(opts?: {
       }
       return { stdout: "{}", stderr: "" };
     }
-    if (args.includes("send")) {
+    if (args.includes("send") || args.includes("set-buffer")) {
       const text = String(args[args.length - 1] ?? "");
       if (text.includes("Codex")) {
         activeCli = "codex";
@@ -152,7 +161,9 @@ function makeLifecycleExec(opts?: {
       }
       if (
         text.trim() &&
-        !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
+        !/^\s*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
+          text,
+        )
       ) {
         promptPending = true;
       }
@@ -221,7 +232,7 @@ function makeLifecycleExec(opts?: {
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({
-          surface: "surface:new",
+          surface: currentSurface,
           text: opts?.shellNeverReady ? "terminal initializing" : readyText,
           lines: 20,
           scrollback_used: false,
@@ -237,7 +248,7 @@ function makeLifecycleExec(opts?: {
     return {
       stdout: JSON.stringify({
         workspace,
-        surface: "surface:new",
+        surface: currentSurface,
         ...(opts?.surfaceUuid ? { surface_id: opts.surfaceUuid } : {}),
         pane: "pane:1",
         title: "",
@@ -634,8 +645,8 @@ describe("lean spawn tool responses", () => {
       state: "booting",
       model: "codex",
       role: "worker",
-      boot_prompt_delivered: false,
-      boot_prompt_submit_verified: null,
+      boot_prompt_delivered: true,
+      boot_prompt_submit_verified: true,
     });
     expect(parsed).not.toHaveProperty("health");
     expect(parsed).not.toHaveProperty("model_policy");
@@ -1931,7 +1942,7 @@ describe("agent lifecycle tool handlers", () => {
       sendKey: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
         surface: "surface:inherit",
-        text: "Codex\n>",
+        text: "OpenAI Codex\ncodex> ",
         lines: 1,
         scrollback_used: false,
       }),
@@ -2039,7 +2050,7 @@ describe("agent lifecycle tool handlers", () => {
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
           surface: "surface:caller",
-          text: "Codex\n>",
+          text: "OpenAI Codex\ncodex> ",
           lines: 1,
           scrollback_used: false,
         }),
@@ -2625,15 +2636,13 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:new"]),
     );
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "fix prompt delivery",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("fix prompt delivery"),
+      ),
+    ).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -2728,22 +2737,19 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
 
     expect(parsed.ok).toBe(true);
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("UUID-bound boot prompt"),
+      ),
+    ).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
-        "send",
+        "paste-buffer",
         "--surface",
         "surface:moved",
-        "UUID-bound boot prompt",
-      ]),
-    );
-    expect(mockExec).not.toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "UUID-bound boot prompt",
       ]),
     );
   });
@@ -2820,15 +2826,18 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.workspace_id).toBe("workspace:1");
     expect(parsed.actual_workspace_id).toBeUndefined();
 
-    const promptSendCall = mockExec.mock.calls.find(([, args]) => {
+    const promptBufferCall = mockExec.mock.calls.find(([, args]) => {
       const argv = args as string[];
-      return argv.includes("send") && argv.includes(prompt);
+      return (
+        argv.includes("set-buffer") &&
+        String(argv.at(-1) ?? "").includes(prompt)
+      );
     });
-    expect(promptSendCall).toBeDefined();
-    const argv = promptSendCall![1] as string[];
-    const workspaceIndex = argv.indexOf("--workspace");
-    expect(workspaceIndex).toBeGreaterThanOrEqual(0);
-    expect(argv[workspaceIndex + 1]).toBe("workspace:1");
+    expect(promptBufferCall).toBeDefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
+    );
   });
 
   it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
@@ -2849,15 +2858,19 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    const promptSendCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
+    const promptBufferCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
       ([, args]) => {
         const argv = args as string[];
-        return argv.includes("send") && argv.includes(prompt);
+        return (
+          argv.includes("set-buffer") &&
+          String(argv.at(-1) ?? "").includes(prompt)
+        );
       },
     );
-    expect(promptSendCall).toBeDefined();
-    expect(promptSendCall![1]).toEqual(
-      expect.arrayContaining(["--workspace", "workspace:1"]),
+    expect(promptBufferCall).toBeDefined();
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
     );
   });
 
@@ -2932,7 +2945,8 @@ describe("agent lifecycle tool handlers", () => {
         (chunk) => Buffer.byteLength(chunk, "utf-8") <= 16_000,
       ),
     ).toBe(true);
-    expect(chunks.join("")).toBe(prompt);
+    expect(chunks.join("")).toContain(prompt);
+    expect(chunks.join("")).toContain("cmuxlayer mailbox contract");
     expect(chunks.join("")).toContain("\n\n");
   });
 
@@ -2944,8 +2958,8 @@ describe("agent lifecycle tool handlers", () => {
     mockExec = vi.fn().mockImplementation(async (cmd, args) => {
       if (
         !renamed &&
-        args.includes("send") &&
-        String(args.at(-1) ?? "") === "probe renamed state"
+        args.includes("set-buffer") &&
+        String(args.at(-1) ?? "").includes("probe renamed state")
       ) {
         renamed = true;
         finalAgentId = renameOnlyAgentStateToSession(sessionId);
@@ -3677,7 +3691,7 @@ describe("agent lifecycle tool handlers", () => {
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
           surface: "surface:caller-worktree",
-          text: "Codex\n>",
+          text: "OpenAI Codex\ncodex> ",
           lines: 1,
           scrollback_used: false,
         }),
@@ -3887,15 +3901,13 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "file prompt body",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("file prompt body"),
+      ),
+    ).toBe(true);
   });
 
   it("read_agent_output scans bounded tail lines by default", async () => {
@@ -4000,9 +4012,9 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
-      if (args.includes("send")) {
+      if (args.includes("send") || args.includes("set-buffer")) {
         lastSentText = String(args.at(-1) ?? "");
-        if (lastSentText === "file prompt body") {
+        if (lastSentText.includes("file prompt body")) {
           promptDelivered = true;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -4018,7 +4030,7 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text:
-              lastSentText === "file prompt body"
+              lastSentText.includes("file prompt body")
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
                 : lastSentText === ""
                 ? "$ "
@@ -4080,17 +4092,13 @@ describe("agent lifecycle tool handlers", () => {
         "surface:new",
       ]),
     );
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--workspace",
-        "workspace:voice",
-        "--surface",
-        "surface:new",
-        "file prompt body",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("file prompt body"),
+      ),
+    ).toBe(true);
   }, 10_000);
 
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
@@ -4152,9 +4160,9 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
-      if (args.includes("send")) {
+      if (args.includes("send") || args.includes("set-buffer")) {
         lastSentText = String(args.at(-1) ?? "");
-        if (lastSentText === "file prompt body") {
+        if (lastSentText.includes("file prompt body")) {
           promptDelivered = true;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -4170,7 +4178,7 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text:
-              lastSentText === "file prompt body"
+              lastSentText.includes("file prompt body")
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
                 : lastSentText === ""
                   ? "$ "
@@ -4975,7 +4983,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
-    const result = await list.handler({}, {} as any);
+    const result = await list.handler({ state: "working" }, {} as any);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
@@ -5791,7 +5799,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
-    const result = await list.handler({ state: "working" }, {} as any);
+    const result = await list.handler({}, {} as any);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 

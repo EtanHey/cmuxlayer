@@ -50,6 +50,7 @@ async function spawnReadyAgent(server: any) {
       model: "sonnet",
       cli: "claude",
       workspace: "workspace:1",
+      boot_prompt_timeout_ms: 100,
     },
     {} as any,
   );
@@ -70,6 +71,7 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
   let readyText =
     typeof initialReadyText === "function" ? initialReadyText() : initialReadyText;
   let promptPending = false;
+  let submissionObservationPending = false;
 
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("send-key") && args.includes("return")) {
@@ -77,13 +79,17 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
         readyText =
           "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)";
         promptPending = false;
+        submissionObservationPending = true;
       }
       return { stdout: "{}", stderr: "" };
     }
 
     if (args.includes("send")) {
       const text = String(args.at(-1) ?? "");
-      if (text.trim() && !/Codex\b/.test(text)) {
+      if (
+        text.trim() &&
+        (text.includes("cmuxlayer mailbox contract") || !/Codex\b/.test(text))
+      ) {
         promptPending = true;
       }
       return { stdout: "{}", stderr: "" };
@@ -95,13 +101,15 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
     }
 
     if (args.includes("read-screen")) {
+      const observedText = submissionObservationPending
+        ? readyText
+        : typeof initialReadyText === "function"
+          ? initialReadyText()
+          : readyText;
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text:
-            typeof initialReadyText === "function"
-              ? initialReadyText()
-              : readyText,
+          text: observedText,
           lines: 20,
           scrollback_used: false,
         }),
@@ -110,6 +118,9 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
     }
 
     if (args.includes("list-workspaces")) {
+      // Spawn response shaping enumerates topology after boot submission has
+      // been verified. Return subsequent reads to the caller-controlled screen.
+      submissionObservationPending = false;
       return {
         stdout: JSON.stringify({
           workspaces: [

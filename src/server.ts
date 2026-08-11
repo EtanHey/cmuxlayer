@@ -46,6 +46,7 @@ import {
 import {
   AgentEngine,
   AgentLaunchError,
+  RetryableDeliveryError,
   buildLaunchCommand,
   resolveSweepTiming,
   type AgentLifecycleEvent,
@@ -2930,6 +2931,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
   };
+  const mailboxBootContract = (
+    agentId: string,
+    monitorBoot: MonitorBootResult,
+  ): string =>
+    `cmuxlayer mailbox contract for ${agentId}: monitor with ${monitorBoot.monitor_command}; ` +
+    `after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> ${monitorBoot.cursor_update_command}`;
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
@@ -4964,6 +4971,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     cli?: CliType;
     prompt?: string;
     boot_prompt_path?: string | null;
+    injected_prompt?: string;
     timeout_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
@@ -4976,7 +4984,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   }> => {
     const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
     assertBootPromptMode(opts.prompt, bootPromptPath);
-    if (!hasInlinePrompt(opts.prompt) && !bootPromptPath) {
+    if (
+      !hasInlinePrompt(opts.prompt) &&
+      !bootPromptPath &&
+      !hasInlinePrompt(opts.injected_prompt)
+    ) {
       return {
         bytes: 0,
         retry_count: 0,
@@ -4997,7 +5009,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const rawPrompt = bootPromptPath
       ? await readFile(bootPromptPath, "utf8")
-      : opts.prompt!;
+      : (opts.prompt ?? "");
     let deliveryRoute = opts.resolveRoute
       ? await opts.resolveRoute()
       : readiness.route;
@@ -5045,9 +5057,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       !useFilePointer
         ? `boot_prompt_path is ${rawPrompt.length} characters; prefer a one-line file pointer for boot prompts over ${BOOT_PROMPT_PATH_WARNING_CHARS} characters`
         : null;
-    const deliveryText = useFilePointer
+    const callerDeliveryText = useFilePointer
       ? `Read and follow ${bootPromptPath}`
       : rawPrompt;
+    const deliveryText = [callerDeliveryText, opts.injected_prompt]
+      .filter((part): part is string => hasInlinePrompt(part))
+      .join("\n\n");
     const sanitizedText = sanitizeTerminalInput(deliveryText);
     const chunks =
       sanitizedText.length > SEND_INPUT_CHUNK_THRESHOLD
@@ -5085,7 +5100,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
       return {
         ...delivery,
-        prompt_text: rawPrompt,
+        prompt_text: hasInlinePrompt(rawPrompt) ? rawPrompt : null,
         prompt_warning: promptWarning,
       };
     } catch (error) {
@@ -9439,7 +9454,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         !INTERACTIVE_AGENT_STATES.has(route.state) &&
         !routeSurfaceAlive
       ) {
-        throw new Error(
+        throw new RetryableDeliveryError(
           `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
             `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}. ` +
             `Pass allow_busy: true to bypass this gate and deliver raw keystrokes regardless of state.`,
@@ -9826,8 +9841,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               effort: args.effort,
               cli: args.cli,
               prompt: spawnPrompt,
-              boot_prompt_pending:
-                hasInlinePrompt(args.prompt) || Boolean(bootPromptPath),
+              boot_prompt_pending: true,
               workspace: spawnWorkspace,
               cwd: worktree.prepared?.path,
               mcp_env: worktree.mcpEnv,
@@ -9893,6 +9907,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
           );
           originalLaunchCommandsBySurface.delete(result.surface_id);
+          const monitorBoot = ensureMonitorBoot(result.agent_id);
+          const injectedBootPrompt = mailboxBootContract(
+            result.agent_id,
+            monitorBoot,
+          );
+          const spawnedBinding = engine.getAgentState(result.agent_id);
           appendStaleBuildWarning(result);
           const placementWarnings = [
             ...targetResolution.warnings,
@@ -9909,7 +9929,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           let bootPromptDelivery:
             Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
           try {
-            if (hasInlinePrompt(args.prompt) || bootPromptPath) {
+            {
               const deliveryWorkspace = spawnDeliveryWorkspace(
                 result,
                 spawnWorkspace,
@@ -9917,11 +9937,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
-                resolveRoute: () =>
-                  resolveManagedDeliveryRoute(result.agent_id),
+                stableSurfaceIdentity: spawnedBinding?.surface_uuid,
+                resolveRoute: spawnedBinding?.surface_uuid
+                  ? () => resolveManagedDeliveryRoute(result.agent_id)
+                  : undefined,
                 cli: args.cli,
                 prompt: args.prompt,
                 boot_prompt_path: bootPromptPath,
+                injected_prompt: injectedBootPrompt,
                 timeout_ms: args.boot_prompt_timeout_ms,
                 onUpdateShellRelaunch: () =>
                   relaunchSpawnAgentAfterUpdate({
@@ -9956,6 +9979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               const current = engine.getAgentState(result.agent_id);
               if (
                 current?.state === "booting" &&
+                (hasInlinePrompt(args.prompt) || Boolean(bootPromptPath)) &&
                 bootPromptDelivery.submit_verified === true
               ) {
                 const ready = stateMgr.transition(result.agent_id, "ready");
@@ -10048,8 +10072,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
             spawnDeliveryWorkspace(result, spawnWorkspace),
             {
-              waitForReady:
-                !hasInlinePrompt(args.prompt) && !Boolean(bootPromptPath),
+              waitForReady: !bootPromptDelivery,
             },
           );
           if (focusRestoreWarning) {
@@ -10068,10 +10091,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               cli: args.cli,
               launcherName: launcherNameForCli(args.repo, args.cli),
             });
-          const monitorBoot =
-            role === "orchestrator"
-              ? ensureMonitorBoot(result.agent_id)
-              : undefined;
           const topology = currentAgent ? await collectSurfaceTopology() : null;
           const health = currentAgent
             ? await evaluateServerAgentHealth(
@@ -10612,7 +10631,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               model: agent.model,
               cli: agent.cli,
               prompt: agent.prompt ?? "",
-              boot_prompt_pending: hasPrompt,
+              boot_prompt_pending: true,
               workspace,
               role: agent.role,
               auto_archive_on_done: false,
@@ -10634,11 +10653,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               result.surface_id,
             );
             originalLaunchCommandsBySurface.delete(result.surface_id);
+            const monitorBoot = ensureMonitorBoot(result.agent_id);
+            const injectedBootPrompt = mailboxBootContract(
+              result.agent_id,
+              monitorBoot,
+            );
+            const spawnedBinding = engine.getAgentState(result.agent_id);
             appendStaleBuildWarning(result);
             let bootPromptDelivery:
               Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
 
-            if (hasPrompt) {
+            {
               const deliveryWorkspace = spawnDeliveryWorkspace(
                 result,
                 workspace,
@@ -10646,10 +10671,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               bootPromptDelivery = await deliverBootPrompt({
                 surface: result.surface_id,
                 workspace: deliveryWorkspace,
-                resolveRoute: () =>
-                  resolveManagedDeliveryRoute(result.agent_id),
+                stableSurfaceIdentity: spawnedBinding?.surface_uuid,
+                resolveRoute: spawnedBinding?.surface_uuid
+                  ? () => resolveManagedDeliveryRoute(result.agent_id)
+                  : undefined,
                 cli: agent.cli,
                 prompt: agent.prompt,
+                injected_prompt: injectedBootPrompt,
                 timeout_ms: BOOT_PROMPT_TIMEOUT_MS,
                 onUpdateShellRelaunch: () =>
                   relaunchSpawnAgentAfterUpdate({
@@ -10670,11 +10698,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 task_summary:
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
                 boot_prompt_pending: false,
+                prompt_delivered:
+                  hasPrompt && bootPromptDelivery.submit_verified === true,
+                submit_verified: hasPrompt
+                  ? bootPromptDelivery.submit_verified
+                  : null,
               });
               registry.set(result.agent_id, updated);
 
               const current = engine.getAgentState(result.agent_id);
-              if (current?.state === "booting") {
+              if (current?.state === "booting" && hasPrompt) {
                 const ready = stateMgr.transition(result.agent_id, "ready");
                 registry.set(result.agent_id, ready);
                 result.state = "ready";
@@ -10692,10 +10725,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 cli: agent.cli,
                 launcherName: launcherNameForCli(agent.repo, agent.cli),
               });
-            const monitorBoot =
-              role === "orchestrator"
-                ? ensureMonitorBoot(result.agent_id)
-                : undefined;
             const topology = currentAgent
               ? await collectSurfaceTopology()
               : null;
@@ -10717,24 +10746,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role,
               health,
               monitor_boot: monitorBoot,
-              boot_prompt_delivered: hasPrompt
-                ? isBootPromptDelivered(bootPromptDelivery)
-                : undefined,
-              boot_prompt_submit_verified: hasPrompt
-                ? (bootPromptDelivery?.submit_verified ?? null)
-                : undefined,
+              boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+              boot_prompt_submit_verified:
+                bootPromptDelivery?.submit_verified ?? null,
             });
             leanSpawnedAgents.push(
               shapeSpawnResponse({
                 ...result,
                 role,
                 health,
-                boot_prompt_delivered: hasPrompt
-                  ? isBootPromptDelivered(bootPromptDelivery)
-                  : false,
-                boot_prompt_submit_verified: hasPrompt
-                  ? (bootPromptDelivery?.submit_verified ?? null)
-                  : null,
+                boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+                boot_prompt_submit_verified:
+                  bootPromptDelivery?.submit_verified ?? null,
               }),
             );
           }
@@ -10743,6 +10766,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             focusRestoreLease,
             lastSurface,
             workspace,
+            { waitForReady: false },
           );
 
           // spawn_in_workspace builds its response from the per-agent objects,

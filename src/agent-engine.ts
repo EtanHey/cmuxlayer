@@ -179,6 +179,16 @@ export interface AgentDeliveryReceipt {
   error: string | null;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
+  /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
+  next_attempt_at?: string | null;
+}
+
+/** A known pre-mutation delivery rejection that is safe to retry. */
+export class RetryableDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableDeliveryError";
+  }
 }
 
 type DeliverySubmitter = (
@@ -4534,6 +4544,7 @@ export class AgentEngine {
         ) {
           const receipt: AgentDeliveryReceipt = {
             submission_started_at: null,
+            next_attempt_at: null,
             ...(candidate as AgentDeliveryReceipt),
           };
           if (
@@ -4594,6 +4605,7 @@ export class AgentEngine {
       submit_verified: null,
       error: null,
       submission_started_at: null,
+      next_attempt_at: null,
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -4638,7 +4650,19 @@ export class AgentEngine {
       for (const receipt of this.deliveryReceipts.values()) {
         if (receipt.delivery_state !== "queued") continue;
         const agent = this.getAgentState(receipt.agent_id);
-        if (!agent || (agent.state !== "ready" && agent.state !== "idle")) {
+        if (!agent) {
+          receipt.delivery_state = "failed";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.error = `Delivery target ${receipt.agent_id} is gone or no longer exists`;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
+        if (
+          receipt.next_attempt_at &&
+          Date.parse(receipt.next_attempt_at) > Date.now()
+        ) {
           continue;
         }
         try {
@@ -4666,14 +4690,29 @@ export class AgentEngine {
           receipt.delivery_state = "submitted";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
-          receipt.retry_count = result.retry_count;
+          receipt.retry_count += result.retry_count;
           receipt.submit_verified = result.submit_verified;
           receipt.error = null;
+          receipt.next_attempt_at = null;
         } catch (error) {
-          receipt.delivery_state = "failed";
-          receipt.terminal = true;
-          receipt.resolved_at = new Date().toISOString();
-          receipt.error = error instanceof Error ? error.message : String(error);
+          if (error instanceof RetryableDeliveryError) {
+            receipt.submission_started_at = null;
+            receipt.retry_count += 1;
+            const backoffMs = Math.min(
+              30_000,
+              250 * 2 ** Math.min(receipt.retry_count - 1, 16),
+            );
+            receipt.next_attempt_at = new Date(
+              Date.now() + backoffMs,
+            ).toISOString();
+            receipt.error = error.message;
+          } else {
+            receipt.delivery_state = "failed";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.error =
+              error instanceof Error ? error.message : String(error);
+          }
         }
         this.persistDeliveryReceipts();
         // Successful delivery already emitted the correlated source event;
