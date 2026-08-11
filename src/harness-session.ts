@@ -616,7 +616,10 @@ function promptFieldContainsExpectedText(
         return [item];
       }
       const block = asRecord(item);
-      if (block?.type === "text" && typeof block.text === "string") {
+      if (
+        (block?.type === "text" || block?.type === "input_text") &&
+        typeof block.text === "string"
+      ) {
         return [block.text];
       }
       return [];
@@ -628,7 +631,10 @@ function promptFieldContainsExpectedText(
     );
   }
   const block = asRecord(value);
-  if (block?.type === "text" && typeof block.text === "string") {
+  if (
+    (block?.type === "text" || block?.type === "input_text") &&
+    typeof block.text === "string"
+  ) {
     return promptTextMatchesExpected(block.text, expectedText);
   }
   return false;
@@ -657,8 +663,12 @@ function recordPromptFields(event: Record<string, unknown>): unknown[] {
   }
 
   const payloadType = typeof payload?.type === "string" ? payload.type : null;
+  const payloadRole = typeof payload?.role === "string" ? payload.role : null;
   if (payloadType === "user_message" || payloadType === "user") {
     fields.push(payload?.message, payload?.text, payload?.input);
+  }
+  if (payloadType === "message" && payloadRole === "user") {
+    fields.push(payload?.content, payload?.message, payload?.text);
   }
 
   return fields;

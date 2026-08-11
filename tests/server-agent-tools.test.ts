@@ -4971,7 +4971,7 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
-  it("list_agents returns healthy rows when one persisted repo is corrupt", async () => {
+  it("list_agents keeps a corrupt legacy repo visible but not resumable", async () => {
     const routeClient = makeUuidRouteClient([
       {
         ref: "surface:healthy",
@@ -5000,7 +5000,7 @@ describe("agent lifecycle tool handlers", () => {
       workspace_id: "workspace:1",
       state: "ready",
       repo: "cmuxlayer",
-      cli_session_id: "healthy-session",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
     const corrupt = makeServerAgentRecord({
       agent_id: "corrupt-agent",
@@ -5009,7 +5009,7 @@ describe("agent lifecycle tool handlers", () => {
       workspace_id: "workspace:1",
       state: "ready",
       repo: "brainlayerClaude [surface:199]",
-      cli_session_id: "corrupt-session",
+      cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f4f",
     });
     for (const record of [healthy, corrupt]) {
       engine.stateMgr.writeState(record);
@@ -5033,14 +5033,13 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agents).toEqual([
       expect.objectContaining({ agent_id: "healthy-agent" }),
-    ]);
-    expect(parsed.skipped_agents).toEqual([
       expect.objectContaining({
         agent_id: "corrupt-agent",
-        error: expect.stringMatching(/repo|launcher/i),
+        resumable: false,
       }),
     ]);
-    expect(result.content[0]?.text).toMatch(/skipped.*corrupt-agent/i);
+    expect(parsed.agents[1]).not.toHaveProperty("resume_command");
+    expect(parsed.skipped_agents).toBeUndefined();
   });
 
   it("send_to keeps registry repo ownership when a title contains a surface suffix", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatDelivery } from "../src/format.js";
+import { formatAgentState, formatDelivery } from "../src/format.js";
+import type { AgentRecord } from "../src/agent-types.js";
 
 describe("formatDelivery", () => {
   it("renders a phone-readable delivered line with full identity", () => {
@@ -69,5 +70,38 @@ describe("formatDelivery", () => {
         submit_verified: null,
       }),
     ).toContain("submit_verified=null (not attempted)");
+  });
+});
+
+describe("formatAgentState", () => {
+  it("renders a legacy short session as non-resumable instead of throwing", () => {
+    const agent = {
+      agent_id: "legacyCodex-019d9aa5",
+      surface_id: "surface:1",
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      model: "gpt-5.6-sol",
+      cli: "codex",
+      cli_session_id: "019d9aa5",
+      task_summary: "legacy row",
+      pid: null,
+      version: 1,
+      created_at: "2026-08-11T10:00:00.000Z",
+      updated_at: "2026-08-11T10:00:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      deletion_intent: false,
+      quality: "unknown",
+      max_cost_per_agent: null,
+      crash_recover: false,
+      respawn_attempts: 0,
+      user_killed: false,
+    } satisfies AgentRecord;
+
+    expect(formatAgentState(agent)).toContain(
+      "resumable: false (no runnable resume command)",
+    );
   });
 });

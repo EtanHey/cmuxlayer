@@ -9,19 +9,22 @@ export type AgentStatePayload = AgentRecord & {
 export function resumeCommandForAgent(
   record: Pick<AgentRecord, "cli" | "repo" | "cli_session_id" | "launcher_name">,
 ): string | undefined {
-  return record.cli_session_id
-    ? buildResumeCommand(
-        record.cli,
-        record.repo,
-        record.cli_session_id,
-        record.launcher_name,
-      )
-    : undefined;
+  if (!record.cli_session_id) return undefined;
+  try {
+    return buildResumeCommand(
+      record.cli,
+      record.repo,
+      record.cli_session_id,
+      record.launcher_name,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 export function toPublicAgent(record: AgentRecord): PublicAgent {
   const resumeCommand = resumeCommandForAgent(record);
-  const resumable = !!record.cli_session_id;
+  const resumable = !!resumeCommand;
   return {
     agent_id: record.agent_id,
     repo: record.repo,
@@ -39,7 +42,7 @@ export function toAgentStatePayload(record: AgentRecord): AgentStatePayload {
   const resumeCommand = resumeCommandForAgent(record);
   return {
     ...record,
-    resumable: !!record.cli_session_id,
+    resumable: !!resumeCommand,
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }
@@ -58,7 +61,7 @@ export function buildRouteTable(
       workspace_id: record.workspace_id ?? null,
       state: record.state,
       session_id: record.cli_session_id,
-      resumable: !!record.cli_session_id,
+      resumable: !!resumeCommand,
       ...(resumeCommand ? { resume_command: resumeCommand } : {}),
     };
     const existing = routes.get(record.agent_id);
