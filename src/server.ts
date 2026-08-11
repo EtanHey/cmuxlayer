@@ -29,6 +29,7 @@ import {
   resolveSpawnModelPolicy,
 } from "./model-policy.js";
 import { StateManager } from "./state-manager.js";
+import { shellQuote } from "./agent-command.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import {
   currentTransportRetryCount,
@@ -110,6 +111,7 @@ import {
 import {
   dispatch,
   ensureInboxFile,
+  inboxCursorPath,
   inboxMonitorState,
   inboxPath,
   monitorAlive,
@@ -2231,6 +2233,11 @@ type MonitorBootResult = {
   heartbeat_written: boolean;
   heartbeat_source: "server_boot";
   monitor_command: string;
+  /** Agent-owned consumption watermark; the engine never writes this file. */
+  cursor_path: string;
+  /** Run after handling with the message id supplied as CMUX_INBOX_MSG_ID. */
+  cursor_update_command: string;
+  cursor_update_env: "CMUX_INBOX_MSG_ID";
   error?: string;
 };
 
@@ -2512,6 +2519,7 @@ export type LifecycleAgentInputDeliverer = (args: {
   press_enter: boolean;
   allow_busy?: boolean;
   source_event: DeliveryEventType;
+  delivery_id?: string;
 }) => Promise<unknown>;
 
 export interface CmuxServerContext {
@@ -2890,6 +2898,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const inboxOpts: InboxOpts = inboxBaseDir ? { baseDir: inboxBaseDir } : {};
   const ensureMonitorBoot = (agentId: string): MonitorBootResult => {
     let monitorCommand = "";
+    const cursorPath = inboxCursorPath(agentId, inboxOpts);
+    const cursorUpdateCommand = `${
+      inboxBaseDir
+        ? `CMUXLAYER_INBOX_BASE_DIR=${shellQuote(inboxBaseDir)} `
+        : ""
+    }cmuxlayer inbox-cursor ${shellQuote(agentId)}`;
     try {
       monitorCommand = recommendedMonitorCommand(agentId, inboxOpts);
       ensureInboxFile(agentId, inboxOpts);
@@ -2899,6 +2913,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         heartbeat_written: true,
         heartbeat_source: "server_boot",
         monitor_command: monitorCommand,
+        cursor_path: cursorPath,
+        cursor_update_command: cursorUpdateCommand,
+        cursor_update_env: "CMUX_INBOX_MSG_ID",
       };
     } catch (e) {
       return {
@@ -2906,6 +2923,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         heartbeat_written: false,
         heartbeat_source: "server_boot",
         monitor_command: monitorCommand,
+        cursor_path: cursorPath,
+        cursor_update_command: cursorUpdateCommand,
+        cursor_update_env: "CMUX_INBOX_MSG_ID",
         error: e instanceof Error ? e.message : String(e),
       };
     }
@@ -4177,6 +4197,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     onChunkDelivered?: (sentChunks: number) => void;
     source_event?: DeliveryEventType;
     source_agent?: string | null;
+    delivery_id?: string;
     verify_submit?: boolean;
     allow_recovery_enter_retry?: boolean;
     submit_verify_timeout_ms?: number;
@@ -4304,6 +4325,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         press_enter: opts.press_enter,
         submit_verified,
         retry_count,
+        ...(opts.delivery_id
+          ? {
+              delivery_id: opts.delivery_id,
+              delivery_state:
+                submit_verified === false
+                  ? ("failed" as const)
+                  : ("submitted" as const),
+            }
+          : {}),
       });
     }
 
@@ -9285,6 +9315,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       press_enter: boolean;
       allow_busy?: boolean;
       source_event: DeliveryEventType;
+      delivery_id?: string;
     }) => {
       await refreshManagedMetadataBestEffort(args.agent_id);
       let route = await engine.resolveAgentIoRoute(args.agent_id);
@@ -9459,6 +9490,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: args.agent_id,
+            delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must
             // be caught, never reported as ok. Busy sends do not retry Return:
@@ -9490,6 +9522,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
     lifecycleAgentInputDeliverer = deliverAgentInput;
+    engine.setDeliverySubmitter(async (receipt) =>
+      deliverAgentInput({
+        agent_id: receipt.agent_id,
+        text: receipt.text,
+        press_enter: receipt.press_enter,
+        allow_busy: false,
+        source_event: receipt.source_event,
+        delivery_id: receipt.delivery_id,
+      }),
+    );
 
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a
@@ -12046,7 +12088,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Unified send path. mode=agent (default) routes by agent_id without exposing surface details; mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends. ${ZSH_BANG_INLINE_WARNING}`,
+      `${PANE_INPUT_BREAKAGE_GUIDANCE} Unified send path. mode=agent (default) routes by agent_id without exposing surface details; a busy agent returns a nonterminal queued delivery receipt that the lifecycle sweep drains when the agent becomes interactive. mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends. ${ZSH_BANG_INLINE_WARNING}`,
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -12056,7 +12098,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           "Press enter after sending text",
         ),
         allow_busy: SendToArgsSchema.shape.allow_busy.describe(
-          "If true, bypass the lifecycle-state gate so a working agent can receive an interjection. Queued-but-unsubmitted input returns an error and must not be retried blindly. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
+          "If true, bypass the lifecycle-state queue so a working agent receives an immediate interjection. Omit it to receive a nonterminal queued receipt that resolves through delivery events. Picker/menu and permission-prompt safety gates still refuse text; use mode=key for deliberate menu driving.",
         ),
         allow_long_inline: SendToArgsSchema.shape.allow_long_inline.describe(
           "Bypass the inline length and multi-paragraph safety guards for a deliberate raw send. Large allowed sends keep the existing chunked delivery behavior.",
@@ -12064,6 +12106,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (rawArgs) => {
+        let failedReceiptPayload: Record<string, unknown> = {};
         try {
           const parsedArgs = SendToArgsSchema.safeParse(rawArgs);
           if (!parsedArgs.success) {
@@ -12161,16 +12204,97 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: targetAgent?.cli,
             allowLongInline: args.allow_long_inline,
           });
-          const delivery = await deliverAgentInput({
+          if (!args.allow_busy && targetAgent?.state === "working") {
+            const receipt = engine.queueDelivery({
+              agent_id: agentId,
+              text: args.text,
+              press_enter: args.press_enter,
+              source_event: "send_to",
+            });
+            const data = {
+              accepted: true,
+              agent_id: agentId,
+              delivery_id: receipt.delivery_id,
+              delivery_state: receipt.delivery_state,
+              terminal: receipt.terminal,
+            };
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `send_to accepted — delivery ${receipt.delivery_id} queued`,
+                },
+              ],
+              structuredContent: data,
+            };
+          }
+          const deliveryId = randomUUID();
+          let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
+          try {
+            delivery = await deliverAgentInput({
+              agent_id: agentId,
+              text: args.text,
+              press_enter: args.press_enter,
+              allow_busy: args.allow_busy,
+              source_event: "send_to",
+              delivery_id: deliveryId,
+            });
+          } catch (error) {
+            const failedReceipt = engine.resolveDelivery(
+              {
+                delivery_id: deliveryId,
+                agent_id: agentId,
+                text: args.text,
+                press_enter: args.press_enter,
+                source_event: "send_to",
+                delivery_state: "failed",
+                terminal: true,
+                retry_count:
+                  error instanceof SubmitVerificationError
+                    ? error.retry_count
+                    : 0,
+                submit_verified:
+                  error instanceof SubmitVerificationError ? false : null,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              {
+                // Submission-verification failures already emitted the source
+                // event immediately before throwing. Earlier failures did not.
+                appendFailureEvent: !(error instanceof SubmitVerificationError),
+              },
+            );
+            failedReceiptPayload = {
+              delivery_id: failedReceipt.delivery_id,
+              delivery_state: failedReceipt.delivery_state,
+              terminal: failedReceipt.terminal,
+            };
+            throw error;
+          }
+          const receipt = engine.resolveDelivery({
+            delivery_id: deliveryId,
             agent_id: agentId,
             text: args.text,
             press_enter: args.press_enter,
-            allow_busy: args.allow_busy,
             source_event: "send_to",
+            delivery_state: "submitted",
+            terminal: true,
+            retry_count: delivery.retry_count,
+            submit_verified: delivery.submit_verified,
+            error: null,
           });
+          // Preserve the already-terminal receipt if optional evidence
+          // collection fails after the pane mutation has succeeded.
+          failedReceiptPayload = {
+            delivery_id: receipt.delivery_id,
+            delivery_state: receipt.delivery_state,
+            terminal: receipt.terminal,
+          };
           const evidence = await collectDeliveryEvidence(agentId);
           const data = {
             agent_id: agentId,
+            delivery_id: receipt.delivery_id,
+            delivery_state: receipt.delivery_state,
+            terminal: receipt.terminal,
             retry_count: delivery.retry_count,
             submit_verified: delivery.submit_verified,
             ...evidence,
@@ -12179,15 +12303,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {
+              ...failedReceiptPayload,
               error_code: e.error_code,
               submit_verified: e.submit_verified,
               screen: e.screen,
             });
           }
           if (e instanceof SubmitVerificationError) {
-            return err(e, submitVerificationFailurePayload(e));
+            return err(e, {
+              ...failedReceiptPayload,
+              ...submitVerificationFailurePayload(e),
+            });
           }
-          return err(e);
+          return err(e, failedReceiptPayload);
         }
       },
     );

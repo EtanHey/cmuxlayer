@@ -152,6 +152,9 @@ describe("spawn monitor boot", () => {
       heartbeat_written: true,
       heartbeat_source: "server_boot",
       monitor_command: expect.stringContaining(parsed.agent_id),
+      cursor_path: expect.stringContaining(parsed.agent_id),
+      cursor_update_command: expect.stringContaining("inbox-cursor"),
+      cursor_update_env: "CMUX_INBOX_MSG_ID",
     });
     expect(parsed.monitor_boot.monitor_command).toContain("tail -n0 -F");
     expect(existsSync(inboxPath(parsed.agent_id, { baseDir: inboxDir }))).toBe(
@@ -221,6 +224,9 @@ describe("spawn monitor boot", () => {
         heartbeat_written: false,
         heartbeat_source: "server_boot",
         monitor_command: expect.stringContaining(parsed.agent_id),
+        cursor_path: expect.stringContaining(parsed.agent_id),
+        cursor_update_command: expect.stringContaining("inbox-cursor"),
+        cursor_update_env: "CMUX_INBOX_MSG_ID",
         error: expect.stringContaining("ENOTDIR"),
       });
     } finally {

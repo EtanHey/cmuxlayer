@@ -11128,6 +11128,89 @@ Session ID: ${sessionId}`,
         /not in an interactive state/,
       );
     });
+
+    it("keeps a durably accepted queued receipt when telemetry logging fails", () => {
+      vi.spyOn(stateMgr.getEventLog(), "appendDelivery").mockImplementation(
+        () => {
+          throw new Error("telemetry unavailable");
+        },
+      );
+
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-telemetry-failure",
+        text: "persist me",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      expect(receipt).toMatchObject({
+        delivery_state: "queued",
+        terminal: false,
+      });
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        text: "persist me",
+        delivery_state: "queued",
+      });
+    });
+
+    it("makes a hung queued submission terminal-uncertain without replay", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "hung-queued-delivery",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      (engine as any).deliverySubmitTimeoutMs = 5;
+      engine.setDeliverySubmitter(
+        async () => await new Promise<never>(() => {}),
+      );
+      const receipt = engine.queueDelivery({
+        agent_id: "hung-queued-delivery",
+        text: "submit once",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        error: expect.stringMatching(/timed out|uncertain/i),
+      });
+    });
+
+    it("does not replay a queued receipt whose persisted submission had started", () => {
+      const receipt = engine.queueDelivery({
+        agent_id: "crashed-queued-delivery",
+        text: "maybe landed",
+        press_enter: true,
+        source_event: "send_to",
+      });
+      const receiptPath = join(TEST_DIR, "delivery-receipts.json");
+      const persisted = JSON.parse(readFileSync(receiptPath, "utf8"));
+      persisted[0].submission_started_at = "2026-08-11T18:00:00.000Z";
+      writeFileSync(receiptPath, `${JSON.stringify(persisted)}\n`, "utf8");
+
+      const restartedState = new StateManager(TEST_DIR);
+      const restarted = new AgentEngine(
+        restartedState,
+        new AgentRegistry(restartedState, async () => []),
+        mockClient,
+      );
+      try {
+        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "failed",
+          terminal: true,
+          error: expect.stringMatching(/uncertain|restart/i),
+        });
+      } finally {
+        restarted.dispose();
+      }
+    });
   });
 });
 

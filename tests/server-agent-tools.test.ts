@@ -30,6 +30,7 @@ import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   reconcileMonitorRegistry,
@@ -657,6 +658,27 @@ describe("lean spawn tool responses", () => {
     expect(result.content[0].text).not.toBe(
       JSON.stringify(result.structuredContent),
     );
+  });
+
+  it("injects the agent-owned inbox cursor helper into orchestrator boot metadata", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        repo: "cmuxlayer",
+        cli: "claude",
+        placement: "orchestrator",
+        verbose: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.monitor_boot).toMatchObject({
+      cursor_path: expect.stringMatching(/inbox\.cursor$/),
+      cursor_update_command: expect.stringContaining("inbox-cursor"),
+      cursor_update_env: "CMUX_INBOX_MSG_ID",
+    });
   });
 
   it("spawn_agent surfaces a real model coercion in lean mode", async () => {
@@ -6994,6 +7016,48 @@ codex>
     expect(engine.getAgentState(agentId)?.state).toBe("idle");
   });
 
+  it("send_to returns a keyed terminal failed receipt when delivery fails", async () => {
+    let failReturn = false;
+    const base = makeLifecycleExec({
+      surfaceUuid: "11111111-2222-4333-8444-555555555555",
+    });
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (failReturn && args.includes("send-key") && args.includes("return")) {
+        throw new Error("Return delivery failed");
+      }
+      return base(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawnResult = await spawn.handler(
+      { repo: "test", model: "sonnet", cli: "claude" },
+      {} as any,
+    );
+    const agentId = parseToolResult(spawnResult).agent_id as string;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const idle = engine.stateMgr.resetState(agentId, "idle", {});
+    engine.getRegistry().set(agentId, idle);
+    failReturn = true;
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: "continue", press_enter: true },
+      {} as any,
+    );
+    const failed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(failed).toMatchObject({
+      delivery_id: expect.any(String),
+      delivery_state: "failed",
+      terminal: true,
+    });
+    expect(engine.getDeliveryReceipt(failed.delivery_id)).toMatchObject({
+      delivery_state: "failed",
+      terminal: true,
+    });
+  });
+
   it.each(["send_to", "send_to_agent"] as const)(
     "%s refuses routed delivery when the agent pane has fallen back to a bare shell",
     async (toolName) => {
@@ -8123,7 +8187,7 @@ codex>
     expect(routeClient.client.send).not.toHaveBeenCalled();
   });
 
-  it("send_to without allow_busy still rejects working agents (backwards compat)", async () => {
+  it("send_to queues a busy composer and drains to a terminal submitted event", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -8143,15 +8207,60 @@ codex>
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
-    const agent = registry.get(agentId);
-    registry.set(agentId, { ...agent, state: "working" });
+    const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
+    registry.set(agentId, working);
+    mockExec.mockClear();
 
     const result = await sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/not in an interactive state/);
+    const queued = parseToolResult(result);
+    expect(result.isError).toBeFalsy();
+    expect(queued).toMatchObject({
+      agent_id: agentId,
+      delivery_id: expect.any(String),
+      delivery_state: "queued",
+      terminal: false,
+    });
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+    ).toHaveLength(0);
+
+    const restartedState = new StateManager(TEST_DIR);
+    const restartedRegistry = new AgentRegistry(restartedState, async () => []);
+    const restartedEngine = new AgentEngine(
+      restartedState,
+      restartedRegistry,
+      {} as any,
+    );
+    expect(restartedEngine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_id: queued.delivery_id,
+      text: "hello",
+      delivery_state: "queued",
+      terminal: false,
+    });
+
+    const ready = engine.stateMgr.updateRecord(agentId, { state: "idle" });
+    registry.set(agentId, ready);
+    await engine.drainDeliveryQueue();
+
+    const receipt = engine.getDeliveryReceipt(queued.delivery_id);
+    expect(receipt).toMatchObject({
+      delivery_id: queued.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+    });
+    expect(
+      engine.stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter((entry: any) => entry.delivery_id === queued.delivery_id)
+        .at(-1),
+    ).toMatchObject({
+      delivery_state: "submitted",
+      delivery_id: queued.delivery_id,
+    });
   });
 
   it("send_to_agent with allow_busy=true delivers to agents in working state", async () => {
@@ -8298,6 +8407,53 @@ codex>
     expect(
       (parsed.health as { issue_codes: string[] }).issue_codes,
     ).not.toContain("registry_screen_disagreement");
+  });
+
+  it("send_to preserves a submitted receipt when post-delivery evidence throws", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:evidence-error",
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:evidence-error",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "receipt-survives-evidence-error",
+      surface_id: "surface:evidence-error",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
+      workspace_id: "workspace:evidence-error",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = registeredTestTool(server, "interact")._engine;
+    const originalSend = routeClient.client.send.getMockImplementation();
+    routeClient.client.send.mockImplementation(
+      async (surface: string, text: string) => {
+        await originalSend?.(surface, text);
+        vi.spyOn(engine, "getAgentState").mockImplementation(() => {
+          throw new Error("post-delivery topology unavailable");
+        });
+      },
+    );
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "delivered before evidence failed",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result)).toMatchObject({
+      delivery_id: expect.any(String),
+      delivery_state: "submitted",
+      terminal: true,
+      error: expect.stringContaining("post-delivery topology unavailable"),
+    });
   });
 
   it("send_to omits evidence when a UUID-less row becomes foreign after delivery", async () => {

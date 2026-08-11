@@ -194,12 +194,12 @@ describe("workspace spawn tools", () => {
         surface_id: "surface:1",
         repo: "brainlayer",
         cli: "claude",
-        monitor_boot: {
+        monitor_boot: expect.objectContaining({
           status: "bootstrapped",
           heartbeat_written: true,
           heartbeat_source: "server_boot",
           monitor_command: expect.any(String),
-        },
+        }),
       }),
       expect.objectContaining({
         surface_id: "surface:2",

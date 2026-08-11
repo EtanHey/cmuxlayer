@@ -19,6 +19,7 @@ import { runFleetSidebarCommand } from "./fleet-sidebar-cli.js";
 import { RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
+import { writeInboxCursor } from "./inbox.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -37,6 +38,9 @@ Usage:
                        orc, golems, voicelayer, skillCreator, cmuxlayer, other.
   cmuxlayer fleet-sidebar state
                        Print the persisted per-lane collapse preferences.
+  CMUX_INBOX_MSG_ID=<id> cmuxlayer inbox-cursor <agent-id>
+                       Advance the agent-owned inbox cursor after handling a
+                       message. CMUXLAYER_INBOX_BASE_DIR overrides its base dir.
 
 Environment:
   CMUX_SOCKET_PATH     Pin the MCP to a specific cmux instance's Unix socket
@@ -76,6 +80,26 @@ async function main() {
     const stream = result.ok ? process.stdout : process.stderr;
     stream.write(`${result.message}\n`);
     process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
+  if (arg === "inbox-cursor") {
+    const agentId = process.argv[3];
+    const messageId = process.env.CMUX_INBOX_MSG_ID;
+    if (!agentId || !messageId) {
+      process.stderr.write(
+        "Usage: CMUX_INBOX_MSG_ID=<id> cmuxlayer inbox-cursor <agent-id>\n",
+      );
+      process.exitCode = 2;
+      return;
+    }
+    writeInboxCursor(
+      agentId,
+      messageId,
+      process.env.CMUXLAYER_INBOX_BASE_DIR
+        ? { baseDir: process.env.CMUXLAYER_INBOX_BASE_DIR }
+        : undefined,
+    );
+    process.stdout.write(`${messageId}\n`);
     return;
   }
 

@@ -20,13 +20,17 @@
 //
 // send_input is KEPT as the fallback path — this channel is additive (belt-and-suspenders) until
 // proven in production.
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -111,6 +115,9 @@ export function inboxPath(agentId: string, opts?: InboxOpts): string {
 }
 export function ackPath(agentId: string, opts?: InboxOpts): string {
   return join(agentDir(agentId, opts), "inbox.ack.jsonl");
+}
+export function inboxCursorPath(agentId: string, opts?: InboxOpts): string {
+  return join(agentDir(agentId, opts), "inbox.cursor");
 }
 export function heartbeatPath(agentId: string, opts?: InboxOpts): string {
   return join(agentDir(agentId, opts), "monitor.heartbeat");
@@ -346,6 +353,75 @@ export function readAcks(agentId: string, opts?: InboxOpts): InboxAck[] {
   return readJsonl<InboxAck>(ackPath(agentId, opts));
 }
 
+/** Last message the agent confirms it fully handled. The engine only reads it. */
+export function readInboxCursor(
+  agentId: string,
+  opts?: InboxOpts,
+): string | null {
+  try {
+    const cursor = readFileSync(inboxCursorPath(agentId, opts), "utf8").trim();
+    return cursor.length > 0 ? cursor : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Agent-side consumption helper. Call only after the message has been handled.
+ * The atomic rename prevents a resume from observing a partial watermark.
+ */
+export function writeInboxCursor(
+  agentId: string,
+  messageId: string,
+  opts?: InboxOpts,
+): string {
+  ensureChannelDirForWrite(agentId, opts);
+  const path = inboxCursorPath(agentId, opts);
+  const lockPath = `${path}.lock`;
+  let lockAcquired = false;
+  let tempPath: string | null = null;
+  try {
+    try {
+      mkdirSync(lockPath);
+      lockAcquired = true;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "EEXIST"
+      ) {
+        throw new Error(`Inbox cursor is locked for ${agentId}; retry`);
+      }
+      throw error;
+    }
+
+    // Read both the inbox and watermark only after acquiring the lock. This is
+    // the compare-and-set boundary across independently resumed agent processes.
+    const messages = readInbox(agentId, opts);
+    const nextIndex = messages.findIndex((message) => message.id === messageId);
+    if (nextIndex < 0) {
+      throw new Error(`Cannot advance inbox cursor to unknown message ${messageId}`);
+    }
+    const current = readInboxCursor(agentId, opts);
+    if (current) {
+      const currentIndex = messages.findIndex((message) => message.id === current);
+      if (currentIndex >= 0 && nextIndex < currentIndex) {
+        throw new Error(
+          `Cannot move inbox cursor backwards from ${current} to ${messageId}`,
+        );
+      }
+    }
+    tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tempPath, `${messageId}\n`, "utf8");
+    renameSync(tempPath, path);
+    tempPath = null;
+    return messageId;
+  } finally {
+    if (tempPath) rmSync(tempPath, { force: true });
+    if (lockAcquired) rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
 /** Set of message ids that have been acked. */
 export function ackedIds(agentId: string, opts?: InboxOpts): Set<string> {
   return new Set(readAcks(agentId, opts).map((a) => a.ack_of));
@@ -360,8 +436,15 @@ export function replayUndelivered(
   agentId: string,
   opts?: InboxOpts,
 ): InboxMessage[] {
+  const messages = readInbox(agentId, opts);
+  const cursor = readInboxCursor(agentId, opts);
+  if (cursor) {
+    const cursorIndex = messages.findIndex((message) => message.id === cursor);
+    // An unknown/corrupt cursor cannot safely suppress anything: replay all.
+    return cursorIndex >= 0 ? messages.slice(cursorIndex + 1) : messages;
+  }
   const acked = ackedIds(agentId, opts);
-  return readInbox(agentId, opts).filter((m) => !acked.has(m.id));
+  return messages.filter((m) => !acked.has(m.id));
 }
 
 /** Append an ACK (deterministic delivery confirmation) and refresh the liveness heartbeat. */

@@ -188,6 +188,11 @@ export interface DeliveryTelemetryEvent {
   press_enter: boolean | null;
   submit_verified: boolean | null;
   retry_count: number;
+  /** Stable receipt identity for agent-routed delivery state transitions. */
+  delivery_id?: string;
+  /** Nonterminal acceptance or terminal resolution. */
+  delivery_state?: "submitted" | "queued" | "failed";
+  target_agent?: string;
 }
 
 export interface ControlHealthTelemetryEvent {
