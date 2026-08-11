@@ -801,6 +801,9 @@ function inferControlState(
   if (errors.includes("interactive_prompt")) {
     return "interactive_overlay";
   }
+  if (hasOsShellPrompt(text)) {
+    return "shell";
+  }
   if (status === "thinking" || status === "working") {
     return "busy";
   }
@@ -814,13 +817,23 @@ function inferControlState(
 }
 
 function hasShellPrompt(text: string): boolean {
+  const last = lastMeaningfulLine(text);
+  if (!last) return false;
+  return /^(?:>|❯|>>>|[$%#])$/.test(last) || /(?:[$#]|\s%)$/.test(last);
+}
+
+function hasOsShellPrompt(text: string): boolean {
+  const last = lastMeaningfulLine(text);
+  if (!last) return false;
+  return /^(?:[$%#])$/.test(last) || /(?:[$#]|\s%)$/.test(last);
+}
+
+function lastMeaningfulLine(text: string): string | null {
   const lines = text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const last = lines.at(-1);
-  if (!last) return false;
-  return /^(?:>|❯|>>>|[$%#])$/.test(last) || /(?:[$#]|\s%)$/.test(last);
+  return lines.at(-1) ?? null;
 }
 
 function hasAgentScreenEvidence(

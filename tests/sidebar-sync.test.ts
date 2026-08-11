@@ -96,6 +96,15 @@ function makeSurface(ref: string): CmuxSurface {
   return { ref, title: "", type: "terminal", index: 0, selected: false };
 }
 
+function useActiveCodexScreen(client: MockClient): void {
+  client.readScreen.mockImplementation(async (surface: string) => ({
+    surface,
+    text: "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer\nWorking (1m 02s • esc to interrupt)",
+    lines: 20,
+    scrollback_used: false,
+  }));
+}
+
 function makeWorkspace(ref: string) {
   return {
     ref,
@@ -1964,6 +1973,7 @@ describe("Sidebar Sync", () => {
   });
 
   it("marks a wedged holder unhealthy and notifies with the health issue summary", async () => {
+    useActiveCodexScreen(mockClient);
     const inboxDir = join(TEST_DIR, "wedged-inbox");
     const agentId = "wedged-holder";
     stateMgr.writeState(
@@ -2054,6 +2064,7 @@ describe("Sidebar Sync", () => {
   });
 
   it("retries health notifications when channel delivery fails", async () => {
+    useActiveCodexScreen(mockClient);
     const inboxDir = join(TEST_DIR, "wedged-retry-inbox");
     const agentId = "wedged-retry-holder";
     stateMgr.writeState(
@@ -2569,6 +2580,7 @@ describe("Sidebar Sync", () => {
   });
 
   it("refreshes sidebar status when an unchanged agent moves workspace", async () => {
+    useActiveCodexScreen(mockClient);
     stateMgr.writeState(
       makeRecord({
         agent_id: "a1",
@@ -2604,6 +2616,7 @@ describe("Sidebar Sync", () => {
   });
 
   it("does not call setStatus again when state is unchanged between sweeps", async () => {
+    useActiveCodexScreen(mockClient);
     stateMgr.writeState(
       makeRecord({
         agent_id: "a1",

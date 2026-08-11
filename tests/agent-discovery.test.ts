@@ -1,7 +1,48 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { AgentDiscovery } from "../src/agent-discovery.js";
 
+const deadCodexShellFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      "./fixtures/live/codex-dead-pane-shell-with-stale-banner.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as { lines_80: string };
+
 describe("AgentDiscovery", () => {
+  it("keeps dead Codex identity while exposing the active shell control state", async () => {
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [
+        {
+          ref: "surface:dead-codex",
+          title: "cmuxlayerCodex",
+          type: "terminal",
+          index: 0,
+          selected: true,
+        },
+      ],
+      readScreen: async (surface) => ({
+        surface,
+        text: deadCodexShellFixture.lines_80,
+        lines: 30,
+        scrollback_used: false,
+      }),
+    });
+
+    await expect(discovery.scan(true)).resolves.toMatchObject([
+      {
+        surface_id: "surface:dead-codex",
+        cli: "codex",
+        has_agent: true,
+        parsed_status: "idle",
+        control_state: "shell",
+      },
+    ]);
+  });
+
   it("reads each surface in its owning workspace", async () => {
     const readScreen = vi.fn().mockResolvedValue({
       surface: "surface:1",

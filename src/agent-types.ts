@@ -201,6 +201,19 @@ export interface ControlHealthTelemetryEvent {
   snapshot: unknown;
 }
 
+export interface AgentCliExitEvent {
+  ts: string;
+  event_type: "agent_cli_exit";
+  agent_id: string;
+  surface_id: string;
+  parent_agent_id: string | null;
+  previous_state: AgentState;
+  control_state: "shell";
+  consecutive_observations: number;
+  inbox_dispatched: boolean;
+  error: string;
+}
+
 /** Which close/kill path emitted the event. */
 export type CloseEventPath =
   | "close_surface"
@@ -295,6 +308,7 @@ export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
   | ControlHealthTelemetryEvent
+  | AgentCliExitEvent
   | CloseTelemetryEvent
   | CloseForensicsEvent;
 

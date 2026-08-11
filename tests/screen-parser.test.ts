@@ -27,6 +27,10 @@ const codexAutoUpdateFixture = JSON.parse(
   >;
 };
 
+const deadCodexShellFixture = JSON.parse(
+  readFixture("live/codex-dead-pane-shell-with-stale-banner.json"),
+) as { lines_12: string; lines_80: string };
+
 describe("parseScreen", () => {
   it("parses Claude-style output with response block and done signal", () => {
     const parsed = parseScreen(`
@@ -1217,6 +1221,28 @@ etanheyman ~ [master] $
     expect(parsed.status).toBe("idle");
     expect(parsed.control_state).toBe("shell");
     expect(parsed.errors).toEqual([]);
+  });
+
+  it("uses the active bottom shell prompt despite stale Codex chrome in the sweep window", () => {
+    const parsed = parseScreen(deadCodexShellFixture.lines_80);
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("idle");
+    expect(parsed.control_state).toBe("shell");
+    expect(parsed.errors).toEqual([]);
+  });
+
+  it("lets the active bottom shell prompt override stale Codex working chrome", () => {
+    const parsed = parseScreen(
+      deadCodexShellFixture.lines_80.replace(
+        "› signal: killedodebase",
+        "Working (1m 02s • esc to interrupt)\n› signal: killedodebase",
+      ),
+    );
+
+    expect(parsed.agent_type).toBe("codex");
+    expect(parsed.status).toBe("working");
+    expect(parsed.control_state).toBe("shell");
   });
 
   it("does not classify stale shell prompts above current output as shell", () => {

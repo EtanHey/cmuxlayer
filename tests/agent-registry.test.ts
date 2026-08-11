@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AgentRegistry,
   deriveSurfaceObserverId,
 } from "../src/agent-registry.js";
+import { AgentDiscovery } from "../src/agent-discovery.js";
 import { StateManager } from "../src/state-manager.js";
 import type { AgentRecord, AgentState } from "../src/agent-types.js";
 import type { DiscoveredAgent } from "../src/agent-discovery.js";
@@ -13,6 +14,17 @@ import type { SeatRegistry } from "../src/seat-identity.js";
 import type { CmuxSurface } from "../src/types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-registry");
+const DEAD_CODEX_SHELL_SCREEN = (
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "./fixtures/live/codex-dead-pane-shell-with-stale-banner.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as { lines_80: string }
+).lines_80;
 
 function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   return {
@@ -2316,6 +2328,61 @@ describe("AgentRegistry", () => {
         error: null,
       });
       expect(stateMgr.readState("auto-claude-surface-121")).toBeNull();
+    });
+
+    it("does not resync a managed shell-state pane to idle", async () => {
+      const staleSurface = "surface:35";
+      const shellSurface = "surface:121";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex",
+          surface_id: staleSurface,
+          repo: "cmuxlayer",
+          cli: "codex",
+          launcher_name: "cmuxlayerCodex",
+          seat_id: "cmuxlayerCodex",
+          seat_lane: "cmuxlayer",
+          seat_role: "worker",
+          seat_identity_status: "ok",
+          role: "worker",
+          state: "error",
+          error: `Surface ${staleSurface} disappeared`,
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface(shellSurface),
+      ]);
+      await registry.reconstitute();
+
+      const discovery = new AgentDiscovery({
+        listSurfaces: async () => [
+          {
+            ...makeSurface(shellSurface),
+            title: "cmuxlayerCodex",
+          },
+        ],
+        readScreen: async (surface) => ({
+          surface,
+          text: DEAD_CODEX_SHELL_SCREEN,
+          lines: 30,
+          scrollback_used: false,
+        }),
+      });
+      const merged = await registry.listMerged(discovery);
+
+      expect(merged).toContainEqual(
+        expect.objectContaining({
+          agent_id: "cmuxlayerCodex",
+          surface_id: shellSurface,
+          state: "error",
+          error: `Surface ${staleSurface} disappeared`,
+        }),
+      );
+      expect(stateMgr.readState("cmuxlayerCodex")).toMatchObject({
+        surface_id: shellSurface,
+        state: "error",
+        error: `Surface ${staleSurface} disappeared`,
+      });
     });
 
     it("RC4: preserves live pending sibling seats on different surfaces during repair", async () => {
