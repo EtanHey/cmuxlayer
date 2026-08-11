@@ -137,6 +137,7 @@ import {
 } from "./surface-topology.js";
 import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
+  dispatchOnce,
   reapOrphanedPendingChannelMarkers,
   removePendingChannelMarkerAfterRegistration,
   type InboxOpts,
@@ -416,6 +417,8 @@ const MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS = 3;
 const BOOT_READY_TIMEOUT_MS = 45_000;
 const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
+const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
+const CLI_EXIT_ERROR = "Agent CLI exited to shell without done evidence";
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -880,6 +883,8 @@ export class AgentEngine {
   private deliveredLeadMonitorDeathAlerts = new Set<string>();
   /** agentId → consecutive ready-prompt matches */
   private readyPatternMatches = new Map<string, number>();
+  /** agentId → consecutive bound-screen observations at a bare shell. */
+  private cliExitShellMatches = new Map<string, number>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
@@ -2284,6 +2289,11 @@ export class AgentEngine {
       previousAgentId,
       nextAgentId,
     );
+    this.rekeyAgentMapEntry(
+      this.cliExitShellMatches,
+      previousAgentId,
+      nextAgentId,
+    );
     this.rekeyAgentEventSet(this.loggedEvents, previousAgentId, nextAgentId);
     this.rekeyAgentEventSet(this.notifiedEvents, previousAgentId, nextAgentId);
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
@@ -2813,6 +2823,88 @@ export class AgentEngine {
     }
   }
 
+  private async maybeMarkCliExited(
+    agent: AgentRecord,
+    ctx: SweepAgentContext,
+    knownScreenText?: string,
+  ): Promise<AgentRecord> {
+    if (
+      TERMINAL_STATES.has(agent.state) ||
+      !(["ready", "working", "idle"] as AgentState[]).includes(agent.state)
+    ) {
+      this.cliExitShellMatches.delete(agent.agent_id);
+      return agent;
+    }
+
+    let screenText: string;
+    try {
+      screenText =
+        knownScreenText ?? (await this.readSweepScreen(agent, ctx)).text;
+    } catch {
+      this.cliExitShellMatches.delete(agent.agent_id);
+      return agent;
+    }
+
+    if (parseScreen(screenText).control_state !== "shell") {
+      this.cliExitShellMatches.delete(agent.agent_id);
+      return agent;
+    }
+
+    const observations =
+      (this.cliExitShellMatches.get(agent.agent_id) ?? 0) + 1;
+    this.cliExitShellMatches.set(agent.agent_id, observations);
+    if (observations < CLI_EXIT_SHELL_CONFIRMATION_SWEEPS) {
+      return agent;
+    }
+
+    let exited: AgentRecord;
+    try {
+      exited = this.stateMgr.transition(agent.agent_id, "error", {
+        error: CLI_EXIT_ERROR,
+      });
+    } catch {
+      return agent;
+    }
+    this.registry.set(agent.agent_id, exited);
+    this.cliExitShellMatches.delete(agent.agent_id);
+
+    let inboxDispatched = false;
+    if (agent.parent_agent_id) {
+      try {
+        dispatchOnce(
+          agent.parent_agent_id,
+          {
+            id: `agent-cli-exit:${agent.agent_id}:${exited.updated_at}`,
+            from: "cmuxlayer:lifecycle",
+            to: agent.parent_agent_id,
+            tag: "agent_cli_exit",
+            task:
+              `Agent ${agent.agent_id} CLI exited to a bare shell without done evidence. ` +
+              `Registry state is error; surface ${agent.surface_id}.`,
+          },
+          this.inboxOpts,
+        );
+        inboxDispatched = true;
+      } catch {
+        // The durable event below records the failed dispatch for lead recovery.
+      }
+    }
+
+    this.stateMgr.getEventLog().appendAgentCliExit({
+      ts: exited.updated_at,
+      event_type: "agent_cli_exit",
+      agent_id: agent.agent_id,
+      surface_id: agent.surface_id,
+      parent_agent_id: agent.parent_agent_id,
+      previous_state: agent.state,
+      control_state: "shell",
+      consecutive_observations: observations,
+      inbox_dispatched: inboxDispatched,
+      error: CLI_EXIT_ERROR,
+    });
+    return exited;
+  }
+
   private async maybeArchiveDoneAgent(agent: AgentRecord): Promise<boolean> {
     void agent;
     // Sweeps must never close user panes. TASK_DONE marks state only; explicit
@@ -3207,6 +3299,7 @@ export class AgentEngine {
     }
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
     this.fleetScreenProgress.delete(agentId);
+    this.cliExitShellMatches.delete(agentId);
   }
 
   private isLeadWatchBlind(
@@ -3453,12 +3546,14 @@ export class AgentEngine {
 
     for (const registryAgent of agents) {
       if (opts.firstConnect && TERMINAL_STATES.has(registryAgent.state)) {
+        this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
       }
       if (!topologyIsAuthoritative) {
         // Empty, partial, mixed-identity, and contradictory observations are
         // preservation signals only. Never read a persisted ref or mutate
         // lifecycle/status state until one coherent topology can bind the row.
+        this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
       }
       const surfaceBinding = resolveAgentSurfaceBinding(
@@ -3483,6 +3578,7 @@ export class AgentEngine {
         // The registry row still exists. Keep once-only lifecycle delivery
         // memory so a recovered binding cannot re-emit "spawned" or terminal
         // notifications merely because one topology snapshot omitted its UUID.
+        this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
       }
 
@@ -3493,6 +3589,7 @@ export class AgentEngine {
       ) {
         // A live ref without compatible provenance cannot publish, read, or
         // mutate this row. Preserve it for its owning observer.
+        this.cliExitShellMatches.delete(registryAgent.agent_id);
         continue;
       }
 
@@ -3537,7 +3634,11 @@ export class AgentEngine {
       );
       const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
       const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
-      const agent = taskDoneResult.agent;
+      const agent = await this.maybeMarkCliExited(
+        taskDoneResult.agent,
+        sweepCtx,
+        taskDoneResult.screenText,
+      );
       const { agent_id: agentId, state } = agent;
       if (this.isKnownClosedSurface(agent, surfaceTopology)) {
         const prev = this.sidebarSnapshot.get(agentId);

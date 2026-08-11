@@ -40,7 +40,7 @@ import {
 } from "../src/agent-types.js";
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
-import { writeHeartbeat } from "../src/inbox.js";
+import { readInbox, writeHeartbeat } from "../src/inbox.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 
@@ -8598,6 +8598,189 @@ To continue this session, run codex resume ${sessionId}`,
       await expect(
         engine.waitFor("nonexistent", "ready", 1000),
       ).rejects.toThrow(/not found/);
+    });
+  });
+
+  describe("shell-state CLI exit", () => {
+    it("transitions a root agent to error after two shell sweeps and records the notification event", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex",
+          state: "ready",
+          surface_id: "surface:cli-exited",
+          parent_agent_id: null,
+          spawn_depth: 0,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-exited")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-exited",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      expect(engine.getAgentState("cmuxlayerCodex")?.state).toBe("ready");
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("cmuxlayerCodex")).toMatchObject({
+        state: "error",
+        error: "Agent CLI exited to shell without done evidence",
+      });
+      expect(
+        engine.getAgentState("cmuxlayerCodex")?.task_done_detected_at ?? null,
+      ).toBeNull();
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(
+        expect.objectContaining({
+          event_type: "agent_cli_exit",
+          agent_id: "cmuxlayerCodex",
+          surface_id: "surface:cli-exited",
+          parent_agent_id: null,
+          previous_state: "ready",
+          control_state: "shell",
+          consecutive_observations: 2,
+          inbox_dispatched: false,
+        }),
+      );
+    });
+
+    it("requires consecutive shell sweeps before marking the CLI exited", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-intermittent",
+          state: "ready",
+          surface_id: "surface:cli-intermittent",
+          parent_agent_id: null,
+          spawn_depth: 0,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-intermittent")];
+      const readScreen = mockClient.readScreen as ReturnType<typeof vi.fn>;
+      readScreen.mockResolvedValueOnce({
+        surface: "surface:cli-intermittent",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      readScreen.mockResolvedValueOnce({
+        surface: "surface:cli-intermittent",
+        text: "gpt-5.4 xhigh · 64% left\nWorking (2s • esc to interrupt)",
+        lines: 20,
+        scrollback_used: false,
+      });
+      readScreen.mockResolvedValue({
+        surface: "surface:cli-intermittent",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(engine.getAgentState("cmuxlayerCodex-intermittent")?.state).toBe(
+        "ready",
+      );
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-intermittent"),
+      ).toMatchObject({
+        state: "error",
+        error: "Agent CLI exited to shell without done evidence",
+      });
+    });
+
+    it("dispatches the CLI-exit notification to the parent when set", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-child",
+          state: "working",
+          surface_id: "surface:cli-exited-child",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-exited-child")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-exited-child",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          from: "cmuxlayer:lifecycle",
+          to: "cmuxlayerClaude",
+          tag: "agent_cli_exit",
+          task: expect.stringContaining("cmuxlayerCodex-child"),
+        }),
+      ]);
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(
+        expect.objectContaining({
+          event_type: "agent_cli_exit",
+          agent_id: "cmuxlayerCodex-child",
+          parent_agent_id: "cmuxlayerClaude",
+          inbox_dispatched: true,
+        }),
+      );
+    });
+
+    it("prefers settled done evidence over a shell-state screen", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-08-11T09:00:00.000Z");
+      const stale = new Date(now.getTime() - 2_000);
+      vi.setSystemTime(now);
+      const transcriptPath = join(TEST_DIR, "completed-codex-session.jsonl");
+      writeCodexDoneTranscript(transcriptPath);
+      utimesSync(transcriptPath, stale, stale);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "completed-codex",
+          state: "working",
+          surface_id: "surface:completed-codex",
+          cli_session_id: "019eab06-57d6-72b1-b3a8-6cf98a30a3f6",
+          cli_session_path: transcriptPath,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:completed-codex")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:completed-codex",
+        text: "$ ",
+        lines: 20,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(engine.getAgentState("completed-codex")).toMatchObject({
+        state: "done",
+        error: null,
+        task_done_detected_at: expect.any(String),
+      });
+      expect(
+        stateMgr
+          .getEventLog()
+          .readEntries()
+          .filter(
+            (entry) =>
+              "event_type" in entry &&
+              entry.event_type === "agent_cli_exit",
+          ),
+      ).toEqual([]);
     });
   });
 

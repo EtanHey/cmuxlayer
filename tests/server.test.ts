@@ -753,7 +753,7 @@ describe("Claude channels", () => {
       setStatus: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
         surface: "surface:42",
-        text: "$ ",
+        text: "gpt-5.4 xhigh · 64% left · ~/Gits/cmuxlayer\nWorking (1m 02s • esc to interrupt)",
         lines: 5,
         scrollback_used: false,
       }),

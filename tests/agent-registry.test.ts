@@ -2318,6 +2318,57 @@ describe("AgentRegistry", () => {
       expect(stateMgr.readState("auto-claude-surface-121")).toBeNull();
     });
 
+    it("does not resync a managed shell-state pane to idle", async () => {
+      const staleSurface = "surface:35";
+      const shellSurface = "surface:121";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerLead",
+          surface_id: staleSurface,
+          repo: "cmuxlayer",
+          cli: "claude",
+          launcher_name: "cmuxlayerClaude",
+          seat_id: "cmuxlayerLead",
+          seat_lane: "cmuxlayer",
+          seat_role: "lead",
+          seat_identity_status: "ok",
+          role: "orchestrator",
+          state: "error",
+          error: `Surface ${staleSurface} disappeared`,
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface(shellSurface),
+      ]);
+      await registry.reconstitute();
+
+      const merged = await registry.listMerged({
+        scan: vi.fn().mockResolvedValue([
+          makeDiscovered({
+            surface_id: shellSurface,
+            surface_title: "cmuxlayerClaude",
+            cli: "claude",
+            control_state: "shell",
+            parsed_status: "idle",
+          }),
+        ]),
+      } as any);
+
+      expect(merged).toContainEqual(
+        expect.objectContaining({
+          agent_id: "cmuxlayerLead",
+          surface_id: shellSurface,
+          state: "error",
+          error: `Surface ${staleSurface} disappeared`,
+        }),
+      );
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        surface_id: shellSurface,
+        state: "error",
+        error: `Surface ${staleSurface} disappeared`,
+      });
+    });
+
     it("RC4: preserves live pending sibling seats on different surfaces during repair", async () => {
       const discovered = [
         makeDiscovered({

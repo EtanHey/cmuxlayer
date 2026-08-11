@@ -1518,6 +1518,9 @@ export class AgentRegistry {
     record: AgentRecord,
     discoveredEntry: DiscoveredAgent,
   ): AgentRecord {
+    if (discoveredEntry.control_state === "shell") {
+      return record;
+    }
     const desiredState = discoveredStatusToAgentState(
       discoveredEntry.parsed_status,
     );
