@@ -11,6 +11,7 @@ const THIN_CORE_TOOL_NAMES = [
   "spawn_agent",
   "send_to",
   "wait_for",
+  "arm_watch",
   "read_screen",
   "my_agents",
   "list_agents",
@@ -145,7 +146,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
           (server as unknown as { _registeredTools: Record<string, unknown> })
             ._registeredTools,
         );
-        expect(names).toHaveLength(42);
+        expect(names).toHaveLength(43);
         expect(names).not.toContain("expand_palette");
         const tools = (
           server as unknown as {

@@ -62,6 +62,11 @@ import {
   type RegisterMonitorInput,
 } from "./monitor-registry.js";
 import {
+  WatchArmError,
+  type WatchNotify,
+  type WatchSpec,
+} from "./watch-spec.js";
+import {
   AgentDiscovery,
   SurfaceBindingChangedDuringDiscoveryError,
   type DiscoveredAgent,
@@ -320,6 +325,41 @@ const QueryMonitorRegistryArgsSchema = {
     .describe("Include intentionally deregistered dead monitors"),
 } as const;
 
+const WatchSpecArgsSchema = {
+  owner: z.string().min(1).describe("Agent/seat notified by the watch"),
+  target: z
+    .string()
+    .min(1)
+    .describe("Absolute file path or public agent_id"),
+  predicate: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Agent state predicate; mutually exclusive with marker"),
+  marker: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Literal file marker; mutually exclusive with predicate"),
+  watermark: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Prior marker count; defaults to count observed at arm time"),
+  deadline: z
+    .number()
+    .int()
+    .positive()
+    .describe("Absolute Unix deadline in milliseconds"),
+} as const;
+
+const WatchSpecSchema = z
+  .object(WatchSpecArgsSchema)
+  .refine((watch) => Boolean(watch.predicate) !== Boolean(watch.marker), {
+    message: "WatchSpec requires exactly one of predicate or marker",
+  });
+
 // Re-export for test access
 export { sanitizeTerminalInput } from "./sanitize.js";
 
@@ -444,6 +484,7 @@ export const THIN_CORE_TOOL_NAMES = new Set([
   "spawn_agent",
   "send_to",
   "wait_for",
+  "arm_watch",
   "read_screen",
   "my_agents",
   "list_agents",
@@ -2479,6 +2520,10 @@ export interface CreateServerOptions {
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
+  /** Canonical persistent WatchSpec registry scanned by the agent engine. */
+  watchRegistryPath?: string;
+  watchRegistryNow?: () => number;
+  watchNotify?: WatchNotify;
   /**
    * Enable close forensics: ingest cmux's OWN app-level `tab_close` events from
    * `~/.cmuxterm/events.jsonl` and attribute them each sweep. Omitted/false by
@@ -9025,6 +9070,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           monitorRegistryPath: opts?.monitorRegistryPath,
           monitorRegistryNow: opts?.monitorRegistryNow,
           monitorRegistryNotify: opts?.monitorRegistryNotify,
+          watchRegistryPath: opts?.watchRegistryPath,
+          watchRegistryNow: opts?.watchRegistryNow,
+          watchNotify: opts?.watchNotify,
           closeForensicsRunner: opts?.enableCloseForensics
             ? createDefaultCloseForensicsRunner({
                 stateMgr,
@@ -9091,6 +9139,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
+
+    server.tool(
+      "arm_watch",
+      "Arm a declared WatchSpec without blocking. Targets are validated immediately; returns the read-only liveness source used by the engine.",
+      WatchSpecArgsSchema,
+      ANNOTATIONS.mutating,
+      async (args) => {
+        try {
+          await awaitLifecycleStart();
+          const watch = await engine.armWatch(args as WatchSpec);
+          return ok({ watch });
+        } catch (error) {
+          if (error instanceof WatchArmError) {
+            return err(error, {
+              error_code: error.code,
+              target: error.target,
+            });
+          }
+          return err(error);
+        }
+      },
+    );
+
     lifecycleEnsureRegistered = async () => {
       await awaitLifecycleStart();
       await engine.runLifecycleMutation(() =>
@@ -10841,6 +10912,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       "wait_for",
       "Block until one agent_id or every agent in ids reaches a target registry state and return health. Defaults to waiting for completion (`done`).",
       {
+        watch: WatchSpecSchema.optional().describe(
+          "Declared WatchSpec alternative to agent_id/ids",
+        ),
         agent_id: z
           .string()
           .optional()
@@ -10866,6 +10940,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
+          if (args.watch) {
+            if (args.agent_id || args.ids) {
+              throw new Error(
+                "wait_for watch is mutually exclusive with agent_id and ids",
+              );
+            }
+            const result = await engine.waitForWatch(
+              args.watch as WatchSpec,
+              args.timeout_ms,
+            );
+            return okFormatted(
+              formatOk("wait_for", {
+                watch_id: result.watch.watch_id,
+                state: result.watch.state,
+              }),
+              result,
+            );
+          }
           const targetState = args.target_state ?? "done";
           if (args.ids) {
             const results = await engine.waitForAll(
