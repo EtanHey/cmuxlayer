@@ -84,6 +84,9 @@ import {
 } from "./agent-health-input.js";
 import type {
   AgentRecord,
+  AgentAuthority,
+  AgentFunction,
+  AgentPlacement,
   AgentRole,
   AgentState,
   CliType,
@@ -131,6 +134,7 @@ import {
   type CodexRolloutFillProvider,
 } from "./codex-rollout-fill.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
+import { shellQuote } from "./agent-command.js";
 import {
   canInferAgentRole,
   collectRoleSurfaceIds,
@@ -473,6 +477,14 @@ const legacyCompatibleAgentRoleSchema = () =>
   z
     .enum(["orchestrator", "worker"])
     .catch((context) => context.input as AgentRole);
+const spawnFunctionSchema = () =>
+  z
+    .enum(["orchestrator", "worker", "implementor", "reviewer", "gatherer"])
+    .catch((context) => context.input as AgentRole);
+const spawnPlacementSchema = () =>
+  z
+    .enum(["left", "right", "orchestrator", "worker"])
+    .catch((context) => context.input as AgentPlacement);
 
 function normalizeToolAgentRole(
   input: unknown,
@@ -491,6 +503,73 @@ function normalizeToolAgentRole(
   throw new Error(
     `Invalid ${field}=${JSON.stringify(input)}; expected orchestrator or worker`,
   );
+}
+
+function normalizeSpawnAxes(input: {
+  role: unknown;
+  placement: unknown;
+  authority: AgentAuthority | undefined;
+}): {
+  role: AgentRole;
+  function: AgentFunction;
+  authority: AgentAuthority;
+  placement: AgentPlacement;
+  warning: string | undefined;
+} {
+  const raw = input.role;
+  const legacyRaw =
+    raw === "orchestrator" || raw === "worker" || raw === "ic"
+      ? raw
+      : input.placement === "orchestrator" ||
+          input.placement === "worker" ||
+          input.placement === "ic"
+        ? input.placement
+        : undefined;
+  const legacy =
+    legacyRaw !== undefined
+      ? normalizeToolAgentRole(
+          legacyRaw,
+          legacyRaw === input.role ? "role" : "placement",
+        )
+      : null;
+  const jobFunction: AgentFunction =
+    raw === "reviewer" || raw === "gatherer" || raw === "implementor"
+      ? raw
+      : "implementor";
+  const defaultAuthority: AgentAuthority = "worker";
+  const authority =
+    input.authority ??
+    (legacy?.role === "orchestrator"
+      ? "lead"
+      : legacy?.role === "worker"
+        ? "worker"
+        : defaultAuthority);
+  if (
+    (jobFunction === "reviewer" || jobFunction === "gatherer") &&
+    authority !== "worker"
+  ) {
+    throw new Error(
+      `${jobFunction} is a worker function and cannot claim lead authority`,
+    );
+  }
+  const derivedPlacement: AgentPlacement =
+    authority === "lead" ? "left" : "right";
+  const requestedPlacement =
+    input.placement === "left" || input.placement === "right"
+      ? input.placement
+      : undefined;
+  if (requestedPlacement && requestedPlacement !== derivedPlacement) {
+    throw new Error(
+      `${jobFunction} with ${authority} authority must be placed ${derivedPlacement}, not ${requestedPlacement}`,
+    );
+  }
+  return {
+    role: authority === "lead" ? "orchestrator" : "worker",
+    function: jobFunction,
+    authority,
+    placement: requestedPlacement ?? derivedPlacement,
+    warning: legacy?.warning,
+  };
 }
 
 const BroadcastArgsSchema = z.object({
@@ -9535,10 +9614,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Spawn a managed AI agent in a terminal surface and return an agent_id plus lean routing and delivery evidence by default; pass verbose:true for the full legacy response including informational health and bookkeeping. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new agent should land in the caller/current workspace; workers should land in the right worker pane by role. Declared role/placement is authoritative; CLI and launcher identity are fallback hints only. A managed worker caller is recorded as parent and its child is forced to worker with a warning. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
+      `${PANE_INPUT_BREAKAGE_GUIDANCE} SpawnSpec v1 creates either a managed AI agent or a plain terminal. Agent identity, authority, job function, and placement are spawn-time facts and never derive from the selected CLI. Agent spawns return a stable agent_id plus parent_agent_id and role; terminal spawns return only terminal routing fields. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new surface lands in the caller/current workspace; lead authority places left and worker authority places right. A managed worker caller is recorded as parent and its child is forced to worker with a warning. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
       {
+        version: z
+          .literal(1)
+          .optional()
+          .default(1)
+          .describe("SpawnSpec schema version"),
+        type: z
+          .enum(["agent", "terminal"])
+          .optional()
+          .default("agent")
+          .describe("Spawn an AI agent or a plain terminal"),
         repo: z
           .string()
+          .optional()
           .describe("Repository name (e.g. 'brainlayer', 'golems')"),
         model: z
           .string()
@@ -9554,7 +9644,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
+          .optional()
           .describe("CLI tool to launch"),
+        cwd: z
+          .string()
+          .optional()
+          .describe("Initial working directory for type=terminal"),
         prompt: z
           .string()
           .optional()
@@ -9598,16 +9693,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "ID of the parent agent for hierarchical spawning. Normally inferred from the managed caller surface; pass explicitly only when no managed caller supplies the hierarchy. Parent must exist.",
           ),
-        role: legacyCompatibleAgentRoleSchema()
+        role: spawnFunctionSchema()
           .optional()
           .describe(
-            "Optional placement role. An explicit declaration is authoritative; CLI/launcher identity is only a fallback hint. A managed worker caller is the safety exception and forces its child to worker with a warning.",
+            "Agent job function: implementor, reviewer, or gatherer. Legacy orchestrator/worker aliases remain accepted for compatibility. Claude requires this field explicitly.",
           ),
-        placement: legacyCompatibleAgentRoleSchema()
+        placement: spawnPlacementSchema()
           .optional()
           .describe(
-            "Canonical role-driven placement. An explicit declaration is authoritative; CLI/launcher identity is only a fallback hint. role remains accepted as a compatibility spelling.",
+            "Physical placement axis: left or right. It must agree with authority (lead=left, worker=right). Legacy orchestrator/worker aliases remain accepted.",
           ),
+        authority: z
+          .enum(["lead", "worker"])
+          .optional()
+          .describe("Authority axis, independent from job function and placement"),
         auto_archive_on_done: z
           .boolean()
           .optional()
@@ -9657,12 +9756,74 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       ANNOTATIONS.mutating,
       async (args) => {
         try {
-          const selectedRoleField =
-            args.placement !== undefined ? "placement" : "role";
-          const normalizedRole = normalizeToolAgentRole(
-            args.placement ?? args.role,
-            selectedRoleField,
-          );
+          if (args.type === "terminal") {
+            if (
+              args.role !== undefined ||
+              args.authority !== undefined ||
+              args.placement !== undefined ||
+              args.worktree !== undefined
+            ) {
+              return err(
+                new Error(
+                  "Terminal spawns do not accept role, authority, placement, or worktree",
+                ),
+                { error_code: "INVALID_TERMINAL_SPAWN_SPEC" },
+              );
+            }
+            const requestedWorkspace = args.workspace;
+            const callerWorkspace = await currentSafetyCallerWorkspace();
+            const createsWorkspace = requestedWorkspace?.startsWith("new:");
+            await assertWorkspaceMutationAllowed(
+              "spawn_agent",
+              createsWorkspace
+                ? callerWorkspace
+                : requestedWorkspace ?? callerWorkspace,
+            );
+            const workspace = createsWorkspace
+              ? (await client.createWorkspace(requestedWorkspace!.slice(4)))
+                  .workspace
+              : requestedWorkspace ?? callerWorkspace;
+            const created = await client.newSplit("right", {
+              ...(workspace ? { workspace } : {}),
+              focus: args.focus,
+            });
+            if (args.cwd) {
+              await client.send(
+                created.surface,
+                `cd -- ${shellQuote(args.cwd)}`,
+                { workspace: created.workspace ?? workspace },
+              );
+              await client.sendKey(created.surface, "return", {
+                workspace: created.workspace ?? workspace,
+              });
+            }
+            return ok({
+              version: 1,
+              type: "terminal",
+              surface_id: created.surface,
+              workspace_id: created.workspace ?? workspace ?? null,
+              cwd: args.cwd ?? null,
+            });
+          }
+          requireValue(args.repo, "repo is required for type=agent");
+          requireValue(args.cli, "cli is required for type=agent");
+          if (
+            args.version === 1 &&
+            args.cli === "claude" &&
+            args.role === undefined
+          ) {
+            return err(
+              new Error(
+                'Claude spawns require an explicit job role; use either authority:"lead", role:"implementor" or authority:"worker", role:"reviewer"',
+              ),
+              { error_code: "ROLE_REQUIRED" },
+            );
+          }
+          const normalizedRole = normalizeSpawnAxes({
+            role: args.role,
+            placement: args.placement,
+            authority: args.authority,
+          });
           resolveSpawnModelPolicy(args.cli, args.model);
           resolveSpawnEffort(args.cli, args.effort);
           const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
@@ -9731,30 +9892,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 .filter(
                   (agent) =>
                     (agent.state === "ready" || agent.state === "idle") &&
-                    reposEquivalent(agent.repo, args.repo) &&
+                    reposEquivalent(agent.repo, args.repo!) &&
                     (agent.workspace_id ?? null) ===
                       (comparisonWorkspace ?? null) &&
-                    (agent.role ??
-                      inferAgentRole({
-                        cli: agent.cli,
-                        launcherName:
-                          agent.launcher_name ??
-                          launcherNameForCli(agent.repo, agent.cli),
-                      })) === requestedRole,
+                    inferRecordRoleOrNull(agent) === requestedRole,
                 )
                 .map((agent) => ({
                   agent_id: agent.agent_id,
                   surface_id: agent.surface_id,
                   workspace_id: agent.workspace_id ?? null,
                   state: agent.state,
-                  role:
-                    agent.role ??
-                    inferAgentRole({
-                      cli: agent.cli,
-                      launcherName:
-                        agent.launcher_name ??
-                        launcherNameForCli(agent.repo, agent.cli),
-                    }),
+                  role: inferRecordRoleOrNull(agent),
                   task_summary: agent.task_summary,
                 }));
           const duplicateSpawnWarning =
@@ -9793,6 +9941,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               worktree_branch: worktree.prepared?.branch,
               parent_agent_id: effectiveParentAgentId,
               role: effectiveRole,
+              authority: callerIsWorker ? "worker" : normalizedRole.authority,
+              function: normalizedRole.function,
+              placement: callerIsWorker ? "right" : normalizedRole.placement,
               auto_archive_on_done: args.auto_archive_on_done ?? false,
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
@@ -10019,7 +10170,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agentId: result.agent_id,
           });
           const currentAgent = engine.getAgentState(result.agent_id);
-          const role =
+          const topologyRole =
             currentAgent?.role ??
             inferAgentRole({
               role: effectiveRole,
@@ -10027,7 +10178,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               launcherName: launcherNameForCli(args.repo, args.cli),
             });
           const monitorBoot =
-            role === "orchestrator"
+            topologyRole === "orchestrator"
               ? ensureMonitorBoot(result.agent_id)
               : undefined;
           const topology = currentAgent ? await collectSurfaceTopology() : null;
@@ -10043,6 +10194,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const formattedData = {
             agent_id: result.agent_id,
+            parent_agent_id: result.parent_agent_id,
             repo: args.repo,
             model: result.model ?? args.model,
             requested_model: result.requested_model,
@@ -10051,7 +10203,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ? result.warnings.join(" | ")
                 : undefined,
             surface: result.surface_id,
-            role,
+            role: args.version === 1 ? normalizedRole.function : topologyRole,
+            authority: callerIsWorker ? "worker" : normalizedRole.authority,
+            placement: callerIsWorker ? "right" : normalizedRole.placement,
+            version: 1,
+            type: "agent",
             health,
             duplicate_spawn_warning: duplicateSpawnWarning,
             monitor_boot: monitorBoot,
@@ -10061,7 +10217,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ...result,
             worktree: worktree.prepared,
             mcp_profile: worktree.mcpProfileLabel,
-            role,
+            role: args.version === 1 ? normalizedRole.function : topologyRole,
+            authority: callerIsWorker ? "worker" : normalizedRole.authority,
+            placement: callerIsWorker ? "right" : normalizedRole.placement,
+            version: 1,
+            type: "agent",
             health,
             duplicate_spawn_warning: duplicateSpawnWarning,
             existing_same_lane_agents: existingSameLaneAgents,

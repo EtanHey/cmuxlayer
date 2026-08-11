@@ -42,6 +42,9 @@ import {
   MAX_RESPAWN_ATTEMPTS,
   type AgentRoute,
   type AgentRecord,
+  type AgentAuthority,
+  type AgentFunction,
+  type AgentPlacement,
   type AgentRole,
   type AgentState,
   type CliType,
@@ -167,6 +170,9 @@ export interface SpawnAgentParams {
   worktree_branch?: string;
   parent_agent_id?: string;
   role?: AgentRole;
+  authority?: AgentAuthority;
+  function?: AgentFunction;
+  placement?: AgentPlacement;
   auto_archive_on_done?: boolean;
   max_cost_per_agent?: number;
   crash_recover?: boolean;
@@ -181,6 +187,7 @@ export interface SpawnAgentParams {
 
 export interface SpawnAgentResult {
   agent_id: string;
+  parent_agent_id: string | null;
   surface_id: string;
   workspace_id?: string;
   state: AgentState;
@@ -2327,6 +2334,9 @@ export class AgentEngine {
       agent.repo,
       identity.session_id,
     );
+    if (!updated.agent_id.includes("-pending-")) {
+      return updated;
+    }
     if (updated.agent_id === finalAgentId) {
       return updated;
     }
@@ -4874,21 +4884,12 @@ export class AgentEngine {
       parentAgent = parent;
     }
 
-    // Job role is authoritative. When no role was declared, spawn context is
-    // stronger evidence than the CLI: a worker's child is worker work even if
-    // the selected harness is Claude. CLI/launcher inference is the final
-    // compatibility fallback only (#378).
+    // Job role is authoritative. The versioned tool rejects missing agent
+    // axes; direct legacy engine callers default to worker without consulting
+    // the selected harness.
     const role = spawnParams.role !== undefined
       ? inferAgentRole({ role: spawnParams.role })
-      : parentAgent && inferRecordRoleOrNull(parentAgent) === "worker"
-        ? "worker"
-        : inferAgentRole({
-            cli: spawnParams.cli,
-            launcherName: launcherNameForCli(
-              spawnParams.repo,
-              spawnParams.cli,
-            ),
-          });
+      : "worker";
 
     this.spawnGuard.check(spawnParams.workspace);
 
@@ -4995,6 +4996,11 @@ export class AgentEngine {
       parent_agent_id: parentAgentId,
       spawn_depth: spawnDepth,
       role,
+      authority:
+        spawnParams.authority ?? (role === "orchestrator" ? "lead" : "worker"),
+      function: spawnParams.function ?? "implementor",
+      placement:
+        spawnParams.placement ?? (role === "orchestrator" ? "left" : "right"),
       auto_archive_on_done: spawnParams.auto_archive_on_done,
       deletion_intent: false,
       quality: "unknown",
@@ -5140,6 +5146,7 @@ export class AgentEngine {
     this.schedulePostSpawnLivenessAssertion(agentId);
     return {
       agent_id: agentId,
+      parent_agent_id: parentAgentId,
       surface_id: surface.surface,
       workspace_id: surface.workspace,
       state: "booting",

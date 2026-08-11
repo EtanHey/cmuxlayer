@@ -2296,7 +2296,8 @@ export class AgentRegistry {
       if (shouldRetainCrashRecoveryError(agent)) {
         continue;
       }
-      if (inferRecordRoleOrNull(agent) === "orchestrator") {
+      const role = inferRecordRoleOrNull(agent);
+      if (role === null || role === "orchestrator") {
         continue;
       }
       if (this.matchingLiveSurface(agent, surfaces)) {

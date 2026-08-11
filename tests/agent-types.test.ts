@@ -114,12 +114,11 @@ describe("generateAgentId", () => {
     expect(id).toBe("skill-creatorClaude-5b9f4f35");
   });
 
-  it("uses a golemName-pending fallback until session capture finishes", () => {
+  it("issues a stable public id before session capture", () => {
     const id1 = generateAgentId("codex", "brainlayer");
     const id2 = generateAgentId("codex", "brainlayer");
-    expect(id1).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
-    expect(id2).toMatch(/^brainlayerCodex-pending-\d+-[a-z0-9]+$/);
-    // Random suffix should make them different even in the same second
+    expect(id1).toMatch(/^brainlayerCodex-[0-9a-f]{8}$/);
+    expect(id2).toMatch(/^brainlayerCodex-[0-9a-f]{8}$/);
     expect(id1).not.toBe(id2);
   });
 });

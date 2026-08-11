@@ -432,7 +432,7 @@ describe("createServer", () => {
     await client.close();
   });
 
-  it("advertises only orchestrator and worker in every placement-role enum", async () => {
+  it("advertises SpawnSpec functions and independent placement axes", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-role-schema-test");
     rmSync(stateDir, { recursive: true, force: true });
     const server = createServer({
@@ -464,9 +464,14 @@ describe("createServer", () => {
     const publicRoles = ["orchestrator", "worker"];
 
     expect(schemaFor("new_split").properties?.role.enum).toEqual(publicRoles);
-    expect(schemaFor("spawn_agent").properties?.role.enum).toEqual(publicRoles);
+    expect(schemaFor("spawn_agent").properties?.role.enum).toEqual([
+      ...publicRoles,
+      "implementor",
+      "reviewer",
+      "gatherer",
+    ]);
     expect(schemaFor("spawn_agent").properties?.placement.enum).toEqual(
-      publicRoles,
+      ["left", "right", ...publicRoles],
     );
     expect(
       schemaFor("spawn_in_workspace").properties?.agents.items.properties.role

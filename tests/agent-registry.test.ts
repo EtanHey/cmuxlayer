@@ -43,6 +43,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     error: null,
     parent_agent_id: null,
     spawn_depth: 0,
+    role: "worker",
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,

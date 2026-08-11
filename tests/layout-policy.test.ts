@@ -5,6 +5,7 @@ import {
   collectRoleSurfaceIds,
   deriveColumnIndex,
   inferAgentRole,
+  inferRecordRoleOrNull,
   launcherNameForCli,
 } from "../src/layout-policy.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -286,8 +287,27 @@ describe("layout policy", () => {
     expect(inferAgentRole({ launcherName: "brainlayerCursor" })).toBe("worker");
   });
 
-  it("treats Codex leads as worker topology by default unless role is explicit", () => {
-    expect(inferAgentRole({ cli: "codex" })).toBe("worker");
+  it("leaves persisted records unresolved instead of deriving from CLI", () => {
+    expect(
+      inferRecordRoleOrNull({
+        role: undefined,
+        cli: "claude",
+        repo: "cmuxlayer",
+      }),
+    ).toBeNull();
+    expect(
+      inferRecordRoleOrNull({
+        role: undefined,
+        cli: "codex",
+        repo: "cmuxlayer",
+      }),
+    ).toBeNull();
+  });
+
+  it("requires stored or launcher role evidence instead of a CLI default", () => {
+    expect(() => inferAgentRole({ cli: "codex" })).toThrow(
+      /Unable to infer agent role/,
+    );
     expect(inferAgentRole({ cli: "codex", launcherName: "cmuxlayerCodex" })).toBe(
       "worker",
     );
@@ -326,13 +346,13 @@ describe("layout policy", () => {
     ).toBe("worker");
   });
 
-  it("does not let repo names that end with launcher suffixes affect non-launcher CLIs", () => {
-    expect(
+  it("does not derive a role when a launcher has no supported final marker", () => {
+    expect(() =>
       inferAgentRole({
         launcherName: launcherNameForCli("apiClaude", "gemini"),
         cli: "gemini",
       }),
-    ).toBe("worker");
+    ).toThrow(/Unable to infer agent role/);
   });
 
   it("inferAgentRole never silently guesses worker", () => {

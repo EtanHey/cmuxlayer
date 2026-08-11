@@ -2,6 +2,7 @@
  * Agent lifecycle types — flat, SQLite-importable schema.
  * Every field is a primitive (string | number | null).
  */
+import { randomUUID } from "node:crypto";
 
 export type AgentState =
   | "creating"
@@ -16,6 +17,9 @@ export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
 export type AgentQuality = "unknown" | "verified" | "suspect" | "degraded";
 export type AgentRole = "orchestrator" | "worker";
+export type AgentAuthority = "lead" | "worker";
+export type AgentFunction = "implementor" | "reviewer" | "gatherer";
+export type AgentPlacement = "left" | "right";
 export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 
@@ -57,6 +61,10 @@ export interface AgentRecord {
   parent_agent_id: string | null;
   spawn_depth: number;
   role?: AgentRole;
+  /** SpawnSpec v1 axes. `role` remains a persisted compatibility field. */
+  authority?: AgentAuthority;
+  function?: AgentFunction;
+  placement?: AgentPlacement;
   auto_archive_on_done?: boolean;
   task_done_candidate_at?: string | null;
   task_done_detected_at?: string | null;
@@ -413,7 +421,5 @@ export function generateAgentId(
   if (sessionId) {
     return `${golemName}-${sessionIdPrefix(sessionId)}`;
   }
-  const ts = Math.floor(Date.now() / 1000);
-  const rand = Math.random().toString(36).slice(2, 6);
-  return `${golemName}-pending-${ts}-${rand}`;
+  return `${golemName}-${randomUUID().slice(0, SESSION_ID_PREFIX_LENGTH)}`;
 }
