@@ -43,6 +43,17 @@ import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 import { readInbox, writeHeartbeat } from "../src/inbox.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
+const DEAD_CODEX_SHELL_SCREEN = (
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "./fixtures/live/codex-dead-pane-shell-with-stale-banner.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as { lines_80: string }
+).lines_80;
 
 function mockSpawnExit(code: number): {
   kill: ReturnType<typeof vi.fn>;
@@ -8615,8 +8626,8 @@ To continue this session, run codex resume ${sessionId}`,
       liveSurfaces = [makeSurface("surface:cli-exited")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:cli-exited",
-        text: "$ ",
-        lines: 20,
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
         scrollback_used: false,
       });
       await engine.getRegistry().reconstitute();
