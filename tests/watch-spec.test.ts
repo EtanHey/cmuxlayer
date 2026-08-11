@@ -42,6 +42,23 @@ describe("WatchSpec arm contract", () => {
     });
   });
 
+  it("rejects an agent watch without an independent observation provider", async () => {
+    await expect(
+      armWatch(
+        {
+          owner: "lead-a",
+          target: "worker-a",
+          predicate: "done",
+          deadline: 60_000,
+        },
+        { registryPath: registryPath(), now: () => 1_000 },
+      ),
+    ).rejects.toMatchObject<Partial<WatchArmError>>({
+      code: "invalid_watch_spec",
+      target: "worker-a",
+    });
+  });
+
   it("notifies the owner when an armed agent consumer dies before its deadline", async () => {
     let consumerAlive = true;
     const notify = vi.fn().mockResolvedValue(undefined);
@@ -55,7 +72,11 @@ describe("WatchSpec arm contract", () => {
       {
         registryPath: registryPath(),
         now: () => 1_000,
-        agentExists: () => consumerAlive,
+        agentObservation: () => ({
+          exists: consumerAlive,
+          state: consumerAlive ? "idle" : null,
+          source: "screen:surface-worker-a",
+        }),
       },
     );
 
@@ -63,8 +84,11 @@ describe("WatchSpec arm contract", () => {
     const result = await sweepWatches({
       registryPath: registryPath(),
       now: () => 5_000,
-      agentExists: () => consumerAlive,
-      agentState: () => null,
+      agentObservation: () => ({
+        exists: consumerAlive,
+        state: consumerAlive ? "idle" : null,
+        source: "screen:surface-worker-a",
+      }),
       notify,
     });
 
@@ -78,11 +102,13 @@ describe("WatchSpec arm contract", () => {
         observed_at_ms: 5_000,
       }),
     );
-    expect(readWatchRegistry({ registryPath: registryPath() }).watches[0])
-      .toMatchObject({
-        state: "failed",
-        liveness: { value: false, source: "registry", observed_at_ms: 5_000 },
-      });
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "failed",
+      liveness_source: "screen:surface-worker-a",
+      liveness: { value: false, source: "screen", observed_at_ms: 5_000 },
+    });
   });
 
   it("treats an error-state agent record as a dead consumer", async () => {
@@ -97,15 +123,22 @@ describe("WatchSpec arm contract", () => {
       {
         registryPath: registryPath(),
         now: () => 1_000,
-        agentExists: () => true,
+        agentObservation: () => ({
+          exists: true,
+          state: "idle",
+          source: "screen:surface-worker-a",
+        }),
       },
     );
 
     const result = await sweepWatches({
       registryPath: registryPath(),
       now: () => 5_000,
-      agentExists: () => true,
-      agentState: () => "error",
+      agentObservation: () => ({
+        exists: true,
+        state: "error",
+        source: "screen:surface-worker-a",
+      }),
       notify,
     });
 
@@ -113,6 +146,123 @@ describe("WatchSpec arm contract", () => {
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ reason: "consumer_died" }),
     );
+  });
+
+  it("judges an agent predicate only from the independent screen observation", async () => {
+    const notify = vi.fn().mockResolvedValue(undefined);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target: "worker-a",
+        predicate: "done",
+        deadline: 60_000,
+      },
+      {
+        registryPath: registryPath(),
+        now: () => 1_000,
+        agentObservation: () => ({
+          exists: true,
+          state: "idle",
+          source: "screen:surface-worker-a",
+        }),
+      },
+    );
+
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 5_000,
+      agentObservation: () => ({
+        exists: true,
+        state: "idle",
+        source: "screen:surface-worker-a",
+      }),
+      notify,
+    });
+
+    expect(result.fired).toEqual([]);
+    expect(result.armed).toEqual([armed.watch_id]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      state: "armed",
+      observed_value: "idle",
+      liveness_source: "screen:surface-worker-a",
+      liveness: { value: true, source: "screen" },
+    });
+  });
+
+  it("keeps a fired watch retryable until notification delivery succeeds", async () => {
+    const target = join(TEST_DIR, "redelivery.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+    appendFileSync(target, "DONE\n", "utf8");
+
+    const failedDelivery = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+    expect(failedDelivery.fired).toEqual([]);
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "firing",
+      terminal_reason: "predicate_matched",
+    });
+
+    const delivered = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 3_000,
+      notify,
+    });
+    expect(delivered.fired).toEqual([armed.watch_id]);
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({ state: "fired" });
+  });
+
+  it("persists and delivers deadline_elapsed through the retryable transition", async () => {
+    const target = join(TEST_DIR, "deadline.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi.fn().mockResolvedValue(true);
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: 2_000,
+      },
+      { registryPath: registryPath(), now: () => 1_000 },
+    );
+
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 2_000,
+      notify,
+    });
+
+    expect(result.failed).toEqual([armed.watch_id]);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "deadline_elapsed" }),
+    );
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+    ).toMatchObject({ state: "failed", terminal_reason: "deadline_elapsed" });
   });
 
   it("fires a marker watch on count increase only", async () => {

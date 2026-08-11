@@ -11,8 +11,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { httpDeliver } from "./outbox-drainer.js";
 
-export type WatchState = "armed" | "fired" | "failed";
-export type WatchObservedSource = "process" | "registry";
+export type WatchState = "armed" | "firing" | "fired" | "failed";
+export type WatchObservedSource = "process" | "screen";
 
 export interface WatchObserved<T> {
   value: T;
@@ -50,10 +50,7 @@ export interface WatchRegistryFile {
 }
 
 export type WatchNotificationReason =
-  | "predicate_matched"
-  | "consumer_died"
-  | "target_missing"
-  | "deadline_elapsed";
+  "predicate_matched" | "consumer_died" | "target_missing" | "deadline_elapsed";
 
 export interface WatchNotification {
   watch_id: string;
@@ -69,11 +66,18 @@ export type WatchNotify = (
   event: WatchNotification,
 ) => Promise<unknown> | unknown;
 
+export interface WatchAgentObservation {
+  exists: boolean;
+  state: string | null;
+  source: string;
+}
+
 export interface WatchRegistryOptions {
   registryPath?: string;
   now?: () => number;
-  agentExists?: (agentId: string) => boolean;
-  agentState?: (agentId: string) => string | null;
+  agentObservation?: (
+    agentId: string,
+  ) => Promise<WatchAgentObservation> | WatchAgentObservation;
 }
 
 export interface WatchSweepOptions extends WatchRegistryOptions {
@@ -87,9 +91,7 @@ export interface WatchSweepResult {
 }
 
 export type WatchArmErrorCode =
-  | "invalid_watch_spec"
-  | "watch_target_missing"
-  | "watch_deadline_elapsed";
+  "invalid_watch_spec" | "watch_target_missing" | "watch_deadline_elapsed";
 
 export class WatchArmError extends Error {
   readonly code: WatchArmErrorCode;
@@ -175,7 +177,10 @@ function countMarker(path: string, marker: string): number {
   return count;
 }
 
-function assertSpec(spec: WatchSpec, opts: WatchRegistryOptions): {
+function assertSpec(
+  spec: WatchSpec,
+  opts: WatchRegistryOptions,
+): {
   owner: string;
   target: string;
   targetKind: "file" | "agent";
@@ -236,11 +241,11 @@ function assertSpec(spec: WatchSpec, opts: WatchRegistryOptions): {
         "Agent WatchSpec targets require predicate and do not accept marker",
       );
     }
-    if (!opts.agentExists?.(target)) {
+    if (!opts.agentObservation) {
       throw new WatchArmError(
-        "watch_target_missing",
+        "invalid_watch_spec",
         target,
-        `Watch target agent does not exist: ${target}`,
+        "Agent WatchSpec targets require an independent observation provider",
       );
     }
   }
@@ -270,8 +275,19 @@ export async function armWatch(
   const watermark = checked.marker
     ? (spec.watermark ?? countMarker(target, checked.marker))
     : spec.watermark;
+  const agentObservation =
+    checked.targetKind === "agent"
+      ? await opts.agentObservation?.(target)
+      : undefined;
+  if (checked.targetKind === "agent" && !agentObservation?.exists) {
+    throw new WatchArmError(
+      "watch_target_missing",
+      target,
+      `Watch target agent does not exist: ${target}`,
+    );
+  }
   const source: WatchObservedSource =
-    checked.targetKind === "file" ? "process" : "registry";
+    checked.targetKind === "file" ? "process" : "screen";
   const record: WatchRecord = {
     watch_id: randomUUID(),
     owner: checked.owner,
@@ -283,7 +299,7 @@ export async function armWatch(
     target_kind: checked.targetKind,
     armed_at_ms: observedAt,
     last_heartbeat_at_ms: observedAt,
-    liveness_source: target,
+    liveness_source: agentObservation?.source ?? target,
     liveness: { value: true, source, observed_at_ms: observedAt },
     state: "armed",
   };
@@ -321,31 +337,64 @@ export async function sweepWatches(
   const notifications: WatchNotification[] = [];
   const result: WatchSweepResult = { fired: [], failed: [], armed: [] };
 
+  const snapshot = readRegistry(path);
+  const agentObservations = new Map<string, WatchAgentObservation>();
+  for (const record of snapshot.watches) {
+    if (record.state !== "armed" || record.target_kind !== "agent") continue;
+    if (!opts.agentObservation) {
+      throw new Error(
+        "Agent WatchSpec sweep requires an independent observation provider",
+      );
+    }
+    agentObservations.set(
+      record.target,
+      await opts.agentObservation(record.target),
+    );
+  }
+
   withWriteLock(path, () => {
     const registry = readRegistry(path);
     const watches = registry.watches.map((record) => {
+      if (record.state === "firing" && record.terminal_reason) {
+        notifications.push(
+          notificationFor(
+            record,
+            record.terminal_reason,
+            record.terminal_at_ms ?? observedAt,
+            record.observed_value,
+          ),
+        );
+        return record;
+      }
       if (record.state !== "armed") return record;
+      const agentObservation = agentObservations.get(record.target);
       const source: WatchObservedSource =
-        record.target_kind === "file" ? "process" : "registry";
+        record.target_kind === "file" ? "process" : "screen";
       const exists =
         record.target_kind === "file"
           ? existsSync(record.target)
-          : (opts.agentExists?.(record.target) ?? false);
+          : (agentObservation?.exists ?? false);
       const heartbeat = {
         last_heartbeat_at_ms: observedAt,
+        liveness_source:
+          record.target_kind === "agent"
+            ? (agentObservation?.source ?? record.liveness_source)
+            : record.liveness_source,
         liveness: { value: exists, source, observed_at_ms: observedAt },
-      } satisfies Pick<WatchRecord, "last_heartbeat_at_ms" | "liveness">;
+      } satisfies Pick<
+        WatchRecord,
+        "last_heartbeat_at_ms" | "liveness_source" | "liveness"
+      >;
 
       if (!exists) {
         const reason: WatchNotificationReason =
           record.target_kind === "agent" ? "consumer_died" : "target_missing";
         const notification = notificationFor(record, reason, observedAt);
         notifications.push(notification);
-        result.failed.push(record.watch_id);
         return {
           ...record,
           ...heartbeat,
-          state: "failed" as const,
+          state: "firing" as const,
           terminal_reason: reason,
           terminal_at_ms: observedAt,
         };
@@ -358,11 +407,10 @@ export async function sweepWatches(
           observedAt,
         );
         notifications.push(notification);
-        result.failed.push(record.watch_id);
         return {
           ...record,
           ...heartbeat,
-          state: "failed" as const,
+          state: "firing" as const,
           terminal_reason: "deadline_elapsed" as const,
           terminal_at_ms: observedAt,
         };
@@ -371,7 +419,7 @@ export async function sweepWatches(
       const observedValue =
         record.target_kind === "file"
           ? countMarker(record.target, record.marker!)
-          : opts.agentState?.(record.target) ?? "unknown";
+          : (agentObservation?.state ?? "unknown");
       const matched =
         record.target_kind === "file"
           ? typeof observedValue === "number" &&
@@ -385,11 +433,10 @@ export async function sweepWatches(
           observedValue,
         );
         notifications.push(notification);
-        result.fired.push(record.watch_id);
         return {
           ...record,
           ...heartbeat,
-          state: "fired" as const,
+          state: "firing" as const,
           terminal_reason: "predicate_matched" as const,
           terminal_at_ms: observedAt,
           observed_value: observedValue,
@@ -407,11 +454,10 @@ export async function sweepWatches(
           observedValue,
         );
         notifications.push(notification);
-        result.failed.push(record.watch_id);
         return {
           ...record,
           ...heartbeat,
-          state: "failed" as const,
+          state: "firing" as const,
           terminal_reason: "consumer_died" as const,
           terminal_at_ms: observedAt,
           observed_value: observedValue,
@@ -425,11 +471,30 @@ export async function sweepWatches(
   });
 
   for (const notification of notifications) {
+    let delivered = false;
     try {
-      await opts.notify?.(notification);
+      delivered = (await opts.notify?.(notification)) !== false;
     } catch {
-      // Terminal registry state is canonical; notification delivery is best effort.
+      delivered = false;
     }
+    if (!delivered) continue;
+    withWriteLock(path, () => {
+      const registry = readRegistry(path);
+      const watches = registry.watches.map((record) => {
+        if (
+          record.watch_id !== notification.watch_id ||
+          record.state !== "firing"
+        ) {
+          return record;
+        }
+        const terminalState: WatchState =
+          record.terminal_reason === "predicate_matched" ? "fired" : "failed";
+        if (terminalState === "fired") result.fired.push(record.watch_id);
+        else result.failed.push(record.watch_id);
+        return { ...record, state: terminalState };
+      });
+      writeRegistry(path, watches);
+    });
   }
   return result;
 }

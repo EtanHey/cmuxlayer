@@ -42,6 +42,7 @@ import {
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 import { readInbox, writeHeartbeat } from "../src/inbox.js";
+import { readWatchRegistry } from "../src/watch-spec.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 const DEAD_CODEX_SHELL_SCREEN = (
@@ -294,6 +295,62 @@ describe("AgentEngine", () => {
       nowSpy.mockRestore();
     }
   }
+
+  it("agent watches judge the live screen instead of registry state", async () => {
+    const watchRegistryPath = join(TEST_DIR, "watch-specs.json");
+    const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const worker = makeRecord({
+      agent_id: "worker-a",
+      surface_id: "surface:watch-worker",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:watch",
+      state: "done",
+    });
+    stateMgr.writeState(worker);
+    liveSurfaces.push({
+      ...makeSurface(worker.surface_id),
+      id: surfaceUuid,
+      workspace_ref: worker.workspace_id,
+    });
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    await registry.reconstitute();
+    const notify = vi.fn().mockResolvedValue(true);
+    let now = 1_000;
+    const watchEngine = new AgentEngine(stateMgr, registry, mockClient, {
+      watchRegistryPath,
+      watchRegistryNow: () => now,
+      watchNotify: notify,
+      sessionIdentityResolver: () => null,
+      fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+    });
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: worker.surface_id,
+      text: ["OpenAI Codex", "Model: gpt-5.4", "", "›"].join("\n"),
+      lines: 30,
+      scrollback_used: false,
+    });
+
+    const armed = await watchEngine.armWatch({
+      owner: "lead-a",
+      target: worker.agent_id,
+      predicate: "done",
+      deadline: 10_000,
+    });
+    now = 2_000;
+    await watchEngine.runSweep();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "armed",
+      observed_value: "idle",
+      liveness_source: `screen:${surfaceUuid}`,
+      liveness: { value: true, source: "screen" },
+    });
+    watchEngine.dispose();
+  });
 
   describe("spawnAgent", () => {
     it("rate-limits spawn storms before creating extra surfaces", async () => {

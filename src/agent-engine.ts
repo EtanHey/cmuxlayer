@@ -54,6 +54,7 @@ import {
   armWatch as armDeclaredWatch,
   readWatchRegistry,
   sweepWatches,
+  type WatchAgentObservation,
   type WatchNotify,
   type WatchRecord,
   type WatchSpec,
@@ -4658,11 +4659,30 @@ export class AgentEngine {
     }
   }
 
-  private watchAgentExists = (agentId: string): boolean =>
-    this.registry.get(agentId) !== null;
-
-  private watchAgentState = (agentId: string): string | null =>
-    this.registry.get(agentId)?.state ?? null;
+  private watchAgentObservation = async (
+    agentId: string,
+  ): Promise<WatchAgentObservation> => {
+    const agent = this.registry.get(agentId);
+    const source = `screen:${agent?.surface_uuid ?? agent?.surface_id ?? agentId}`;
+    if (!agent) return { exists: false, state: null, source };
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
+        lines: 30,
+      });
+      const parsed = parseScreen(cleanScreenText(screen.text));
+      return {
+        exists:
+          parsed.agent_type !== "unknown" &&
+          parsed.control_state !== "dead" &&
+          parsed.control_state !== "stale_surface",
+        state: parsed.status === "frozen" ? "error" : parsed.status,
+        source,
+      };
+    } catch {
+      return { exists: false, state: null, source };
+    }
+  };
 
   private async sweepWatchesBestEffort(): Promise<void> {
     if (!this.watchRegistryPath || this.watchSweepInFlight) return;
@@ -4671,8 +4691,7 @@ export class AgentEngine {
       await sweepWatches({
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
-        agentExists: this.watchAgentExists,
-        agentState: this.watchAgentState,
+        agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
       });
     } catch {
@@ -5364,8 +5383,7 @@ export class AgentEngine {
     return armDeclaredWatch(spec, {
       registryPath: this.watchRegistryPath,
       now: this.watchRegistryNow,
-      agentExists: this.watchAgentExists,
-      agentState: this.watchAgentState,
+      agentObservation: this.watchAgentObservation,
     });
   }
 
@@ -5382,8 +5400,7 @@ export class AgentEngine {
       await sweepWatches({
         registryPath: this.watchRegistryPath,
         now: this.watchRegistryNow,
-        agentExists: this.watchAgentExists,
-        agentState: this.watchAgentState,
+        agentObservation: this.watchAgentObservation,
         notify: this.watchNotify,
       });
       const current = readWatchRegistry({
