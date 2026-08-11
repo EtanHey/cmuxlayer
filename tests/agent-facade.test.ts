@@ -15,7 +15,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     repo: "brainlayer",
     model: "sonnet",
     cli: "claude",
-    cli_session_id: "session-1",
+    cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     task_summary: "Fix the bug",
     pid: null,
     version: 1,
@@ -43,11 +43,12 @@ describe("agent facade projections", () => {
       repo: "brainlayer",
       model: "sonnet",
       state: "ready",
-      session_id: "session-1",
+      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       resumable: true,
       submit_verified: null,
       model_mismatch: null,
-      resume_command: "brainlayerClaude -s --resume session-1",
+      resume_command:
+        "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
     expect((projected as any).surface_id).toBeUndefined();
   });
@@ -99,9 +100,10 @@ describe("agent route table", () => {
       surface_uuid: "11111111-2222-4333-8444-555555555555",
       workspace_id: "ws:1",
       state: "ready",
-      session_id: "session-1",
+      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       resumable: true,
-      resume_command: "brainlayerClaude -s --resume session-1",
+      resume_command:
+        "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });
     expect(table.get("agent-2")?.surface_id).toBe("surface:2");
   });

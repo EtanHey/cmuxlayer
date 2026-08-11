@@ -20,23 +20,53 @@ export function sanitizeRepoName(repo: string): string {
   return safeRepo;
 }
 
+const FULL_SESSION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const LAUNCHER_SUFFIX: Partial<Record<CliType, string>> = {
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
+  gemini: "Gemini",
+};
+
+function cleanLauncherName(
+  _cli: CliType,
+  launcherName: string | null | undefined,
+): string | null {
+  if (!launcherName) return null;
+  const trimmed = launcherName.trim();
+  if (!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function buildResumeCommand(
   cli: CliType,
   repo: string,
   sessionId: string,
   launcherName?: string | null,
 ): string {
-  const safeRepo = sanitizeRepoName(repo);
+  if (!FULL_SESSION_UUID_RE.test(sessionId)) {
+    throw new Error(
+      `Invalid session id: "${sessionId}". A full session UUID is required.`,
+    );
+  }
+  const suffix = LAUNCHER_SUFFIX[cli];
+  const launcher =
+    cleanLauncherName(cli, launcherName) ??
+    (suffix ? `${sanitizeRepoName(repo)}${suffix}` : null);
   switch (cli) {
     case "claude":
-      return `${launcherName ?? `${safeRepo}Claude`} -s --resume ${sessionId}`;
+      return `${launcher} -s --resume ${sessionId}`;
     case "codex":
-      return `${launcherName ?? `${safeRepo}Codex`} --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
+      return `${launcher} --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
     case "gemini":
-      return `${launcherName ?? `${safeRepo}Gemini`} -s --resume ${sessionId}`;
-    case "kiro":
+      return `${launcher} -s --resume ${sessionId}`;
+    case "kiro": {
+      const safeRepo = sanitizeRepoName(repo);
       return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
+    }
     case "cursor":
-      return `${launcherName ?? `${safeRepo}Cursor`} -s --resume ${sessionId}`;
+      return `${launcher} -s --resume ${sessionId}`;
   }
 }

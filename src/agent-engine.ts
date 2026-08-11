@@ -109,6 +109,7 @@ import {
 import {
   launcherNameCandidates,
   resolveLauncherNameFromRegistry,
+  resolveRepoRootFromLauncherRegistry,
   type LauncherSuffix,
 } from "./launcher-registry.js";
 import { buildAgentHealthInput } from "./agent-health-input.js";
@@ -292,6 +293,7 @@ function sessionCollisionSuffix(sessionId: string): string {
  */
 export interface SpawnPreflightResult {
   launcherName?: string;
+  repoRoot?: string;
 }
 
 export interface CrashRecoveryMutationInput {
@@ -978,21 +980,25 @@ export class AgentEngine {
         if (params.cli === "claude") {
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Claude"),
+            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
           };
         }
         if (params.cli === "codex") {
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Codex"),
+            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
           };
         }
         if (params.cli === "cursor") {
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Cursor"),
+            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
           };
         }
         if (params.cli === "gemini") {
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Gemini"),
+            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
           };
         }
       });
@@ -2002,6 +2008,7 @@ export class AgentEngine {
 
   private canUseSelfRegistrationSessionResolver(agent: AgentRecord): boolean {
     return Boolean(
+      agent.cli !== "codex" &&
       this.selfRegistrationSessionResolver &&
       TRANSCRIPT_SESSION_CAPTURE_STATES.has(agent.state) &&
       JSONL_HARNESSES.has(agent.cli) &&
@@ -2159,15 +2166,10 @@ export class AgentEngine {
   }
 
   /**
-   * Default session-identity resolution: self-registration READ (PRIMARY) then
-   * the deprecated transcript scan (last-resort fallback). Self-registration is
-   * the P0 root fix — agents append their real session id to the registry at
-   * boot, so we read it instead of scanning `~/.claude`/`~/.codex` and inferring
-   * by cwd+recency (which breaks with raw spawns + worktrees + many agents per
-   * repo). The scan is only reached when self-registration returns null (unset in
-   * bare construction, or a hook-less agent with no registry entry) and no
-   * injected fallback override is present; #336's bounded deferred-capture marker
-   * still guards that fallback.
+   * Default session-identity resolution is harness-specific. Codex identity is
+   * sourced only from its rollout JSONL because its screen does not reliably
+   * expose the UUID and self-registration can race or carry unrelated identity.
+   * Claude/Cursor retain self-registration first, then transcript fallback.
    */
   private resolveSessionIdentityWithSelfRegistration(
     agent: AgentRecord,
@@ -2564,7 +2566,10 @@ export class AgentEngine {
       }
     }
 
-    if (!this.isBootCaptureWindowOpen(captureAgent)) {
+    if (
+      captureAgent.cli === "codex" ||
+      !this.isBootCaptureWindowOpen(captureAgent)
+    ) {
       return captureAgent;
     }
 
@@ -3099,6 +3104,16 @@ export class AgentEngine {
       let createdSurface: CreatedAgentSurface | null = null;
       let createdSurfaceBound = false;
       try {
+        const sessionId = agent.cli_session_id;
+        if (!sessionId) {
+          throw new Error("Crash recovery requires a captured session id");
+        }
+        const resumeCmd = buildResumeCommand(
+          agent.cli,
+          agent.repo,
+          sessionId,
+          agent.launcher_name,
+        );
         await this.beforeCrashRecoveryMutation?.({
           phase: "placement",
           agent_id: agent.agent_id,
@@ -3165,12 +3180,6 @@ export class AgentEngine {
         });
         this.registry.set(agent.agent_id, booting);
 
-        const resumeCmd = buildResumeCommand(
-          agent.cli,
-          agent.repo,
-          agent.cli_session_id!,
-          agent.launcher_name,
-        );
         await this.sendLaunchCommand(
           surface.surface,
           resumeWorkspace,
@@ -4884,6 +4893,7 @@ export class AgentEngine {
     this.spawnGuard.check(spawnParams.workspace);
 
     const preflight = await this.spawnPreflight(spawnParams);
+    const launchCwd = spawnParams.cwd ?? preflight?.repoRoot ?? null;
     const seatIdentity = assertSeatIdentity({
       repo: spawnParams.repo,
       cli: spawnParams.cli,
@@ -4998,7 +5008,7 @@ export class AgentEngine {
       prompt_delivered: false,
       parsed_model: null,
       model_mismatch: null,
-      launch_cwd: spawnParams.cwd ?? null,
+      launch_cwd: launchCwd,
       mcp_profile: spawnParams.mcp_profile_label ?? null,
       worktree_path: spawnParams.cwd ?? null,
       worktree_branch: spawnParams.worktree_branch ?? null,
@@ -5139,7 +5149,7 @@ export class AgentEngine {
         ...modelPolicy.warnings,
       ],
       model_policy: modelPolicy,
-      cwd: spawnParams.cwd,
+      cwd: launchCwd ?? undefined,
       mcp_env: spawnParams.mcp_env,
     };
   }
@@ -5379,7 +5389,7 @@ export class AgentEngine {
       workspace_id: agent.workspace_id ?? null,
       state: agent.state,
       session_id: agent.cli_session_id,
-      resumable: !!agent.cli_session_id,
+      resumable: !!resumeCommand,
       ...(resumeCommand ? { resume_command: resumeCommand } : {}),
     };
   }

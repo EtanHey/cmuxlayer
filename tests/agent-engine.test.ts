@@ -25,6 +25,7 @@ import {
   resolveSweepTiming,
 } from "../src/agent-engine.js";
 import { launcherNameCandidates } from "../src/launcher-registry.js";
+import { toAgentStatePayload } from "../src/agent-facade.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   AgentRegistry,
@@ -726,7 +727,10 @@ describe("AgentEngine", () => {
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
       const resolvingEngine = new AgentEngine(stateMgr, registry, mockClient, {
         // agent-html-host registered only as the hyphen-stripped form.
-        spawnPreflight: async () => ({ launcherName: "agenthtmlhostCursor" }),
+        spawnPreflight: async () => ({
+          launcherName: "agenthtmlhostCursor",
+          repoRoot: "/Users/etanheyman/Gits/agent-html-host",
+        }),
         sessionIdentityResolver: () => null,
       });
 
@@ -741,6 +745,9 @@ describe("AgentEngine", () => {
       expect(launchCmd).toBe("agenthtmlhostCursor -s");
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
+      expect(state?.launch_cwd).toBe(
+        "/Users/etanheyman/Gits/agent-html-host",
+      );
 
       resolvingEngine.dispose();
     });
@@ -749,7 +756,10 @@ describe("AgentEngine", () => {
       engine.dispose();
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
       engine = new AgentEngine(stateMgr, registry, mockClient, {
-        spawnPreflight: async () => ({ launcherName: "cmuxlayerCodex" }),
+        spawnPreflight: async () => ({
+          launcherName: "cmuxlayerCodex",
+          repoRoot: process.cwd(),
+        }),
         sessionIdentityResolver: () => null,
         seatRegistry: {
           cmuxlayerClaude: {
@@ -3556,6 +3566,35 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
+    it("rejects an invalid crash-recovery session before creating a surface", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-crash-short-session",
+          state: "error",
+          surface_id: "surface:dead-short-session",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5",
+          crash_recover: true,
+          error: "Surface surface:dead-short-session disappeared",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:witness")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(engine.getAgentState("agent-crash-short-session")).toMatchObject({
+        state: "error",
+        surface_id: "surface:dead-short-session",
+        respawn_attempts: 0,
+        error: expect.stringMatching(/full session UUID/i),
+      });
+    });
+
     it.each(["tab_close", "workspace_teardown"] as const)(
       "treats a cmux UI %s as terminal before crash recovery",
       async (closeOrigin) => {
@@ -4220,7 +4259,218 @@ describe("AgentEngine", () => {
     });
 
     afterEach(() => {
+      vi.unstubAllEnvs();
       vi.useRealTimers();
+    });
+
+    it("never captures a Codex session id from screen output", async () => {
+      const screenSessionId = "11111111-2222-7333-8444-555555555555";
+      vi.setSystemTime(new Date("2026-08-11T10:00:30.000Z"));
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-rollout-only",
+          repo: "cmuxlayer",
+          model: "gpt-5.6-sol",
+          cli: "codex",
+          surface_id: "surface:rollout-only",
+          state: "booting",
+          task_summary: "Fix rollout-only capture",
+          created_at: "2026-08-11T10:00:00.000Z",
+          updated_at: "2026-08-11T10:00:00.000Z",
+          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:rollout-only")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:rollout-only",
+        text: [
+          "OpenAI Codex",
+          `To continue this session, run codex resume ${screenSessionId}`,
+          "›",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.captureBootSessionId(
+        "cmuxlayerCodex-pending-rollout-only",
+      );
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-pending-rollout-only"),
+      ).toMatchObject({
+        cli_session_id: null,
+      });
+      expect(engine.getAgentState("cmuxlayerCodex-11111111")).toBeNull();
+    });
+
+    it("matches Codex rollout identity by cwd and spawn window", async () => {
+      const codexHome = join(TEST_DIR, "codex-home-matching");
+      const rolloutRoot = join(codexHome, "sessions", "2026", "08", "11");
+      const launchCwd = "/tmp/cmuxlayer-a3-rollout-target";
+      const correctSessionId = "019fec96-588d-7000-8000-000000000001";
+      const wrongCwdSessionId = "019fec96-588d-7000-8000-000000000002";
+      const staleSessionId = "019fec96-588d-7000-8000-000000000003";
+      const task = "Match this exact A3 rollout prompt";
+      mkdirSync(rolloutRoot, { recursive: true });
+      const writeRollout = (
+        name: string,
+        sessionId: string,
+        cwd: string,
+        mtime: string,
+      ): string => {
+        const path = join(rolloutRoot, name);
+        writeFileSync(
+          path,
+          [
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id: sessionId, cwd },
+            }),
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: task }],
+              },
+            }),
+          ].join("\n"),
+        );
+        const timestamp = new Date(mtime);
+        utimesSync(path, timestamp, timestamp);
+        return path;
+      };
+      const correctPath = writeRollout(
+        "rollout-correct.jsonl",
+        correctSessionId,
+        launchCwd,
+        "2026-08-11T10:00:02.000Z",
+      );
+      writeRollout(
+        "rollout-wrong-cwd.jsonl",
+        wrongCwdSessionId,
+        "/tmp/other-repo",
+        "2026-08-11T10:00:03.000Z",
+      );
+      writeRollout(
+        "rollout-stale.jsonl",
+        staleSessionId,
+        launchCwd,
+        "2026-08-11T09:59:40.000Z",
+      );
+      vi.stubEnv("CODEX_HOME", codexHome);
+      try {
+        vi.setSystemTime(new Date("2026-08-11T10:00:05.000Z"));
+        engine.dispose();
+        const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+        engine = new AgentEngine(stateMgr, registry, mockClient, {
+          spawnPreflight: async () => {},
+        });
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-pending-rollout-match",
+            repo: "cmuxlayer",
+            cli: "codex",
+            model: "gpt-5.6-sol",
+            state: "booting",
+            surface_id: "surface:rollout-match",
+            task_summary: task,
+            launch_cwd: launchCwd,
+            created_at: "2026-08-11T10:00:00.000Z",
+            updated_at: "2026-08-11T10:00:00.000Z",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:rollout-match")];
+        await registry.reconstitute();
+
+        await engine.captureBootSessionId(
+          "cmuxlayerCodex-pending-rollout-match",
+        );
+
+        expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toMatchObject({
+          cli_session_id: correctSessionId,
+          cli_session_path: correctPath,
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("uses Codex rollout identity instead of self-registration", async () => {
+      const rolloutSessionId = "019fec96-588d-7000-8000-000000000000";
+      const registeredSessionId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+      const rolloutPath =
+        "/Users/etanheyman/.codex/sessions/2026/08/11/rollout-2026-08-11T10-05-00-019fec96-588d-7000-8000-000000000000.jsonl";
+      const transcriptResolver = vi.fn(() => ({
+        session_id: rolloutSessionId,
+        path: rolloutPath,
+      }));
+      const selfRegistrationResolver = vi.fn(() => ({
+        session_id: registeredSessionId,
+        path: null,
+      }));
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: transcriptResolver,
+        selfRegistrationSessionResolver: selfRegistrationResolver,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-source",
+          repo: "cmuxlayer",
+          cli: "codex",
+          model: "gpt-5.6-sol",
+          state: "booting",
+          surface_id: "surface:rollout-source",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
+          task_summary: "Fix rollout identity source",
+          launch_cwd: "/Users/etanheyman/Gits/cmuxlayer",
+        }),
+      );
+      liveSurfaces = [
+        {
+          ...makeSurface("surface:rollout-source"),
+          id: "11111111-2222-4333-8444-555555555555",
+        },
+      ];
+      await engine.getRegistry().reconstitute();
+
+      await engine.captureBootSessionId("cmuxlayerCodex-pending-source");
+
+      expect(selfRegistrationResolver).not.toHaveBeenCalled();
+      expect(transcriptResolver).toHaveBeenCalledTimes(1);
+      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toMatchObject({
+        cli_session_id: rolloutSessionId,
+        cli_session_path: rolloutPath,
+      });
+      expect(engine.getAgentState("cmuxlayerCodex-aaaaaaaa")).toBeNull();
+    });
+
+    it("does not advertise an unrunnable legacy session route", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "brainlayerClaude-legacy-route",
+          repo: "brainlayerClaude [surface:199]",
+          cli: "claude",
+          cli_session_id: "019fec96-588d-7000-8000-000000000004",
+          launcher_name: null,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      expect(engine.resolveAgentRoute("brainlayerClaude-legacy-route")).toEqual(
+        expect.objectContaining({
+          session_id: "019fec96-588d-7000-8000-000000000004",
+          resumable: false,
+        }),
+      );
+      expect(
+        engine.resolveAgentRoute("brainlayerClaude-legacy-route"),
+      ).not.toHaveProperty("resume_command");
     });
 
     it("reads a moved UUID surface instead of a recycled cached ref", async () => {
@@ -4230,7 +4480,9 @@ describe("AgentEngine", () => {
       vi.setSystemTime(new Date("2026-07-14T08:00:00.000Z"));
       stateMgr.writeState(
         makeRecord({
-          agent_id: "brainlayerCodex-pending-moved",
+          agent_id: "brainlayerClaude-pending-moved",
+          cli: "claude",
+          model: "sonnet",
           state: "booting",
           surface_id: "surface:old",
           surface_uuid: stableUuid,
@@ -4247,7 +4499,7 @@ describe("AgentEngine", () => {
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
         async (surface: string) => ({
           surface,
-          text: `To continue this session, run codex resume ${
+          text: `Session ID: ${
             surface === "surface:new-route" ? targetSession : foreignSession
           }`,
           lines: 80,
@@ -4256,7 +4508,7 @@ describe("AgentEngine", () => {
       );
 
       const captured = await engine.captureBootSessionId(
-        "brainlayerCodex-pending-moved",
+        "brainlayerClaude-pending-moved",
       );
 
       expect(captured?.cli_session_id).toBe(targetSession);
@@ -4271,14 +4523,6 @@ describe("AgentEngine", () => {
     });
 
     it.each([
-      [
-        "codex",
-        "codex",
-        "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-        `gpt-5.4
-Working (12s • esc to interrupt)
-To continue this session, run codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e`,
-      ],
       [
         "claude",
         "sonnet",
@@ -4335,9 +4579,8 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       liveSurfaces = [makeSpawnSurface()];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:new",
-        text: `gpt-5.4
-Working (12s • esc to interrupt)
-To continue this session, run codex resume ${sessionId}`,
+        text: `Claude Code
+Session ID: ${sessionId}`,
         lines: 80,
         scrollback_used: true,
       });
@@ -4346,14 +4589,14 @@ To continue this session, run codex resume ${sessionId}`,
 
       const result = await engine.spawnAgent({
         repo: "brainlayer",
-        model: "gpt-5.4",
-        cli: "codex",
+        model: "sonnet",
+        cli: "claude",
         prompt: "Fix gap F",
       });
 
-      const finalAgentId = "brainlayerCodex-019d9aa5";
+      const finalAgentId = "brainlayerClaude-019d9aa5";
       expect(result.agent_id).toMatch(
-        /^brainlayerCodex-pending-\d+-[a-z0-9]+$/,
+        /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
       );
       writeHeartbeat(result.agent_id, { baseDir: TEST_DIR });
       const pendingMarker = join(
@@ -4534,7 +4777,7 @@ To continue this session, run codex resume ${sessionId}`,
       });
     });
 
-    it("captures session identity after the initial boot window for a long-stuck ready pane", async () => {
+    it("does not capture Codex screen identity after the initial boot window", async () => {
       vi.setSystemTime(new Date("2026-06-25T08:02:30.000Z"));
       const sessionId = "019f0010-1111-7222-8333-444455556666";
       stateMgr.writeState(
@@ -4567,15 +4810,15 @@ To continue this session, run codex resume ${sessionId}`,
 
       await engine.runSweep();
 
-      expect(engine.getAgentState("cmuxlayerCodex-019f0010")).toMatchObject({
-        agent_id: "cmuxlayerCodex-019f0010",
+      expect(engine.getAgentState("cmuxlayerCodex-pending-late")).toMatchObject({
+        agent_id: "cmuxlayerCodex-pending-late",
         state: "ready",
-        cli_session_id: sessionId,
-        cli_session_path: null,
+        cli_session_id: null,
       });
-      expect(engine.resolveAgentRoute("cmuxlayerCodex-019f0010")).toMatchObject({
-        session_id: sessionId,
-        resumable: true,
+      expect(engine.getAgentState("cmuxlayerCodex-019f0010")).toBeNull();
+      expect(engine.resolveAgentRoute("cmuxlayerCodex-pending-late")).toMatchObject({
+        session_id: null,
+        resumable: false,
       });
     });
 
@@ -5247,6 +5490,111 @@ To continue this session, run codex resume ${sessionId}`,
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+
+    it("keeps a rollout-captured Codex spawn resumable after a mid-task stop", async () => {
+      const sessionId = "019fec96-588d-7000-8000-000000000000";
+      vi.setSystemTime(new Date("2026-08-11T10:10:00.000Z"));
+      const codexHome = join(TEST_DIR, "codex-home-decisive");
+      const sessionPath = join(
+        codexHome,
+        "sessions",
+        "2026",
+        "08",
+        "11",
+        `rollout-2026-08-11T10-10-00-${sessionId}.jsonl`,
+      );
+      mkdirSync(join(sessionPath, ".."), { recursive: true });
+      const prompt = "Prove resumability after a mid-task stop";
+      writeFileSync(
+        sessionPath,
+        [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: sessionId, cwd: process.cwd() },
+          }),
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: prompt }],
+            },
+          }),
+        ].join("\n"),
+      );
+      const rolloutMtime = new Date("2026-08-11T10:10:01.000Z");
+      utimesSync(sessionPath, rolloutMtime, rolloutMtime);
+      vi.stubEnv("CODEX_HOME", codexHome);
+      engine.dispose();
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        spawnPreflight: async () => ({ launcherName: "cmuxlayerCodex" }),
+        stopPostConditionTimeoutMs: 20,
+      });
+      liveSurfaces = [makeSpawnSurface()];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:new",
+        text: "OpenAI Codex\nWorking (12s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: true,
+      });
+      const spawned = await engine.spawnAgent({
+        repo: "cmuxlayer",
+        model: "codex",
+        cli: "codex",
+        prompt,
+        cwd: process.cwd(),
+      });
+      const spawnedRecord = engine
+        .listAgents()
+        .find((agent) => agent.surface_id === "surface:new");
+      expect(spawnedRecord?.launch_cwd).toBeTruthy();
+      writeFileSync(
+        sessionPath,
+        [
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id: sessionId, cwd: spawnedRecord?.launch_cwd },
+          }),
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: prompt }],
+            },
+          }),
+        ].join("\n"),
+      );
+      utimesSync(sessionPath, rolloutMtime, rolloutMtime);
+      await engine.captureBootSessionId(spawnedRecord!.agent_id);
+      const finalAgentId = "cmuxlayerCodex-019fec96";
+      stateMgr.transition(finalAgentId, "ready");
+      const working = stateMgr.transition(finalAgentId, "working");
+      registry.set(finalAgentId, working);
+      liveSurfaces.push({
+        ...makeSurface("surface:witness"),
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      });
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => {
+          liveSurfaces = liveSurfaces.filter(
+            (candidate) => candidate.ref !== surface,
+          );
+        },
+      );
+
+      await engine.stopAgent(finalAgentId);
+
+      expect(engine.resolveAgentRoute(finalAgentId)).toMatchObject({
+        state: "done",
+        session_id: sessionId,
+        resumable: true,
+        resume_command:
+          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019fec96-588d-7000-8000-000000000000",
+      });
+      vi.unstubAllEnvs();
     });
   });
 
@@ -11128,6 +11476,60 @@ describe("buildResumeCommand", () => {
     expect(buildResumeCommand("kiro", "brainlayer", sessionId)).toBe(
       "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
+  });
+
+  it("uses a clean launcher field when the legacy repo field contains a tab title", () => {
+    expect(
+      buildResumeCommand(
+        "claude",
+        "brainlayer-lead PR647-red-baseline",
+        sessionId,
+        "brainlayerClaude",
+      ),
+    ).toBe(
+      "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+  });
+
+  it("falls back to the clean repo launcher when launcher_name is decorated", () => {
+    expect(
+      buildResumeCommand(
+        "codex",
+        "brainlayer",
+        sessionId,
+        "brainlayerCodex [surface:606]",
+      ),
+    ).toBe(
+      "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+  });
+
+  it("honors a clean registered launcher alias", () => {
+    expect(
+      buildResumeCommand("codex", "matchmat", sessionId, "mm-worker"),
+    ).toBe(
+      "mm-worker --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+    );
+  });
+
+  it("rejects session prefixes instead of emitting an unusable resume command", () => {
+    expect(() =>
+      buildResumeCommand("claude", "brainlayer", "019d9aa5"),
+    ).toThrow(/full session UUID/i);
+  });
+
+  it("does not advertise resumable when no clean launcher can be derived", () => {
+    const payload = toAgentStatePayload(
+      makeRecord({
+        cli: "claude",
+        repo: "brainlayer-lead PR647-red-baseline",
+        launcher_name: null,
+        cli_session_id: sessionId,
+      }),
+    );
+
+    expect(payload.resumable).toBe(false);
+    expect(payload).not.toHaveProperty("resume_command");
   });
 });
 
