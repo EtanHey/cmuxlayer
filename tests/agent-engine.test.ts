@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const spawnMock = vi.hoisted(() => vi.fn());
+const execFileMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   spawn: spawnMock,
+  execFile: execFileMock,
 }));
 
 import {
@@ -18,6 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   AgentEngine,
+  RetryableDeliveryError,
   assertLauncherAvailable,
   buildLaunchCommand,
   buildResumeCommand,
@@ -42,6 +45,7 @@ import {
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
 import { readInbox, writeHeartbeat } from "../src/inbox.js";
+import { readWatchRegistry } from "../src/watch-spec.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
 const DEAD_CODEX_SHELL_SCREEN = (
@@ -295,6 +299,62 @@ describe("AgentEngine", () => {
       nowSpy.mockRestore();
     }
   }
+
+  it("agent watches judge the live screen instead of registry state", async () => {
+    const watchRegistryPath = join(TEST_DIR, "watch-specs.json");
+    const surfaceUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const worker = makeRecord({
+      agent_id: "worker-a",
+      surface_id: "surface:watch-worker",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:watch",
+      state: "done",
+    });
+    stateMgr.writeState(worker);
+    liveSurfaces.push({
+      ...makeSurface(worker.surface_id),
+      id: surfaceUuid,
+      workspace_ref: worker.workspace_id,
+    });
+    const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+    await registry.reconstitute();
+    const notify = vi.fn().mockResolvedValue(true);
+    let now = 1_000;
+    const watchEngine = new AgentEngine(stateMgr, registry, mockClient, {
+      watchRegistryPath,
+      watchRegistryNow: () => now,
+      watchNotify: notify,
+      sessionIdentityResolver: () => null,
+      fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+    });
+    (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+      surface: worker.surface_id,
+      text: ["OpenAI Codex", "Model: gpt-5.4", "", "›"].join("\n"),
+      lines: 30,
+      scrollback_used: false,
+    });
+
+    const armed = await watchEngine.armWatch({
+      owner: "lead-a",
+      target: worker.agent_id,
+      predicate: "done",
+      deadline: 10_000,
+    });
+    now = 2_000;
+    await watchEngine.runSweep();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+    ).toMatchObject({
+      watch_id: armed.watch_id,
+      state: "armed",
+      observed_value: "idle",
+      liveness_source: `screen:${surfaceUuid}`,
+      liveness: { value: true, source: "screen" },
+    });
+    watchEngine.dispose();
+  });
 
   describe("spawnAgent", () => {
     it("rate-limits spawn storms before creating extra surfaces", async () => {
@@ -11123,6 +11183,211 @@ Session ID: ${sessionId}`,
         /not in an interactive state/,
       );
     });
+
+    it("keeps a durably accepted queued receipt when telemetry logging fails", () => {
+      vi.spyOn(stateMgr.getEventLog(), "appendDelivery").mockImplementation(
+        () => {
+          throw new Error("telemetry unavailable");
+        },
+      );
+
+      const receipt = engine.queueDelivery({
+        agent_id: "queued-telemetry-failure",
+        text: "persist me",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      expect(receipt).toMatchObject({
+        delivery_state: "queued",
+        terminal: false,
+      });
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        text: "persist me",
+        delivery_state: "queued",
+      });
+    });
+
+    it("makes a hung queued submission terminal-uncertain without replay", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "hung-queued-delivery",
+          state: "idle",
+          surface_id: "surface:42",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      (engine as any).deliverySubmitTimeoutMs = 5;
+      engine.setDeliverySubmitter(
+        async () => await new Promise<never>(() => {}),
+      );
+      const receipt = engine.queueDelivery({
+        agent_id: "hung-queued-delivery",
+        text: "submit once",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        error: expect.stringMatching(/timed out|uncertain/i),
+      });
+    });
+
+    it("keeps an accepted receipt queued across a transient posture mismatch and retries after capped backoff", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "posture-race-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        const submitter = vi
+          .fn()
+          .mockRejectedValueOnce(
+            new RetryableDeliveryError(
+              'Agent "posture-race-delivery" is not in an interactive state (current: working)',
+            ),
+          )
+          .mockResolvedValueOnce({ retry_count: 0, submit_verified: true });
+        engine.setDeliverySubmitter(submitter);
+        const receipt = engine.queueDelivery({
+          agent_id: "posture-race-delivery",
+          text: "accepted means eventual",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        await engine.drainDeliveryQueue();
+
+        const deferred = engine.getDeliveryReceipt(receipt.delivery_id);
+        expect(deferred).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          retry_count: 1,
+          submission_started_at: null,
+          error: expect.stringMatching(/not in an interactive state/),
+        });
+        expect(deferred?.next_attempt_at).toBe("2026-08-11T18:00:00.250Z");
+        await engine.drainDeliveryQueue();
+        expect(submitter).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(new Date("2026-08-11T18:00:00.250Z"));
+        await engine.drainDeliveryQueue();
+
+        expect(submitter).toHaveBeenCalledTimes(2);
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "submitted",
+          terminal: true,
+          retry_count: 1,
+          submit_verified: true,
+          error: null,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("terminal-fails a queued receipt only when its target is gone", async () => {
+      const submitter = vi.fn();
+      engine.setDeliverySubmitter(submitter);
+      const receipt = engine.queueDelivery({
+        agent_id: "gone-queued-delivery",
+        text: "cannot arrive",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(submitter).not.toHaveBeenCalled();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "failed",
+        terminal: true,
+        error: expect.stringMatching(/target.*gone|no longer exists/i),
+      });
+    });
+
+    it("caps repeated retryable delivery backoff at thirty seconds", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T18:00:00.000Z"));
+      try {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "bounded-backoff-delivery",
+            state: "idle",
+            surface_id: "surface:42",
+          }),
+        );
+        liveSurfaces = [makeSurface("surface:42")];
+        await engine.getRegistry().reconstitute();
+        engine.setDeliverySubmitter(async () => {
+          throw new RetryableDeliveryError("route posture changed");
+        });
+        const receipt = engine.queueDelivery({
+          agent_id: "bounded-backoff-delivery",
+          text: "keep accepted",
+          press_enter: true,
+          source_event: "send_to",
+        });
+
+        let previousAttemptAt = Date.now();
+        for (let attempt = 1; attempt <= 8; attempt += 1) {
+          await engine.drainDeliveryQueue();
+          const deferred = engine.getDeliveryReceipt(receipt.delivery_id)!;
+          expect(deferred).toMatchObject({
+            delivery_state: "queued",
+            terminal: false,
+            retry_count: attempt,
+          });
+          const nextAttemptAt = Date.parse(deferred.next_attempt_at!);
+          const expectedDelay = Math.min(30_000, 250 * 2 ** (attempt - 1));
+          expect(nextAttemptAt - previousAttemptAt).toBe(expectedDelay);
+          vi.setSystemTime(nextAttemptAt);
+          previousAttemptAt = nextAttemptAt;
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not replay a queued receipt whose persisted submission had started", () => {
+      const receipt = engine.queueDelivery({
+        agent_id: "crashed-queued-delivery",
+        text: "maybe landed",
+        press_enter: true,
+        source_event: "send_to",
+      });
+      const receiptPath = join(TEST_DIR, "delivery-receipts.json");
+      const persisted = JSON.parse(readFileSync(receiptPath, "utf8"));
+      persisted[0].submission_started_at = "2026-08-11T18:00:00.000Z";
+      writeFileSync(receiptPath, `${JSON.stringify(persisted)}\n`, "utf8");
+
+      const restartedState = new StateManager(TEST_DIR);
+      const restarted = new AgentEngine(
+        restartedState,
+        new AgentRegistry(restartedState, async () => []),
+        mockClient,
+      );
+      try {
+        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "failed",
+          terminal: true,
+          error: expect.stringMatching(/uncertain|restart/i),
+        });
+      } finally {
+        restarted.dispose();
+      }
+    });
   });
 });
 
@@ -11143,6 +11408,12 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("passes an explicit Codex model with the launcher override env", () => {
+    expect(
+      buildLaunchCommand("codex", "brainlayer", "gpt-5.6-luna"),
+    ).toBe("REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.6-luna");
+  });
+
   it("passes an explicit Codex effort to the repoGolem launcher", () => {
     expect(
       buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
@@ -11151,13 +11422,15 @@ describe("buildLaunchCommand", () => {
     ).toBe("brainlayerCodex -s -E medium");
   });
 
-  it("adds safe model flags for recognized launcher model aliases", () => {
+  it("adds safe model flags for launcher-owned Codex model names", () => {
     expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
       "brainlayerClaude -s -S",
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
-    ).toBe("brainlayerCodex -s");
+    ).toBe(
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
+    );
     expect(
       buildLaunchCommand(
         "codex",
@@ -11166,7 +11439,9 @@ describe("buildLaunchCommand", () => {
         undefined,
         { allowModelOverride: true },
       ),
-    ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
+    ).toBe(
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
+    );
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
     );
@@ -11186,15 +11461,15 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("omits unsafe or unrecognized model values instead of passing them raw", () => {
+  it("shell-quotes arbitrary launcher-owned Codex model values", () => {
     expect(
       buildLaunchCommand("claude", "brainlayer", "Opus 4.8 (1M context)"),
     ).toBe("brainlayerClaude -s");
     expect(buildLaunchCommand("codex", "brainlayer", "gpt-5.5 xhigh")).toBe(
-      "brainlayerCodex -s",
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m 'gpt-5.5 xhigh'",
     );
     expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
-      "brainlayerCodex -s",
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m 'codex;rm-rf'",
     );
     expect(buildLaunchCommand("gemini", "golems", "constructor")).toBe(
       "golemsGemini -s",

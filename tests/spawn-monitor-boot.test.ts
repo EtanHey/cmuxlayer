@@ -16,7 +16,20 @@ import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 const STATE_DIR = join(tmpdir(), "cmuxlayer-spawn-monitor-boot-state");
 
 function makeExec(): ExecFn {
+  let submitted = false;
+  let bootTextSent = false;
+  let activeCli: "claude" | "codex" = "claude";
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("send-key") && args.includes("return")) {
+      submitted = bootTextSent;
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("send")) {
+      const text = String(args[args.length - 1] ?? "");
+      if (/Codex/.test(text)) activeCli = "codex";
+      if (/Claude/.test(text)) activeCli = "claude";
+      if (text.includes("cmuxlayer mailbox contract")) bootTextSent = true;
+    }
     if (args.includes("list-workspaces")) {
       return {
         stdout: JSON.stringify({
@@ -75,7 +88,13 @@ function makeExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: "Claude Code\n>",
+          text: submitted
+            ? activeCli === "codex"
+              ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
+              : "Claude Code\n✻ Working"
+            : activeCli === "codex"
+              ? "OpenAI Codex\ncodex> "
+              : "Claude Code\n>",
           lines: 20,
           scrollback_used: false,
         }),
@@ -103,6 +122,16 @@ function sendCalls(exec: ExecFn): string[][] {
   return (exec as ReturnType<typeof vi.fn>).mock.calls
     .filter(([, args]: [string, string[]]) => args.includes("send"))
     .map(([, args]: [string, string[]]) => args);
+}
+
+function deliveredInput(exec: ExecFn): string {
+  return (exec as ReturnType<typeof vi.fn>).mock.calls
+    .filter(
+      ([, args]: [string, string[]]) =>
+        args.includes("send") || args.includes("set-buffer"),
+    )
+    .flatMap(([, args]: [string, string[]]) => args)
+    .join("\n");
 }
 
 describe("spawn monitor boot", () => {
@@ -152,6 +181,9 @@ describe("spawn monitor boot", () => {
       heartbeat_written: true,
       heartbeat_source: "server_boot",
       monitor_command: expect.stringContaining(parsed.agent_id),
+      cursor_path: expect.stringContaining(parsed.agent_id),
+      cursor_update_command: expect.stringContaining("inbox-cursor"),
+      cursor_update_env: "CMUX_INBOX_MSG_ID",
     });
     expect(parsed.monitor_boot.monitor_command).toContain("tail -n0 -F");
     expect(existsSync(inboxPath(parsed.agent_id, { baseDir: inboxDir }))).toBe(
@@ -162,7 +194,7 @@ describe("spawn monitor boot", () => {
     );
   });
 
-  it("does not monitor-boot worker spawns", async () => {
+  it("injects the concrete mailbox and cursor contract into worker boots", async () => {
     const spawn = server._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
@@ -172,13 +204,23 @@ describe("spawn monitor boot", () => {
         cli: "codex",
         role: "worker",
         workspace: "workspace:1",
+        boot_prompt_timeout_ms: 500,
+        verbose: true,
       },
       {} as any,
     );
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    expect(parsed.monitor_boot).toBeUndefined();
+    expect(parsed.monitor_boot).toMatchObject({
+      status: "bootstrapped",
+      cursor_update_env: "CMUX_INBOX_MSG_ID",
+    });
+    const deliveredText = deliveredInput(exec);
+    expect(deliveredText).toContain(parsed.agent_id);
+    expect(deliveredText).toContain(parsed.monitor_boot.monitor_command);
+    expect(deliveredText).toContain(parsed.monitor_boot.cursor_update_command);
+    expect(deliveredText).toContain("CMUX_INBOX_MSG_ID");
     expect(monitorAlive(parsed.agent_id, 1_000, { baseDir: inboxDir })).toBe(
       false,
     );
@@ -221,6 +263,9 @@ describe("spawn monitor boot", () => {
         heartbeat_written: false,
         heartbeat_source: "server_boot",
         monitor_command: expect.stringContaining(parsed.agent_id),
+        cursor_path: expect.stringContaining(parsed.agent_id),
+        cursor_update_command: expect.stringContaining("inbox-cursor"),
+        cursor_update_env: "CMUX_INBOX_MSG_ID",
         error: expect.stringContaining("ENOTDIR"),
       });
     } finally {

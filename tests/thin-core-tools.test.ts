@@ -7,6 +7,7 @@ const CORE_TOOL_NAMES = [
   "spawn_agent",
   "send_to",
   "wait_for",
+  "arm_watch",
   "read_screen",
   "my_agents",
   "list_agents",
@@ -105,7 +106,7 @@ function parseResult(result: {
 }
 
 describe("thin-core tool palette", () => {
-  it("lists exactly 12 signed core tools, defers interact, and deletes reorder_surface", () => {
+  it("lists exactly 13 signed core tools, defers interact, and deletes reorder_surface", () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,
@@ -116,7 +117,7 @@ describe("thin-core tool palette", () => {
       { _meta?: Record<string, unknown>; handler?: unknown }
     >;
 
-    expect(Object.keys(tools)).toHaveLength(42);
+    expect(Object.keys(tools)).toHaveLength(43);
     expect(tools.reorder_surface).toBeUndefined();
     const immediate = Object.entries(tools)
       .filter(([, tool]) => tool._meta?.defer_loading !== true)

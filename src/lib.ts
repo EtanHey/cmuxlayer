@@ -9,6 +9,12 @@ export {
   queryMonitorRegistryForGates,
   readMonitorRegistry,
 } from "./monitor-registry.js";
+export {
+  armWatch,
+  defaultWatchRegistryPath,
+  readWatchRegistry,
+  sweepWatches,
+} from "./watch-spec.js";
 export type {
   ParsedScreenAgentType,
   ParsedScreenResult,
@@ -25,3 +31,11 @@ export type {
   MonitorRegistryRecord,
   MonitorState,
 } from "./monitor-registry.js";
+export type {
+  WatchNotification,
+  WatchObserved,
+  WatchRecord,
+  WatchRegistryFile,
+  WatchSpec,
+  WatchState,
+} from "./watch-spec.js";

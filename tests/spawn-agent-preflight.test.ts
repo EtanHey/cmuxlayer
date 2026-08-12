@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
@@ -97,5 +97,38 @@ describe("spawn_agent launcher preflight", () => {
     expect(stateMgr.listStates()).toHaveLength(0);
     expect(engine.listAgents()).toHaveLength(0);
     expect(mockClient.newSplit).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown Codex model from Codex's bundled model list before creating anything", async () => {
+    const registryPath = join(TEST_DIR, "launchers.zsh");
+    writeFileSync(
+      registryPath,
+      'repoGolem cmuxlayer "/Users/etanheyman/Gits/cmuxlayer"\n',
+    );
+    vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+    const defaultEngine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => []), mockClient, {
+      codexModelListRunner: async () => ({
+        stdout: JSON.stringify({ models: [{ slug: "gpt-5.6-luna" }] }),
+        stderr: "",
+      }),
+    });
+
+    try {
+      await expect(
+        defaultEngine.spawnAgent({
+          repo: "cmuxlayer",
+          model: "gpt-9.9-totally-not-a-model",
+          cli: "codex",
+          prompt: "",
+        }),
+      ).rejects.toThrow(
+        /Unsupported Codex model "gpt-9\.9-totally-not-a-model".*gpt-5\.6-luna.*No agent was spawned/s,
+      );
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(stateMgr.listStates()).toHaveLength(0);
+    } finally {
+      defaultEngine.dispose();
+      vi.unstubAllEnvs();
+    }
   });
 });

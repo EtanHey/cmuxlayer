@@ -30,6 +30,7 @@ import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   reconcileMonitorRegistry,
@@ -99,11 +100,13 @@ function makeLifecycleExec(opts?: {
   let surfaceLive = true;
   let promptPending = false;
   let activeCli: "claude" | "codex" | "cursor" = "claude";
+  let createdSurfaceCount = 0;
+  let currentSurface = "surface:new";
   const listedSurface = () =>
     surfaceLive
       ? {
           paneRef: "pane:1",
-          surfaceRef: "surface:new",
+          surfaceRef: currentSurface,
           title: "agent-pane",
         }
       : {
@@ -123,6 +126,13 @@ function makeLifecycleExec(opts?: {
   return vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("new-split") || args.includes("new-surface")) {
       surfaceLive = true;
+      createdSurfaceCount += 1;
+      currentSurface =
+        createdSurfaceCount === 1
+          ? "surface:new"
+          : `surface:new-${createdSurfaceCount}`;
+      readyText = "$ ";
+      promptPending = false;
     }
     if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
       surfaceLive = false;
@@ -135,7 +145,7 @@ function makeLifecycleExec(opts?: {
       }
       return { stdout: "{}", stderr: "" };
     }
-    if (args.includes("send")) {
+    if (args.includes("send") || args.includes("set-buffer")) {
       const text = String(args[args.length - 1] ?? "");
       if (text.includes("Codex")) {
         activeCli = "codex";
@@ -151,7 +161,9 @@ function makeLifecycleExec(opts?: {
       }
       if (
         text.trim() &&
-        !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
+        !/^\s*(?:[A-Z_]+=\S+\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
+          text,
+        )
       ) {
         promptPending = true;
       }
@@ -220,7 +232,7 @@ function makeLifecycleExec(opts?: {
     if (args.includes("read-screen")) {
       return {
         stdout: JSON.stringify({
-          surface: "surface:new",
+          surface: currentSurface,
           text: opts?.shellNeverReady ? "terminal initializing" : readyText,
           lines: 20,
           scrollback_used: false,
@@ -236,7 +248,7 @@ function makeLifecycleExec(opts?: {
     return {
       stdout: JSON.stringify({
         workspace,
-        surface: "surface:new",
+        surface: currentSurface,
         ...(opts?.surfaceUuid ? { surface_id: opts.surfaceUuid } : {}),
         pane: "pane:1",
         title: "",
@@ -945,7 +957,13 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      {
+        repo: "cmuxlayer",
+        model: "sonnet",
+        cli: "claude",
+        role: "implementor",
+        authority: "lead",
+      },
       {} as any,
     );
     const parsed =
@@ -1024,8 +1042,8 @@ describe("lean spawn tool responses", () => {
       state: "booting",
       model: "codex",
       role: "worker",
-      boot_prompt_delivered: false,
-      boot_prompt_submit_verified: null,
+      boot_prompt_delivered: true,
+      boot_prompt_submit_verified: true,
     });
     expect(parsed).not.toHaveProperty("health");
     expect(parsed).not.toHaveProperty("model_policy");
@@ -1050,20 +1068,42 @@ describe("lean spawn tool responses", () => {
     );
   });
 
-  it("spawn_agent surfaces a real model coercion in lean mode", async () => {
+  it("injects the agent-owned inbox cursor helper into orchestrator boot metadata", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex" },
+      {
+        repo: "cmuxlayer",
+        cli: "claude",
+        placement: "orchestrator",
+        verbose: true,
+      },
+      {} as any,
+    );
+
+    expect(result.structuredContent.monitor_boot).toMatchObject({
+      cursor_path: expect.stringMatching(/inbox\.cursor$/),
+      cursor_update_command: expect.stringContaining("inbox-cursor"),
+      cursor_update_env: "CMUX_INBOX_MSG_ID",
+    });
+  });
+
+  it("spawn_agent surfaces Codex model pass-through in lean mode", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", verbose: true },
       {} as any,
     );
 
     expect(result.structuredContent.model_policy).toMatchObject({
-      coerced: true,
-      effective_model: "codex",
+      coerced: false,
+      effective_model: "gpt-5.5",
+      launcher_model: "gpt-5.5",
+      override_allowed: true,
     });
-    expect(result.structuredContent.warnings).not.toHaveLength(0);
   });
 
   it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
@@ -1818,11 +1858,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total registered tool count is 42 after deleting reorder_surface", () => {
+  it("total registered tool count is 43 after adding arm_watch", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(42);
+    expect(Object.keys(registeredTools)).toHaveLength(43);
   });
 });
 
@@ -2302,7 +2342,7 @@ describe("agent lifecycle tool handlers", () => {
       sendKey: vi.fn().mockResolvedValue(undefined),
       readScreen: vi.fn().mockResolvedValue({
         surface: "surface:inherit",
-        text: "Codex\n>",
+        text: "OpenAI Codex\ncodex> ",
         lines: 1,
         scrollback_used: false,
       }),
@@ -2410,7 +2450,7 @@ describe("agent lifecycle tool handlers", () => {
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
           surface: "surface:caller",
-          text: "Codex\n>",
+          text: "OpenAI Codex\ncodex> ",
           lines: 1,
           scrollback_used: false,
         }),
@@ -3005,15 +3045,13 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:new"]),
     );
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "fix prompt delivery",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("fix prompt delivery"),
+      ),
+    ).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -3108,22 +3146,19 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
 
     expect(parsed.ok).toBe(true);
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("UUID-bound boot prompt"),
+      ),
+    ).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
-        "send",
+        "paste-buffer",
         "--surface",
         "surface:moved",
-        "UUID-bound boot prompt",
-      ]),
-    );
-    expect(mockExec).not.toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "UUID-bound boot prompt",
       ]),
     );
   });
@@ -3200,15 +3235,18 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.workspace_id).toBe("workspace:1");
     expect(parsed.actual_workspace_id).toBeUndefined();
 
-    const promptSendCall = mockExec.mock.calls.find(([, args]) => {
+    const promptBufferCall = mockExec.mock.calls.find(([, args]) => {
       const argv = args as string[];
-      return argv.includes("send") && argv.includes(prompt);
+      return (
+        argv.includes("set-buffer") &&
+        String(argv.at(-1) ?? "").includes(prompt)
+      );
     });
-    expect(promptSendCall).toBeDefined();
-    const argv = promptSendCall![1] as string[];
-    const workspaceIndex = argv.indexOf("--workspace");
-    expect(workspaceIndex).toBeGreaterThanOrEqual(0);
-    expect(argv[workspaceIndex + 1]).toBe("workspace:1");
+    expect(promptBufferCall).toBeDefined();
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
+    );
   });
 
   it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
@@ -3229,15 +3267,19 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    const promptSendCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
+    const promptBufferCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
       ([, args]) => {
         const argv = args as string[];
-        return argv.includes("send") && argv.includes(prompt);
+        return (
+          argv.includes("set-buffer") &&
+          String(argv.at(-1) ?? "").includes(prompt)
+        );
       },
     );
-    expect(promptSendCall).toBeDefined();
-    expect(promptSendCall![1]).toEqual(
-      expect.arrayContaining(["--workspace", "workspace:1"]),
+    expect(promptBufferCall).toBeDefined();
+    expect(exec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
     );
   });
 
@@ -3312,7 +3354,8 @@ describe("agent lifecycle tool handlers", () => {
         (chunk) => Buffer.byteLength(chunk, "utf-8") <= 16_000,
       ),
     ).toBe(true);
-    expect(chunks.join("")).toBe(prompt);
+    expect(chunks.join("")).toContain(prompt);
+    expect(chunks.join("")).toContain("cmuxlayer mailbox contract");
     expect(chunks.join("")).toContain("\n\n");
   });
 
@@ -3324,8 +3367,8 @@ describe("agent lifecycle tool handlers", () => {
     mockExec = vi.fn().mockImplementation(async (cmd, args) => {
       if (
         !renamed &&
-        args.includes("send") &&
-        String(args.at(-1) ?? "") === "probe renamed state"
+        args.includes("set-buffer") &&
+        String(args.at(-1) ?? "").includes("probe renamed state")
       ) {
         renamed = true;
         finalAgentId = renameOnlyAgentStateToSession(sessionId);
@@ -4057,7 +4100,7 @@ describe("agent lifecycle tool handlers", () => {
         sendKey: vi.fn().mockResolvedValue(undefined),
         readScreen: vi.fn().mockResolvedValue({
           surface: "surface:caller-worktree",
-          text: "Codex\n>",
+          text: "OpenAI Codex\ncodex> ",
           lines: 1,
           scrollback_used: false,
         }),
@@ -4267,15 +4310,13 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--surface",
-        "surface:new",
-        "file prompt body",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("file prompt body"),
+      ),
+    ).toBe(true);
   });
 
   it("read_agent_output scans bounded tail lines by default", async () => {
@@ -4380,9 +4421,9 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
-      if (args.includes("send")) {
+      if (args.includes("send") || args.includes("set-buffer")) {
         lastSentText = String(args.at(-1) ?? "");
-        if (lastSentText === "file prompt body") {
+        if (lastSentText.includes("file prompt body")) {
           promptDelivered = true;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -4398,7 +4439,7 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text:
-              lastSentText === "file prompt body"
+              lastSentText.includes("file prompt body")
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
                 : lastSentText === ""
                 ? "$ "
@@ -4460,17 +4501,13 @@ describe("agent lifecycle tool handlers", () => {
         "surface:new",
       ]),
     );
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining([
-        "send",
-        "--workspace",
-        "workspace:voice",
-        "--surface",
-        "surface:new",
-        "file prompt body",
-      ]),
-    );
+    expect(
+      mockExec.mock.calls.some(
+        ([, args]) =>
+          args.includes("set-buffer") &&
+          String(args.at(-1) ?? "").includes("file prompt body"),
+      ),
+    ).toBe(true);
   }, 10_000);
 
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
@@ -4532,9 +4569,9 @@ describe("agent lifecycle tool handlers", () => {
           stderr: "",
         };
       }
-      if (args.includes("send")) {
+      if (args.includes("send") || args.includes("set-buffer")) {
         lastSentText = String(args.at(-1) ?? "");
-        if (lastSentText === "file prompt body") {
+        if (lastSentText.includes("file prompt body")) {
           promptDelivered = true;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -4550,7 +4587,7 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text:
-              lastSentText === "file prompt body"
+              lastSentText.includes("file prompt body")
                 ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
                 : lastSentText === ""
                   ? "$ "
@@ -5359,7 +5396,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
-    const result = await list.handler({}, {} as any);
+    const result = await list.handler({ state: "working" }, {} as any);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
@@ -6175,7 +6212,7 @@ describe("agent lifecycle tool handlers", () => {
       {} as any,
     );
 
-    const result = await list.handler({ state: "working" }, {} as any);
+    const result = await list.handler({}, {} as any);
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
@@ -7400,6 +7437,48 @@ codex>
     expect(engine.getAgentState(agentId)?.state).toBe("idle");
   });
 
+  it("send_to returns a keyed terminal failed receipt when delivery fails", async () => {
+    let failReturn = false;
+    const base = makeLifecycleExec({
+      surfaceUuid: "11111111-2222-4333-8444-555555555555",
+    });
+    const exec: ExecFn = vi.fn().mockImplementation(async (cmd, args) => {
+      if (failReturn && args.includes("send-key") && args.includes("return")) {
+        throw new Error("Return delivery failed");
+      }
+      return base(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const sendTo = (server as any)._registeredTools["send_to"];
+    const spawnResult = await spawn.handler(
+      { repo: "test", model: "sonnet", cli: "claude" },
+      {} as any,
+    );
+    const agentId = parseToolResult(spawnResult).agent_id as string;
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const idle = engine.stateMgr.resetState(agentId, "idle", {});
+    engine.getRegistry().set(agentId, idle);
+    failReturn = true;
+
+    const result = await sendTo.handler(
+      { agent_id: agentId, text: "continue", press_enter: true },
+      {} as any,
+    );
+    const failed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(failed).toMatchObject({
+      delivery_id: expect.any(String),
+      delivery_state: "failed",
+      terminal: true,
+    });
+    expect(engine.getDeliveryReceipt(failed.delivery_id)).toMatchObject({
+      delivery_state: "failed",
+      terminal: true,
+    });
+  });
+
   it.each(["send_to", "send_to_agent"] as const)(
     "%s refuses routed delivery when the agent pane has fallen back to a bare shell",
     async (toolName) => {
@@ -8529,7 +8608,7 @@ codex>
     expect(routeClient.client.send).not.toHaveBeenCalled();
   });
 
-  it("send_to without allow_busy still rejects working agents (backwards compat)", async () => {
+  it("send_to queues a busy composer and drains to a terminal submitted event", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendTo = (server as any)._registeredTools["send_to"];
@@ -8549,15 +8628,67 @@ codex>
 
     const engine = (server as any)._registeredTools["interact"]._engine;
     const registry = engine.getRegistry();
-    const agent = registry.get(agentId);
-    registry.set(agentId, { ...agent, state: "working" });
+    const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
+    registry.set(agentId, working);
+    mockExec.mockClear();
 
     const result = await sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/not in an interactive state/);
+    const queued = parseToolResult(result);
+    expect(result.isError).toBeFalsy();
+    expect(queued).toMatchObject({
+      agent_id: agentId,
+      delivery_id: expect.any(String),
+      delivery_state: "queued",
+      terminal: false,
+    });
+    expect(
+      mockExec.mock.calls.filter(([, args]) => args.includes("send")),
+    ).toHaveLength(0);
+
+    const restartedState = new StateManager(TEST_DIR);
+    const restartedRegistry = new AgentRegistry(restartedState, async () => []);
+    const restartedEngine = new AgentEngine(
+      restartedState,
+      restartedRegistry,
+      {} as any,
+    );
+    expect(restartedEngine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_id: queued.delivery_id,
+      text: "hello",
+      delivery_state: "queued",
+      terminal: false,
+    });
+
+    await engine.drainDeliveryQueue();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+    });
+
+    const ready = engine.stateMgr.updateRecord(agentId, { state: "idle" });
+    registry.set(agentId, ready);
+    await new Promise((resolve) => setTimeout(resolve, 275));
+    await engine.drainDeliveryQueue();
+
+    const receipt = engine.getDeliveryReceipt(queued.delivery_id);
+    expect(receipt).toMatchObject({
+      delivery_id: queued.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+    });
+    expect(
+      engine.stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter((entry: any) => entry.delivery_id === queued.delivery_id)
+        .at(-1),
+    ).toMatchObject({
+      delivery_state: "submitted",
+      delivery_id: queued.delivery_id,
+    });
   });
 
   it("send_to_agent with allow_busy=true delivers to agents in working state", async () => {
@@ -8704,6 +8835,53 @@ codex>
     expect(
       (parsed.health as { issue_codes: string[] }).issue_codes,
     ).not.toContain("registry_screen_disagreement");
+  });
+
+  it("send_to preserves a submitted receipt when post-delivery evidence throws", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:evidence-error",
+        id: "11111111-2222-4333-8444-555555555555",
+        workspace_ref: "workspace:evidence-error",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "receipt-survives-evidence-error",
+      surface_id: "surface:evidence-error",
+      surface_uuid: "11111111-2222-4333-8444-555555555555",
+      workspace_id: "workspace:evidence-error",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const engine = registeredTestTool(server, "interact")._engine;
+    const originalSend = routeClient.client.send.getMockImplementation();
+    routeClient.client.send.mockImplementation(
+      async (surface: string, text: string) => {
+        await originalSend?.(surface, text);
+        vi.spyOn(engine, "getAgentState").mockImplementation(() => {
+          throw new Error("post-delivery topology unavailable");
+        });
+      },
+    );
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        agent_id: record.agent_id,
+        text: "delivered before evidence failed",
+        press_enter: false,
+      },
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result)).toMatchObject({
+      delivery_id: expect.any(String),
+      delivery_state: "submitted",
+      terminal: true,
+      error: expect.stringContaining("post-delivery topology unavailable"),
+    });
   });
 
   it("send_to omits evidence when a UUID-less row becomes foreign after delivery", async () => {

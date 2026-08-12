@@ -61,6 +61,7 @@ function makeExec(
   primarySurfaceUuid?: string,
 ): ExecFn {
   let promptPending = false;
+  let pastePending = false;
   let currentScreenText = screenText;
   const surfaces: TestSurface[] = [
     {
@@ -157,11 +158,21 @@ function makeExec(
       }
       return { stdout: "{}", stderr: "" };
     }
+    if (args.includes("set-buffer")) {
+      pastePending = String(args.at(-1) ?? "").trim().length > 0;
+      return { stdout: "{}", stderr: "" };
+    }
+    if (args.includes("paste-buffer")) {
+      if (pastePending) promptPending = true;
+      pastePending = false;
+      return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send")) {
       const text = String(args.at(-1) ?? "");
       if (
         text.trim() &&
-        !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text)
+        (text.includes("cmuxlayer mailbox contract") ||
+          !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
       }

@@ -3,9 +3,20 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
@@ -49,10 +60,20 @@ import {
   type AgentState,
   type CliType,
   type CloseForensicsEvent,
+  type DeliveryEventType,
   type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
+import {
+  armWatch as armDeclaredWatch,
+  readWatchRegistry,
+  sweepWatches,
+  type WatchAgentObservation,
+  type WatchNotify,
+  type WatchRecord,
+  type WatchSpec,
+} from "./watch-spec.js";
 import { cleanScreenText, parseScreen } from "./screen-parser.js";
 import {
   canonicalRoleColumn,
@@ -97,6 +118,7 @@ import {
   type HarnessSessionWithMeta,
 } from "./harness-session.js";
 import {
+  MODEL_OVERRIDE_ENV,
   resolveLaunchModelFlag,
   resolveSpawnEffort,
   resolveSpawnModelPolicy,
@@ -154,6 +176,39 @@ import {
 } from "./fleet-sidebar.js";
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
+
+export type AgentDeliveryState = "submitted" | "queued" | "failed";
+
+export interface AgentDeliveryReceipt {
+  delivery_id: string;
+  agent_id: string;
+  text: string;
+  press_enter: boolean;
+  source_event: DeliveryEventType;
+  delivery_state: AgentDeliveryState;
+  terminal: boolean;
+  created_at: string;
+  resolved_at: string | null;
+  retry_count: number;
+  submit_verified: boolean | null;
+  error: string | null;
+  /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
+  submission_started_at?: string | null;
+  /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
+  next_attempt_at?: string | null;
+}
+
+/** A known pre-mutation delivery rejection that is safe to retry. */
+export class RetryableDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableDeliveryError";
+  }
+}
+
+type DeliverySubmitter = (
+  receipt: AgentDeliveryReceipt,
+) => Promise<{ retry_count: number; submit_verified: boolean | null }>;
 
 export interface SpawnAgentParams {
   repo: string;
@@ -303,6 +358,77 @@ export interface SpawnPreflightResult {
   repoRoot?: string;
 }
 
+export type CodexModelListRunner = (
+  args: string[],
+) => Promise<{ stdout: string; stderr?: string }>;
+
+const execFileAsync = promisify(execFile);
+
+async function defaultCodexModelListRunner(
+  args: string[],
+): Promise<{ stdout: string; stderr?: string }> {
+  return execFileAsync("codex", args, {
+    timeout: 10_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+function parseCodexModelSlugs(stdout: string): string[] {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(
+      `Codex model discovery returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }. No agent was spawned.`,
+    );
+  }
+  const models =
+    payload && typeof payload === "object" && "models" in payload
+      ? (payload as { models?: unknown }).models
+      : null;
+  const slugs = Array.isArray(models)
+    ? models.flatMap((model) => {
+        if (typeof model === "string") return [model];
+        if (model && typeof model === "object" && "slug" in model) {
+          const slug = (model as { slug?: unknown }).slug;
+          return typeof slug === "string" ? [slug] : [];
+        }
+        return [];
+      })
+    : [];
+  if (slugs.length === 0) {
+    throw new Error(
+      "Codex model discovery returned no models. No agent was spawned.",
+    );
+  }
+  return slugs;
+}
+
+async function validateCodexModel(
+  model: string | undefined,
+  runner: CodexModelListRunner,
+): Promise<void> {
+  if (!model?.trim() || model.trim().toLowerCase() === "codex") return;
+
+  let result: { stdout: string; stderr?: string };
+  try {
+    result = await runner(["debug", "models", "--bundled"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Unable to discover Codex models: ${message}. No agent was spawned.`,
+    );
+  }
+  const models = parseCodexModelSlugs(result.stdout);
+  if (!models.includes(model.trim())) {
+    throw new Error(
+      `Unsupported Codex model "${model.trim()}". Codex models: ${models.join(", ")}. No agent was spawned.`,
+    );
+  }
+}
+
 export interface CrashRecoveryMutationInput {
   phase: "placement" | "resume";
   agent_id: string;
@@ -314,6 +440,7 @@ export interface AgentEngineOptions {
   spawnPreflight?: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
+  codexModelListRunner?: CodexModelListRunner;
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
@@ -371,6 +498,10 @@ export interface AgentEngineOptions {
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
+  /** Persistent declared-watch registry. Disabled when omitted. */
+  watchRegistryPath?: string;
+  watchRegistryNow?: () => number;
+  watchNotify?: WatchNotify;
   /**
    * Best-effort close-forensics ingest, run before absence reconciliation so a
    * cmux UI `tab_close` can make the matching managed agent terminal before
@@ -388,6 +519,8 @@ export interface AgentEngineOptions {
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
   /** Render-only timeout for a working seat whose transcript/output stops advancing. */
   fleetWorkingNoProgressTimeoutMs?: number;
+  /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
+  deliverySubmitTimeoutMs?: number;
 }
 
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
@@ -767,6 +900,10 @@ function formatModelArg(modelFlag: string): string {
   return isSafeShellToken(modelFlag) ? modelFlag : shellQuote(modelFlag);
 }
 
+function modelMatchesDefaultForLaunch(cli: CliType, model?: string): boolean {
+  return cli === "codex" && model?.trim().toLowerCase() === "codex";
+}
+
 export function buildLaunchCommand(
   cli: CliType,
   repo: string,
@@ -785,7 +922,11 @@ export function buildLaunchCommand(
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveLaunchModelFlag(cli, model, {
-    allowModelOverride: opts?.allowModelOverride,
+    allowModelOverride:
+      opts?.allowModelOverride ??
+      (cli === "codex" &&
+        Boolean(model?.trim()) &&
+        !modelMatchesDefaultForLaunch(cli, model)),
   });
   const formattedModelFlag = modelFlag ? formatModelArg(modelFlag) : null;
   const launcherModelArgs = formattedModelFlag
@@ -798,7 +939,13 @@ export function buildLaunchCommand(
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
   const launcherEffortArg = opts?.effort ? ` -E ${opts.effort}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-  const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";
+  const codexModelOverride =
+    cli === "codex" && modelFlag !== null && modelFlag !== "codex";
+  const envParts = [
+    codexModelOverride ? `${MODEL_OVERRIDE_ENV}=1` : null,
+    opts?.envPrefix ?? null,
+  ].filter((part): part is string => Boolean(part));
+  const envPrefix = envParts.length > 0 ? `${envParts.join(" ")} ` : "";
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
@@ -855,6 +1002,7 @@ export class AgentEngine {
   private spawnPreflight: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
+  private codexModelListRunner: CodexModelListRunner;
   private spawnGuard: SpawnGuard;
   private postSpawnLivenessMs: number;
   private stopPostConditionTimeoutMs: number;
@@ -902,6 +1050,10 @@ export class AgentEngine {
   private monitorRegistryNow?: () => number;
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
+  private watchRegistryPath?: string;
+  private watchRegistryNow?: () => number;
+  private watchNotify: WatchNotify;
+  private watchSweepInFlight = false;
   /** Best-effort close-forensics ingest; null when disabled. */
   private closeForensicsRunner:
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
@@ -911,6 +1063,11 @@ export class AgentEngine {
   private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
+  private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
+  private deliveryReceiptsPath: string;
+  private deliverySubmitter: DeliverySubmitter | null = null;
+  private deliveryDrainInFlight = false;
+  private deliverySubmitTimeoutMs: number;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -918,6 +1075,15 @@ export class AgentEngine {
     opts?: AgentEngineOptions,
   ) {
     this.stateMgr = stateMgr;
+    this.deliveryReceiptsPath = join(
+      stateMgr.getBaseDir(),
+      "delivery-receipts.json",
+    );
+    this.deliverySubmitTimeoutMs = Math.max(
+      1,
+      opts?.deliverySubmitTimeoutMs ?? 30_000,
+    );
+    this.loadDeliveryReceipts();
     this.registry = registry;
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
@@ -950,6 +1116,9 @@ export class AgentEngine {
     this.monitorRegistryNow = opts?.monitorRegistryNow;
     this.monitorRegistryNotify =
       opts?.monitorRegistryNotify ?? (async () => {});
+    this.watchRegistryPath = opts?.watchRegistryPath;
+    this.watchRegistryNow = opts?.watchRegistryNow;
+    this.watchNotify = opts?.watchNotify ?? (async () => {});
     // Default DISABLED: bare construction (tests, libraries) must never read the
     // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
     // runner (see app-server-runtime / server.ts createServer). `null` keeps it
@@ -981,6 +1150,8 @@ export class AgentEngine {
         process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS,
         DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS,
       );
+    this.codexModelListRunner =
+      opts?.codexModelListRunner ?? defaultCodexModelListRunner;
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params): Promise<SpawnPreflightResult | void> => {
@@ -991,6 +1162,7 @@ export class AgentEngine {
           };
         }
         if (params.cli === "codex") {
+          await validateCodexModel(params.model, this.codexModelListRunner);
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Codex"),
             repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
@@ -4473,6 +4645,236 @@ export class AgentEngine {
 
   async runSweep(): Promise<void> {
     await this.runLifecycleMutation(() => this.runSweepOnce());
+    await this.drainDeliveryQueue();
+  }
+
+  setDeliverySubmitter(submitter: DeliverySubmitter | null): void {
+    this.deliverySubmitter = submitter;
+  }
+
+  private loadDeliveryReceipts(): void {
+    try {
+      const parsed: unknown = JSON.parse(
+        readFileSync(this.deliveryReceiptsPath, "utf8"),
+      );
+      if (!Array.isArray(parsed)) return;
+      let repairedUncertainReceipt = false;
+      for (const candidate of parsed) {
+        if (
+          candidate &&
+          typeof candidate === "object" &&
+          typeof (candidate as AgentDeliveryReceipt).delivery_id === "string"
+        ) {
+          const receipt: AgentDeliveryReceipt = {
+            submission_started_at: null,
+            next_attempt_at: null,
+            ...(candidate as AgentDeliveryReceipt),
+          };
+          if (
+            receipt.delivery_state === "queued" &&
+            receipt.submission_started_at
+          ) {
+            receipt.delivery_state = "failed";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.error =
+              "Delivery outcome uncertain after process restart; refusing automatic replay";
+            repairedUncertainReceipt = true;
+          }
+          this.deliveryReceipts.set(receipt.delivery_id, receipt);
+        }
+      }
+      if (repairedUncertainReceipt) {
+        try {
+          this.persistDeliveryReceipts();
+        } catch {
+          // In-memory terminal state still prevents replay in this process.
+        }
+      }
+    } catch {
+      // Missing or corrupt legacy state must not prevent lifecycle startup.
+    }
+  }
+
+  private persistDeliveryReceipts(): void {
+    mkdirSync(dirname(this.deliveryReceiptsPath), { recursive: true });
+    const tempPath = `${this.deliveryReceiptsPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(
+        tempPath,
+        `${JSON.stringify([...this.deliveryReceipts.values()], null, 2)}\n`,
+        "utf8",
+      );
+      renameSync(tempPath, this.deliveryReceiptsPath);
+    } finally {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    }
+  }
+
+  queueDelivery(input: {
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: DeliveryEventType;
+  }): AgentDeliveryReceipt {
+    const receipt: AgentDeliveryReceipt = {
+      delivery_id: randomUUID(),
+      ...input,
+      delivery_state: "queued",
+      terminal: false,
+      created_at: new Date().toISOString(),
+      resolved_at: null,
+      retry_count: 0,
+      submit_verified: null,
+      error: null,
+      submission_started_at: null,
+      next_attempt_at: null,
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    try {
+      // Acceptance is not returned until the full replay payload is durable.
+      this.persistDeliveryReceipts();
+    } catch (error) {
+      this.deliveryReceipts.delete(receipt.delivery_id);
+      throw error;
+    }
+    this.appendDeliveryReceiptEventBestEffort(receipt);
+    return { ...receipt };
+  }
+
+  resolveDelivery(
+    input: Omit<AgentDeliveryReceipt, "created_at" | "resolved_at"> & {
+      created_at?: string;
+    },
+    opts?: { appendFailureEvent?: boolean },
+  ): AgentDeliveryReceipt {
+    const receipt: AgentDeliveryReceipt = {
+      ...input,
+      created_at: input.created_at ?? new Date().toISOString(),
+      resolved_at: new Date().toISOString(),
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    this.persistDeliveryReceipts();
+    if (receipt.delivery_state === "failed" && opts?.appendFailureEvent) {
+      this.appendDeliveryReceiptEventBestEffort(receipt);
+    }
+    return { ...receipt };
+  }
+
+  getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    return receipt ? { ...receipt } : null;
+  }
+
+  async drainDeliveryQueue(): Promise<void> {
+    if (this.deliveryDrainInFlight || !this.deliverySubmitter) return;
+    this.deliveryDrainInFlight = true;
+    try {
+      for (const receipt of this.deliveryReceipts.values()) {
+        if (receipt.delivery_state !== "queued") continue;
+        const agent = this.getAgentState(receipt.agent_id);
+        if (!agent) {
+          receipt.delivery_state = "failed";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.error = `Delivery target ${receipt.agent_id} is gone or no longer exists`;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
+        if (
+          receipt.next_attempt_at &&
+          Date.parse(receipt.next_attempt_at) > Date.now()
+        ) {
+          continue;
+        }
+        try {
+          receipt.submission_started_at = new Date().toISOString();
+          // This is the no-replay boundary. A crash after this write leaves an
+          // uncertain terminal receipt instead of re-sending terminal input.
+          this.persistDeliveryReceipts();
+          let timeout: ReturnType<typeof setTimeout> | null = null;
+          const result = await Promise.race([
+            this.deliverySubmitter(receipt),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `Delivery submission timed out after ${this.deliverySubmitTimeoutMs}ms; outcome uncertain and will not be retried`,
+                    ),
+                  ),
+                this.deliverySubmitTimeoutMs,
+              );
+            }),
+          ]).finally(() => {
+            if (timeout) clearTimeout(timeout);
+          });
+          receipt.delivery_state = "submitted";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.retry_count += result.retry_count;
+          receipt.submit_verified = result.submit_verified;
+          receipt.error = null;
+          receipt.next_attempt_at = null;
+        } catch (error) {
+          if (error instanceof RetryableDeliveryError) {
+            receipt.submission_started_at = null;
+            receipt.retry_count += 1;
+            const backoffMs = Math.min(
+              30_000,
+              250 * 2 ** Math.min(receipt.retry_count - 1, 16),
+            );
+            receipt.next_attempt_at = new Date(
+              Date.now() + backoffMs,
+            ).toISOString();
+            receipt.error = error.message;
+          } else {
+            receipt.delivery_state = "failed";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.error =
+              error instanceof Error ? error.message : String(error);
+          }
+        }
+        this.persistDeliveryReceipts();
+        // Successful delivery already emitted the correlated source event;
+        // failures have no such event and need an explicit terminal transition.
+        if (receipt.delivery_state === "failed") {
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+        }
+      }
+    } finally {
+      this.deliveryDrainInFlight = false;
+    }
+  }
+
+  private appendDeliveryReceiptEvent(receipt: AgentDeliveryReceipt): void {
+    const agent = this.getAgentState(receipt.agent_id);
+    this.stateMgr.getEventLog().appendDelivery({
+      ts: receipt.resolved_at ?? receipt.created_at,
+      event_type: receipt.source_event,
+      source_agent: null,
+      target_surface: agent?.surface_id ?? "unknown",
+      target_agent: receipt.agent_id,
+      bytes: Buffer.byteLength(receipt.text),
+      press_enter: receipt.press_enter,
+      submit_verified: receipt.submit_verified,
+      retry_count: receipt.retry_count,
+      delivery_id: receipt.delivery_id,
+      delivery_state: receipt.delivery_state,
+    });
+  }
+
+  private appendDeliveryReceiptEventBestEffort(
+    receipt: AgentDeliveryReceipt,
+  ): void {
+    try {
+      this.appendDeliveryReceiptEvent(receipt);
+    } catch {
+      // Receipt persistence is authoritative; telemetry must not invalidate
+      // acceptance or tempt a caller to duplicate terminal input.
+    }
   }
 
   requestFleetSidebarRepublish(): void {
@@ -4522,6 +4924,7 @@ export class AgentEngine {
     // Retry after the one-shot startup purge has retained marked rows, but
     // before normal terminal cleanup can act on a closed pane.
     await this.retryDeferredTranscriptCaptures();
+    await this.sweepWatchesBestEffort();
     await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
     await this.reconcileRolePlacements("idle");
@@ -4645,6 +5048,48 @@ export class AgentEngine {
       // lifecycle reconciliation because the shared file is temporarily busy.
     } finally {
       this.monitorRegistrySweepInFlight = false;
+    }
+  }
+
+  private watchAgentObservation = async (
+    agentId: string,
+  ): Promise<WatchAgentObservation> => {
+    const agent = this.registry.get(agentId);
+    const source = `screen:${agent?.surface_uuid ?? agent?.surface_id ?? agentId}`;
+    if (!agent) return { exists: false, state: null, source };
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
+        lines: 30,
+      });
+      const parsed = parseScreen(cleanScreenText(screen.text));
+      return {
+        exists:
+          parsed.agent_type !== "unknown" &&
+          parsed.control_state !== "dead" &&
+          parsed.control_state !== "stale_surface",
+        state: parsed.status === "frozen" ? "error" : parsed.status,
+        source,
+      };
+    } catch {
+      return { exists: false, state: null, source };
+    }
+  };
+
+  private async sweepWatchesBestEffort(): Promise<void> {
+    if (!this.watchRegistryPath || this.watchSweepInFlight) return;
+    this.watchSweepInFlight = true;
+    try {
+      await sweepWatches({
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        notify: this.watchNotify,
+      });
+    } catch {
+      // Declared watches are retried on the next lifecycle sweep.
+    } finally {
+      this.watchSweepInFlight = false;
     }
   }
 
@@ -5318,6 +5763,55 @@ export class AgentEngine {
         }
       }, WAIT_FOR_SWEEP_INTERVAL_MS);
     });
+  }
+
+  async armWatch(spec: WatchSpec): Promise<WatchRecord> {
+    if (!this.watchRegistryPath) {
+      throw new Error("WatchSpec registry is not configured");
+    }
+    return armDeclaredWatch(spec, {
+      registryPath: this.watchRegistryPath,
+      now: this.watchRegistryNow,
+      agentObservation: this.watchAgentObservation,
+    });
+  }
+
+  async waitForWatch(
+    spec: WatchSpec,
+    timeoutMs: number,
+  ): Promise<{ matched: boolean; elapsed: number; watch: WatchRecord }> {
+    if (!this.watchRegistryPath) {
+      throw new Error("WatchSpec registry is not configured");
+    }
+    const startedAt = Date.now();
+    const armed = await this.armWatch(spec);
+    while (true) {
+      await sweepWatches({
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        notify: this.watchNotify,
+      });
+      const current = readWatchRegistry({
+        registryPath: this.watchRegistryPath,
+      }).watches.find((watch) => watch.watch_id === armed.watch_id);
+      if (!current) {
+        throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
+      }
+      const elapsed = Date.now() - startedAt;
+      if (current.state === "fired") {
+        return { matched: true, elapsed, watch: current };
+      }
+      if (current.state === "failed") {
+        return { matched: false, elapsed, watch: current };
+      }
+      if (elapsed >= timeoutMs) {
+        return { matched: false, elapsed, watch: current };
+      }
+      await new Promise<void>((resolveSleep) => {
+        setTimeout(resolveSleep, Math.min(50, timeoutMs - elapsed));
+      });
+    }
   }
 
   /**
