@@ -9808,10 +9808,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ? (await client.createWorkspace(requestedWorkspace!.slice(4)))
                   .workspace
               : requestedWorkspace ?? callerWorkspace;
-            const created = await client.newSplit("right", {
-              ...(workspace ? { workspace } : {}),
-              focus: args.focus,
-            });
+            const panes = await client.listPanes({ workspace });
+            const placement = chooseAgentSpawnPlacement(
+              panes.panes,
+              [],
+              new Set<string>(),
+              { role: "worker" },
+            );
+            const created =
+              placement.kind === "surface"
+                ? await client.newSurface({
+                    pane: placement.pane,
+                    ...(workspace ? { workspace } : {}),
+                    type: "terminal",
+                  })
+                : await client.newSplit(placement.direction, {
+                    ...(workspace ? { workspace } : {}),
+                    ...(placement.pane ? { pane: placement.pane } : {}),
+                    focus: args.focus,
+                  });
             if (args.cwd) {
               await client.send(
                 created.surface,

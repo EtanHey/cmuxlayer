@@ -743,6 +743,81 @@ describe("lean spawn tool responses", () => {
     ).toBe(true);
   });
 
+  it("docks a plain terminal into the existing worker column", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, callArgs: string[]) => {
+      if (callArgs.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:lead",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:lead"],
+                pixel_frame: { x: 0, y: 0, width: 800, height: 900 },
+              },
+              {
+                ref: "pane:worker",
+                index: 1,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:worker"],
+                pixel_frame: { x: 800, y: 0, width: 800, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (callArgs.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:terminal",
+            pane: "pane:worker",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, callArgs);
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      spawn.inputSchema.parse({
+        version: 1,
+        type: "terminal",
+        workspace: "workspace:1",
+      }),
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      type: "terminal",
+      surface_id: "surface:terminal",
+      workspace_id: "workspace:1",
+    });
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("new-surface") &&
+          callArgs.includes("--pane") &&
+          callArgs.includes("pane:worker"),
+      ),
+    ).toBe(true);
+    expect(
+      exec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
   it("creates a named workspace for a terminal workspace=new request", async () => {
     const exec = makeLifecycleExec({ createdWorkspace: "workspace:created" });
     const server = createLifecycleServer(exec);
