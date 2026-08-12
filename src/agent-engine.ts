@@ -60,6 +60,15 @@ import {
   type WaitResult,
 } from "./agent-types.js";
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
+import {
+  armWatch as armDeclaredWatch,
+  readWatchRegistry,
+  sweepWatches,
+  type WatchAgentObservation,
+  type WatchNotify,
+  type WatchRecord,
+  type WatchSpec,
+} from "./watch-spec.js";
 import { cleanScreenText, parseScreen } from "./screen-parser.js";
 import {
   canonicalRoleColumn,
@@ -407,6 +416,10 @@ export interface AgentEngineOptions {
   monitorRegistryPath?: string;
   monitorRegistryNow?: () => number;
   monitorRegistryNotify?: MonitorDeadmanNotify;
+  /** Persistent declared-watch registry. Disabled when omitted. */
+  watchRegistryPath?: string;
+  watchRegistryNow?: () => number;
+  watchNotify?: WatchNotify;
   /**
    * Best-effort close-forensics ingest, run before absence reconciliation so a
    * cmux UI `tab_close` can make the matching managed agent terminal before
@@ -940,6 +953,10 @@ export class AgentEngine {
   private monitorRegistryNow?: () => number;
   private monitorRegistryNotify: MonitorDeadmanNotify;
   private monitorRegistrySweepInFlight = false;
+  private watchRegistryPath?: string;
+  private watchRegistryNow?: () => number;
+  private watchNotify: WatchNotify;
+  private watchSweepInFlight = false;
   /** Best-effort close-forensics ingest; null when disabled. */
   private closeForensicsRunner:
     | (() => CloseForensicsSweepResult | Promise<CloseForensicsSweepResult>)
@@ -1002,6 +1019,9 @@ export class AgentEngine {
     this.monitorRegistryNow = opts?.monitorRegistryNow;
     this.monitorRegistryNotify =
       opts?.monitorRegistryNotify ?? (async () => {});
+    this.watchRegistryPath = opts?.watchRegistryPath;
+    this.watchRegistryNow = opts?.watchRegistryNow;
+    this.watchNotify = opts?.watchNotify ?? (async () => {});
     // Default DISABLED: bare construction (tests, libraries) must never read the
     // real `~/.cmuxterm/events.jsonl`. Production entrypoints inject the real
     // runner (see app-server-runtime / server.ts createServer). `null` keeps it
@@ -4801,6 +4821,7 @@ export class AgentEngine {
     // Retry after the one-shot startup purge has retained marked rows, but
     // before normal terminal cleanup can act on a closed pane.
     await this.retryDeferredTranscriptCaptures();
+    await this.sweepWatchesBestEffort();
     await this.registry.purgeTerminal(surfacelessConfirmation);
     await this.sweepMonitorRegistryBestEffort();
     await this.reconcileRolePlacements("idle");
@@ -4924,6 +4945,48 @@ export class AgentEngine {
       // lifecycle reconciliation because the shared file is temporarily busy.
     } finally {
       this.monitorRegistrySweepInFlight = false;
+    }
+  }
+
+  private watchAgentObservation = async (
+    agentId: string,
+  ): Promise<WatchAgentObservation> => {
+    const agent = this.registry.get(agentId);
+    const source = `screen:${agent?.surface_uuid ?? agent?.surface_id ?? agentId}`;
+    if (!agent) return { exists: false, state: null, source };
+    try {
+      const screen = await this.client.readScreen(agent.surface_id, {
+        ...(agent.workspace_id ? { workspace: agent.workspace_id } : {}),
+        lines: 30,
+      });
+      const parsed = parseScreen(cleanScreenText(screen.text));
+      return {
+        exists:
+          parsed.agent_type !== "unknown" &&
+          parsed.control_state !== "dead" &&
+          parsed.control_state !== "stale_surface",
+        state: parsed.status === "frozen" ? "error" : parsed.status,
+        source,
+      };
+    } catch {
+      return { exists: false, state: null, source };
+    }
+  };
+
+  private async sweepWatchesBestEffort(): Promise<void> {
+    if (!this.watchRegistryPath || this.watchSweepInFlight) return;
+    this.watchSweepInFlight = true;
+    try {
+      await sweepWatches({
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        notify: this.watchNotify,
+      });
+    } catch {
+      // Declared watches are retried on the next lifecycle sweep.
+    } finally {
+      this.watchSweepInFlight = false;
     }
   }
 
@@ -5600,6 +5663,55 @@ export class AgentEngine {
         }
       }, WAIT_FOR_SWEEP_INTERVAL_MS);
     });
+  }
+
+  async armWatch(spec: WatchSpec): Promise<WatchRecord> {
+    if (!this.watchRegistryPath) {
+      throw new Error("WatchSpec registry is not configured");
+    }
+    return armDeclaredWatch(spec, {
+      registryPath: this.watchRegistryPath,
+      now: this.watchRegistryNow,
+      agentObservation: this.watchAgentObservation,
+    });
+  }
+
+  async waitForWatch(
+    spec: WatchSpec,
+    timeoutMs: number,
+  ): Promise<{ matched: boolean; elapsed: number; watch: WatchRecord }> {
+    if (!this.watchRegistryPath) {
+      throw new Error("WatchSpec registry is not configured");
+    }
+    const startedAt = Date.now();
+    const armed = await this.armWatch(spec);
+    while (true) {
+      await sweepWatches({
+        registryPath: this.watchRegistryPath,
+        now: this.watchRegistryNow,
+        agentObservation: this.watchAgentObservation,
+        notify: this.watchNotify,
+      });
+      const current = readWatchRegistry({
+        registryPath: this.watchRegistryPath,
+      }).watches.find((watch) => watch.watch_id === armed.watch_id);
+      if (!current) {
+        throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);
+      }
+      const elapsed = Date.now() - startedAt;
+      if (current.state === "fired") {
+        return { matched: true, elapsed, watch: current };
+      }
+      if (current.state === "failed") {
+        return { matched: false, elapsed, watch: current };
+      }
+      if (elapsed >= timeoutMs) {
+        return { matched: false, elapsed, watch: current };
+      }
+      await new Promise<void>((resolveSleep) => {
+        setTimeout(resolveSleep, Math.min(50, timeoutMs - elapsed));
+      });
+    }
   }
 
   /**

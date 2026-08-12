@@ -9,6 +9,7 @@ export const REGISTERED_TOOL_NAMES = [
   "deregister_monitor",
   "list_monitors",
   "query_monitor_registry",
+  "arm_watch",
   "select_workspace",
   "create_workspace",
   "delete_workspace",

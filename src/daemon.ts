@@ -26,6 +26,10 @@ import {
   reconcileMonitorRegistry,
 } from "./monitor-registry.js";
 import {
+  defaultWatchRegistryPath,
+  httpNotifyWatch,
+} from "./watch-spec.js";
+import {
   ackedIds,
   dispatchOnce,
   inboxPath,
@@ -566,6 +570,9 @@ export class CmuxLayerDaemon {
       monitorRegistryPath: this.opts.monitorRegistryPath,
       monitorRegistryNow: this.opts.monitorRegistryNow,
       monitorRegistryNotify: this.opts.monitorRegistryNotify,
+      watchRegistryPath: this.opts.watchRegistryPath,
+      watchRegistryNow: this.opts.watchRegistryNow,
+      watchNotify: this.opts.watchNotify,
       fleetSidebarPublisher: this.opts.fleetSidebarPublisher,
     });
     try {
@@ -1146,6 +1153,10 @@ export async function runDaemon(
       (testProcess ? async () => undefined : httpNotifyMonitorDeadman),
     monitorRegistryPath:
       opts.monitorRegistryPath ?? defaultMonitorRegistryPath(),
+    watchRegistryPath: opts.watchRegistryPath ?? defaultWatchRegistryPath(),
+    watchNotify:
+      opts.watchNotify ??
+      (testProcess ? async () => undefined : httpNotifyWatch),
     fleetSidebarPublisher:
       opts.fleetSidebarPublisher ??
       (testProcess ? undefined : new FleetSidebarPublisher()),

@@ -1458,11 +1458,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total registered tool count is 42 after deleting reorder_surface", () => {
+  it("total registered tool count is 43 after adding arm_watch", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(42);
+    expect(Object.keys(registeredTools)).toHaveLength(43);
   });
 });
 
