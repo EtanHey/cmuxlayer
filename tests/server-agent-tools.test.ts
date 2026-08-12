@@ -161,7 +161,7 @@ function makeLifecycleExec(opts?: {
       }
       if (
         text.trim() &&
-        !/^\s*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
+        !/^\s*(?:[A-Z_]+=\S+\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
           text,
         )
       ) {
@@ -692,20 +692,21 @@ describe("lean spawn tool responses", () => {
     });
   });
 
-  it("spawn_agent surfaces a real model coercion in lean mode", async () => {
+  it("spawn_agent surfaces Codex model pass-through in lean mode", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex" },
+      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", verbose: true },
       {} as any,
     );
 
     expect(result.structuredContent.model_policy).toMatchObject({
-      coerced: true,
-      effective_model: "codex",
+      coerced: false,
+      effective_model: "gpt-5.5",
+      launcher_model: "gpt-5.5",
+      override_allowed: true,
     });
-    expect(result.structuredContent.warnings).not.toHaveLength(0);
   });
 
   it("spawn_agent passes an explicit Codex effort to the launcher", async () => {

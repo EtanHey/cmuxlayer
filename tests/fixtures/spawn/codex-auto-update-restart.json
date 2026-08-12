@@ -1,5 +1,5 @@
 {
-  "launcher_command": "cmuxlayerCodex -s -m gpt-5.5",
+  "launcher_command": "REPOGOLEM_ALLOW_MODEL=1 cmuxlayerCodex -s -m gpt-5.5",
   "screens": {
     "launcher": "etan@mac % cmuxlayerCodex -s -m gpt-5.5",
     "interactive_update": "  ✨ Update available! 0.142.5 -> 0.143.0\n\n  Release notes: https://github.com/openai/codex/releases/latest\n\n› 1. Update now (runs `npm install -g @openai/codex@latest`)\n  2. Skip\n  3. Skip until next version\n\n  Press enter to continue",

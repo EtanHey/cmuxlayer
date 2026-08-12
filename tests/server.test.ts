@@ -9128,7 +9128,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text.startsWith("cmuxlayerCodex ")) {
+        if (text.includes("cmuxlayerCodex ")) {
           launcherSent = true;
         }
         return { stdout: "{}", stderr: "" };
