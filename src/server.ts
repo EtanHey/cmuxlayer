@@ -119,6 +119,15 @@ import {
   parseScreen,
 } from "./screen-parser.js";
 import {
+  launcherFailureFromShell,
+  matchShellPromptLine,
+  matchesShellPrompt,
+} from "./shell-prompt.js";
+import {
+  CreatedIdentityScope,
+  createdIdentityFromError,
+} from "./created-identity.js";
+import {
   dispatch,
   ensureInboxFile,
   inboxCursorPath,
@@ -778,6 +787,16 @@ class BootPromptTimeoutError extends Error {
   }
 }
 
+class LauncherReadinessError extends Error {
+  constructor(
+    message: string,
+    readonly last_10_lines: string[],
+  ) {
+    super(message);
+    this.name = "LauncherReadinessError";
+  }
+}
+
 class BootPromptDeliveryError extends Error {
   constructor(
     message: string,
@@ -966,6 +985,15 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  const readinessTimeout = findErrorInChain(
+    error,
+    (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
+      candidate instanceof BootPromptTimeoutError ||
+      candidate instanceof LauncherReadinessError,
+  );
+  const readinessExtra = readinessTimeout
+    ? { last_10_lines: readinessTimeout.last_10_lines }
+    : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -993,13 +1021,32 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...readinessExtra,
     ...extra,
+    ...createdIdentityFromError(error),
   };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
     isError: true,
   };
+}
+
+function findErrorInChain<T extends Error>(
+  error: unknown,
+  predicate: (error: Error) => error is T,
+): T | null {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (predicate(current)) return current;
+    seen.add(current);
+    current =
+      current instanceof AgentLaunchError && current.launch_cause !== undefined
+        ? current.launch_cause
+        : current.cause;
+  }
+  return null;
 }
 
 function requireValue(
@@ -1719,36 +1766,6 @@ function inferRepoFromLauncherTitle(title?: string): string | null {
 
 function isLauncherShellCommand(command: string): boolean {
   return /(?:^|\s)[\w.-]+(?:Claude|Codex|Cursor|Gemini)(?=\s|$)/.test(command);
-}
-
-function matchShellPromptLine(
-  line: string,
-  opts?: { allowRootInput?: boolean },
-): { input: string } | null {
-  const normalized = line.trimEnd();
-  const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
-  if (barePrompt) {
-    return { input: barePrompt[2] ?? "" };
-  }
-  const rootPrompt = normalized.match(/^\s*#(?:\s+(.*))?$/);
-  if (rootPrompt && (!rootPrompt[1] || opts?.allowRootInput)) {
-    return { input: rootPrompt[1] ?? "" };
-  }
-
-  const prefixedPrompt = normalized.match(
-    /^\s*(?:(?:\S+@\S+)(?:\s+(?:~|\/)\S*)?|(?:\S+\s+)?(?:~|\/)\S*)(?:\s+\[[^\]]+\])?\s*[$%#](?:\s+(.*))?$/,
-  );
-  return prefixedPrompt ? { input: prefixedPrompt[1] ?? "" } : null;
-}
-
-function matchesShellPrompt(text: string): boolean {
-  const lines = normalizeTerminalText(text).split("\n");
-  let end = lines.length;
-  while (end > 0 && !lines[end - 1]?.trim()) {
-    end -= 1;
-  }
-  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
-  return prompt?.input.trim() === "";
 }
 
 function shouldHandleCodexUpdateMenu(
@@ -4551,6 +4568,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const now = Date.now();
         const updateState = parsed.cli_update_state;
 
+        const launcherFailure = launcherFailureFromShell(screen.text);
+        if (launcherFailure) {
+          throw new LauncherReadinessError(
+            `Launcher exited before reaching readiness on ${target.surface}: ${launcherFailure}`,
+            tailLines(lastText, 10),
+          );
+        }
+
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
           if (codexUpdateMenuAccepted) {
             const elapsedSinceAcceptMs =
@@ -4684,6 +4709,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (error) {
         if (
           error instanceof BootPromptTimeoutError ||
+          error instanceof LauncherReadinessError ||
           error instanceof BootPromptUpdateMenuBlockedError
         ) {
           throw error;
@@ -4857,6 +4883,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const parsed = parseScreen(screen.text);
         const now = Date.now();
 
+        const launcherFailure = launcherFailureFromShell(screen.text);
+        if (launcherFailure) {
+          throw new LauncherReadinessError(
+            `Launcher exited before reaching readiness on ${opts.surface}: ${launcherFailure}`,
+            tailLines(lastText, 10),
+          );
+        }
+
         if (parsed.cli_update_state === "updating") {
           updateWasSeen = true;
           updateStartedAt ??= now;
@@ -4925,7 +4959,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
       } catch (error) {
-        if (error instanceof BootPromptTimeoutError) {
+        if (
+          error instanceof BootPromptTimeoutError ||
+          error instanceof LauncherReadinessError
+        ) {
           throw error;
         }
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
@@ -5011,6 +5048,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return false;
           }
 
+          const verifyPendingCommandSubmitted = async (): Promise<void> => {
+            const startedAt = Date.now();
+            let lastText = screen.text;
+            while (
+              Date.now() - startedAt < SEND_INPUT_RECOVERY_ENTER_DELAY_MS
+            ) {
+              const confirmation = await readLauncherScreen();
+              lastText = confirmation.text;
+              if (
+                !screenShowsPendingShellInput(lastText, sanitizedCommand) ||
+                READY_PATTERN_CLIS.some(
+                  (cli) => matchReadyPattern(cli, lastText).matched,
+                )
+              ) {
+                return;
+              }
+              const remaining =
+                SEND_INPUT_RECOVERY_ENTER_DELAY_MS -
+                (Date.now() - startedAt);
+              if (remaining <= 0) break;
+              await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
+            }
+            throw new LauncherReadinessError(
+              `launcher command remained pending after Return on ${opts.surface}`,
+              tailLines(lastText, 10),
+            );
+          };
+
           try {
             // Return is a mutation: retrying after a lost acknowledgement can
             // submit into the newly started CLI. Probe before any fallback.
@@ -5018,20 +5083,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await client.sendKey(opts.surface, "return", {
               workspace: opts.workspace,
             });
+            await verifyPendingCommandSubmitted();
             return true;
           } catch (error) {
             if (isSurfaceGoneReadFailure(error, opts.surface)) {
               throw new SurfaceGoneError(opts.surface, error);
             }
             try {
-              const confirmation = await readLauncherScreen();
-              return !screenShowsPendingShellInput(
-                confirmation.text,
-                sanitizedCommand,
-              );
+              await verifyPendingCommandSubmitted();
+              return true;
             } catch (confirmationError) {
               if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
                 throw new SurfaceGoneError(opts.surface, confirmationError);
+              }
+              if (confirmationError instanceof LauncherReadinessError) {
+                throw confirmationError;
               }
               throw error;
             }
@@ -5094,6 +5160,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             error instanceof Error ? error.message : String(error);
           if (!/Enter submit could not be verified/.test(message)) {
             throw error;
+          }
+          const pendingScreen = await client.readScreen(opts.surface, {
+            workspace: opts.workspace,
+            lines: 80,
+            scrollback: false,
+          });
+          if (
+            screenShowsPendingShellInput(
+              pendingScreen.text,
+              sanitizedCommand,
+            )
+          ) {
+            throw new LauncherReadinessError(
+              `launcher command remained pending after Return on ${opts.surface}`,
+              tailLines(pendingScreen.text, 10),
+            );
           }
           // The command can remain visible in shell history while the launcher is
           // already booting. Readiness detection is the authoritative launch check.
@@ -6956,6 +7038,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       let result: CmuxNewSplitResult | undefined;
       let focusRestoreLease: FocusRestoreLease | null = null;
+      const creation = new CreatedIdentityScope();
       try {
         const normalizedRole = normalizeToolAgentRole(args.role, "role");
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
@@ -7106,6 +7189,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   url: args.url,
                   title: args.title,
                 });
+          creation.record({
+            surface: result.surface,
+            workspace: result.workspace,
+            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+          });
           assertSurfaceObserverEpochCurrent(
             rolePlacementObserverEpoch,
             "role-based new_split placement",
@@ -7126,6 +7214,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             type: args.type,
             url: args.url,
             title: args.title,
+          });
+          creation.record({
+            surface: result.surface,
+            workspace: result.workspace,
+            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
           });
         }
         if (args.focus === true) {
@@ -7216,6 +7309,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const caught = creation.attach(e);
         // Creation or boot delivery may fail after cmuxlayer selected a target
         // workspace. Return focus when the user has not moved since then.
         await restoreFocusAfterRender(
@@ -7231,30 +7325,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(result.surface_id ? { surface_id: result.surface_id } : {}),
             }
           : {};
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e, createdIdentity));
+        if (caught instanceof SurfaceGoneError) {
+          return err(caught, surfaceGonePayload(caught, createdIdentity));
         }
-        if (e instanceof BootPromptTimeoutError) {
-          return err(e, {
+        if (caught instanceof BootPromptTimeoutError) {
+          return err(caught, {
             ...createdIdentity,
-            last_10_lines: e.last_10_lines,
+            last_10_lines: caught.last_10_lines,
           });
         }
-        if (e instanceof BootPromptUpdateMenuBlockedError) {
-          return err(e, {
+        if (caught instanceof BootPromptUpdateMenuBlockedError) {
+          return err(caught, {
             ...createdIdentity,
-            error_code: e.error_code,
-            last_10_lines: e.last_10_lines,
-            recovery: e.recovery,
+            error_code: caught.error_code,
+            last_10_lines: caught.last_10_lines,
+            recovery: caught.recovery,
           });
         }
-        if (e instanceof BootPromptDeliveryError) {
-          return err(e, {
+        if (caught instanceof BootPromptDeliveryError) {
+          return err(caught, {
             ...createdIdentity,
-            delivered_chars: e.delivered_chars,
+            delivered_chars: caught.delivered_chars,
           });
         }
-        return err(e, createdIdentity);
+        return err(caught, createdIdentity);
       }
     },
   );
@@ -7291,6 +7385,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       let result: CmuxNewSurfaceResult | undefined;
+      const creation = new CreatedIdentityScope();
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         if (bootPromptPath) {
@@ -7315,6 +7410,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: targetWorkspace,
           type: args.type,
           url: args.url,
+        });
+        creation.record({
+          surface: result.surface,
+          workspace: result.workspace,
+          ...(result.surface_id ? { surface_id: result.surface_id } : {}),
         });
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
@@ -7366,6 +7466,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const caught = creation.attach(e);
         const createdIdentity = result
           ? {
               surface: result.surface,
@@ -7373,30 +7474,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(result.surface_id ? { surface_id: result.surface_id } : {}),
             }
           : {};
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e, createdIdentity));
+        if (caught instanceof SurfaceGoneError) {
+          return err(caught, surfaceGonePayload(caught, createdIdentity));
         }
-        if (e instanceof BootPromptTimeoutError) {
-          return err(e, {
+        if (caught instanceof BootPromptTimeoutError) {
+          return err(caught, {
             ...createdIdentity,
-            last_10_lines: e.last_10_lines,
+            last_10_lines: caught.last_10_lines,
           });
         }
-        if (e instanceof BootPromptUpdateMenuBlockedError) {
-          return err(e, {
+        if (caught instanceof BootPromptUpdateMenuBlockedError) {
+          return err(caught, {
             ...createdIdentity,
-            error_code: e.error_code,
-            last_10_lines: e.last_10_lines,
-            recovery: e.recovery,
+            error_code: caught.error_code,
+            last_10_lines: caught.last_10_lines,
+            recovery: caught.recovery,
           });
         }
-        if (e instanceof BootPromptDeliveryError) {
-          return err(e, {
+        if (caught instanceof BootPromptDeliveryError) {
+          return err(caught, {
             ...createdIdentity,
-            delivered_chars: e.delivered_chars,
+            delivered_chars: caught.delivered_chars,
           });
         }
-        return err(e, createdIdentity);
+        return err(caught, createdIdentity);
       }
     },
   );
@@ -9915,6 +10016,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         try {
           if (args.type === "terminal") {
             if (
@@ -9962,6 +10064,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ...(placement.pane ? { pane: placement.pane } : {}),
                     focus: args.focus,
                   });
+            creation.record({
+              surface_id: created.surface,
+              workspace_id: created.workspace ?? workspace ?? null,
+            });
             if (args.cwd) {
               await client.send(
                 created.surface,
@@ -10094,6 +10200,56 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.worktree,
             args.mcp_profile as McpProfile | undefined,
           );
+          const cleanupFailedLauncherArtifacts = async (
+            error: Error,
+            agentId: string,
+            surface: string,
+            workspace?: string,
+          ): Promise<boolean> => {
+            const record = engine.getAgentState(agentId);
+            const cleanupSurface = record?.surface_uuid?.trim() || surface;
+            try {
+              await client.closeSurface(cleanupSurface, { workspace });
+            } catch (cleanupError) {
+              error.message = `${error.message}. Failed to close launcher surface ${cleanupSurface}: ${
+                cleanupError instanceof Error
+                  ? cleanupError.message
+                  : String(cleanupError)
+              }`;
+              return false;
+            }
+            const current = engine.getAgentState(agentId);
+            if (current && !TERMINAL_AGENT_STATES.has(current.state)) {
+              try {
+                const failed = stateMgr.transition(agentId, "error", {
+                  error: `Launcher surface closed after failed readiness: ${error.message}`,
+                });
+                registry.set(agentId, failed);
+              } catch (stateError) {
+                error.message = `${error.message}. Failed to mark closed launcher agent ${agentId} terminal: ${
+                  stateError instanceof Error
+                    ? stateError.message
+                    : String(stateError)
+                }`;
+              }
+            }
+            if (worktree.prepared?.created && worktree.repoRoot) {
+              try {
+                await rollbackPreparedWorktree(
+                  worktree.repoRoot,
+                  worktree.prepared,
+                  opts?.worktreeExec,
+                );
+              } catch (rollbackError) {
+                error.message = `${error.message}. Worktree rollback also failed: ${
+                  rollbackError instanceof Error
+                    ? rollbackError.message
+                    : String(rollbackError)
+                }`;
+              }
+            }
+            return true;
+          };
           let focusRestoreLease = await focusTargetBeforeSplit(
             spawnWorkspace,
             args.focus !== true,
@@ -10124,6 +10280,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
                 surfaceCreated = true;
+                creation.record({
+                  agent_id: created.agent_id,
+                  surface_id: created.surface,
+                  workspace_id: created.workspace ?? spawnWorkspace ?? null,
+                });
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
                   created,
@@ -10131,6 +10292,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             });
           } catch (e) {
+            if (
+              e instanceof AgentLaunchError &&
+              e.launch_phase === "launch" &&
+              !(e.launch_cause instanceof SurfaceGoneError)
+            ) {
+              await cleanupFailedLauncherArtifacts(
+                e,
+                e.agent_id,
+                e.surface_id,
+                e.workspace_id,
+              );
+            }
             let rollbackError: unknown = null;
             if (
               !surfaceCreated &&
@@ -10197,6 +10370,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           let bootPromptDelivery:
             Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+          let launcherSurfaceClosed = false;
           try {
             {
               const deliveryWorkspace = spawnDeliveryWorkspace(
@@ -10259,6 +10433,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
           } catch (e) {
+            creation.attach(e);
+            if (e instanceof LauncherReadinessError) {
+              launcherSurfaceClosed = await cleanupFailedLauncherArtifacts(
+                e,
+                result.agent_id,
+                result.surface_id,
+                spawnDeliveryWorkspace(result, spawnWorkspace),
+              );
+            }
             const message = e instanceof Error ? e.message : String(e);
             const clearBootPromptPending = () => {
               const record = resolveSpawnRecord(
@@ -10300,7 +10483,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // timeout, restore immediately instead of starting a second wait.
               await restoreFocusAfterRender(
                 focusRestoreLease,
-                result.surface_id,
+                launcherSurfaceClosed ? undefined : result.surface_id,
                 spawnDeliveryWorkspace(result, spawnWorkspace),
                 { waitForReady: false },
               );
@@ -10419,44 +10602,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", formattedData),
           );
         } catch (e) {
-          if (e instanceof AgentLaunchError) {
-            if (e.launch_cause instanceof DeliverySafetyGateError) {
-              return err(e.launch_cause, {
-                agent_id: e.agent_id,
-                surface_id: e.surface_id,
-                workspace_id: e.workspace_id,
-                error_code: e.launch_cause.error_code,
-                submit_verified: e.launch_cause.submit_verified,
-                screen: e.launch_cause.screen,
+          const caught = creation.attach(e);
+          if (caught instanceof AgentLaunchError) {
+            if (caught.launch_cause instanceof DeliverySafetyGateError) {
+              creation.attach(caught.launch_cause);
+              return err(caught.launch_cause, {
+                agent_id: caught.agent_id,
+                surface_id: caught.surface_id,
+                workspace_id: caught.workspace_id,
+                error_code: caught.launch_cause.error_code,
+                submit_verified: caught.launch_cause.submit_verified,
+                screen: caught.launch_cause.screen,
               });
             }
-            if (e.launch_cause instanceof SurfaceGoneError) {
+            if (caught.launch_cause instanceof SurfaceGoneError) {
+              creation.attach(caught.launch_cause);
               return err(
-                e.launch_cause,
-                surfaceGonePayload(e.launch_cause, {
-                  agent_id: e.agent_id,
-                  surface_id: e.surface_id,
-                  workspace_id: e.workspace_id,
+                caught.launch_cause,
+                surfaceGonePayload(caught.launch_cause, {
+                  agent_id: caught.agent_id,
+                  surface_id: caught.surface_id,
+                  workspace_id: caught.workspace_id,
                 }),
               );
             }
-            return err(e, {
-              agent_id: e.agent_id,
-              surface_id: e.surface_id,
-              workspace_id: e.workspace_id,
+            return err(caught, {
+              agent_id: caught.agent_id,
+              surface_id: caught.surface_id,
+              workspace_id: caught.workspace_id,
             });
           }
-          if (e instanceof DeliverySafetyGateError) {
-            return err(e, {
-              error_code: e.error_code,
-              submit_verified: e.submit_verified,
-              screen: e.screen,
+          if (caught instanceof DeliverySafetyGateError) {
+            return err(caught, {
+              error_code: caught.error_code,
+              submit_verified: caught.submit_verified,
+              screen: caught.screen,
             });
           }
-          if (e instanceof SurfaceGoneError) {
-            return err(e, surfaceGonePayload(e));
+          if (caught instanceof SurfaceGoneError) {
+            return err(caught, surfaceGonePayload(caught));
           }
-          return err(e);
+          return err(caught);
         }
       },
     );
@@ -10506,6 +10692,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         let focusRestoreLease: FocusRestoreLease | null = null;
         let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
         let mutationWorkspace: string | undefined;
@@ -10561,6 +10748,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             crash_recover: args.crash_recover,
             on_surface_created: async (created) => {
               surfaceCreated = true;
+              creation.record({
+                agent_id: created.agent_id,
+                surface_id: created.surface,
+                workspace_id: created.workspace ?? mutationWorkspace ?? null,
+              });
               focusRestoreLease = await capturePostCreationFocus(
                 focusRestoreLease,
                 created,
@@ -10665,7 +10857,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("new_worktree_split", formattedData),
           );
         } catch (e) {
-          let caught: unknown = e;
+          let caught: unknown = creation.attach(e);
           if (
             !result &&
             !surfaceCreated &&
@@ -10694,6 +10886,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
           }
+          caught = creation.attach(caught);
           await restoreFocusAfterRender(
             focusRestoreLease,
             result?.surface_id,
@@ -10819,6 +11012,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         const originFocus = await currentFocusTarget();
         let focusRestoreLease: FocusRestoreLease | null = null;
         let workspace: string | undefined;
@@ -10889,6 +11083,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!workspace) {
             throw new Error("create_workspace returned an empty workspace ref");
           }
+          creation.record({ workspace, workspace_id: workspace });
 
           focusRestoreLease = await focusTargetBeforeSplit(
             workspace,
@@ -10914,6 +11109,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: agent.role,
               auto_archive_on_done: false,
               on_surface_created: async (created) => {
+                const identity = {
+                  agent_id: created.agent_id,
+                  surface_id: created.surface,
+                  workspace_id: created.workspace ?? workspace ?? null,
+                };
+                creation.record(identity);
+                creation.append(
+                  "agents",
+                  identity,
+                  (left, right) =>
+                    left.surface_id === right.surface_id,
+                );
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
                   created,
@@ -10925,6 +11132,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface_id: result.surface_id,
               workspace_id: result.workspace_id ?? workspace ?? null,
             };
+            creation.record(activeSpawnIdentity);
+            creation.append(
+              "agents",
+              activeSpawnIdentity,
+              (left, right) => left.surface_id === right.surface_id,
+            );
             createdAgentIdentities.push(activeSpawnIdentity);
             lastSurface = result.surface_id;
             const originalLaunchCommand = originalLaunchCommandsBySurface.get(
@@ -11090,6 +11303,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          const caught = creation.attach(e);
           await restoreFocusAfterRender(
             focusRestoreLease,
             lastSurface,
@@ -11097,11 +11311,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             { waitForReady: false },
           );
           const failedIdentity =
-            e instanceof AgentLaunchError
+            caught instanceof AgentLaunchError
               ? {
-                  agent_id: e.agent_id,
-                  surface_id: e.surface_id,
-                  workspace_id: e.workspace_id ?? null,
+                  agent_id: caught.agent_id,
+                  surface_id: caught.surface_id,
+                  workspace_id: caught.workspace_id ?? null,
                 }
               : activeSpawnIdentity;
           const failureAgents = [...createdAgentIdentities];
@@ -11120,62 +11334,64 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ...(failedIdentity ?? {}),
             ...(failureAgents.length > 0 ? { agents: failureAgents } : {}),
           };
-          if (e instanceof AgentLaunchError) {
-            if (e.launch_cause instanceof DeliverySafetyGateError) {
-              return err(e.launch_cause, {
+          if (caught instanceof AgentLaunchError) {
+            if (caught.launch_cause instanceof DeliverySafetyGateError) {
+              creation.attach(caught.launch_cause);
+              return err(caught.launch_cause, {
                 ...failureIdentityPayload,
-                error_code: e.launch_cause.error_code,
-                submit_verified: e.launch_cause.submit_verified,
-                screen: e.launch_cause.screen,
+                error_code: caught.launch_cause.error_code,
+                submit_verified: caught.launch_cause.submit_verified,
+                screen: caught.launch_cause.screen,
               });
             }
-            if (e.launch_cause instanceof SurfaceGoneError) {
+            if (caught.launch_cause instanceof SurfaceGoneError) {
+              creation.attach(caught.launch_cause);
               return err(
-                e.launch_cause,
-                surfaceGonePayload(e.launch_cause, failureIdentityPayload),
+                caught.launch_cause,
+                surfaceGonePayload(caught.launch_cause, failureIdentityPayload),
               );
             }
-            return err(e, failureIdentityPayload);
+            return err(caught, failureIdentityPayload);
           }
-          if (e instanceof DeliverySafetyGateError) {
-            return err(e, {
+          if (caught instanceof DeliverySafetyGateError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              error_code: e.error_code,
-              submit_verified: e.submit_verified,
-              screen: e.screen,
+              error_code: caught.error_code,
+              submit_verified: caught.submit_verified,
+              screen: caught.screen,
             });
           }
-          if (e instanceof SubmitVerificationError) {
-            return err(e, {
+          if (caught instanceof SubmitVerificationError) {
+            return err(caught, {
               ...failureIdentityPayload,
               submit_verified: false,
-              retry_count: e.retry_count,
+              retry_count: caught.retry_count,
             });
           }
-          if (e instanceof SurfaceGoneError) {
-            return err(e, surfaceGonePayload(e, failureIdentityPayload));
+          if (caught instanceof SurfaceGoneError) {
+            return err(caught, surfaceGonePayload(caught, failureIdentityPayload));
           }
-          if (e instanceof BootPromptTimeoutError) {
-            return err(e, {
+          if (caught instanceof BootPromptTimeoutError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              last_10_lines: e.last_10_lines,
+              last_10_lines: caught.last_10_lines,
             });
           }
-          if (e instanceof BootPromptUpdateMenuBlockedError) {
-            return err(e, {
+          if (caught instanceof BootPromptUpdateMenuBlockedError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              error_code: e.error_code,
-              last_10_lines: e.last_10_lines,
-              recovery: e.recovery,
+              error_code: caught.error_code,
+              last_10_lines: caught.last_10_lines,
+              recovery: caught.recovery,
             });
           }
-          if (e instanceof BootPromptDeliveryError) {
-            return err(e, {
+          if (caught instanceof BootPromptDeliveryError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              delivered_chars: e.delivered_chars,
+              delivered_chars: caught.delivered_chars,
             });
           }
-          return err(e, failureIdentityPayload);
+          return err(caught, failureIdentityPayload);
         }
       },
     );
