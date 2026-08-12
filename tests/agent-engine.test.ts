@@ -6583,6 +6583,39 @@ Session ID: ${sessionId}`,
         workspace: "ws:placement",
       });
     });
+
+    it("backfills legacy pending ids with their captured session identity before first publication", async () => {
+      const sessionId = "019fec96-588d-7000-8000-000000000004";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-pending-1710000000-dead",
+          repo: "cmuxlayer",
+          cli: "codex",
+          state: "ready",
+          cli_session_id: sessionId,
+          cli_session_path: "/tmp/codex-session.jsonl",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      const discovery = { scan: vi.fn(async () => []) };
+
+      await engine.initialize(discovery as any);
+
+      expect(
+        stateMgr.readState("cmuxlayerCodex-pending-1710000000-dead"),
+      ).toBeNull();
+      expect(
+        engine
+          .getRegistry()
+          .list()
+          .some((record) => record.agent_id.includes("-pending-")),
+      ).toBe(false);
+      expect(engine.getAgentState("cmuxlayerCodex-019fec96")).toMatchObject({
+        agent_id: "cmuxlayerCodex-019fec96",
+        cli_session_id: sessionId,
+        cli_session_path: "/tmp/codex-session.jsonl",
+      });
+    });
   });
 
   describe("waitFor", () => {

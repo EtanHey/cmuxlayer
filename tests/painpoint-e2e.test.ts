@@ -582,7 +582,10 @@ describe("Phase 10 painpoint e2e replay", () => {
         await getTool(server, "resync_agents").handler({}, {}),
       );
       const listed = parseToolResult<{
-        agents: Array<{ agent_id: string; state: AgentState }>;
+        agents: Array<{
+          agent_id: string;
+          state: { value: AgentState };
+        }>;
       }>(await getTool(server, "list_agents").handler({}, {}));
 
       expect(resync.ok).toBe(true);
@@ -590,7 +593,7 @@ describe("Phase 10 painpoint e2e replay", () => {
       expect(listed.agents).toEqual([
         expect.objectContaining({
           agent_id: "terminal-worker-empty-scan",
-          state: "done",
+          state: expect.objectContaining({ value: "done" }),
         }),
       ]);
     } finally {

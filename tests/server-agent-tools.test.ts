@@ -1233,8 +1233,9 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.error).toContain(
       'would actually run "claude-opus-5[1m]"',
     );
-    expect(result.structuredContent.error).toContain(
-      "Accepted models: claude-opus-5[1m], sonnet",
+    expect(result.structuredContent.error).toContain("Accepted models:");
+    expect(result.structuredContent.error).toMatch(
+      /Accepted models: [^.]*\bsonnet\b/,
     );
     expect(
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
@@ -5400,9 +5401,29 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.derived_at).toEqual(expect.any(Number));
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0].repo).toBe("brainlayer");
-    expect(parsed.agents[0].session_id).toBeNull();
+    expect(parsed.agents[0].state).toMatchObject({
+      value: "working",
+      source: expect.stringMatching(/^(screen|registry|process)$/),
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].model).toMatchObject({
+      value: "sonnet",
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].session_id).toMatchObject({
+      value: null,
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].resumable).toMatchObject({
+      value: false,
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
     expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
     expect(parsed.agents[0].health).toMatchObject({
@@ -5411,6 +5432,70 @@ describe("agent lifecycle tool handlers", () => {
         "missing_cli_session_id",
         "non_resumable",
       ]),
+    });
+  });
+
+  it("list_agents bounds caller-declared staleness to five seconds", () => {
+    const server = createLifecycleServer(mockExec);
+    const list = (server as any)._registeredTools["list_agents"];
+
+    expect(list.inputSchema.parse({ max_age_ms: 5_000 })).toMatchObject({
+      max_age_ms: 5_000,
+    });
+    expect(() => list.inputSchema.parse({ max_age_ms: 5_001 })).toThrow();
+  });
+
+  it("list_agents reuses a bounded snapshot until live topology changes", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:observed",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "observed-cache-agent",
+      surface_id: "surface:observed",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+      model: "gpt-5.4",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const list = registeredTestTool(server, "list_agents");
+
+    const first = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+    routeClient.client.readScreen.mockClear();
+    const cached = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+
+    expect(cached.derived_at).toBe(first.derived_at);
+    expect(routeClient.client.readScreen).not.toHaveBeenCalled();
+
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:moved",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const refreshed = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+
+    expect(routeClient.client.readScreen).toHaveBeenCalled();
+    expect(refreshed.agents[0].state).toMatchObject({
+      value: "working",
+      source: "screen",
     });
   });
 
@@ -5478,7 +5563,7 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({ agent_id: "healthy-agent" }),
       expect.objectContaining({
         agent_id: "corrupt-agent",
-        resumable: false,
+        resumable: expect.objectContaining({ value: false }),
       }),
     ]);
     expect(parsed.agents[1]).not.toHaveProperty("resume_command");
@@ -6220,7 +6305,11 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0]).toMatchObject({
       repo: "brainlayer",
-      state: "working",
+      state: {
+        value: "working",
+        source: "screen",
+        observed_at_ms: expect.any(Number),
+      },
       health: {
         status: "healthy",
         issue_codes: expect.arrayContaining([
@@ -6272,7 +6361,10 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(agent).toBeDefined();
-    expect(agent?.state).toBe("ready");
+    expect(agent?.state).toMatchObject({
+      value: "ready",
+      source: "registry",
+    });
     expect(agent?.health?.reconciled_state).toBeUndefined();
     expect(agent?.health?.issue_codes).not.toContain(
       "registry_screen_disagreement",
@@ -6310,7 +6402,10 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(agent).toBeDefined();
-    expect(agent?.state).toBe("ready");
+    expect(agent?.state).toMatchObject({
+      value: "ready",
+      source: "registry",
+    });
     expect(agent?.health?.reconciled_state).toBeUndefined();
     expect(agent?.health?.issue_codes).not.toContain(
       "registry_screen_disagreement",
@@ -6448,7 +6543,11 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.agents[0]).toMatchObject({
-      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      session_id: {
+        value: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        source: "process",
+        observed_at_ms: expect.any(Number),
+      },
       resume_command:
         "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });

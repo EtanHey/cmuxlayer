@@ -77,11 +77,12 @@ import {
 import {
   resumeCommandForAgent,
   toAgentStatePayload,
-  toPublicAgent,
+  toObservedPublicAgent,
 } from "./agent-facade.js";
 import {
   DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
+  type AgentHealth,
   type AgentHealthIssueCode,
 } from "./agent-health.js";
 import {
@@ -95,6 +96,7 @@ import type {
   AgentAuthority,
   AgentFunction,
   AgentPlacement,
+  ObservedPublicAgent,
   AgentRole,
   AgentState,
   CliType,
@@ -11469,9 +11471,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 15. list_agents
+    type ListAgentsCacheEntry = {
+      topology_signature: string;
+      derived_at: number;
+      agents: Array<ObservedPublicAgent & { health: AgentHealth }>;
+      skipped_agents: Array<{ agent_id: string; error: string }>;
+    };
+    const listAgentsCache = new Map<string, ListAgentsCacheEntry>();
+    const listAgentsTopologySignature = (
+      topology: SurfaceTopologySnapshot | null,
+    ): string =>
+      JSON.stringify({
+        complete: topology?.complete ?? false,
+        surfaces: topology
+          ? [...topology.workspaceBySurface]
+              .map(([surface, workspace]) => ({
+                surface,
+                workspace,
+                uuid: topology.surfaceIdByRef.get(surface) ?? null,
+              }))
+              .sort((a, b) => a.surface.localeCompare(b.surface))
+          : [],
+      });
+
     server.tool(
       "list_agents",
-      "List public agent handles with optional filters by state, repo, or model, including health. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
+      "List public agent handles derived from live topology with provenance-labelled facts and optional filters by state, repo, or model. max_age_ms permits reuse of a same-topology snapshot for at most five seconds. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
       {
         state: z
           .enum([
@@ -11487,6 +11512,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Filter by state"),
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
+        max_age_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(5_000)
+          .optional()
+          .describe(
+            "Maximum acceptable snapshot age in milliseconds (0-5000); topology changes always invalidate the snapshot",
+          ),
       },
       ANNOTATIONS.readOnly,
       async (args) => {
@@ -11495,8 +11529,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           model: args.model,
         };
         const requestedState = args.state;
-        const buildListAgentsResponse = async (records: AgentRecord[]) => {
-          const topology = await collectSurfaceTopology();
+        const cacheKey = JSON.stringify({
+          state: args.state ?? null,
+          repo: args.repo ?? null,
+          model: args.model ?? null,
+        });
+        const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
+          const data = {
+            derived_at: entry.derived_at,
+            agents: entry.agents as unknown as Record<string, unknown>[],
+            count: entry.agents.length,
+            ...(entry.skipped_agents.length > 0
+              ? { skipped_agents: entry.skipped_agents }
+              : {}),
+          };
+          const formatted = formatListAgents(
+            entry.agents,
+            entry.agents.length,
+            entry.skipped_agents,
+          );
+          return okFormatted(formatted, data);
+        };
+        const buildListAgentsResponse = async (
+          records: AgentRecord[],
+          topology: SurfaceTopologySnapshot | null,
+          topologySignature: string,
+        ) => {
+          const derivedAt = Date.now();
           const rows = await Promise.all(
             records.map(async (agent) => {
               try {
@@ -11507,10 +11566,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   },
                   topology,
                 );
+                const reconciledState = health.reconciled_state ?? agent.state;
                 return {
                   agent: {
-                    ...toPublicAgent(agent),
-                    state: health.reconciled_state ?? agent.state,
+                    ...toObservedPublicAgent(agent, {
+                      derivedAtMs: derivedAt,
+                      state: reconciledState,
+                      stateSource: health.reconciled_state
+                        ? "screen"
+                        : "registry",
+                    }),
                     health,
                   },
                   skipped: null,
@@ -11534,33 +11599,65 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             row.skipped ? [row.skipped] : [],
           );
           const agents = requestedState
-            ? enrichedAgents.filter((agent) => agent.state === requestedState)
+            ? enrichedAgents.filter(
+                (agent) => agent.state.value === requestedState,
+              )
             : enrichedAgents;
-          const data = {
-            agents: agents as unknown as Record<string, unknown>[],
-            count: agents.length,
-            ...(skippedAgents.length > 0
-              ? { skipped_agents: skippedAgents }
-              : {}),
+          const entry: ListAgentsCacheEntry = {
+            topology_signature: topologySignature,
+            derived_at: derivedAt,
+            agents: agents as Array<
+              ObservedPublicAgent & { health: AgentHealth }
+            >,
+            skipped_agents: skippedAgents,
           };
-          const formatted = formatListAgents(
-            agents,
-            agents.length,
-            skippedAgents,
-          );
-          return okFormatted(formatted, data);
+          listAgentsCache.set(cacheKey, entry);
+          return renderListAgentsResponse(entry);
         };
 
         try {
           await awaitLifecycleStart();
-          const merged = await engine.runLifecycleMutation(() =>
-            registry.listMerged(discovery, { filter }),
+          const topology = await collectSurfaceTopology();
+          const topologySignature = listAgentsTopologySignature(topology);
+          const maxAgeMs = args.max_age_ms ?? 0;
+          const cached = listAgentsCache.get(cacheKey);
+          if (
+            maxAgeMs > 0 &&
+            cached &&
+            cached.topology_signature === topologySignature &&
+            Date.now() - cached.derived_at <= maxAgeMs
+          ) {
+            return renderListAgentsResponse(cached);
+          }
+          const merged = await engine.runLifecycleMutation(async () => {
+            discovery.invalidate();
+            const discovered = await discovery.scan(true);
+            if (
+              registry
+                .list()
+                .some((record) => record.agent_id.includes("-pending-"))
+            ) {
+              registry.repairFromDiscovery(discovered, { seatRegistry });
+            }
+            return registry.listMerged(discovery, {
+              filter,
+              force: true,
+              discovered,
+            });
+          });
+          return await buildListAgentsResponse(
+            merged,
+            topology,
+            topologySignature,
           );
-          return await buildListAgentsResponse(merged);
         } catch (e) {
           if (isSurfaceEnumerationError(e)) {
             try {
-              return await buildListAgentsResponse(registry.list(filter));
+              return await buildListAgentsResponse(
+                registry.list(filter),
+                null,
+                listAgentsTopologySignature(null),
+              );
             } catch (fallbackError) {
               return err(fallbackError);
             }

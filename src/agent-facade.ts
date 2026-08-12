@@ -1,4 +1,12 @@
-import type { AgentRecord, AgentRoute, PublicAgent } from "./agent-types.js";
+import type {
+  AgentRecord,
+  AgentRoute,
+  AgentState,
+  ObservationSource,
+  Observed,
+  ObservedPublicAgent,
+  PublicAgent,
+} from "./agent-types.js";
 import { buildResumeCommand } from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
@@ -22,18 +30,80 @@ export function resumeCommandForAgent(
   }
 }
 
-export function toPublicAgent(record: AgentRecord): PublicAgent {
+function recordObservedAtMs(record: AgentRecord, derivedAtMs: number): number {
+  const parsed = Date.parse(record.updated_at);
+  return Number.isFinite(parsed) ? parsed : derivedAtMs;
+}
+
+function observed<T>(
+  value: T,
+  source: ObservationSource,
+  observedAtMs: number,
+): Observed<T> {
+  return { value, source, observed_at_ms: observedAtMs };
+}
+
+export function toPublicAgent(
+  record: AgentRecord,
+): PublicAgent {
   const resumeCommand = resumeCommandForAgent(record);
-  const resumable = !!resumeCommand;
   return {
     agent_id: record.agent_id,
     repo: record.repo,
     model: record.model,
     state: record.state,
     session_id: record.cli_session_id,
-    resumable,
+    resumable: !!resumeCommand,
     submit_verified: record.submit_verified ?? null,
     model_mismatch: record.model_mismatch ?? null,
+    ...(resumeCommand ? { resume_command: resumeCommand } : {}),
+  };
+}
+
+export function toObservedPublicAgent(
+  record: AgentRecord,
+  opts: {
+    derivedAtMs?: number;
+    state?: AgentState;
+    stateSource?: ObservationSource;
+  } = {},
+): ObservedPublicAgent {
+  const derivedAtMs = opts.derivedAtMs ?? Date.now();
+  const registryObservedAtMs = recordObservedAtMs(record, derivedAtMs);
+  const resumeCommand = resumeCommandForAgent(record);
+  const resumable = !!resumeCommand;
+  const model = record.parsed_model ?? record.model ?? null;
+  return {
+    agent_id: record.agent_id,
+    repo: record.repo,
+    model: observed(
+      model,
+      record.parsed_model ? "screen" : "registry",
+      registryObservedAtMs,
+    ),
+    state: observed(
+      opts.state ?? record.state,
+      opts.stateSource ?? "registry",
+      opts.stateSource === "screen" ? derivedAtMs : registryObservedAtMs,
+    ),
+    session_id: observed(
+      record.cli_session_id,
+      record.cli_session_id ? "process" : "registry",
+      registryObservedAtMs,
+    ),
+    resumable: observed(resumable, "registry", registryObservedAtMs),
+    submit_verified: observed(
+      record.submit_verified ?? null,
+      "registry",
+      registryObservedAtMs,
+    ),
+    model_mismatch: observed(
+      record.model_mismatch ?? null,
+      record.model_mismatch === null || record.model_mismatch === undefined
+        ? "registry"
+        : "screen",
+      registryObservedAtMs,
+    ),
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }

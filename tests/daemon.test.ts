@@ -2240,9 +2240,19 @@ describe("CmuxLayerDaemon", () => {
           }),
         ]);
 
-      expect(daemonAgents.structuredContent).toEqual(
-        directAgents.structuredContent,
+      expect(daemonAgents.structuredContent?.derived_at).toEqual(
+        expect.any(Number),
       );
+      expect(directAgents.structuredContent?.derived_at).toEqual(
+        expect.any(Number),
+      );
+      expect({
+        ...daemonAgents.structuredContent,
+        derived_at: 0,
+      }).toEqual({
+        ...directAgents.structuredContent,
+        derived_at: 0,
+      });
       expect(daemonScreen.structuredContent).toEqual(
         directScreen.structuredContent,
       );

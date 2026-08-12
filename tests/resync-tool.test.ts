@@ -1636,7 +1636,10 @@ describe("resync_agents tool", () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.count).toBe(1);
-    expect(parsed.agents[0].state).toBe("working");
+    expect(parsed.agents[0].state).toMatchObject({
+      value: "working",
+      source: expect.stringMatching(/^(screen|registry|process)$/),
+    });
   });
 
   it("my_agents returns discovered root agents even when no parent_agent_id is provided", async () => {
@@ -2441,7 +2444,10 @@ describe("resync_agents tool", () => {
     const parsed = parseResult(listResult);
 
     expect(parsed.count).toBe(1);
-    expect(parsed.agents[0].state).toBe("idle");
+    expect(parsed.agents[0].state).toMatchObject({
+      value: "idle",
+      source: expect.stringMatching(/^(screen|registry|process)$/),
+    });
     expect(stateMgr.readState("auto-claude-surface-1")?.state).toBe("idle");
   });
 

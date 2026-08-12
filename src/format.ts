@@ -5,7 +5,7 @@
  * No ANSI color codes (MCP tool output doesn't support them in Claude Code).
  */
 
-import type { AgentRecord, PublicAgent } from "./agent-types.js";
+import type { AgentRecord, ObservedPublicAgent } from "./agent-types.js";
 import { resumeCommandForAgent } from "./agent-facade.js";
 import type { CmuxSurface, ParsedScreenResult } from "./types.js";
 
@@ -160,7 +160,7 @@ export function formatReadScreen(
 }
 
 export function formatListAgents(
-  agents: PublicAgent[],
+  agents: ObservedPublicAgent[],
   count: number,
   skippedAgents: Array<{ agent_id: string; error: string }> = [],
 ): string {
@@ -186,9 +186,9 @@ export function formatListAgents(
   for (const a of agents) {
     const id = pad(truncate(a.agent_id, 18), 20);
     const repo = pad(truncate(a.repo, 14), 16);
-    const state = pad(a.state, 8);
-    const model = pad(truncate(a.model, 16), 18);
-    const session = pad(a.session_id ?? "\u2014", 14);
+    const state = pad(a.state.value ?? "unknown", 8);
+    const model = pad(truncate(a.model.value ?? "unknown", 16), 18);
+    const session = pad(a.session_id.value ?? "\u2014", 14);
     lines.push(`\u2502 ${id} ${repo} ${state} ${model} ${session}`);
   }
 
