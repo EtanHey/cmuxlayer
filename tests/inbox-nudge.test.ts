@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
 import {
   agentDir,
+  inboxPath,
   writeHeartbeat,
   readInbox,
 } from "../src/inbox.js";
@@ -287,8 +288,10 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const nudgeCall = after.at(-1)!;
     const nudgeText = String(nudgeCall.at(-1) ?? "");
     expect(nudgeCall.join(" ")).toContain("surface:new");
-    expect(nudgeCall.join(" ")).toContain("inbox");
-    expect(nudgeText).not.toMatch(/[\n\r]/);
+    const message = readInbox(agentId, { baseDir: inboxDir }).at(-1)!;
+    expect(nudgeText).toBe(
+      `[inbox] ${message.id} — reply_to: ${message.reply_to} — read ${inboxPath(agentId, { baseDir: inboxDir })}`,
+    );
     // And the message itself is durably in the inbox file.
     expect(
       readInbox(agentId, { baseDir: inboxDir }).map((m) => m.task),
@@ -349,6 +352,89 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(parsed.delivery_status).toBe("monitor_live");
     expect(parsed.nudge.attempted).toBe(false);
     expect(sendCalls(exec).length).toBe(before);
+  });
+
+  it("wakes an idle live agent exactly once on enqueue even when its monitor is fresh", async () => {
+    const agentId = await spawnTestAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    const idle = engine.stateMgr.updateRecord(agentId, { state: "idle" });
+    engine.getRegistry().set(agentId, idle);
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+
+    const before = sendCalls(exec).length;
+    const result = await server._registeredTools["dispatch_to_agent"].handler(
+      {
+        agent_id: agentId,
+        task: "GO",
+        from: "orc",
+        tag: "dispatch",
+        persist: false,
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const message = readInbox(agentId, { baseDir: inboxDir }).at(-1)!;
+    const after = sendCalls(exec);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.monitor_state).toBe("alive");
+    expect(parsed.nudge).toMatchObject({ attempted: true, sent: true });
+    expect(after).toHaveLength(before + 1);
+    expect(String(after.at(-1)?.at(-1) ?? "")).toBe(
+      `[inbox] ${message.id} — reply_to: ${message.reply_to} — read ${inboxPath(agentId, { baseDir: inboxDir })}`,
+    );
+  });
+
+  it("puts the resolved caller agent id in the envelope and ping reply address", async () => {
+    const agentId = await spawnTestAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    const target = engine.getRegistry().get(agentId)!;
+    const idle = engine.stateMgr.updateRecord(agentId, { state: "idle" });
+    engine.getRegistry().set(agentId, idle);
+    const caller = {
+      ...target,
+      agent_id: "golems-caller",
+      surface_id: "surface:golems",
+      surface_uuid: "22222222-2222-4222-8222-222222222222",
+      state: "ready",
+    };
+    engine.stateMgr.writeState(caller);
+    engine.getRegistry().set(caller.agent_id, caller);
+    writeHeartbeat(agentId, { baseDir: inboxDir });
+
+    const before = sendCalls(exec).length;
+    const result = await runWithCallerContext(
+      { surfaceId: caller.surface_uuid },
+      () =>
+        server._registeredTools["dispatch_to_agent"].handler(
+          {
+            agent_id: agentId,
+            task: "Reply to the sender, not your own pane",
+            from: "ambiguous-human-label",
+            nudge: "auto",
+          },
+          {} as any,
+        ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const message = readInbox(agentId, { baseDir: inboxDir }).at(-1)!;
+    const after = sendCalls(exec);
+
+    expect(parsed.ok).toBe(true);
+    expect(message).toMatchObject({
+      from: "ambiguous-human-label",
+      reply_to: caller.agent_id,
+      via: caller.surface_id,
+      observed_at: expect.any(String),
+    });
+    expect(after).toHaveLength(before + 1);
+    expect(String(after.at(-1)?.at(-1) ?? "")).toBe(
+      `[inbox] ${message.id} — reply_to: ${caller.agent_id} via:${caller.surface_id} observed_at:${message.observed_at} — read ${inboxPath(agentId, { baseDir: inboxDir })}`,
+    );
+    expect(String(after.at(-1)?.at(-1) ?? "")).not.toContain("workspace:");
   });
 
   it("republishes a Claude idle-to-working transition without shrinking any lane", async () => {

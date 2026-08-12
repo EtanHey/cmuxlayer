@@ -432,7 +432,7 @@ describe("createServer", () => {
     await client.close();
   });
 
-  it("advertises SpawnSpec functions and independent placement axes", async () => {
+  it("advertises SpawnSpec axes and send_to job-function targeting", async () => {
     const stateDir = processScopedTmpDir("cmuxlayer-role-schema-test");
     rmSync(stateDir, { recursive: true, force: true });
     const server = createServer({
@@ -477,6 +477,9 @@ describe("createServer", () => {
       schemaFor("spawn_in_workspace").properties?.agents.items.properties.role
         .enum,
     ).toEqual(publicRoles);
+    expect(
+      schemaFor("send_to").properties?.targeting.properties.role.enum,
+    ).toEqual(["implementor", "reviewer", "gatherer"]);
 
     await client.close();
     rmSync(stateDir, { recursive: true, force: true });

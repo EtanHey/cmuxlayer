@@ -11,7 +11,6 @@ const CORE_TOOL_NAMES = [
   "read_screen",
   "my_agents",
   "list_agents",
-  "broadcast",
   "close_surface",
   "dispatch_to_agent",
   "list_surfaces",
@@ -21,6 +20,7 @@ const CORE_TOOL_NAMES = [
 
 // The signed-off prose says 9 legacy names, but its exhaustive mapping names 8.
 const LEGACY_TOOL_NAMES = [
+  "broadcast",
   "send_to_agent",
   "send_input",
   "send_command",
@@ -106,7 +106,7 @@ function parseResult(result: {
 }
 
 describe("thin-core tool palette", () => {
-  it("lists exactly 13 signed core tools, defers interact, and deletes reorder_surface", () => {
+  it("lists exactly 12 signed core tools, defers interact, and deletes reorder_surface", () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,

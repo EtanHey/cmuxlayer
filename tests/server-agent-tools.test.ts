@@ -43,6 +43,7 @@ import {
   currentCallerContext,
   runWithCallerContext,
 } from "../src/caller-context.js";
+import { MODEL_OVERRIDE_ENV } from "../src/model-policy.js";
 
 let TEST_DIR = join(tmpdir(), "cmux-agents-test-server-tools");
 const serverContexts: CmuxServerContext[] = [];
@@ -1220,11 +1221,22 @@ describe("lean spawn tool responses", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
+    const previousOverride = process.env[MODEL_OVERRIDE_ENV];
+    process.env[MODEL_OVERRIDE_ENV] = "1";
 
-    const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "claude", model: "fable-5" },
-      {} as any,
-    );
+    let result: any;
+    try {
+      result = await spawn.handler(
+        { repo: "cmuxlayer", cli: "claude", model: "fable-5" },
+        {} as any,
+      );
+    } finally {
+      if (previousOverride === undefined) {
+        delete process.env[MODEL_OVERRIDE_ENV];
+      } else {
+        process.env[MODEL_OVERRIDE_ENV] = previousOverride;
+      }
+    }
 
     expect(result.structuredContent).toMatchObject({ ok: false });
     expect(result.structuredContent.error).toContain(
@@ -1234,7 +1246,7 @@ describe("lean spawn tool responses", () => {
       'would actually run "claude-opus-5[1m]"',
     );
     expect(result.structuredContent.error).toContain(
-      "Accepted models: claude-opus-5[1m], sonnet",
+      "Accepted models: claude-opus-5[1m], opus, sonnet, haiku",
     );
     expect(
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
@@ -6195,6 +6207,220 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendCalls.map((call) => call.surface).sort()).toEqual(
       ["surface:orc", "surface:worker-2", "surface:worker"].sort(),
     );
+  });
+
+  it("send_to resolves structured targeting by job function, workspace, ids, and exclude", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "reviewer-a",
+        surface_id: "surface:reviewer-a",
+        workspace_id: "workspace:one",
+        state: "ready",
+        function: "reviewer",
+      }),
+      makeServerAgentRecord({
+        agent_id: "reviewer-excluded",
+        surface_id: "surface:reviewer-excluded",
+        workspace_id: "workspace:one",
+        state: "ready",
+        function: "reviewer",
+      }),
+      makeServerAgentRecord({
+        agent_id: "reviewer-other-workspace",
+        surface_id: "surface:reviewer-other",
+        workspace_id: "workspace:two",
+        state: "ready",
+        function: "reviewer",
+      }),
+      makeServerAgentRecord({
+        agent_id: "implementor-a",
+        surface_id: "surface:implementor-a",
+        workspace_id: "workspace:one",
+        state: "ready",
+        function: "implementor",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Review the P6 receipt set",
+        press_enter: false,
+        targeting: {
+          role: "reviewer",
+          workspace: "workspace:one",
+          agent_ids: ["reviewer-a", "reviewer-excluded", "implementor-a"],
+          exclude: ["reviewer-excluded"],
+        },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(Object.isFrozen(parsed.receipts)).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      targeting: {
+        role: "reviewer",
+        workspace: "workspace:one",
+        agent_ids: ["reviewer-a", "reviewer-excluded", "implementor-a"],
+        exclude: ["reviewer-excluded"],
+      },
+      target_count: 1,
+      delivered_count: 1,
+      failed_count: 0,
+      skipped_count: 0,
+      receipts: [
+        expect.objectContaining({
+          agent_id: "reviewer-a",
+          delivered: true,
+        }),
+      ],
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual([
+      "surface:reviewer-a",
+    ]);
+  });
+
+  it("send_to structured targeting returns one stable receipt set when one target fails", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "gatherer-ok",
+        surface_id: "surface:gatherer-ok",
+        state: "ready",
+        function: "gatherer",
+      }),
+      makeServerAgentRecord({
+        agent_id: "gatherer-fail",
+        surface_id: "surface:gatherer-fail",
+        state: "ready",
+        function: "gatherer",
+      }),
+    ];
+    const { server } = await createBroadcastServer(records, {
+      failSurface: "surface:gatherer-fail",
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Gather receipts",
+        targeting: { role: "gatherer" },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      target_count: 2,
+      delivered_count: 1,
+      failed_count: 1,
+      skipped_count: 0,
+      receipts: expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "gatherer-ok",
+          delivered: true,
+        }),
+        expect.objectContaining({
+          agent_id: "gatherer-fail",
+          delivered: false,
+          error: expect.stringContaining("send failed for surface:gatherer-fail"),
+        }),
+      ]),
+    });
+  });
+
+  it("send_to structured targeting skips non-deliverable targets with stable receipts", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "implementor-ready",
+        surface_id: "surface:implementor-ready",
+        state: "ready",
+        function: "implementor",
+      }),
+      makeServerAgentRecord({
+        agent_id: "implementor-done",
+        surface_id: "surface:implementor-done",
+        state: "done",
+        function: "implementor",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      { text: "Apply P6", targeting: { role: "implementor" } },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      target_count: 2,
+      delivered_count: 1,
+      failed_count: 0,
+      skipped_count: 1,
+      receipts: expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: "implementor-done",
+          delivered: false,
+          skipped: "dead:done",
+        }),
+      ]),
+    });
+    expect(sendCalls.map((call) => call.surface)).toEqual([
+      "surface:implementor-ready",
+    ]);
+  });
+
+  it("send_to structured targeting preflights every composer before the first delivery", async () => {
+    const records = [
+      makeServerAgentRecord({
+        agent_id: "a-gatherer-gemini",
+        surface_id: "surface:gatherer-gemini",
+        state: "ready",
+        function: "gatherer",
+        cli: "gemini",
+      }),
+      makeServerAgentRecord({
+        agent_id: "z-gatherer-claude",
+        surface_id: "surface:gatherer-claude",
+        state: "ready",
+        function: "gatherer",
+        cli: "claude",
+      }),
+    ];
+    const { server, sendCalls } = await createBroadcastServer(records);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "paragraph one\n\nparagraph two",
+        targeting: { role: "gatherer" },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("refuses multi-paragraph inline text");
+    expect(sendCalls).toHaveLength(0);
+  });
+
+  it("send_to targeting rejects authority and placement labels as roles", async () => {
+    const { server, sendCalls } = await createBroadcastServer([]);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Must not target by authority",
+        targeting: { role: "worker" },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toContain("targeting.role");
+    expect(sendCalls).toHaveLength(0);
   });
 
   it("list_agents state filter uses the reconciled screen-active state", async () => {
