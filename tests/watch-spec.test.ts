@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -52,6 +61,31 @@ describe("WatchSpec arm contract", () => {
           deadline: 60_000,
         },
         { registryPath: registryPath(), now: () => 1_000 },
+      ),
+    ).rejects.toMatchObject<Partial<WatchArmError>>({
+      code: "invalid_watch_spec",
+      target: "worker-a",
+    });
+  });
+
+  it("rejects an unobservable agent predicate through the exported library API", async () => {
+    await expect(
+      armWatch(
+        {
+          owner: "lead-a",
+          target: "worker-a",
+          predicate: "ready",
+          deadline: 60_000,
+        } as any,
+        {
+          registryPath: registryPath(),
+          now: () => 1_000,
+          agentObservation: () => ({
+            exists: true,
+            state: "idle",
+            source: "screen:surface-worker-a",
+          }),
+        },
       ),
     ).rejects.toMatchObject<Partial<WatchArmError>>({
       code: "invalid_watch_spec",
@@ -192,14 +226,136 @@ describe("WatchSpec arm contract", () => {
     });
   });
 
-  it("keeps a fired watch retryable until notification delivery succeeds", async () => {
-    const target = join(TEST_DIR, "redelivery.md");
+  it("keeps a watch armed when it was added after the sweep observation snapshot", async () => {
+    await armWatch(
+      {
+        owner: "lead-a",
+        target: "worker-existing",
+        predicate: "done",
+        deadline: 60_000,
+      },
+      {
+        registryPath: registryPath(),
+        now: () => 1_000,
+        agentObservation: () => ({
+          exists: true,
+          state: "idle",
+          source: "screen:surface-existing",
+        }),
+      },
+    );
+
+    let armedDuringSweep: Awaited<ReturnType<typeof armWatch>> | undefined;
+    const notify = vi.fn().mockResolvedValue(true);
+    const result = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => 5_000,
+      agentObservation: async (agentId) => {
+        if (agentId === "worker-existing" && !armedDuringSweep) {
+          armedDuringSweep = await armWatch(
+            {
+              owner: "lead-b",
+              target: "worker-new",
+              predicate: "done",
+              deadline: 60_000,
+            },
+            {
+              registryPath: registryPath(),
+              now: () => 2_000,
+              agentObservation: () => ({
+                exists: true,
+                state: "idle",
+                source: "screen:surface-new",
+              }),
+            },
+          );
+        }
+        return {
+          exists: true,
+          state: "idle",
+          source: `screen:${agentId}`,
+        };
+      },
+      notify,
+    });
+
+    expect(armedDuringSweep).toBeDefined();
+    expect(result.failed).not.toContain(armedDuringSweep!.watch_id);
+    expect(result.armed).toContain(armedDuringSweep!.watch_id);
+    expect(notify).not.toHaveBeenCalled();
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches.find(
+        (record) => record.watch_id === armedDuringSweep!.watch_id,
+      ),
+    ).toMatchObject({
+      state: "armed",
+      last_heartbeat_at_ms: 2_000,
+      liveness: { value: true, source: "screen", observed_at_ms: 2_000 },
+    });
+  });
+
+  it("recovers an abandoned stale registry lock", async () => {
+    const target = join(TEST_DIR, "stale-lock.md");
+    const lockPath = `${registryPath()}.lock`;
     writeFileSync(target, "", "utf8");
-    const notify = vi
-      .fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
-    const armed = await armWatch(
+    mkdirSync(lockPath);
+    utimesSync(lockPath, new Date(0), new Date(0));
+
+    await expect(
+      armWatch(
+        {
+          owner: "lead-a",
+          target,
+          marker: "DONE",
+          deadline: 60_000,
+        },
+        { registryPath: registryPath(), now: () => 1_000 },
+      ),
+    ).resolves.toMatchObject({ state: "armed" });
+  });
+
+  it("waits for a live registry lock holder instead of failing with EEXIST", async () => {
+    const target = join(TEST_DIR, "contended-lock.md");
+    const lockPath = `${registryPath()}.lock`;
+    writeFileSync(target, "", "utf8");
+    mkdirSync(lockPath);
+    const releaser = spawn(
+      process.execPath,
+      [
+        "-e",
+        "setTimeout(() => require('node:fs').rmSync(process.argv[1], { recursive: true, force: true }), 50)",
+        lockPath,
+      ],
+      { stdio: "ignore" },
+    );
+    let timerTicks = 0;
+    const timer = setInterval(() => {
+      timerTicks += 1;
+    }, 5);
+
+    try {
+      await expect(
+        armWatch(
+          {
+            owner: "lead-a",
+            target,
+            marker: "DONE",
+            deadline: 60_000,
+          },
+          { registryPath: registryPath(), now: () => 1_000 },
+        ),
+      ).resolves.toMatchObject({ state: "armed" });
+    } finally {
+      clearInterval(timer);
+      if (releaser.exitCode === null) await once(releaser, "exit");
+    }
+    expect(timerTicks).toBeGreaterThan(0);
+  });
+
+  it("drops a malformed persisted row without aborting valid watch evaluation", async () => {
+    const target = join(TEST_DIR, "malformed-row.md");
+    writeFileSync(target, "", "utf8");
+    const valid = await armWatch(
       {
         owner: "lead-a",
         target,
@@ -208,32 +364,104 @@ describe("WatchSpec arm contract", () => {
       },
       { registryPath: registryPath(), now: () => 1_000 },
     );
+    writeFileSync(
+      registryPath(),
+      `${JSON.stringify(
+        {
+          version: 2,
+          watches: [
+            valid,
+            {
+              ...valid,
+              watch_id: "malformed-row",
+              marker: undefined,
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
     appendFileSync(target, "DONE\n", "utf8");
 
-    const failedDelivery = await sweepWatches({
+    const result = await sweepWatches({
       registryPath: registryPath(),
       now: () => 2_000,
+      notify: vi.fn().mockResolvedValue(true),
+    });
+
+    expect(result.fired).toEqual([valid.watch_id]);
+    const persisted = JSON.parse(readFileSync(registryPath(), "utf8")) as {
+      version: number;
+      watches: Array<{ watch_id: string }>;
+    };
+    expect(persisted.version).toBe(2);
+    expect(persisted.watches.map((record) => record.watch_id)).toEqual([
+      valid.watch_id,
+      "malformed-row",
+    ]);
+    expect(
+      readWatchRegistry({ registryPath: registryPath() }).watches.map(
+        (record) => record.watch_id,
+      ),
+    ).toEqual([valid.watch_id]);
+  });
+
+  it("records the terminal verdict before retrying notification with backoff", async () => {
+    const target = join(TEST_DIR, "redelivery.md");
+    writeFileSync(target, "", "utf8");
+    const notify = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    let now = 1_000;
+    const armed = await armWatch(
+      {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: 60_000,
+      },
+      { registryPath: registryPath(), now: () => now },
+    );
+    appendFileSync(target, "DONE\n", "utf8");
+
+    now = 2_000;
+    const failedDelivery = await sweepWatches({
+      registryPath: registryPath(),
+      now: () => now,
       notify,
     });
-    expect(failedDelivery.fired).toEqual([]);
+    expect(failedDelivery.fired).toEqual([armed.watch_id]);
     expect(
       readWatchRegistry({ registryPath: registryPath() }).watches[0],
     ).toMatchObject({
       watch_id: armed.watch_id,
-      state: "firing",
+      state: "fired",
       terminal_reason: "predicate_matched",
+      notification_pending: true,
+      notification_attempts: 1,
     });
 
-    const delivered = await sweepWatches({
+    now = 2_500;
+    await sweepWatches({
       registryPath: registryPath(),
-      now: () => 3_000,
+      now: () => now,
       notify,
     });
-    expect(delivered.fired).toEqual([armed.watch_id]);
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    now = 3_000;
+    await sweepWatches({
+      registryPath: registryPath(),
+      now: () => now,
+      notify,
+    });
     expect(notify).toHaveBeenCalledTimes(2);
     expect(
       readWatchRegistry({ registryPath: registryPath() }).watches[0],
-    ).toMatchObject({ state: "fired" });
+    ).toMatchObject({ state: "fired", notification_pending: false });
   });
 
   it("persists and delivers deadline_elapsed through the retryable transition", async () => {

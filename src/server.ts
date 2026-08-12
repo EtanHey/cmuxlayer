@@ -62,6 +62,7 @@ import {
   type RegisterMonitorInput,
 } from "./monitor-registry.js";
 import {
+  WATCH_AGENT_PREDICATES,
   WatchArmError,
   type WatchNotify,
   type WatchSpec,
@@ -332,10 +333,11 @@ const WatchSpecArgsSchema = {
     .min(1)
     .describe("Absolute file path or public agent_id"),
   predicate: z
-    .string()
-    .min(1)
+    .enum(WATCH_AGENT_PREDICATES)
     .optional()
-    .describe("Agent state predicate; mutually exclusive with marker"),
+    .describe(
+      "Agent screen-state predicate: thinking, working, idle, done, error; mutually exclusive with marker",
+    ),
   marker: z
     .string()
     .min(1)

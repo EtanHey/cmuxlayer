@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ function makeNoopExec(): ExecFn {
   return async () => ({ stdout: "{}", stderr: "" });
 }
 
-function createWatchServer() {
+function createWatchServer(watchNotify?: () => Promise<boolean>) {
   return createServer({
     exec: makeNoopExec(),
     stateDir: join(TEST_DIR, "state"),
@@ -19,6 +19,7 @@ function createWatchServer() {
     sessionIdentityResolver: () => null,
     watchRegistryPath: join(TEST_DIR, "watches.json"),
     watchRegistryNow: () => Date.now(),
+    watchNotify,
   });
 }
 
@@ -86,6 +87,37 @@ describe("WatchSpec MCP contract", () => {
     });
   });
 
+  it("enum-constrains agent predicates at both WatchSpec schema boundaries", () => {
+    const server = createWatchServer() as any;
+    const armSchema = server._registeredTools.arm_watch.inputSchema;
+    const waitSchema = server._registeredTools.wait_for.inputSchema;
+    const baseWatch = {
+      owner: "lead-a",
+      target: "worker-a",
+      deadline: Date.now() + 5_000,
+    };
+
+    for (const predicate of ["thinking", "working", "idle", "done", "error"]) {
+      expect(armSchema.safeParse({ ...baseWatch, predicate }).success).toBe(
+        true,
+      );
+      expect(
+        waitSchema.safeParse({ watch: { ...baseWatch, predicate } }).success,
+      ).toBe(true);
+    }
+    for (const predicate of ["creating", "booting", "ready", "arbitrary"]) {
+      expect(armSchema.safeParse({ ...baseWatch, predicate }).success).toBe(
+        false,
+      );
+      expect(
+        waitSchema.safeParse({ watch: { ...baseWatch, predicate } }).success,
+      ).toBe(false);
+    }
+    expect(armSchema.shape.predicate.description).toContain(
+      "thinking, working, idle, done, error",
+    );
+  });
+
   it("accepts WatchSpec through wait_for and blocks until marker count increases", async () => {
     const server = createWatchServer();
     const target = join(TEST_DIR, "findings.md");
@@ -112,5 +144,36 @@ describe("WatchSpec MCP contract", () => {
         observed_value: 2,
       },
     });
+  });
+
+  it("returns a matched terminal verdict when notification delivery is down", async () => {
+    const notify = vi.fn().mockResolvedValue(false);
+    const server = createWatchServer(notify);
+    const target = join(TEST_DIR, "delivery-down.md");
+    writeFileSync(target, "", "utf8");
+    setTimeout(() => appendFileSync(target, "DONE\n", "utf8"), 30);
+
+    const { raw, parsed } = await callTool(server, "wait_for", {
+      watch: {
+        owner: "lead-a",
+        target,
+        marker: "DONE",
+        deadline: Date.now() + 1_000,
+      },
+      timeout_ms: 500,
+    });
+
+    expect(raw.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      matched: true,
+      watch: {
+        state: "fired",
+        terminal_reason: "predicate_matched",
+        notification_pending: true,
+        notification_attempts: 1,
+      },
+    });
+    expect(notify).toHaveBeenCalledOnce();
   });
 });
