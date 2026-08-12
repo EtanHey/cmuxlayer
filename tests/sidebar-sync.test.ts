@@ -151,6 +151,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     error: null,
     parent_agent_id: null,
     spawn_depth: 0,
+    role: "worker",
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
@@ -961,9 +962,7 @@ describe("Sidebar Sync", () => {
 
     expect(deferredTranscriptResolver).toHaveBeenCalledTimes(1);
     expect(
-      engine.getAgentState(
-        generateAgentId("codex", "cmuxlayer", capturedSessionId),
-      ),
+      engine.getAgentState("cmuxlayerCodex-deferred-startup-purge"),
     ).toMatchObject({
       state: "done",
       cli_session_id: capturedSessionId,

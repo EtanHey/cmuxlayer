@@ -153,6 +153,7 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
     error: null,
     parent_agent_id: null,
     spawn_depth: 0,
+    role: "worker",
     deletion_intent: false,
     quality: "unknown",
     max_cost_per_agent: null,
@@ -405,9 +406,7 @@ describe("AgentEngine", () => {
         prompt: "Fix gap F",
       });
 
-      expect(result.agent_id).toMatch(
-        /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
-      );
+      expect(result.agent_id).toMatch(/^brainlayerClaude-[a-f0-9]{8}$/);
       expect(result.surface_id).toBe("surface:new");
       expect(result.state).toBe("booting");
       expect(engine.getAgentState(result.agent_id)?.surface_uuid).toBe(
@@ -466,10 +465,10 @@ describe("AgentEngine", () => {
         expectedRole: "worker" as const,
       },
       {
-        label: "no-role Claude fallback",
+        label: "no-role harness-neutral fallback",
         cli: "claude" as const,
         role: undefined,
-        expectedRole: "orchestrator" as const,
+        expectedRole: "worker" as const,
       },
       {
         label: "explicit Codex orchestrator",
@@ -635,9 +634,10 @@ describe("AgentEngine", () => {
         }),
       ).rejects.toThrow(/waiting for agent launch readiness/);
 
-      const finalAgentId = "brainlayerCodex-019d9aa5";
-      expect(engine.getAgentState(finalAgentId)).toMatchObject({
-        agent_id: finalAgentId,
+      const failedAgent = engine
+        .listAgents()
+        .find((agent) => agent.surface_id === "surface:new");
+      expect(failedAgent).toMatchObject({
         state: "error",
         error: expect.stringContaining("Launch failed:"),
         cli_session_id: sessionId,
@@ -4634,7 +4634,7 @@ Resumable session: 8c2f7f0c-00ee-4c6e-856d-cc7ae91f5274`,
       },
     );
 
-    it("finalizes agent_id to golemName-session-prefix and aliases the provisional id", async () => {
+    it("captures session identity without changing the stable spawn id", async () => {
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
       liveSurfaces = [makeSpawnSurface()];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -4654,33 +4654,30 @@ Session ID: ${sessionId}`,
         prompt: "Fix gap F",
       });
 
-      const finalAgentId = "brainlayerClaude-019d9aa5";
-      expect(result.agent_id).toMatch(
-        /^brainlayerClaude-pending-\d+-[a-z0-9]+$/,
-      );
+      const stableAgentId = result.agent_id;
+      expect(stableAgentId).toMatch(/^brainlayerClaude-[a-f0-9]{8}$/);
       writeHeartbeat(result.agent_id, { baseDir: TEST_DIR });
-      const pendingMarker = join(
+      const stableMarker = join(
         TEST_DIR,
         ".channel-dirs",
         `${encodeURIComponent(result.agent_id)}.created`,
       );
-      expect(existsSync(pendingMarker)).toBe(true);
+      expect(existsSync(stableMarker)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(1000);
 
-      expect(engine.getAgentState(finalAgentId)).toMatchObject({
-        agent_id: finalAgentId,
+      expect(engine.getAgentState(stableAgentId)).toMatchObject({
+        agent_id: stableAgentId,
         cli_session_id: sessionId,
         cli_session_path: null,
       });
       expect(engine.getAgentState(result.agent_id)).toMatchObject({
-        agent_id: finalAgentId,
+        agent_id: stableAgentId,
         cli_session_id: sessionId,
         cli_session_path: null,
       });
-      expect(stateMgr.readState(result.agent_id)).toBeNull();
-      expect(stateMgr.readState(finalAgentId)?.agent_id).toBe(finalAgentId);
-      expect(existsSync(pendingMarker)).toBe(false);
+      expect(stateMgr.readState(stableAgentId)?.agent_id).toBe(stableAgentId);
+      expect(existsSync(stableMarker)).toBe(true);
     });
 
     it("periodically reaps only old pending markers absent from registry and state", async () => {
@@ -4773,14 +4770,12 @@ Session ID: ${sessionId}`,
 
       await vi.advanceTimersByTimeAsync(1000);
 
-      expect(engine.getAgentState("brainlayerCodex-019e942c")).toMatchObject({
-        agent_id: "brainlayerCodex-019e942c",
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        agent_id: result.agent_id,
         cli_session_id: sessionId,
         cli_session_path: sessionPath,
       });
-      expect(engine.getAgentState(result.agent_id)?.agent_id).toBe(
-        "brainlayerCodex-019e942c",
-      );
+      expect(engine.getAgentState(result.agent_id)?.agent_id).toBe(result.agent_id);
     });
 
     it("captures transcript session identity after boot has already reached ready", async () => {
@@ -5629,7 +5624,7 @@ Session ID: ${sessionId}`,
       );
       utimesSync(sessionPath, rolloutMtime, rolloutMtime);
       await engine.captureBootSessionId(spawnedRecord!.agent_id);
-      const finalAgentId = "cmuxlayerCodex-019fec96";
+      const finalAgentId = spawnedRecord!.agent_id;
       stateMgr.transition(finalAgentId, "ready");
       const working = stateMgr.transition(finalAgentId, "working");
       registry.set(finalAgentId, working);

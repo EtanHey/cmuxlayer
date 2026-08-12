@@ -257,20 +257,6 @@ function roleFromLauncherLabel(label: string | undefined): AgentRole | null {
   return null;
 }
 
-function roleFromCli(cli: string | undefined): AgentRole | null {
-  switch (cli) {
-    case "claude":
-      return "orchestrator";
-    case "codex":
-    case "cursor":
-    case "gemini":
-    case "kiro":
-      return "worker";
-    default:
-      return null;
-  }
-}
-
 function normalizeExplicitRole(
   role: AgentRole | "ic" | undefined,
 ): AgentRole | undefined {
@@ -286,8 +272,7 @@ export function canInferAgentRole(input: {
   return Boolean(
     input.role ||
     roleFromLauncherLabel(input.launcherName) ||
-    roleFromLauncherLabel(input.title) ||
-    roleFromCli(input.cli),
+    roleFromLauncherLabel(input.title),
   );
 }
 
@@ -304,9 +289,6 @@ export function inferAgentRole(input: {
     roleFromLauncherLabel(input.launcherName) ??
     roleFromLauncherLabel(input.title);
   if (launcherRole) return launcherRole;
-
-  const cliRole = roleFromCli(input.cli);
-  if (cliRole) return cliRole;
 
   throw new AgentRoleInferenceError(input);
 }
@@ -331,13 +313,9 @@ export function launcherNameForCli(repo: string, cli: CliType): string {
 export function inferRecordRole(
   agent: Pick<AgentRecord, "role" | "cli" | "repo">,
 ): AgentRole {
-  return (
-    normalizeExplicitRole(agent.role) ??
-    inferAgentRole({
-      cli: agent.cli,
-      launcherName: launcherNameForCli(agent.repo, agent.cli),
-    })
-  );
+  const explicitRole = normalizeExplicitRole(agent.role);
+  if (explicitRole) return explicitRole;
+  throw new AgentRoleInferenceError({ role: agent.role, cli: agent.cli });
 }
 
 export function inferRecordRoleOrNull(

@@ -544,6 +544,397 @@ describe("lifecycle dependency seams", () => {
 });
 
 describe("lean spawn tool responses", () => {
+  it.each([
+    ["role", "gatherr"],
+    ["role", "reviwer"],
+    ["role", ""],
+    ["placement", "sideways"],
+  ] as const)(
+    "rejects invalid spawn %s=%j before creating a surface",
+    async (field, value) => {
+      const exec = makeLifecycleExec();
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await spawn.handler(
+        spawn.inputSchema.parse({
+          version: 1,
+          repo: "cmuxlayer",
+          cli: "codex",
+          ...(field === "placement" ? { role: "implementor" } : {}),
+          [field]: value,
+        }),
+        {} as any,
+      );
+
+      expect(result.structuredContent).toMatchObject({ ok: false });
+      expect(result.structuredContent.error).toContain(`Invalid ${field}=`);
+      expect(
+        exec.mock.calls.some(([, args]) =>
+          args.includes("new-split") || args.includes("new-surface"),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("rejects roleless Claude before creating any surface and names both fixes", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      spawn.inputSchema.parse({ repo: "cmuxlayer", cli: "claude" }),
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: false,
+      error_code: "ROLE_REQUIRED",
+    });
+    expect(result.structuredContent.error).toMatch(
+      /use either .*authority.*lead.*role.*implementor.*or .*authority.*worker.*role.*reviewer/i,
+    );
+    expect(
+      exec.mock.calls.some(([, args]) =>
+        args.includes("new-split") || args.includes("new-surface"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects placement-only Claude as roleless", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      spawn.inputSchema.parse({
+        version: 1,
+        repo: "cmuxlayer",
+        cli: "claude",
+        placement: "left",
+      }),
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: false,
+      error_code: "ROLE_REQUIRED",
+    });
+    expect(
+      exec.mock.calls.some(([, args]) =>
+        args.includes("new-split") || args.includes("new-surface"),
+      ),
+    ).toBe(false);
+  });
+
+  it("stores reviewer function independently and places Claude on the right", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "agent",
+      repo: "cmuxlayer",
+      cli: "claude",
+      role: "reviewer",
+    });
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      version: 1,
+      type: "agent",
+      role: "reviewer",
+      authority: "worker",
+      placement: "right",
+    });
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("new-split") && callArgs.includes("right"),
+      ),
+    ).toBe(true);
+
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    expect(engine.getAgentState(result.structuredContent.agent_id)).toMatchObject({
+      function: "reviewer",
+      authority: "worker",
+      placement: "right",
+    });
+  });
+
+  it("defaults implementor axes independently of harness", async () => {
+    const spawnWith = async (cli: "claude" | "codex") => {
+      const server = createLifecycleServer(makeLifecycleExec());
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      return spawn.handler(
+        spawn.inputSchema.parse({
+          version: 1,
+          repo: "cmuxlayer",
+          cli,
+          role: "implementor",
+          force_new: true,
+        }),
+        {} as any,
+      );
+    };
+
+    const claude = await spawnWith("claude");
+    const codex = await spawnWith("codex");
+
+    expect(claude.structuredContent).toMatchObject({
+      ok: true,
+      role: "implementor",
+      authority: "worker",
+      placement: "right",
+    });
+    expect(codex.structuredContent).toMatchObject({
+      ok: true,
+      role: "implementor",
+      authority: "worker",
+      placement: "right",
+    });
+  });
+
+  it("rejects a reviewer placed left before creating a surface", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "agent",
+      repo: "cmuxlayer",
+      cli: "claude",
+      role: "reviewer",
+      placement: "left",
+    });
+
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent).toMatchObject({ ok: false });
+    expect(result.structuredContent.error).toMatch(/reviewer.*right|left.*reviewer/i);
+    expect(
+      exec.mock.calls.some(([, callArgs]) =>
+        callArgs.includes("new-split") || callArgs.includes("new-surface"),
+      ),
+    ).toBe(false);
+  });
+
+  it("spawns a plain terminal in the parent workspace with cwd and no agent fields", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "terminal",
+      cwd: "/tmp/spawn-spec-terminal",
+    });
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1" },
+      () => spawn.handler(args, {} as any),
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      version: 1,
+      type: "terminal",
+      workspace_id: "workspace:1",
+      surface_id: "surface:new",
+      cwd: "/tmp/spawn-spec-terminal",
+    });
+    expect(result.structuredContent).not.toHaveProperty("agent_id");
+    expect(result.structuredContent).not.toHaveProperty("role");
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("send") &&
+          callArgs.includes("cd -- '/tmp/spawn-spec-terminal'"),
+      ),
+    ).toBe(true);
+  });
+
+  it("docks a plain terminal into the existing worker column", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, callArgs: string[]) => {
+      if (callArgs.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:lead",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:lead"],
+                pixel_frame: { x: 0, y: 0, width: 800, height: 900 },
+              },
+              {
+                ref: "pane:worker",
+                index: 1,
+                focused: false,
+                surface_count: 1,
+                surface_refs: ["surface:worker"],
+                pixel_frame: { x: 800, y: 0, width: 800, height: 900 },
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (callArgs.includes("new-surface")) {
+        return {
+          stdout: JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:terminal",
+            pane: "pane:worker",
+            title: "",
+            type: "terminal",
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, callArgs);
+    }) as unknown as ExecFn;
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      spawn.inputSchema.parse({
+        version: 1,
+        type: "terminal",
+        workspace: "workspace:1",
+      }),
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      type: "terminal",
+      surface_id: "surface:terminal",
+      workspace_id: "workspace:1",
+    });
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("new-surface") &&
+          callArgs.includes("--pane") &&
+          callArgs.includes("pane:worker"),
+      ),
+    ).toBe(true);
+    expect(
+      exec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
+    ).toBe(false);
+  });
+
+  it("creates a named workspace for a terminal workspace=new request", async () => {
+    const exec = makeLifecycleExec({ createdWorkspace: "workspace:created" });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "terminal",
+      workspace: "new:Scratch Pad",
+    });
+
+    const result = await spawn.handler(args, {} as any);
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      type: "terminal",
+      workspace_id: "workspace:created",
+    });
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("workspace") &&
+          callArgs.includes("create") &&
+          callArgs.includes("Scratch Pad"),
+      ),
+    ).toBe(true);
+  });
+
+  it("terminal new workspace refuses manual mode before creating workspace", async () => {
+    const baseExec = makeLifecycleExec({ createdWorkspace: "workspace:created" });
+    const exec = vi.fn().mockImplementation(async (cmd, args) => {
+      if (Array.isArray(args) && args.includes("list-status")) {
+        return {
+          stdout: JSON.stringify([{ key: "mode.control", value: "manual" }]),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec as ExecFn);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "terminal",
+      workspace: "new:Scratch Pad",
+    });
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1" },
+      () => spawn.handler(args, {} as any),
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: false,
+      error_code: "manual_mode",
+    });
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("workspace") && callArgs.includes("create"),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns a stable identity triple for a worker-spawned reviewer", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const parent = makeServerAgentRecord({
+      agent_id: "cmuxlayerCodex-parent",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "working",
+      cli: "codex",
+      role: "worker",
+    });
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const args = spawn.inputSchema.parse({
+      version: 1,
+      type: "agent",
+      repo: "cmuxlayer",
+      cli: "claude",
+      role: "reviewer",
+      force_new: true,
+    });
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: parent.surface_id },
+      () => spawn.handler(args, {} as any),
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      agent_id: expect.any(String),
+      parent_agent_id: parent.agent_id,
+      role: "reviewer",
+    });
+    expect(result.structuredContent.agent_id).not.toContain("-pending-");
+    expect(engine.getAgentState(result.structuredContent.agent_id)).toMatchObject({
+      agent_id: result.structuredContent.agent_id,
+      parent_agent_id: parent.agent_id,
+      function: "reviewer",
+    });
+  });
+
   it("spawn_agent publishes the exact expected-state manifest through the injected writer", async () => {
     const manifests: SeatManifest[] = [];
     const surfaceUuid = "11111111-2222-4333-8444-555555555555";
@@ -566,7 +957,13 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      {
+        repo: "cmuxlayer",
+        model: "sonnet",
+        cli: "claude",
+        role: "implementor",
+        authority: "lead",
+      },
       {} as any,
     );
     const parsed =
@@ -803,6 +1200,8 @@ describe("lean spawn tool responses", () => {
     const args = spawn.inputSchema.parse({
       repo: "cmuxlayer",
       cli: "claude",
+      role: "implementor",
+      authority: "lead",
       effort: "medium",
     });
 
@@ -1769,7 +2168,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(/^brainlayerClaude-pending-\d+-[a-z0-9]+$/);
+    expect(parsed.agent_id).toMatch(/^brainlayerClaude-[0-9a-f]{8}$/);
     expect(parsed.surface_id).toBe("surface:new");
     expect(parsed.state).toBe("ready");
     expect(parsed.health).toBeUndefined();
@@ -2323,7 +2722,11 @@ describe("agent lifecycle tool handlers", () => {
     const child = engine.getAgentState(parsed.agent_id);
 
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
-    expect(parsed.role).toBe("worker");
+    expect(parsed).toMatchObject({
+      role: "worker",
+      authority: "worker",
+      placement: "right",
+    });
     expect(parsed.warnings).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/worker caller.*forced.*role.*worker/i),
@@ -2592,6 +2995,7 @@ describe("agent lifecycle tool handlers", () => {
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
+      role: "implementor",
       placement: "ic",
       prompt: "coordinate task",
     });
@@ -2600,7 +3004,11 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
-    expect(parsed.role).toBe("worker");
+    expect(parsed).toMatchObject({
+      role: "implementor",
+      authority: "worker",
+      placement: "right",
+    });
     expect(parsed.warnings.join(" | ")).toMatch(
       /legacy.*ic.*worker|ic.*coerc.*worker/i,
     );
@@ -3839,7 +4247,7 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.agent_id).toMatch(/^cmuxlayerCursor-pending-\d+-[a-z0-9]+$/);
+    expect(parsed.agent_id).toMatch(/^cmuxlayerCursor-[0-9a-f]{8}$/);
     expect(parsed.state).toBe("ready");
     expect(parsed.boot_prompt_delivered).toBe(true);
 
@@ -4846,6 +5254,8 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
+        role: "implementor",
+        authority: "lead",
         prompt: "fix gap F",
         crash_recover: true,
       },
@@ -4925,6 +5335,8 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
+        role: "implementor",
+        authority: "lead",
         prompt: "fix gap F",
     });
     const spawnResult = await spawn.handler(spawnArgs, {} as any);
@@ -11465,6 +11877,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       const args = tool.inputSchema.parse({
         repo: "cmuxlayer",
         cli: "claude",
+        role: "implementor",
         placement: "orchestrator",
         workspace: "workspace:1",
         force_new: true,
