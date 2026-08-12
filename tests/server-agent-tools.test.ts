@@ -3838,6 +3838,125 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("spawn_agent waits through an 800ms launcher first-paint delay without cleanup", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "voicelayerCodex -s") {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (
+          launcherSentAt !== null &&
+          args.includes("send-key") &&
+          args.includes("return")
+        ) {
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 800
+                  ? "$ voicelayerCodex -s"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.error).toBeUndefined();
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent keeps a generic launch-timeout surface and worktree recoverable", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-timeout");
+      const registryPath = join(TEST_DIR, "launchers-timeout.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "launch-timeout");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const exec = makeLifecycleExec({ shellNeverReady: true });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "launch-timeout",
+            branch: "wt/launch-timeout",
+          },
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("new_worktree_split rolls back a newly created worktree and branch when spawning fails", async () => {
     const gitsDir = join(TEST_DIR, "Gits");
     const repoRoot = join(gitsDir, "cmuxlayer");

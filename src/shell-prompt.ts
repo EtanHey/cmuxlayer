@@ -18,6 +18,13 @@ export function matchShellPromptLine(
     return { input: barePrompt[2] ?? "" };
   }
 
+  // Preserve the app-server's established contract: any decorated prompt
+  // ending in $, %, or # is ready. Pending input follows the terminator and
+  // therefore cannot match this suffix-only fallback.
+  if (/^.+[$%#]$/u.test(normalized)) {
+    return { input: "" };
+  }
+
   const prefixedPrompt = normalized.match(
     new RegExp(
       `^\\s*(?:(?:\\S+@\\S+)(?:\\s+(?:~|\\/)\\S*)?|(?:.*\\s)?(?:~|\\/)\\S*)(?:\\s+\\[[^\\]]+\\])?\\s*${SHELL_PROMPT_TERMINATOR}(?:\\s+(.*))?$`,

@@ -16,6 +16,10 @@ describe("shell prompt recognition", () => {
     "» ",
     "user in ~/code/cmuxlayer > ",
     "etan@mac ~/Gits/cmuxlayer [main] ❯ ",
+    "➜  cmuxlayer git:(main) $ ",
+    "[etan@mac cmuxlayer]$ ",
+    "cmuxlayer (main) % ",
+    "bash-5.2$ ",
   ])("accepts a ready %s prompt", (prompt) => {
     expect(matchesShellPrompt(`old output\n${prompt}`)).toBe(true);
   });
@@ -24,6 +28,7 @@ describe("shell prompt recognition", () => {
     "> cmuxlayerCodex -s",
     "❯ cmuxlayerClaude -s",
     "user in ~/code/cmuxlayer > still pending",
+    "bash-5.2$ cmuxlayerCodex -s",
   ])("rejects pending input at %s", (prompt) => {
     expect(matchesShellPrompt(prompt)).toBe(false);
   });

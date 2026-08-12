@@ -5048,34 +5048,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return false;
           }
 
-          const verifyPendingCommandSubmitted = async (): Promise<void> => {
-            const startedAt = Date.now();
-            let lastText = screen.text;
-            while (
-              Date.now() - startedAt < SEND_INPUT_RECOVERY_ENTER_DELAY_MS
-            ) {
-              const confirmation = await readLauncherScreen();
-              lastText = confirmation.text;
-              if (
-                !screenShowsPendingShellInput(lastText, sanitizedCommand) ||
-                READY_PATTERN_CLIS.some(
-                  (cli) => matchReadyPattern(cli, lastText).matched,
-                )
-              ) {
-                return;
-              }
-              const remaining =
-                SEND_INPUT_RECOVERY_ENTER_DELAY_MS -
-                (Date.now() - startedAt);
-              if (remaining <= 0) break;
-              await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
-            }
-            throw new LauncherReadinessError(
-              `launcher command remained pending after Return on ${opts.surface}`,
-              tailLines(lastText, 10),
-            );
-          };
-
           try {
             // Return is a mutation: retrying after a lost acknowledgement can
             // submit into the newly started CLI. Probe before any fallback.
@@ -5083,21 +5055,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await client.sendKey(opts.surface, "return", {
               workspace: opts.workspace,
             });
-            await verifyPendingCommandSubmitted();
             return true;
           } catch (error) {
             if (isSurfaceGoneReadFailure(error, opts.surface)) {
               throw new SurfaceGoneError(opts.surface, error);
             }
             try {
-              await verifyPendingCommandSubmitted();
-              return true;
+              const confirmation = await readLauncherScreen();
+              return !screenShowsPendingShellInput(
+                confirmation.text,
+                sanitizedCommand,
+              );
             } catch (confirmationError) {
               if (isSurfaceGoneReadFailure(confirmationError, opts.surface)) {
                 throw new SurfaceGoneError(opts.surface, confirmationError);
-              }
-              if (confirmationError instanceof LauncherReadinessError) {
-                throw confirmationError;
               }
               throw error;
             }
@@ -5161,30 +5132,42 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!/Enter submit could not be verified/.test(message)) {
             throw error;
           }
-          const pendingScreen = await client.readScreen(opts.surface, {
-            workspace: opts.workspace,
-            lines: 80,
-            scrollback: false,
-          });
-          if (
-            screenShowsPendingShellInput(
-              pendingScreen.text,
-              sanitizedCommand,
-            )
-          ) {
-            throw new LauncherReadinessError(
-              `launcher command remained pending after Return on ${opts.surface}`,
-              tailLines(pendingScreen.text, 10),
-            );
-          }
           // The command can remain visible in shell history while the launcher is
           // already booting. Readiness detection is the authoritative launch check.
-          await waitForAgentLaunchReady({
-            surface: opts.surface,
-            workspace: opts.workspace,
-            timeout_ms: opts.timeout_ms,
-            onUpdateShellRelaunch: relaunchOriginalCommand,
-          });
+          try {
+            await waitForAgentLaunchReady({
+              surface: opts.surface,
+              workspace: opts.workspace,
+              timeout_ms: opts.timeout_ms,
+              onUpdateShellRelaunch: relaunchOriginalCommand,
+            });
+          } catch (readinessError) {
+            let pendingScreen;
+            try {
+              pendingScreen = await client.readScreen(opts.surface, {
+                workspace: opts.workspace,
+                lines: 80,
+                scrollback: false,
+              });
+            } catch (readError) {
+              if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+                throw new SurfaceGoneError(opts.surface, readError);
+              }
+              throw readinessError;
+            }
+            if (
+              screenShowsPendingShellInput(
+                pendingScreen.text,
+                sanitizedCommand,
+              )
+            ) {
+              throw new LauncherReadinessError(
+                `launcher command remained pending after Return on ${opts.surface}`,
+                tailLines(pendingScreen.text, 10),
+              );
+            }
+            throw readinessError;
+          }
         }
       },
       {
@@ -10295,7 +10278,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (
               e instanceof AgentLaunchError &&
               e.launch_phase === "launch" &&
-              !(e.launch_cause instanceof SurfaceGoneError)
+              e.launch_cause instanceof LauncherReadinessError
             ) {
               await cleanupFailedLauncherArtifacts(
                 e,
