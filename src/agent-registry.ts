@@ -312,7 +312,9 @@ function roleFromSeatOrLauncher(input: {
     });
   } catch (error) {
     if (isAgentRoleInferenceError(error)) {
-      return inferAgentRole({ cli: input.cli });
+      if (input.cli === "gemini" || input.cli === "kiro") {
+        return "worker";
+      }
     }
     throw error;
   }

@@ -1663,6 +1663,38 @@ describe("AgentRegistry", () => {
   });
 
   describe("repairFromDiscovery", () => {
+    it.each([
+      ["gemini", "golemsGemini"],
+      ["kiro", "golemsKiro"],
+    ] as const)(
+      "keeps listMerged available for a roleless %s launcher on a fresh install",
+      async (cli, surfaceTitle) => {
+        const surfaceId = `surface:${cli}`;
+        const registry = new AgentRegistry(stateMgr, async () => [
+          { ...makeSurface(surfaceId), title: surfaceTitle },
+        ]);
+        await registry.reconstitute();
+
+        const merged = await registry.listMerged({
+          scan: vi.fn().mockResolvedValue([
+            makeDiscovered({
+              surface_id: surfaceId,
+              surface_title: surfaceTitle,
+              cli,
+            }),
+          ]),
+        } as any);
+
+        expect(merged).toContainEqual(
+          expect.objectContaining({
+            surface_id: surfaceId,
+            cli,
+            role: "worker",
+          }),
+        );
+      },
+    );
+
     it("does not repair or evict from a non-bijective discovery observation", () => {
       const duplicateUuid = "11111111-2222-4333-8444-555555555555";
       stateMgr.writeState(

@@ -532,6 +532,39 @@ describe("lifecycle dependency seams", () => {
 });
 
 describe("lean spawn tool responses", () => {
+  it.each([
+    ["role", "gatherr"],
+    ["role", "reviwer"],
+    ["role", ""],
+    ["placement", "sideways"],
+  ] as const)(
+    "rejects invalid spawn %s=%j before creating a surface",
+    async (field, value) => {
+      const exec = makeLifecycleExec();
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await spawn.handler(
+        spawn.inputSchema.parse({
+          version: 1,
+          repo: "cmuxlayer",
+          cli: "codex",
+          ...(field === "placement" ? { role: "implementor" } : {}),
+          [field]: value,
+        }),
+        {} as any,
+      );
+
+      expect(result.structuredContent).toMatchObject({ ok: false });
+      expect(result.structuredContent.error).toContain(`Invalid ${field}=`);
+      expect(
+        exec.mock.calls.some(([, args]) =>
+          args.includes("new-split") || args.includes("new-surface"),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();
     const server = createLifecycleServer(exec);

@@ -517,6 +517,31 @@ function normalizeSpawnAxes(input: {
   warning: string | undefined;
 } {
   const raw = input.role;
+  if (
+    raw !== undefined &&
+    raw !== "orchestrator" &&
+    raw !== "worker" &&
+    raw !== "ic" &&
+    raw !== "implementor" &&
+    raw !== "reviewer" &&
+    raw !== "gatherer"
+  ) {
+    throw new Error(
+      `Invalid role=${JSON.stringify(raw)}; expected orchestrator, worker, implementor, reviewer, or gatherer`,
+    );
+  }
+  if (
+    input.placement !== undefined &&
+    input.placement !== "left" &&
+    input.placement !== "right" &&
+    input.placement !== "orchestrator" &&
+    input.placement !== "worker" &&
+    input.placement !== "ic"
+  ) {
+    throw new Error(
+      `Invalid placement=${JSON.stringify(input.placement)}; expected left or right`,
+    );
+  }
   const legacyRaw =
     raw === "orchestrator" || raw === "worker" || raw === "ic"
       ? raw
