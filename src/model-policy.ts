@@ -3,8 +3,8 @@ import type { CliType } from "./agent-types.js";
 export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
 // Match the installed repoGolem launcher sourced by fresh interactive shells
 // (~/.config/ralphtools/golem-dispatch.zsh), not the potentially newer golems
-// checkout. The drift gate fails when that live contract changes; validation
-// must still reject mismatches before any worktree or surface is created.
+// checkout. Codex model validation is delegated to `codex debug models
+// --bundled` during spawn preflight, before any worktree or surface is created.
 export const CODEX_EFFORT_VALUES = [
   "medium",
   "high",
@@ -227,7 +227,8 @@ export function resolveSpawnModelPolicy(
       cli,
       requested_model: requestedModel,
       effective_model: requestedModel,
-      launcher_model: requestedModel,
+      launcher_model:
+        requestedModel.toLowerCase() === "codex" ? null : requestedModel,
       coerced: false,
       warnings: [],
       override_env: MODEL_OVERRIDE_ENV,

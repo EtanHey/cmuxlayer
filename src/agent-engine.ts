@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -15,6 +16,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
@@ -349,6 +351,77 @@ export interface SpawnPreflightResult {
   repoRoot?: string;
 }
 
+export type CodexModelListRunner = (
+  args: string[],
+) => Promise<{ stdout: string; stderr?: string }>;
+
+const execFileAsync = promisify(execFile);
+
+async function defaultCodexModelListRunner(
+  args: string[],
+): Promise<{ stdout: string; stderr?: string }> {
+  return execFileAsync("codex", args, {
+    timeout: 10_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+}
+
+function parseCodexModelSlugs(stdout: string): string[] {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(
+      `Codex model discovery returned invalid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }. No agent was spawned.`,
+    );
+  }
+  const models =
+    payload && typeof payload === "object" && "models" in payload
+      ? (payload as { models?: unknown }).models
+      : null;
+  const slugs = Array.isArray(models)
+    ? models.flatMap((model) => {
+        if (typeof model === "string") return [model];
+        if (model && typeof model === "object" && "slug" in model) {
+          const slug = (model as { slug?: unknown }).slug;
+          return typeof slug === "string" ? [slug] : [];
+        }
+        return [];
+      })
+    : [];
+  if (slugs.length === 0) {
+    throw new Error(
+      "Codex model discovery returned no models. No agent was spawned.",
+    );
+  }
+  return slugs;
+}
+
+async function validateCodexModel(
+  model: string | undefined,
+  runner: CodexModelListRunner,
+): Promise<void> {
+  if (!model?.trim() || model.trim().toLowerCase() === "codex") return;
+
+  let result: { stdout: string; stderr?: string };
+  try {
+    result = await runner(["debug", "models", "--bundled"]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Unable to discover Codex models: ${message}. No agent was spawned.`,
+    );
+  }
+  const models = parseCodexModelSlugs(result.stdout);
+  if (!models.includes(model.trim())) {
+    throw new Error(
+      `Unsupported Codex model "${model.trim()}". Codex models: ${models.join(", ")}. No agent was spawned.`,
+    );
+  }
+}
+
 export interface CrashRecoveryMutationInput {
   phase: "placement" | "resume";
   agent_id: string;
@@ -360,6 +433,7 @@ export interface AgentEngineOptions {
   spawnPreflight?: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
+  codexModelListRunner?: CodexModelListRunner;
   spawnGuard?: SpawnGuard;
   postSpawnLivenessMs?: number;
   stopPostConditionTimeoutMs?: number;
@@ -921,6 +995,7 @@ export class AgentEngine {
   private spawnPreflight: (
     params: SpawnAgentParams,
   ) => Promise<SpawnPreflightResult | void>;
+  private codexModelListRunner: CodexModelListRunner;
   private spawnGuard: SpawnGuard;
   private postSpawnLivenessMs: number;
   private stopPostConditionTimeoutMs: number;
@@ -1068,6 +1143,8 @@ export class AgentEngine {
         process.env.CMUXLAYER_STOP_POST_CONDITION_TIMEOUT_MS,
         DEFAULT_STOP_POST_CONDITION_TIMEOUT_MS,
       );
+    this.codexModelListRunner =
+      opts?.codexModelListRunner ?? defaultCodexModelListRunner;
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params): Promise<SpawnPreflightResult | void> => {
@@ -1078,6 +1155,7 @@ export class AgentEngine {
           };
         }
         if (params.cli === "codex") {
+          await validateCodexModel(params.model, this.codexModelListRunner);
           return {
             launcherName: await assertLauncherAvailable(params.repo, "Codex"),
             repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),

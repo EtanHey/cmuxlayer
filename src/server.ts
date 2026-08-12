@@ -9308,7 +9308,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           {
             cwd: launchCwd,
             envPrefix: opts.mcpEnv,
-            allowModelOverride: process.env.REPOGOLEM_ALLOW_MODEL === "1",
+            allowModelOverride:
+              record.cli === "codex"
+                ? Boolean(
+                    record.model?.trim() &&
+                      record.model.trim().toLowerCase() !== "codex",
+                  )
+                : process.env.REPOGOLEM_ALLOW_MODEL === "1",
           },
         );
       const route = await resolveManagedDeliveryRoute(record.agent_id);
@@ -9674,7 +9680,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "OPTIONAL — leave UNSET so the launcher pins the top-tier model. Only set this if you have a specific reason NOT to use the top model (e.g. a deliberately cheaper 'sonnet' pass, or a non-claude engine variant like 'codex'). Never pass 'opus' for claude — the top Claude model is already the default.",
+            "OPTIONAL — leave UNSET so the launcher pins the top-tier model. For cli:'codex', an explicit model is checked against Codex's runtime model list before any worktree or surface is created, then passed through to the launcher. Never pass 'opus' for claude — the top Claude model is already the default.",
           ),
         effort: z
           .enum(CODEX_EFFORT_VALUES)
