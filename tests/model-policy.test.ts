@@ -42,35 +42,19 @@ describe("model policy contract", () => {
     expect(escaped.override_allowed).toBe(true);
   });
 
-  it("does not pass Codex model overrides to repoGolem launchers without the escape env", () => {
-    const coerced = resolveSpawnModelPolicy("codex", "gpt-5.5", {});
+  it("passes any explicit Codex model to the launcher override path", () => {
+    const policy = resolveSpawnModelPolicy("codex", "gpt-5.6-luna", {});
 
-    expect(coerced.effective_model).toBe("codex");
-    expect(coerced.launcher_model).toBeNull();
-    expect(coerced.coerced).toBe(true);
-    expect(coerced.warnings[0]).toContain("CODEX MODEL POLICY");
-    expect(coerced.warnings[0]).toContain("gpt-5.5");
-
-    const escaped = resolveSpawnModelPolicy("codex", "gpt-5.5", {
-      [MODEL_OVERRIDE_ENV]: "1",
-    });
-
-    expect(escaped.effective_model).toBe("gpt-5.5");
-    expect(escaped.launcher_model).toBe("gpt-5.5");
-    expect(escaped.coerced).toBe(false);
-    expect(escaped.override_allowed).toBe(true);
+    expect(policy.effective_model).toBe("gpt-5.6-luna");
+    expect(policy.launcher_model).toBe("gpt-5.6-luna");
+    expect(policy.coerced).toBe(false);
+    expect(policy.override_allowed).toBe(true);
 
     expect(
-      resolveLaunchModelFlag("codex", "gpt-5.5", {
-        allowModelOverride: false,
-      }),
-    ).toBeNull();
-
-    expect(
-      resolveLaunchModelFlag("codex", "gpt-5.5", {
+      resolveLaunchModelFlag("codex", "gpt-5.6-luna", {
         allowModelOverride: true,
       }),
-    ).toBe("gpt-5.5");
+    ).toBe("gpt-5.6-luna");
   });
 
   it("resolves omitted models to per-CLI defaults without pinning launcher args", () => {
@@ -120,17 +104,4 @@ describe("model policy contract", () => {
     ).toBe("haiku");
   });
 
-  it("rejects an unknown Codex model before the legacy override coercion", () => {
-    expect(() =>
-      resolveSpawnModelPolicy("codex", "gpt-5.6-sol", {}),
-    ).toThrow(
-      /Unsupported model "gpt-5\.6-sol".*would actually run "codex".*Accepted models: codex.*No agent was spawned/,
-    );
-
-    expect(() =>
-      resolveSpawnModelPolicy("codex", "gpt-5.6-sol", {
-        [MODEL_OVERRIDE_ENV]: "1",
-      }),
-    ).toThrow(/Unsupported model "gpt-5\.6-sol"/);
-  });
 });

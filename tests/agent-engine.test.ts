@@ -11411,6 +11411,12 @@ describe("buildLaunchCommand", () => {
     );
   });
 
+  it("passes an explicit Codex model with the launcher override env", () => {
+    expect(
+      buildLaunchCommand("codex", "brainlayer", "gpt-5.6-luna"),
+    ).toBe("REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.6-luna");
+  });
+
   it("passes an explicit Codex effort to the repoGolem launcher", () => {
     expect(
       buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
@@ -11419,13 +11425,15 @@ describe("buildLaunchCommand", () => {
     ).toBe("brainlayerCodex -s -E medium");
   });
 
-  it("adds safe model flags for recognized launcher model aliases", () => {
+  it("adds safe model flags for launcher-owned Codex model names", () => {
     expect(buildLaunchCommand("claude", "brainlayer", "sonnet")).toBe(
       "brainlayerClaude -s -S",
     );
     expect(
       buildLaunchCommand("codex", "brainlayer", "gpt-5.3-codex-spark"),
-    ).toBe("brainlayerCodex -s");
+    ).toBe(
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
+    );
     expect(
       buildLaunchCommand(
         "codex",
@@ -11434,7 +11442,9 @@ describe("buildLaunchCommand", () => {
         undefined,
         { allowModelOverride: true },
       ),
-    ).toBe("brainlayerCodex -s -m gpt-5.3-codex-spark");
+    ).toBe(
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m gpt-5.3-codex-spark",
+    );
     expect(buildLaunchCommand("codex", "brainlayer", "codex")).toBe(
       "brainlayerCodex -s",
     );
@@ -11454,15 +11464,15 @@ describe("buildLaunchCommand", () => {
     );
   });
 
-  it("omits unsafe or unrecognized model values instead of passing them raw", () => {
+  it("shell-quotes arbitrary launcher-owned Codex model values", () => {
     expect(
       buildLaunchCommand("claude", "brainlayer", "Opus 4.8 (1M context)"),
     ).toBe("brainlayerClaude -s");
     expect(buildLaunchCommand("codex", "brainlayer", "gpt-5.5 xhigh")).toBe(
-      "brainlayerCodex -s",
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m 'gpt-5.5 xhigh'",
     );
     expect(buildLaunchCommand("codex", "brainlayer", "codex;rm-rf")).toBe(
-      "brainlayerCodex -s",
+      "REPOGOLEM_ALLOW_MODEL=1 brainlayerCodex -s -m 'codex;rm-rf'",
     );
     expect(buildLaunchCommand("gemini", "golems", "constructor")).toBe(
       "golemsGemini -s",

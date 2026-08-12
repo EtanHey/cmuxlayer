@@ -70,17 +70,9 @@ export const MODEL_POLICY_CONTRACT: {
       defaultModel: "codex",
       allowModelOverrideByDefault: false,
       forbiddenModelPatterns: [],
-      modelAliases: {
-        "gpt-5": "gpt-5",
-        "gpt-5-codex": "gpt-5-codex",
-        "gpt-5.3": "gpt-5.3",
-        "gpt-5.3-codex": "gpt-5.3-codex",
-        "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
-        "gpt-5.4": "gpt-5.4",
-        "gpt-5.4-mini": "gpt-5.4-mini",
-        "gpt-5.5": "gpt-5.5",
-        "gpt-5.5-mini": "gpt-5.5-mini",
-      },
+      // Codex model names are owned by the launcher. Keep no parallel alias
+      // table here: explicit names pass through under the launcher contract.
+      modelAliases: {},
     },
     claude: {
       defaultModel: "claude-opus-5[1m]",
@@ -197,7 +189,7 @@ export function resolveLaunchModelFlag(
 
   if (cli === "codex") {
     if (modelMatchesDefault(cli, requested)) return null;
-    if (!opts?.allowModelOverride) return null;
+    return opts?.allowModelOverride ? requested : null;
   }
 
   if (cli === "cursor") {
@@ -226,6 +218,22 @@ export function resolveSpawnModelPolicy(
     ? defaultModel
     : requestedModel;
   const resolvedRequested = resolveModelAlias(cli, requestedOrDefault);
+
+  // The repoGolem Codex launcher is the single source of truth for model
+  // names. Explicit Codex models are forwarded with the override escape hatch
+  // so launcher validation/refusal remains authoritative.
+  if (cli === "codex" && !requestedWasOmitted) {
+    return {
+      cli,
+      requested_model: requestedModel,
+      effective_model: requestedModel,
+      launcher_model: requestedModel,
+      coerced: false,
+      warnings: [],
+      override_env: MODEL_OVERRIDE_ENV,
+      override_allowed: true,
+    };
+  }
 
   // Cursor deliberately accepts arbitrary model strings behind its escape
   // hatch. Every launcher-backed CLI, however, has a finite alias table. Do

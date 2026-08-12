@@ -113,6 +113,7 @@ import {
   type HarnessSessionWithMeta,
 } from "./harness-session.js";
 import {
+  MODEL_OVERRIDE_ENV,
   resolveLaunchModelFlag,
   resolveSpawnEffort,
   resolveSpawnModelPolicy,
@@ -818,6 +819,10 @@ function formatModelArg(modelFlag: string): string {
   return isSafeShellToken(modelFlag) ? modelFlag : shellQuote(modelFlag);
 }
 
+function modelMatchesDefaultForLaunch(cli: CliType, model?: string): boolean {
+  return cli === "codex" && model?.trim().toLowerCase() === "codex";
+}
+
 export function buildLaunchCommand(
   cli: CliType,
   repo: string,
@@ -836,7 +841,11 @@ export function buildLaunchCommand(
 ): string {
   const safeRepo = sanitizeRepoName(repo);
   const modelFlag = resolveLaunchModelFlag(cli, model, {
-    allowModelOverride: opts?.allowModelOverride,
+    allowModelOverride:
+      opts?.allowModelOverride ??
+      (cli === "codex" &&
+        Boolean(model?.trim()) &&
+        !modelMatchesDefaultForLaunch(cli, model)),
   });
   const formattedModelFlag = modelFlag ? formatModelArg(modelFlag) : null;
   const launcherModelArgs = formattedModelFlag
@@ -849,7 +858,13 @@ export function buildLaunchCommand(
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
   const launcherEffortArg = opts?.effort ? ` -E ${opts.effort}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-  const envPrefix = opts?.envPrefix ? `${opts.envPrefix} ` : "";
+  const codexModelOverride =
+    cli === "codex" && modelFlag !== null && modelFlag !== "codex";
+  const envParts = [
+    codexModelOverride ? `${MODEL_OVERRIDE_ENV}=1` : null,
+    opts?.envPrefix ?? null,
+  ].filter((part): part is string => Boolean(part));
+  const envPrefix = envParts.length > 0 ? `${envParts.join(" ")} ` : "";
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
