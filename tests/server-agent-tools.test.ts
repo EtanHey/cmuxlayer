@@ -8249,8 +8249,15 @@ codex>
       terminal: false,
     });
 
+    await engine.drainDeliveryQueue();
+    expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+    });
+
     const ready = engine.stateMgr.updateRecord(agentId, { state: "idle" });
     registry.set(agentId, ready);
+    await new Promise((resolve) => setTimeout(resolve, 275));
     await engine.drainDeliveryQueue();
 
     const receipt = engine.getDeliveryReceipt(queued.delivery_id);
