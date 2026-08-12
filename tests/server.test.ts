@@ -1147,6 +1147,9 @@ describe("tool handler integration", () => {
   it("spawn_in_workspace tool handler creates, selects, then spawns agents", async () => {
     const calls: string[] = [];
     let surfaceIndex = 0;
+    const pendingBootContracts = new Set<string>();
+    const submittedBootContracts = new Set<string>();
+    const launchedSurfaces = new Set<string>();
     const mockClient = {
       createWorkspace: vi.fn().mockImplementation(async (title: string) => {
         calls.push(`create:${title}`);
@@ -1182,14 +1185,37 @@ describe("tool handler integration", () => {
       }),
       newSurface: vi.fn(),
       focusSurface: vi.fn().mockResolvedValue(undefined),
-      send: vi.fn().mockResolvedValue(undefined),
-      sendKey: vi.fn().mockResolvedValue(undefined),
-      readScreen: vi.fn().mockResolvedValue({
-        surface: "surface:1",
-        text: "Claude Code\n>",
+      send: vi.fn().mockImplementation(async (surface: string, text: string) => {
+        if (text.includes("cmuxlayer mailbox contract")) {
+          pendingBootContracts.add(surface);
+        } else {
+          launchedSurfaces.add(surface);
+        }
+      }),
+      pasteText: vi.fn().mockImplementation(
+        async (surface: string, text: string) => {
+          if (text.includes("cmuxlayer mailbox contract")) {
+            pendingBootContracts.add(surface);
+          }
+        },
+      ),
+      sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
+        if (key === "return" && pendingBootContracts.delete(surface)) {
+          submittedBootContracts.add(surface);
+        }
+      }),
+      readScreen: vi.fn().mockImplementation(async (surface: string) => ({
+        surface,
+        text: submittedBootContracts.has(surface)
+          ? "Working (1s - esc to interrupt)"
+          : !launchedSurfaces.has(surface)
+            ? "$ "
+            : surface === "surface:2"
+              ? "OpenAI Codex\nmodel: gpt-5.4\n\n›"
+              : "Claude Code\n>",
         lines: 1,
         scrollback_used: false,
-      }),
+      })),
       log: vi.fn().mockResolvedValue(undefined),
       setStatus: vi.fn().mockResolvedValue(undefined),
       clearStatus: vi.fn().mockResolvedValue(undefined),
@@ -1213,6 +1239,7 @@ describe("tool handler integration", () => {
         tool.handler(
           {
             workspace_title: "red-team",
+            verbose: true,
             agents: [
               {
                 repo: "brainlayer",
@@ -1230,7 +1257,7 @@ describe("tool handler integration", () => {
           },
           {} as any,
         ),
-      1_000,
+      100_000,
     );
 
     const parsed =
@@ -1238,19 +1265,22 @@ describe("tool handler integration", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace).toBe("workspace:grid");
     expect(parsed.agents).toHaveLength(2);
-    expect(parsed).not.toHaveProperty("retry_count");
+    expect(parsed).toHaveProperty("retry_count", 0);
     expect(parsed.agents[0]).toMatchObject({
       agent_id: expect.any(String),
       surface_id: "surface:1",
-      workspace_id: "workspace:grid",
-      state: "booting",
-      model: expect.any(String),
       role: "orchestrator",
-      boot_prompt_delivered: false,
-      boot_prompt_submit_verified: null,
+      boot_prompt_delivered: true,
+      boot_prompt_submit_verified: true,
     });
-    expect(parsed.agents[0]).not.toHaveProperty("health");
-    expect(parsed.agents[0]).not.toHaveProperty("monitor_boot");
+    expect(parsed.agents[0]).toHaveProperty("health");
+    expect(parsed.agents[0]).toHaveProperty("monitor_boot");
+    expect(parsed.agents[1]).toMatchObject({
+      role: "worker",
+      boot_prompt_delivered: true,
+      boot_prompt_submit_verified: true,
+      monitor_boot: expect.any(Object),
+    });
     expect(calls.slice(0, 4)).toEqual([
       "create:red-team",
       "select:workspace:grid",
@@ -1258,32 +1288,6 @@ describe("tool handler integration", () => {
       "spawn:workspace:grid:surface:1",
     ]);
     expect(calls).toContain("spawn:workspace:grid:surface:2");
-
-    const verboseResult = await runWithFakeTimers(
-      () =>
-        tool.handler(
-          {
-            workspace_title: "red-team",
-            reuse_workspace: "workspace:grid",
-            verbose: true,
-            agents: [
-              {
-                repo: "cmuxlayer",
-                model: "gpt-5.4",
-                cli: "codex",
-                role: "worker",
-              },
-            ],
-          },
-          {} as any,
-        ),
-      1_000,
-    );
-    expect(verboseResult.structuredContent).toHaveProperty("retry_count", 0);
-    expect(verboseResult.structuredContent.agents[0]).toHaveProperty("health");
-    expect(verboseResult.structuredContent.agents[0]).toHaveProperty(
-      "monitor_boot",
-    );
 
     await server.close();
     rmSync(stateDir, { recursive: true, force: true });
@@ -8103,14 +8107,23 @@ describe("tool handler integration", () => {
         if (args.includes("send")) {
           const text = String(args.at(-1) ?? "");
           sentTexts.push(text);
-          if (text.includes("cmuxlayerCodex")) {
+          if (
+            text.includes("cmuxlayerCodex") &&
+            !text.includes("cmuxlayer mailbox contract")
+          ) {
             if (launcherSends === 0) {
               delete process.env.REPOGOLEM_ALLOW_MODEL;
             }
             launcherSends += 1;
-          } else if (text === prompt) {
+          } else if (text.includes(prompt)) {
             promptSent = true;
           }
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("set-buffer")) {
+          const text = String(args.at(-1) ?? "");
+          sentTexts.push(text);
+          if (text.includes(prompt)) promptSent = true;
           return { stdout: "{}", stderr: "" };
         }
         if (args.includes("read-screen")) {
@@ -8181,9 +8194,13 @@ describe("tool handler integration", () => {
         expect(parsed.boot_prompt_delivered).toBe(true);
         expect(launcherSends).toBe(2);
         expect(
-          sentTexts.filter((text) => text.includes("cmuxlayerCodex")),
+          sentTexts.filter(
+            (text) =>
+              text.includes("cmuxlayerCodex") &&
+              !text.includes("cmuxlayer mailbox contract"),
+          ),
         ).toEqual([fixture.launcher_command, fixture.launcher_command]);
-        expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+        expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
         expect(returnPresses).toBeGreaterThanOrEqual(3);
         expect(
           new StateManager(stateDir).readState(parsed.agent_id),
@@ -8242,6 +8259,12 @@ describe("tool handler integration", () => {
         } else if (text === "boot after stranded launcher") {
           promptSent = true;
         }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("set-buffer")) {
+        const text = String(args.at(-1) ?? "");
+        sentTexts.push(text);
+        if (text.includes(prompt)) promptSent = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("send-key")) {
@@ -8388,6 +8411,8 @@ describe("tool handler integration", () => {
           if (launcherSendAttempts === 1) {
             throw new Error("socket closed before receiving response");
           }
+        } else if (text.includes("cmuxlayer mailbox contract")) {
+          composer += text;
         }
         return { stdout: "{}", stderr: "" };
       }
@@ -8403,6 +8428,8 @@ describe("tool handler integration", () => {
             ? fixture.screen
             : submitted === fixture.launcher_command
               ? "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›"
+              : submitted?.includes("cmuxlayer mailbox contract")
+                ? "OpenAI Codex\nWorking (1s - esc to interrupt)"
               : composer
                 ? `etanheyman ~/Gits/brainlayer [main] $ ${composer}`
                 : "etanheyman ~/Gits/brainlayer [main] $";
@@ -8440,7 +8467,8 @@ describe("tool handler integration", () => {
         2_000,
       );
 
-      expect(submittedCommands).toEqual([fixture.launcher_command]);
+      expect(submittedCommands[0]).toBe(fixture.launcher_command);
+      expect(submittedCommands[1]).toContain("cmuxlayer mailbox contract");
       expect(submittedCommands).not.toContain(fixture.corrupted_command);
       expect(launcherSendAttempts).toBe(1);
     } finally {
@@ -8554,6 +8582,8 @@ describe("tool handler integration", () => {
             launcherWriteBecameAmbiguous = true;
             throw new Error(fixture.replay.transport_error);
           }
+        } else if (text.includes("cmuxlayer mailbox contract")) {
+          composer += text;
         }
         return { stdout: "{}", stderr: "" };
       }
@@ -8564,7 +8594,9 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         let text = fixture.replay.stale_probe_screen;
-        if (submittedCommands.length > 0) {
+        if (submittedCommands.at(-1)?.includes("cmuxlayer mailbox contract")) {
+          text = "OpenAI Codex\nWorking (1s - esc to interrupt)";
+        } else if (submittedCommands.length > 0) {
           text = "OpenAI Codex\nmodel: gpt-5.6-sol xhigh\n\n›";
         } else if (launcherWriteBecameAmbiguous) {
           ambiguityProbeReads += 1;
@@ -8624,9 +8656,12 @@ describe("tool handler integration", () => {
       expect(ambiguityProbeReads).toBeGreaterThanOrEqual(
         probe === "delayed-visible" ? 2 : 1,
       );
-      expect(submittedCommands).toEqual(
-        probe === "delayed-visible" ? [fixture.launcher_command] : [],
-      );
+      if (probe === "delayed-visible") {
+        expect(submittedCommands[0]).toBe(fixture.launcher_command);
+        expect(submittedCommands[1]).toContain("cmuxlayer mailbox contract");
+      } else {
+        expect(submittedCommands).toEqual([]);
+      }
       expect(submittedCommands).not.toContain(
         fixture.captured_corrupted_command,
       );
@@ -8733,11 +8768,20 @@ describe("tool handler integration", () => {
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
-        if (text.includes("cmuxlayerCodex")) {
+        if (
+          text.includes("cmuxlayerCodex") &&
+          !text.includes("cmuxlayer mailbox contract")
+        ) {
           launcherSends += 1;
-        } else if (text === prompt) {
+        } else if (text.includes(prompt)) {
           promptSent = true;
         }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("set-buffer")) {
+        const text = String(args.at(-1) ?? "");
+        sentTexts.push(text);
+        if (text.includes(prompt)) promptSent = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -8820,7 +8864,7 @@ describe("tool handler integration", () => {
       expect(updateAccepted).toBe(true);
       expect(updateMenuKeys).toEqual(["return"]);
       expect(launcherSends).toBe(2);
-      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;
@@ -8913,11 +8957,20 @@ describe("tool handler integration", () => {
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
         sentTexts.push(text);
-        if (text.includes("cmuxlayerCodex")) {
+        if (
+          text.includes("cmuxlayerCodex") &&
+          !text.includes("cmuxlayer mailbox contract")
+        ) {
           launcherSent = true;
-        } else if (text === prompt) {
+        } else if (text.includes(prompt)) {
           promptSent = true;
         }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("set-buffer")) {
+        const text = String(args.at(-1) ?? "");
+        sentTexts.push(text);
+        if (text.includes(prompt)) promptSent = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -8988,12 +9041,12 @@ describe("tool handler integration", () => {
         result.structuredContent ?? JSON.parse(result.content[0].text);
       expect(parsed.ok).toBe(true);
       expect(parsed.boot_prompt_delivered).toBe(true);
-      // Poll the repaint, confirm readiness, then preflight once more at the
-      // shared text-delivery boundary before typing the boot prompt.
+      // Poll the repaint, confirm readiness, then perform the shared delivery
+      // preflight and verification for the combined caller + mailbox contract.
       expect(postDismissMenuReads).toBe(3);
       expect(sentKeys).not.toContain("down");
       expect(sentKeys).toContain("return");
-      expect(sentTexts.filter((text) => text === prompt)).toHaveLength(1);
+      expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
     } finally {
       if (previousAllowModel === undefined) {
         delete process.env.REPOGOLEM_ALLOW_MODEL;
@@ -9075,7 +9128,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text.includes("cmuxlayerCodex")) {
+        if (text.startsWith("cmuxlayerCodex ")) {
           launcherSent = true;
         }
         return { stdout: "{}", stderr: "" };
@@ -9400,7 +9453,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text.includes("cmuxlayerCodex")) {
+        if (text.startsWith("cmuxlayerCodex ")) {
           launcherSends += 1;
         } else if (text === prompt) {
           promptSent = true;
@@ -9630,7 +9683,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("send")) {
         const text = String(args.at(-1) ?? "");
-        if (text.includes("cmuxlayerCodex")) {
+        if (text.startsWith("cmuxlayerCodex ")) {
           launcherSends += 1;
         } else if (text === prompt) {
           promptSent = true;

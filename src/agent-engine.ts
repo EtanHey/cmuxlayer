@@ -3,7 +3,16 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { StateManager } from "./state-manager.js";
@@ -46,6 +55,7 @@ import {
   type AgentState,
   type CliType,
   type CloseForensicsEvent,
+  type DeliveryEventType,
   type PublicAgent,
   type WaitResult,
 } from "./agent-types.js";
@@ -151,6 +161,39 @@ import {
 } from "./fleet-sidebar.js";
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
+
+export type AgentDeliveryState = "submitted" | "queued" | "failed";
+
+export interface AgentDeliveryReceipt {
+  delivery_id: string;
+  agent_id: string;
+  text: string;
+  press_enter: boolean;
+  source_event: DeliveryEventType;
+  delivery_state: AgentDeliveryState;
+  terminal: boolean;
+  created_at: string;
+  resolved_at: string | null;
+  retry_count: number;
+  submit_verified: boolean | null;
+  error: string | null;
+  /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
+  submission_started_at?: string | null;
+  /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
+  next_attempt_at?: string | null;
+}
+
+/** A known pre-mutation delivery rejection that is safe to retry. */
+export class RetryableDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableDeliveryError";
+  }
+}
+
+type DeliverySubmitter = (
+  receipt: AgentDeliveryReceipt,
+) => Promise<{ retry_count: number; submit_verified: boolean | null }>;
 
 export interface SpawnAgentParams {
   repo: string;
@@ -381,6 +424,8 @@ export interface AgentEngineOptions {
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
   /** Render-only timeout for a working seat whose transcript/output stops advancing. */
   fleetWorkingNoProgressTimeoutMs?: number;
+  /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
+  deliverySubmitTimeoutMs?: number;
 }
 
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
@@ -904,6 +949,11 @@ export class AgentEngine {
   private fleetWorkingNoProgressTimeoutMs: number;
   private startupInitializePromise: Promise<void> | null = null;
   private lifecycleMutationTail: Promise<void> = Promise.resolve();
+  private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
+  private deliveryReceiptsPath: string;
+  private deliverySubmitter: DeliverySubmitter | null = null;
+  private deliveryDrainInFlight = false;
+  private deliverySubmitTimeoutMs: number;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -911,6 +961,15 @@ export class AgentEngine {
     opts?: AgentEngineOptions,
   ) {
     this.stateMgr = stateMgr;
+    this.deliveryReceiptsPath = join(
+      stateMgr.getBaseDir(),
+      "delivery-receipts.json",
+    );
+    this.deliverySubmitTimeoutMs = Math.max(
+      1,
+      opts?.deliverySubmitTimeoutMs ?? 30_000,
+    );
+    this.loadDeliveryReceipts();
     this.registry = registry;
     this.client = client;
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
@@ -4463,6 +4522,236 @@ export class AgentEngine {
 
   async runSweep(): Promise<void> {
     await this.runLifecycleMutation(() => this.runSweepOnce());
+    await this.drainDeliveryQueue();
+  }
+
+  setDeliverySubmitter(submitter: DeliverySubmitter | null): void {
+    this.deliverySubmitter = submitter;
+  }
+
+  private loadDeliveryReceipts(): void {
+    try {
+      const parsed: unknown = JSON.parse(
+        readFileSync(this.deliveryReceiptsPath, "utf8"),
+      );
+      if (!Array.isArray(parsed)) return;
+      let repairedUncertainReceipt = false;
+      for (const candidate of parsed) {
+        if (
+          candidate &&
+          typeof candidate === "object" &&
+          typeof (candidate as AgentDeliveryReceipt).delivery_id === "string"
+        ) {
+          const receipt: AgentDeliveryReceipt = {
+            submission_started_at: null,
+            next_attempt_at: null,
+            ...(candidate as AgentDeliveryReceipt),
+          };
+          if (
+            receipt.delivery_state === "queued" &&
+            receipt.submission_started_at
+          ) {
+            receipt.delivery_state = "failed";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.error =
+              "Delivery outcome uncertain after process restart; refusing automatic replay";
+            repairedUncertainReceipt = true;
+          }
+          this.deliveryReceipts.set(receipt.delivery_id, receipt);
+        }
+      }
+      if (repairedUncertainReceipt) {
+        try {
+          this.persistDeliveryReceipts();
+        } catch {
+          // In-memory terminal state still prevents replay in this process.
+        }
+      }
+    } catch {
+      // Missing or corrupt legacy state must not prevent lifecycle startup.
+    }
+  }
+
+  private persistDeliveryReceipts(): void {
+    mkdirSync(dirname(this.deliveryReceiptsPath), { recursive: true });
+    const tempPath = `${this.deliveryReceiptsPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(
+        tempPath,
+        `${JSON.stringify([...this.deliveryReceipts.values()], null, 2)}\n`,
+        "utf8",
+      );
+      renameSync(tempPath, this.deliveryReceiptsPath);
+    } finally {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    }
+  }
+
+  queueDelivery(input: {
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: DeliveryEventType;
+  }): AgentDeliveryReceipt {
+    const receipt: AgentDeliveryReceipt = {
+      delivery_id: randomUUID(),
+      ...input,
+      delivery_state: "queued",
+      terminal: false,
+      created_at: new Date().toISOString(),
+      resolved_at: null,
+      retry_count: 0,
+      submit_verified: null,
+      error: null,
+      submission_started_at: null,
+      next_attempt_at: null,
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    try {
+      // Acceptance is not returned until the full replay payload is durable.
+      this.persistDeliveryReceipts();
+    } catch (error) {
+      this.deliveryReceipts.delete(receipt.delivery_id);
+      throw error;
+    }
+    this.appendDeliveryReceiptEventBestEffort(receipt);
+    return { ...receipt };
+  }
+
+  resolveDelivery(
+    input: Omit<AgentDeliveryReceipt, "created_at" | "resolved_at"> & {
+      created_at?: string;
+    },
+    opts?: { appendFailureEvent?: boolean },
+  ): AgentDeliveryReceipt {
+    const receipt: AgentDeliveryReceipt = {
+      ...input,
+      created_at: input.created_at ?? new Date().toISOString(),
+      resolved_at: new Date().toISOString(),
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    this.persistDeliveryReceipts();
+    if (receipt.delivery_state === "failed" && opts?.appendFailureEvent) {
+      this.appendDeliveryReceiptEventBestEffort(receipt);
+    }
+    return { ...receipt };
+  }
+
+  getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    return receipt ? { ...receipt } : null;
+  }
+
+  async drainDeliveryQueue(): Promise<void> {
+    if (this.deliveryDrainInFlight || !this.deliverySubmitter) return;
+    this.deliveryDrainInFlight = true;
+    try {
+      for (const receipt of this.deliveryReceipts.values()) {
+        if (receipt.delivery_state !== "queued") continue;
+        const agent = this.getAgentState(receipt.agent_id);
+        if (!agent) {
+          receipt.delivery_state = "failed";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.error = `Delivery target ${receipt.agent_id} is gone or no longer exists`;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
+        if (
+          receipt.next_attempt_at &&
+          Date.parse(receipt.next_attempt_at) > Date.now()
+        ) {
+          continue;
+        }
+        try {
+          receipt.submission_started_at = new Date().toISOString();
+          // This is the no-replay boundary. A crash after this write leaves an
+          // uncertain terminal receipt instead of re-sending terminal input.
+          this.persistDeliveryReceipts();
+          let timeout: ReturnType<typeof setTimeout> | null = null;
+          const result = await Promise.race([
+            this.deliverySubmitter(receipt),
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `Delivery submission timed out after ${this.deliverySubmitTimeoutMs}ms; outcome uncertain and will not be retried`,
+                    ),
+                  ),
+                this.deliverySubmitTimeoutMs,
+              );
+            }),
+          ]).finally(() => {
+            if (timeout) clearTimeout(timeout);
+          });
+          receipt.delivery_state = "submitted";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.retry_count += result.retry_count;
+          receipt.submit_verified = result.submit_verified;
+          receipt.error = null;
+          receipt.next_attempt_at = null;
+        } catch (error) {
+          if (error instanceof RetryableDeliveryError) {
+            receipt.submission_started_at = null;
+            receipt.retry_count += 1;
+            const backoffMs = Math.min(
+              30_000,
+              250 * 2 ** Math.min(receipt.retry_count - 1, 16),
+            );
+            receipt.next_attempt_at = new Date(
+              Date.now() + backoffMs,
+            ).toISOString();
+            receipt.error = error.message;
+          } else {
+            receipt.delivery_state = "failed";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.error =
+              error instanceof Error ? error.message : String(error);
+          }
+        }
+        this.persistDeliveryReceipts();
+        // Successful delivery already emitted the correlated source event;
+        // failures have no such event and need an explicit terminal transition.
+        if (receipt.delivery_state === "failed") {
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+        }
+      }
+    } finally {
+      this.deliveryDrainInFlight = false;
+    }
+  }
+
+  private appendDeliveryReceiptEvent(receipt: AgentDeliveryReceipt): void {
+    const agent = this.getAgentState(receipt.agent_id);
+    this.stateMgr.getEventLog().appendDelivery({
+      ts: receipt.resolved_at ?? receipt.created_at,
+      event_type: receipt.source_event,
+      source_agent: null,
+      target_surface: agent?.surface_id ?? "unknown",
+      target_agent: receipt.agent_id,
+      bytes: Buffer.byteLength(receipt.text),
+      press_enter: receipt.press_enter,
+      submit_verified: receipt.submit_verified,
+      retry_count: receipt.retry_count,
+      delivery_id: receipt.delivery_id,
+      delivery_state: receipt.delivery_state,
+    });
+  }
+
+  private appendDeliveryReceiptEventBestEffort(
+    receipt: AgentDeliveryReceipt,
+  ): void {
+    try {
+      this.appendDeliveryReceiptEvent(receipt);
+    } catch {
+      // Receipt persistence is authoritative; telemetry must not invalidate
+      // acceptance or tempt a caller to duplicate terminal input.
+    }
   }
 
   requestFleetSidebarRepublish(): void {

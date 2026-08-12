@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -15,6 +16,7 @@ import {
   dispatch,
   dispatchOnce,
   inboxMonitorState,
+  inboxCursorPath,
   inboxPath,
   monitorAlive,
   pendingDispatches,
@@ -25,7 +27,9 @@ import {
   recommendedCodexWatch,
   recommendedMonitorCommand,
   replayUndelivered,
+  readInboxCursor,
   surfacedLogPath,
+  writeInboxCursor,
   writeHeartbeat,
 } from "../src/inbox.js";
 
@@ -201,6 +205,33 @@ describe("inbox write-channel", () => {
       "g1",
       "g3",
     ]);
+  });
+
+  it("replays only messages strictly after the agent-written consumption cursor", () => {
+    dispatch("cursor-a1", { from: "orc", task: "t1", id: "m1" }, opts);
+    dispatch("cursor-a1", { from: "orc", task: "t2", id: "m2" }, opts);
+    dispatch("cursor-a1", { from: "orc", task: "t3", id: "m3" }, opts);
+
+    writeInboxCursor("cursor-a1", "m1", opts);
+
+    expect(readInboxCursor("cursor-a1", opts)).toBe("m1");
+    expect(replayUndelivered("cursor-a1", opts).map((message) => message.id)).toEqual([
+      "m2",
+      "m3",
+    ]);
+    expect(existsSync(inboxCursorPath("cursor-a1", opts))).toBe(true);
+  });
+
+  it("serializes cursor advancement with a per-agent cross-process lock", () => {
+    dispatch("cursor-lock", { from: "orc", task: "t1", id: "m1" }, opts);
+    mkdirSync(`${inboxCursorPath("cursor-lock", opts)}.lock`, {
+      recursive: true,
+    });
+
+    expect(() => writeInboxCursor("cursor-lock", "m1", opts)).toThrow(
+      /cursor.*locked/i,
+    );
+    expect(readInboxCursor("cursor-lock", opts)).toBeNull();
   });
 
   it("FM#3 pendingDispatches flags un-acked messages older than the ack-timeout", () => {
