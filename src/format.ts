@@ -266,6 +266,8 @@ export function formatDelivery(
     // instead of the delivered/failed binary, so the line never contradicts a
     // pending status.
     pending?: boolean;
+    typed?: boolean;
+    submit_attempted?: boolean;
     submit_verified?: boolean | null;
   },
 ): string {
@@ -280,8 +282,15 @@ export function formatDelivery(
   );
   const parens = meta.length > 0 ? ` (${meta.join(" \u00b7 ")})` : "";
   let head: string;
-  if (info.pending) {
+  if (info.typed) {
+    head = `typed into ${label}${parens} (not submitted)`;
+  } else if (info.pending) {
     head = `delivering to ${label}${parens}`;
+  } else if (
+    info.submit_attempted &&
+    info.submit_verified === null
+  ) {
+    head = `submission attempted to ${label}${parens} (not verified)`;
   } else if (info.delivered) {
     head = `delivered to ${label}${parens}`;
   } else {

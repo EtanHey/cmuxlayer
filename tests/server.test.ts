@@ -3057,7 +3057,8 @@ describe("tool handler integration", () => {
     expect(data.title).toBe("BL-LEAD");
     expect(data.model).toBe("Opus 4.8");
     expect(data.agent_type).toBe("claude");
-    expect(result.content[0].text).toContain("delivered to BL-LEAD");
+    expect(result.content[0].text).toContain("typed into BL-LEAD");
+    expect(result.content[0].text).toContain("not submitted");
     expect(result.content[0].text).toContain("Opus 4.8");
     expect(result.content[0].text).toContain("claude");
     rmSync(stateDir, { recursive: true, force: true });
@@ -3077,7 +3078,8 @@ describe("tool handler integration", () => {
     expect(data.title).toBeUndefined();
     expect(data.model).toBeUndefined();
     expect(data.agent_type).toBeUndefined();
-    expect(result.content[0].text).toContain("delivered to surface:unknown");
+    expect(result.content[0].text).toContain("typed into surface:unknown");
+    expect(result.content[0].text).toContain("not submitted");
   });
 
   it("send_command fails closed when tracked-agent verification has no screen evidence (F8)", async () => {

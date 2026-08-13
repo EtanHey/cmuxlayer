@@ -7852,12 +7852,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
         const identity = resolveTargetIdentity(stateMgr, route.surface);
         const queued = delivery.delivery === "queued";
+        const submitted =
+          delivery.delivery === "submitted" &&
+          delivery.submit_verified === true;
+        const typed = !args.press_enter;
+        const acceptedDelivery = queued
+          ? "queued"
+          : submitted
+            ? "submitted"
+            : null;
         const data = {
           ...identity,
           delivered: !queued,
-          delivery: delivery.delivery,
-          delivery_state: delivery.delivery,
-          terminal: !queued,
+          ...(acceptedDelivery
+            ? {
+                delivery: acceptedDelivery,
+                delivery_state: acceptedDelivery,
+              }
+            : {}),
+          terminal: submitted,
+          ...(typed ? { typed: true } : {}),
+          submit_attempted: args.press_enter,
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
         };
@@ -7866,6 +7881,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ...identity,
             delivered: !queued,
             pending: queued,
+            typed,
+            submit_attempted: args.press_enter,
             submit_verified: delivery.submit_verified,
           }),
           data,
