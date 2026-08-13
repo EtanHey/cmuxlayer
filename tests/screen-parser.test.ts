@@ -342,6 +342,32 @@ Select a model for the next worker:
     expect(parsed.control_state).toBe("interactive_overlay");
   });
 
+  it("recognizes the long Codex model picker after stale done scrollback", () => {
+    const parsed = parseScreen(`
+TASK_DONE
+
+─ Worked for 1m 26s ──────────────────────────────────────────────────────────
+
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+› 1. gpt-5.6-sol (current)  Latest frontier agentic coding model.
+  2. gpt-5.6-terra          Balanced agentic coding model for everyday work.
+  3. gpt-5.6-luna           Fast and affordable agentic coding model.
+  4. gpt-5.5                Frontier model for complex coding, research, and real-world
+                            work.
+  5. gpt-5.4                Strong model for everyday coding.
+  6. gpt-5.4-mini           Small, fast, and cost-efficient model for simpler coding
+                            tasks.
+  7. gpt-5.3-codex-spark    Ultra-fast coding model.
+
+  Press enter to confirm or esc to go back
+`);
+
+    expect(parsed.errors).toContain("interactive_prompt");
+    expect(parsed.control_state).toBe("interactive_overlay");
+  });
+
   it("recognizes the Codex update menu as an interactive overlay", () => {
     // Reconstructed from local Codex CLI 0.142.5 binary strings; fixture stays screen-only.
     const parsed = parseScreen(readFixture("painpoints/codex-update-menu.txt"));

@@ -56,6 +56,7 @@ import {
   type AgentRecord,
   type AgentAuthority,
   type AgentFunction,
+  type AgentHaltType,
   type AgentPlacement,
   type AgentRole,
   type AgentState,
@@ -240,6 +241,7 @@ export interface SpawnAgentParams {
   max_cost_per_agent?: number;
   crash_recover?: boolean;
   auto_revive?: boolean;
+  halt_escalation?: boolean;
   /** Internal lifecycle hook: runs immediately after cmux creates and focuses
    * the surface, before launcher I/O or readiness polling can give the user time to move.
    */
@@ -534,6 +536,12 @@ export interface AgentEngineOptions {
   deliverySubmitTimeoutMs?: number;
   /** Base delay for same-surface CLI auto-revive retries. */
   autoReviveBackoffBaseMs?: number;
+  /** Deterministic clock and per-class dwell controls for live-halt escalation. */
+  haltNow?: () => number;
+  haltAwaitingInputDwellMs?: number;
+  haltIdleWithoutDoneDwellMs?: number;
+  haltWedgedDwellMs?: number;
+  haltWedgedSweeps?: number;
 }
 
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
@@ -575,6 +583,10 @@ const TASK_DONE_CONFIRMATION_MS = 5_000;
 const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
 const CLI_EXIT_ERROR = "Agent CLI exited to shell without done evidence";
 const DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS = 1_000;
+const DEFAULT_HALT_AWAITING_INPUT_DWELL_MS = 120_000;
+const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 180_000;
+const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
+const DEFAULT_HALT_WEDGED_SWEEPS = 3;
 const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
@@ -1140,6 +1152,11 @@ export class AgentEngine {
   private deliveryDrainInFlight = false;
   private deliverySubmitTimeoutMs: number;
   private autoReviveBackoffBaseMs: number;
+  private haltNow: () => number;
+  private haltAwaitingInputDwellMs: number;
+  private haltIdleWithoutDoneDwellMs: number;
+  private haltWedgedDwellMs: number;
+  private haltWedgedSweeps: number;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -1158,6 +1175,39 @@ export class AgentEngine {
     this.autoReviveBackoffBaseMs = Math.max(
       0,
       opts?.autoReviveBackoffBaseMs ?? DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS,
+    );
+    this.haltNow = opts?.haltNow ?? Date.now;
+    this.haltAwaitingInputDwellMs = Math.max(
+      0,
+      opts?.haltAwaitingInputDwellMs ??
+        parseNonNegativeInteger(
+          process.env.CMUXLAYER_HALT_AWAITING_INPUT_DWELL_MS,
+          DEFAULT_HALT_AWAITING_INPUT_DWELL_MS,
+        ),
+    );
+    this.haltIdleWithoutDoneDwellMs = Math.max(
+      0,
+      opts?.haltIdleWithoutDoneDwellMs ??
+        parseNonNegativeInteger(
+          process.env.CMUXLAYER_HALT_IDLE_WITHOUT_DONE_DWELL_MS,
+          DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS,
+        ),
+    );
+    this.haltWedgedDwellMs = Math.max(
+      0,
+      opts?.haltWedgedDwellMs ??
+        parseNonNegativeInteger(
+          process.env.CMUXLAYER_HALT_WEDGED_DWELL_MS,
+          DEFAULT_HALT_WEDGED_DWELL_MS,
+        ),
+    );
+    this.haltWedgedSweeps = Math.max(
+      1,
+      opts?.haltWedgedSweeps ??
+        parsePositiveInteger(
+          process.env.CMUXLAYER_HALT_WEDGED_SWEEPS,
+          DEFAULT_HALT_WEDGED_SWEEPS,
+        ),
     );
     this.loadDeliveryReceipts();
     this.registry = registry;
@@ -3095,6 +3145,278 @@ export class AgentEngine {
     }
   }
 
+  private haltDwellMs(type: AgentHaltType): number {
+    switch (type) {
+      case "awaiting_input":
+        return this.haltAwaitingInputDwellMs;
+      case "idle_without_done":
+        return this.haltIdleWithoutDoneDwellMs;
+      case "wedged":
+        return this.haltWedgedDwellMs;
+    }
+  }
+
+  private haltUnblockAction(agent: AgentRecord, type: AgentHaltType): string {
+    switch (type) {
+      case "awaiting_input":
+        return (
+          `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the prompt, ` +
+          `send_key(surface: "${agent.surface_id}", key: "return")`
+        );
+      case "idle_without_done":
+        return `interact(agent: "${agent.agent_id}", action: "send", text: "Continue and report status.")`;
+      case "wedged":
+        return `interact(agent: "${agent.agent_id}", action: "interrupt")`;
+    }
+  }
+
+  private hasUnfinishedBackgroundTool(screenText: string): boolean {
+    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
+    return (
+      /\b\d+\s+background terminals? running\b/i.test(visibleTail) ||
+      /\bWait(?:ing|ed) for background terminal\b/i.test(visibleTail)
+    );
+  }
+
+  private observableHaltProgressSignature(
+    agent: AgentRecord,
+    screenText: string,
+  ): string {
+    const materialScreen = cleanScreenText(
+      screenText,
+      BOOT_SESSION_CAPTURE_LINES,
+    );
+    const transcriptMtime = this.loadGroundTruthSession(agent)?.mtime_ms ?? 0;
+    return `${screenTextSignature(materialScreen)}:${transcriptMtime}`;
+  }
+
+  private isMatureHaltEpisode(agent: AgentRecord, nowMs: number): boolean {
+    if (!agent.halt_episode_type) return false;
+    const startedAtMs = Date.parse(agent.halt_episode_started_at ?? "");
+    return (
+      Number.isFinite(startedAtMs) &&
+      nowMs - startedAtMs >= this.haltDwellMs(agent.halt_episode_type) &&
+      (agent.halt_episode_type !== "wedged" ||
+        (agent.halt_episode_observations ?? 0) >= this.haltWedgedSweeps)
+    );
+  }
+
+  private clearHaltEpisode(
+    agent: AgentRecord,
+    patch: Partial<AgentRecord> = {},
+  ): AgentRecord {
+    const hasEpisodeState = Boolean(
+      agent.halt_episode_type ||
+        agent.halt_episode_started_at ||
+        agent.halt_notification_sent_at ||
+        agent.halt_notified_ancestor_id,
+    );
+    if (!hasEpisodeState && Object.keys(patch).length === 0) return agent;
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      halt_episode_type: null,
+      halt_episode_started_at: null,
+      halt_episode_observations: 0,
+      halt_notification_sent_at: null,
+      halt_notified_ancestor_id: null,
+      halt_last_observable_action: null,
+      ...patch,
+    });
+    this.registry.set(agent.agent_id, updated);
+    return updated;
+  }
+
+  private async nearestLiveHaltAncestor(
+    agent: AgentRecord,
+    nowMs: number,
+  ): Promise<AgentRecord | null> {
+    const visited = new Set<string>([agent.agent_id]);
+    let ancestorId = agent.parent_agent_id;
+    while (ancestorId && !visited.has(ancestorId)) {
+      visited.add(ancestorId);
+      const ancestor =
+        this.registry.get(ancestorId) ?? this.stateMgr.readState(ancestorId);
+      if (!ancestor) return null;
+      try {
+        const screen = await this.readAgentScreen(ancestor, {
+          lines: BOOT_SESSION_CAPTURE_LINES,
+        });
+        const parsed = parseScreen(screen.text);
+        const live =
+          parsed.agent_type !== "unknown" &&
+          parsed.control_state !== "shell" &&
+          parsed.control_state !== "dead" &&
+          parsed.control_state !== "stale_surface" &&
+          parsed.control_state !== "permission_prompt" &&
+          parsed.control_state !== "interactive_overlay" &&
+          !this.isMatureHaltEpisode(ancestor, nowMs);
+        if (live) return ancestor;
+      } catch {
+        // A parent whose live screen cannot be proven is not an escalation sink.
+      }
+      ancestorId = ancestor.parent_agent_id;
+    }
+    return null;
+  }
+
+  private async maybeEscalateLiveHalt(
+    agent: AgentRecord,
+    screenText: string,
+  ): Promise<AgentRecord> {
+    const nowMs = this.haltNow();
+    const nowIso = new Date(nowMs).toISOString();
+    if (agent.halt_escalation === false) return agent;
+    const parsed = parseScreen(screenText);
+    if (
+      parsed.control_state === "shell" ||
+      parsed.control_state === "dead" ||
+      parsed.control_state === "stale_surface" ||
+      this.hasOutputDoneEvidence(agent.cli, screenText)
+    ) {
+      const hasProgressMemory = Boolean(
+        agent.halt_last_active_at ||
+          agent.halt_last_progress_at_ms ||
+          agent.halt_last_progress_signature,
+      );
+      return this.clearHaltEpisode(
+        agent,
+        hasProgressMemory
+          ? {
+              halt_last_active_at: null,
+              halt_last_progress_at_ms: null,
+              halt_last_progress_signature: null,
+            }
+          : {},
+      );
+    }
+
+    const progressSignature = this.observableHaltProgressSignature(
+      agent,
+      screenText,
+    );
+    const screenActive =
+      parsed.status === "working" || parsed.status === "thinking";
+    let haltType: AgentHaltType | null = null;
+    let episodeStartedAtMs = nowMs;
+    if (
+      parsed.control_state === "permission_prompt" ||
+      parsed.control_state === "interactive_overlay"
+    ) {
+      haltType = "awaiting_input";
+    } else if (screenActive) {
+      if (agent.halt_last_progress_signature !== progressSignature) {
+        return this.clearHaltEpisode(agent, {
+          halt_last_active_at: nowIso,
+          halt_last_progress_at_ms: nowMs,
+          halt_last_progress_signature: progressSignature,
+        });
+      }
+      haltType = "wedged";
+      episodeStartedAtMs = agent.halt_last_progress_at_ms ?? nowMs;
+    } else if (
+      parsed.status === "idle" &&
+      parsed.control_state === "ready" &&
+      parsed.agent_type !== "unknown" &&
+      agent.halt_last_active_at
+    ) {
+      if (this.hasUnfinishedBackgroundTool(screenText)) {
+        haltType = "wedged";
+        episodeStartedAtMs = agent.halt_last_progress_at_ms ?? nowMs;
+      } else {
+        haltType = "idle_without_done";
+      }
+    }
+    if (!haltType) return this.clearHaltEpisode(agent);
+
+    let episode = agent;
+    if (!agent.halt_episode_type) {
+      episode = this.stateMgr.updateRecord(agent.agent_id, {
+        halt_episode_type: haltType,
+        halt_episode_started_at: new Date(episodeStartedAtMs).toISOString(),
+        halt_episode_observations: 1,
+        halt_notification_sent_at: null,
+        halt_notified_ancestor_id: null,
+        halt_last_observable_action: parsed.current_action ?? haltType,
+      });
+      this.registry.set(agent.agent_id, episode);
+      return episode;
+    }
+    if (agent.halt_episode_type !== haltType) {
+      episode = this.stateMgr.updateRecord(agent.agent_id, {
+        halt_episode_type: haltType,
+        halt_episode_started_at: nowIso,
+        halt_episode_observations: 1,
+        halt_notification_sent_at: null,
+        halt_notified_ancestor_id: null,
+        halt_last_observable_action: parsed.current_action ?? haltType,
+      });
+      this.registry.set(agent.agent_id, episode);
+      return episode;
+    }
+    if (haltType === "wedged") {
+      episode = this.stateMgr.updateRecord(agent.agent_id, {
+        halt_episode_observations: (agent.halt_episode_observations ?? 0) + 1,
+        halt_last_observable_action: parsed.current_action ?? haltType,
+      });
+      this.registry.set(agent.agent_id, episode);
+    }
+    if (episode.halt_notification_sent_at) return episode;
+
+    const startedAtMs = Date.parse(episode.halt_episode_started_at ?? "");
+    if (
+      !Number.isFinite(startedAtMs) ||
+      nowMs - startedAtMs < this.haltDwellMs(haltType) ||
+      (haltType === "wedged" &&
+        (episode.halt_episode_observations ?? 0) < this.haltWedgedSweeps)
+    ) {
+      return episode;
+    }
+    const ancestor = await this.nearestLiveHaltAncestor(episode, nowMs);
+    if (!ancestor) return episode;
+    let resumeCommand = "no captured session; inspect the live surface";
+    if (episode.cli_session_id) {
+      try {
+        resumeCommand = buildRawResumeCommand(
+          episode.cli,
+          episode.repo,
+          episode.cli_session_id,
+        );
+      } catch {
+        // Keep the explicit non-resumable fallback above.
+      }
+    }
+    const durationSeconds = Math.max(
+      0,
+      Math.floor((nowMs - startedAtMs) / 1_000),
+    );
+    const unblockAction = this.haltUnblockAction(episode, haltType);
+    try {
+      dispatchOnce(
+        ancestor.agent_id,
+        {
+          id: `agent-halt:${episode.agent_id}:${episode.halt_episode_started_at}`,
+          from: "cmuxlayer:lifecycle",
+          to: ancestor.agent_id,
+          tag: `agent_halt_${haltType}`,
+          task:
+            `Agent ${episode.agent_id} in surface ${episode.surface_id} has remained ` +
+            `${haltType} for ${durationSeconds}s. Last observable action: ` +
+            `${episode.halt_last_observable_action ?? "unknown"}. ` +
+            `Exact unblock action: ${unblockAction}. ` +
+            `Session resume fallback: ${resumeCommand}`,
+        },
+        this.inboxOpts,
+      );
+      const notified = this.stateMgr.updateRecord(episode.agent_id, {
+        halt_notification_sent_at: nowIso,
+        halt_notified_ancestor_id: ancestor.agent_id,
+      });
+      this.registry.set(episode.agent_id, notified);
+      return notified;
+    } catch {
+      return episode;
+    }
+  }
+
   private shouldAutoReviveCliExit(agent: AgentRecord): boolean {
     const structurallyEligible =
       agent.surface_provenance === "cmuxlayer_spawn" &&
@@ -4204,25 +4526,25 @@ export class AgentEngine {
       );
       const readyAgent = await this.maybeMarkBootReady(capturedAgent, sweepCtx);
       const taskDoneResult = await this.maybeMarkTaskDone(readyAgent, sweepCtx);
-      const agent = await this.maybeMarkCliExited(
+      let agent = await this.maybeMarkCliExited(
         taskDoneResult.agent,
         sweepCtx,
         taskDoneResult.screenText,
       );
-      const { agent_id: agentId, state } = agent;
+      const initialAgentId = agent.agent_id;
       if (this.isKnownClosedSurface(agent, surfaceTopology)) {
-        const prev = this.sidebarSnapshot.get(agentId);
+        const prev = this.sidebarSnapshot.get(initialAgentId);
         if (prev) {
           try {
-            await this.client.clearStatus(agentId, {
+            await this.client.clearStatus(initialAgentId, {
               workspace: prev.workspaceId ?? undefined,
             });
           } catch {
             // Best-effort cleanup; closed panes must not emit fresh health signals.
           }
         }
-        this.sidebarSnapshot.delete(agentId);
-        this.clearAgentLifecycleMemory(agentId);
+        this.sidebarSnapshot.delete(initialAgentId);
+        this.clearAgentLifecycleMemory(initialAgentId);
         continue;
       }
       const harvestability = this.assessHarvestability(agent);
@@ -4312,20 +4634,32 @@ export class AgentEngine {
         // than the topology snapshot that began the sweep. The screen belongs
         // to the fresh route, while title/topology still belong to the outer
         // snapshot, so publishing either as one row would invert seat state.
-        const prev = this.sidebarSnapshot.get(agentId);
+        const prev = this.sidebarSnapshot.get(initialAgentId);
         if (prev) {
           try {
-            await this.client.clearStatus(agentId, {
+            await this.client.clearStatus(initialAgentId, {
               workspace: prev.workspaceId ?? undefined,
             });
           } catch {
             // Best-effort cleanup; the next coherent sweep republishes it.
           }
         }
-        this.sidebarSnapshot.delete(agentId);
-        this.clearAgentLifecycleMemory(agentId);
+        this.sidebarSnapshot.delete(initialAgentId);
+        this.clearAgentLifecycleMemory(initialAgentId);
         continue;
       }
+      let haltScreenText = taskDoneResult.screenText;
+      if (haltScreenText === undefined) {
+        try {
+          haltScreenText = (await this.readSweepScreen(agent, sweepCtx)).text;
+        } catch {
+          // No live screen proof means no halt classification or escalation.
+        }
+      }
+      if (haltScreenText !== undefined) {
+        agent = await this.maybeEscalateLiveHalt(agent, haltScreenText);
+      }
+      const { agent_id: agentId, state } = agent;
       const boundSurfaceRef = surfaceBinding.surfaceRef;
       const boundWorkspaceId =
         surfaceBinding.workspaceId ?? agent.workspace_id ?? null;
@@ -5903,6 +6237,16 @@ export class AgentEngine {
       revive_previous_state: null,
       revive_consecutive_observations: 0,
       revive_notification_sent_at: null,
+      halt_escalation: spawnParams.halt_escalation ?? true,
+      halt_episode_type: null,
+      halt_episode_started_at: null,
+      halt_episode_observations: 0,
+      halt_notification_sent_at: null,
+      halt_notified_ancestor_id: null,
+      halt_last_observable_action: null,
+      halt_last_active_at: null,
+      halt_last_progress_at_ms: null,
+      halt_last_progress_signature: null,
       boot_prompt_pending: spawnParams.boot_prompt_pending ?? false,
       submit_verified: null,
       prompt_delivered: false,

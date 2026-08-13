@@ -5731,7 +5731,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(state.crash_recover).toBe(true);
   });
 
-  it("spawn_agent defaults managed agents to auto_revive and persists an explicit opt-out", async () => {
+  it("spawn_agent defaults managed agents to lifecycle escalation and persists explicit opt-outs", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = (server as any)._registeredTools["get_agent_state"];
@@ -5752,6 +5752,7 @@ describe("agent lifecycle tool handlers", () => {
       authority: "worker",
       prompt: "debug CLI death",
       auto_revive: false,
+      halt_escalation: false,
       force_new: true,
     });
 
@@ -5779,7 +5780,9 @@ describe("agent lifecycle tool handlers", () => {
       JSON.parse(optedOutStateResult.content[0].text);
 
     expect(defaultState.auto_revive).toBe(true);
+    expect(defaultState.halt_escalation).toBe(true);
     expect(optedOutState.auto_revive).toBe(false);
+    expect(optedOutState.halt_escalation).toBe(false);
   });
 
   it("lifecycle crash recovery refuses placement in a manual workspace", async () => {

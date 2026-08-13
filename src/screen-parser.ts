@@ -186,7 +186,7 @@ const PICKER_NUMBERED_OPTION_RE =
 const PICKER_SELECTED_NUMBERED_OPTION_RE =
   /^\s*[>❯›]\s*(?:[☐☑◉○●◯✓✔]\s*)?\d+\.\s+\S.+$/;
 const PICKER_NAVIGATION_FOOTER_RE =
-  /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press up to edit queued messages)/i;
+  /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press enter to confirm or esc to go back|Press up to edit queued messages)/i;
 const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
 const CLAUDE_PICKER_AUX_OPTION_RE =
   /^\s*\d+\.\s+(?:Type something\.?|Chat about this)\s*$/i;
