@@ -10446,6 +10446,70 @@ Session ID: ${sessionId}`,
       ).toHaveLength(1);
     });
 
+    it.each([
+      {
+        label: "an orchestrator",
+        role: "orchestrator" as const,
+        footer: "⏵⏵ bypass permissions on",
+      },
+      {
+        label: "an agent visibly supervising a child",
+        role: "worker" as const,
+        footer: "⏵⏵ bypass permissions on · ← 1 agent",
+      },
+    ])("does not report $label waiting at an idle prompt", async ({ role, footer }) => {
+      let nowMs = Date.parse("2026-08-13T14:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltIdleWithoutDoneDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: `idle-lead-parent-${role}`,
+        surface_id: `surface:idle-lead-parent-${role}`,
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: `idle-lead-${role}`,
+        surface_id: `surface:idle-lead-${role}`,
+        state: "working",
+        cli: "claude",
+        role,
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_last_active_at: new Date(nowMs - 1_800_000).toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen = `Claude Code\nCompleted the previous turn.\n❯\n${footer}`;
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        idleScreen,
+      );
+
+      expect(
+        engine.getAgentState(child.agent_id)?.halt_episode_type ?? null,
+      ).toBeNull();
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+          message.tag.startsWith("agent_halt_"),
+        ),
+      ).toEqual([]);
+    });
+
     it("suppresses idle escalation after the child reports to its parent", async () => {
       let nowMs = Date.parse("2026-08-13T15:00:00.000Z");
       engine.dispose();

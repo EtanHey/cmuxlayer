@@ -3205,6 +3205,12 @@ export class AgentEngine {
     return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
   }
 
+  private isIdleSupervisor(agent: AgentRecord, screenText: string): boolean {
+    if (agent.role === "orchestrator") return true;
+    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
+    return /←\s*\d+\s+agents?\b/i.test(visibleTail);
+  }
+
   private observableHaltProgressSignature(
     agent: AgentRecord,
     screenText: string,
@@ -3355,6 +3361,7 @@ export class AgentEngine {
       parsed.status === "idle" &&
       parsed.control_state === "ready" &&
       parsed.agent_type !== "unknown" &&
+      !this.isIdleSupervisor(agent, screenText) &&
       agent.halt_last_active_at
     ) {
       haltType = "idle_without_done";
