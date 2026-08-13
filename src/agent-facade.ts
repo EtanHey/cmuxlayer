@@ -30,11 +30,6 @@ export function resumeCommandForAgent(
   }
 }
 
-function recordObservedAtMs(record: AgentRecord, derivedAtMs: number): number {
-  const parsed = Date.parse(record.updated_at);
-  return Number.isFinite(parsed) ? parsed : derivedAtMs;
-}
-
 function observed<T>(
   value: T,
   source: ObservationSource,
@@ -66,29 +61,39 @@ export function toObservedPublicAgent(
     derivedAtMs?: number;
     state?: AgentState;
     stateSource?: ObservationSource;
+    screenObservedAtMs?: number;
+    screenModel?: string | null;
   } = {},
 ): ObservedPublicAgent {
   const derivedAtMs = opts.derivedAtMs ?? Date.now();
-  const registryObservedAtMs = recordObservedAtMs(record, derivedAtMs);
+  const registryObservedAtMs = derivedAtMs;
   const resumeCommand = resumeCommandForAgent(record);
   const resumable = !!resumeCommand;
-  const model = record.parsed_model ?? record.model ?? null;
+  const hasScreenModelObservation =
+    opts.screenObservedAtMs !== undefined && opts.screenModel != null;
+  const model = hasScreenModelObservation
+    ? (opts.screenModel ?? null)
+    : (record.model ?? null);
   return {
     agent_id: record.agent_id,
     repo: record.repo,
     model: observed(
       model,
-      record.parsed_model ? "screen" : "registry",
-      registryObservedAtMs,
+      hasScreenModelObservation ? "screen" : "registry",
+      hasScreenModelObservation
+        ? opts.screenObservedAtMs!
+        : registryObservedAtMs,
     ),
     state: observed(
       opts.state ?? record.state,
       opts.stateSource ?? "registry",
-      opts.stateSource === "screen" ? derivedAtMs : registryObservedAtMs,
+      opts.stateSource === "screen"
+        ? (opts.screenObservedAtMs ?? derivedAtMs)
+        : registryObservedAtMs,
     ),
     session_id: observed(
       record.cli_session_id,
-      record.cli_session_id ? "process" : "registry",
+      "registry",
       registryObservedAtMs,
     ),
     resumable: observed(resumable, "registry", registryObservedAtMs),
@@ -99,9 +104,7 @@ export function toObservedPublicAgent(
     ),
     model_mismatch: observed(
       record.model_mismatch ?? null,
-      record.model_mismatch === null || record.model_mismatch === undefined
-        ? "registry"
-        : "screen",
+      "registry",
       registryObservedAtMs,
     ),
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),

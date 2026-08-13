@@ -1,6 +1,11 @@
 import type { AgentRecord, AgentRole, AgentState } from "./agent-types.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
 import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
+import type {
+  ParsedControlPlaneState,
+  ParsedScreenAgentType,
+  ParsedScreenStatus,
+} from "./types.js";
 import {
   inferAgentRole,
   inferRecordRoleOrNull,
@@ -19,6 +24,7 @@ export type AgentHealthIssueCode =
   | "monitor_collapsed"
   | "stale_inbox_dispatches"
   | "agent_wedged"
+  | "agent_shell_fallback"
   | "pane_pty_dead"
   | "registry_screen_disagreement"
   | "registry_surface_workspace_mismatch"
@@ -43,6 +49,7 @@ export const DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY: Record<
   AgentHealthIssueSeverity
 > = {
   agent_wedged: "blocking",
+  agent_shell_fallback: "blocking",
   pane_pty_dead: "blocking",
   closure_without_artifact: "blocking",
   pr_loop_incomplete: "blocking",
@@ -79,6 +86,8 @@ export interface AgentHealthInput {
   inbox_channel_dir_deleted?: boolean | null;
   stale_count?: number;
   screen_status?: string | null;
+  screen_agent_type?: ParsedScreenAgentType | null;
+  screen_control_state?: ParsedControlPlaneState | null;
   surface_workspace_id?: string | null;
   surface_title?: string | null;
   closure_artifact_verified?: boolean | null;
@@ -102,6 +111,14 @@ export interface AgentHealth {
     Record<AgentHealthIssueCode, AgentHealthIssueSeverity>
   >;
   reconciled_state?: AgentState;
+  screen_confirmed_state?: AgentState;
+  screen_observation?: {
+    observed_at_ms: number;
+    status: ParsedScreenStatus;
+    agent_type: ParsedScreenAgentType;
+    control_state: ParsedControlPlaneState;
+    model: string | null;
+  };
   recommended_actions?: string[];
 }
 
@@ -418,24 +435,37 @@ export function evaluateAgentHealth(
   }
   const screenDone = input.screen_status === "done";
   let reconciledState: AgentState | undefined;
-  const registryActive =
-    agent.state === "creating" ||
-    agent.state === "booting" ||
-    agent.state === "working";
-  const registryInactive =
-    agent.state === "ready" ||
-    agent.state === "idle" ||
-    agent.state === "done" ||
-    agent.state === "error";
-  if ((screenActive && registryInactive) || (screenDone && registryActive)) {
-    if (screenActive && registryInactive) {
-      reconciledState = "working";
-    }
+  let screenConfirmedState: AgentState | undefined;
+  const screenIsShell =
+    input.screen_control_state === "shell" &&
+    input.screen_agent_type === "unknown";
+  if (screenIsShell) {
+    screenConfirmedState = "error";
+    addIssue(
+      issueCodes,
+      issues,
+      "agent_shell_fallback",
+      "tracked agent surface has fallen back to a bare shell with no agent process visible",
+    );
+  } else if (screenActive) {
+    screenConfirmedState = "working";
+  } else if (
+    input.screen_control_state === "ready" &&
+    input.screen_agent_type !== null &&
+    input.screen_agent_type !== undefined &&
+    input.screen_agent_type !== "unknown"
+  ) {
+    screenConfirmedState = "ready";
+  } else if (screenDone) {
+    screenConfirmedState = "done";
+  }
+  if (screenConfirmedState && screenConfirmedState !== agent.state) {
+    reconciledState = screenConfirmedState;
     addIssue(
       issueCodes,
       issues,
       "registry_screen_disagreement",
-      `registry state is ${agent.state} while screen parses as ${input.screen_status}`,
+      `registry state is ${agent.state} while screen confirms ${screenConfirmedState}`,
     );
   }
 
@@ -597,6 +627,9 @@ export function evaluateAgentHealth(
     issues,
     ...(issueCodes.length > 0 ? { issue_severities: issueSeverities } : {}),
     ...(reconciledState ? { reconciled_state: reconciledState } : {}),
+    ...(screenConfirmedState
+      ? { screen_confirmed_state: screenConfirmedState }
+      : {}),
     ...(recommendedActions.length > 0
       ? { recommended_actions: recommendedActions }
       : {}),

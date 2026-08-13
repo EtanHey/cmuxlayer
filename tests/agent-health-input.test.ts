@@ -60,6 +60,47 @@ describe("buildAgentHealthInput", () => {
     expect(input.screen_actions).toBeUndefined();
   });
 
+  it("threads all parsed screen confirmation fields without overrides", async () => {
+    const input = await buildAgentHealthInput(makeAgent(), {
+      readParsedSurface: async () => ({
+        status: "ready",
+        agent_type: "unknown",
+        control_state: "shell",
+        actions: ["resume"],
+      }),
+    });
+
+    expect(input).toMatchObject({
+      screen_status: "ready",
+      screen_agent_type: "unknown",
+      screen_control_state: "shell",
+      screen_actions: ["resume"],
+    });
+  });
+
+  it("reads missing confirmation fields when status and actions are overridden", async () => {
+    let reads = 0;
+    const input = await buildAgentHealthInput(
+      makeAgent(),
+      {
+        readParsedSurface: async () => {
+          reads += 1;
+          return {
+            agent_type: "codex",
+            control_state: "ready",
+          };
+        },
+      },
+      { screen_status: "working", screen_actions: [] },
+    );
+
+    expect(reads).toBe(1);
+    expect(input.screen_status).toBe("working");
+    expect(input.screen_actions).toEqual([]);
+    expect(input.screen_agent_type).toBe("codex");
+    expect(input.screen_control_state).toBe("ready");
+  });
+
   it("threads the latest surface write-liveness observation into health input", async () => {
     const observation = {
       pty_dead: true,

@@ -6215,6 +6215,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (
       binding &&
       (overrides?.screen_status === undefined ||
+        overrides?.screen_agent_type === undefined ||
+        overrides?.screen_control_state === undefined ||
         overrides?.screen_actions === undefined)
     ) {
       parsedSurface = await readParsedSurface(
@@ -6229,16 +6231,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     const safeSurfaceOverrides: AgentHealthInputOverrides = {
       ...surfaceOverrides,
-      screen_status: binding
-        ? overrides?.screen_status !== undefined
+      screen_status:
+        overrides?.screen_status !== undefined
           ? overrides.screen_status
-          : (parsedSurface?.parsed.status ?? null)
-        : null,
-      screen_actions: binding
-        ? overrides?.screen_actions !== undefined
+          : binding
+            ? (parsedSurface?.parsed.status ?? null)
+            : null,
+      screen_agent_type:
+        overrides?.screen_agent_type !== undefined
+          ? overrides.screen_agent_type
+          : binding
+            ? (parsedSurface?.parsed.agent_type ?? null)
+            : null,
+      screen_control_state:
+        overrides?.screen_control_state !== undefined
+          ? overrides.screen_control_state
+          : binding
+            ? (parsedSurface?.parsed.control_state ?? null)
+            : null,
+      screen_actions:
+        overrides?.screen_actions !== undefined
           ? overrides.screen_actions
-          : (parsedSurface?.parsed.actions ?? null)
-        : null,
+          : binding
+            ? (parsedSurface?.parsed.actions ?? null)
+            : null,
       surface_write_liveness: binding
         ? surfaceWriteLiveness.observe(
             binding.surfaceRef,
@@ -6275,7 +6291,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ...safeSurfaceOverrides,
       },
     );
-    return evaluateAgentHealth(agent, input);
+    const health = evaluateAgentHealth(agent, input);
+    return {
+      ...health,
+      ...(parsedSurface
+        ? {
+            screen_observation: {
+              observed_at_ms: Date.now(),
+              status: parsedSurface.parsed.status,
+              agent_type: parsedSurface.parsed.agent_type,
+              control_state: parsedSurface.parsed.control_state,
+              model: parsedSurface.parsed.model,
+            },
+          }
+        : {}),
+    };
   };
 
   const spawnDeliveryWorkspace = (
@@ -11522,7 +11552,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             "Maximum acceptable snapshot age in milliseconds (0-5000); topology changes always invalidate the snapshot",
           ),
       },
-      ANNOTATIONS.readOnly,
+      ANNOTATIONS.mutating,
       async (args) => {
         const filter = {
           repo: args.repo,
@@ -11554,29 +11584,85 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           records: AgentRecord[],
           topology: SurfaceTopologySnapshot | null,
           topologySignature: string,
+          liveDiscovery?: {
+            rows: DiscoveredAgent[];
+            observed_at_ms: number;
+          },
         ) => {
-          const derivedAt = Date.now();
+          const registryObservedAt = Date.now();
+          const uuidKey = (value: string | null | undefined) =>
+            value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
             records.map(async (agent) => {
               try {
+                const agentUuid = uuidKey(agent.surface_uuid);
+                const observedSurface = liveDiscovery?.rows.find((surface) => {
+                  const surfaceUuid = uuidKey(surface.surface_uuid);
+                  return agentUuid && surfaceUuid
+                    ? agentUuid === surfaceUuid
+                    : Boolean(
+                        !agentUuid &&
+                          !surfaceUuid &&
+                          agent.surface_observer_id &&
+                          agent.surface_observer_id === registry.getObserverId() &&
+                          surface.surface_id === agent.surface_id,
+                      );
+                });
+                const trustedScreenObservation =
+                  observedSurface && !observedSurface.read_error
+                    ? observedSurface
+                    : null;
                 const health = await evaluateServerAgentHealth(
                   agent,
                   {
                     ...healthTopologyOverrides(agent, topology),
+                    ...(trustedScreenObservation
+                      ? {
+                          screen_status:
+                            trustedScreenObservation.parsed_status,
+                          screen_agent_type:
+                            trustedScreenObservation.cli === "kiro"
+                              ? "unknown"
+                              : trustedScreenObservation.cli,
+                          screen_control_state:
+                            trustedScreenObservation.control_state,
+                          screen_actions:
+                            trustedScreenObservation.actions ?? [],
+                        }
+                      : {}),
                   },
                   topology,
                 );
                 const reconciledState = health.reconciled_state ?? agent.state;
+                const screenObservation = trustedScreenObservation
+                  ? {
+                      observed_at_ms: liveDiscovery!.observed_at_ms,
+                      status: trustedScreenObservation.parsed_status,
+                      agent_type:
+                        trustedScreenObservation.cli === "kiro"
+                          ? "unknown"
+                          : trustedScreenObservation.cli,
+                      control_state: trustedScreenObservation.control_state,
+                      model: trustedScreenObservation.model,
+                    }
+                  : health.screen_observation;
                 return {
                   agent: {
                     ...toObservedPublicAgent(agent, {
-                      derivedAtMs: derivedAt,
+                      derivedAtMs: registryObservedAt,
                       state: reconciledState,
-                      stateSource: health.reconciled_state
+                      stateSource: health.screen_confirmed_state
                         ? "screen"
                         : "registry",
+                      screenObservedAtMs: screenObservation?.observed_at_ms,
+                      screenModel: screenObservation?.model,
                     }),
-                    health,
+                    health: {
+                      ...health,
+                      ...(screenObservation
+                        ? { screen_observation: screenObservation }
+                        : {}),
+                    },
                   },
                   skipped: null,
                 };
@@ -11605,7 +11691,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : enrichedAgents;
           const entry: ListAgentsCacheEntry = {
             topology_signature: topologySignature,
-            derived_at: derivedAt,
+            derived_at: Date.now(),
             agents: agents as Array<
               ObservedPublicAgent & { health: AgentHealth }
             >,
@@ -11629,9 +11715,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ) {
             return renderListAgentsResponse(cached);
           }
-          const merged = await engine.runLifecycleMutation(async () => {
+          const live = await engine.runLifecycleMutation(async () => {
             discovery.invalidate();
             const discovered = await discovery.scan(true);
+            const observedAtMs = Date.now();
             if (
               registry
                 .list()
@@ -11639,16 +11726,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ) {
               registry.repairFromDiscovery(discovered, { seatRegistry });
             }
-            return registry.listMerged(discovery, {
+            const merged = await registry.listMerged(discovery, {
               filter,
               force: true,
               discovered,
             });
+            return { merged, discovered, observedAtMs };
           });
           return await buildListAgentsResponse(
-            merged,
+            live.merged,
             topology,
             topologySignature,
+            {
+              rows: live.discovered,
+              observed_at_ms: live.observedAtMs,
+            },
           );
         } catch (e) {
           if (isSurfaceEnumerationError(e)) {
@@ -11894,10 +11986,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "resync_agents",
-      "Force-refresh the agent registry by scanning all surfaces. Evicts ghosts, registers discovered agents, and returns a diff.",
+      "Removed compatibility stub. Agent discovery and reconciliation now happen automatically on list_agents; callers must not resync manually.",
       {},
-      ANNOTATIONS.mutating,
+      ANNOTATIONS.readOnly,
       async () => {
+        const compatibilityStubRemoved: boolean = true;
+        if (compatibilityStubRemoved) {
+          return err(
+            new Error(
+              "resync_agents was removed; call list_agents for an automatically refreshed live view",
+            ),
+          );
+        }
+        /* c8 ignore start -- retained for one release as unreachable rollback reference */
         await awaitLifecycleStart();
         return engine.runLifecycleMutation(async () => {
           try {
@@ -12459,6 +12560,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e);
           }
         });
+        /* c8 ignore stop */
       },
     );
 

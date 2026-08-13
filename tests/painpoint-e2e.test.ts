@@ -563,7 +563,7 @@ describe("Phase 10 painpoint e2e replay", () => {
     }
   });
 
-  it("candidate 14: public resync/list keeps terminal workers on empty surface enumeration", async () => {
+  it("candidate 14: list_agents keeps terminal workers on empty surface enumeration without manual resync", async () => {
     const dir = tempDir("candidate-14");
     new StateManager(dir).writeState(
       makeRecord({
@@ -578,9 +578,6 @@ describe("Phase 10 painpoint e2e replay", () => {
     try {
       const engine = getEngine(server);
       await engine.getRegistry().reconstitute();
-      const resync = parseToolResult<{ ok: boolean; count: number }>(
-        await getTool(server, "resync_agents").handler({}, {}),
-      );
       const listed = parseToolResult<{
         agents: Array<{
           agent_id: string;
@@ -588,8 +585,6 @@ describe("Phase 10 painpoint e2e replay", () => {
         }>;
       }>(await getTool(server, "list_agents").handler({}, {}));
 
-      expect(resync.ok).toBe(true);
-      expect(resync.count).toBe(1);
       expect(listed.agents).toEqual([
         expect.objectContaining({
           agent_id: "terminal-worker-empty-scan",

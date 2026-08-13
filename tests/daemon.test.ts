@@ -28,6 +28,19 @@ import { ack, readInbox } from "../src/inbox.js";
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
 
+function normalizeObservationTimes(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeObservationTimes);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      key === "derived_at" || key === "observed_at_ms"
+        ? 0
+        : normalizeObservationTimes(entry),
+    ]),
+  );
+}
+
 function withTestObserver<T extends Omit<CreateServerOptions, "context">>(
   opts: T,
 ): T & Omit<CreateServerOptions, "context"> {
@@ -2246,13 +2259,9 @@ describe("CmuxLayerDaemon", () => {
       expect(directAgents.structuredContent?.derived_at).toEqual(
         expect.any(Number),
       );
-      expect({
-        ...daemonAgents.structuredContent,
-        derived_at: 0,
-      }).toEqual({
-        ...directAgents.structuredContent,
-        derived_at: 0,
-      });
+      expect(
+        normalizeObservationTimes(daemonAgents.structuredContent),
+      ).toEqual(normalizeObservationTimes(directAgents.structuredContent));
       expect(daemonScreen.structuredContent).toEqual(
         directScreen.structuredContent,
       );

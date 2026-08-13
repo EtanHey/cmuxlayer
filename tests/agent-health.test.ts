@@ -338,6 +338,37 @@ describe("agent lifecycle health", () => {
     );
   });
 
+  it("reconciles a ready registry agent whose pane fell back to a bare shell as errored", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({ state: "ready" }),
+      {
+        monitor_alive: true,
+        screen_status: "idle",
+        screen_agent_type: "unknown",
+        screen_control_state: "shell",
+      },
+    );
+
+    expect(health.reconciled_state).toBe("error");
+    expect(health.issue_codes).toContain("agent_shell_fallback");
+    expect(health.status).toBe("unhealthy");
+  });
+
+  it("reconciles a stale registry error when the screen confirms a ready agent", () => {
+    const health = evaluateAgentHealth(
+      makeRecord({ state: "error" }),
+      {
+        monitor_alive: true,
+        screen_status: "idle",
+        screen_agent_type: "codex",
+        screen_control_state: "ready",
+      },
+    );
+
+    expect(health.reconciled_state).toBe("ready");
+    expect(health.issue_codes).toContain("registry_screen_disagreement");
+  });
+
   it("marks stale dispatches on a live monitor as wedged, not dead", () => {
     const health = evaluateAgentHealth(makeRecord({ state: "working" }), {
       monitor_alive: true,

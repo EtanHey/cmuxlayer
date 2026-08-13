@@ -6,6 +6,10 @@ import type {
 } from "./agent-health.js";
 import type { WorkerHarvestability } from "./agent-engine.js";
 import type { SurfaceWriteLivenessObservation } from "./surface-write-liveness.js";
+import type {
+  ParsedControlPlaneState,
+  ParsedScreenAgentType,
+} from "./types.js";
 import {
   channelDirDeletedAfterCreate,
   monitorAlive,
@@ -18,6 +22,8 @@ export const AGENT_HEALTH_DISPATCH_ACK_TIMEOUT_MS = 120_000;
 
 export interface ParsedSurfaceHealthInput {
   status?: string | null;
+  agent_type?: ParsedScreenAgentType | null;
+  control_state?: ParsedControlPlaneState | null;
   actions?: string[] | null;
 }
 
@@ -26,6 +32,8 @@ export interface AgentHealthInputOverrides {
   monitor_alive?: boolean | null;
   stale_count?: number;
   screen_status?: string | null;
+  screen_agent_type?: ParsedScreenAgentType | null;
+  screen_control_state?: ParsedControlPlaneState | null;
   screen_actions?: string[] | null;
   surface_workspace_id?: string | null;
   surface_title?: string | null;
@@ -97,6 +105,8 @@ export async function buildAgentHealthInput(
     ).length;
   const needsScreen =
     overrides.screen_status === undefined ||
+    overrides.screen_agent_type === undefined ||
+    overrides.screen_control_state === undefined ||
     overrides.screen_actions === undefined;
   let parsedScreen: ParsedSurfaceHealthInput | null | undefined = null;
   if (needsScreen) {
@@ -114,6 +124,14 @@ export async function buildAgentHealthInput(
     overrides.screen_actions !== undefined
       ? overrides.screen_actions
       : parsedScreen?.actions;
+  const screenAgentType =
+    overrides.screen_agent_type !== undefined
+      ? overrides.screen_agent_type
+      : parsedScreen?.agent_type;
+  const screenControlState =
+    overrides.screen_control_state !== undefined
+      ? overrides.screen_control_state
+      : parsedScreen?.control_state;
   const surfaceWorkspaceId =
     overrides.surface_workspace_id !== undefined
       ? overrides.surface_workspace_id
@@ -136,6 +154,8 @@ export async function buildAgentHealthInput(
     inbox_channel_dir_deleted: inboxChannelDirDeleted,
     stale_count: staleCount,
     screen_status: screenStatus,
+    screen_agent_type: screenAgentType,
+    screen_control_state: screenControlState,
     screen_actions: screenActions,
     surface_workspace_id: surfaceWorkspaceId,
     surface_title: overrides.surface_title,
