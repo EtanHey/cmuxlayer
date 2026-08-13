@@ -153,6 +153,26 @@ describe("agent lifecycle health", () => {
     });
   });
 
+  it("does not degrade an auto-discovered agent solely for an absent inbox monitor after boot grace", () => {
+    const createdAt = "2026-06-26T20:00:00.000Z";
+    const health = evaluateAgentHealth(
+      makeRecord({
+        agent_id: "auto-codex-surface-306",
+        task_summary: "(auto-discovered)",
+        cli_session_id: null,
+        created_at: createdAt,
+      }),
+      { monitor_alive: false, screen_status: "idle" },
+      {
+        now: () =>
+          Date.parse(createdAt) + AGENT_HEALTH_INBOX_MONITOR_BOOT_GRACE_MS + 1,
+      },
+    );
+
+    expect(health.status).toBe("healthy");
+    expect(health.issue_severities?.inbox_monitor_not_alive).toBe("info");
+  });
+
   it("distinguishes a deleted inbox channel dir from a never-armed monitor", () => {
     const deleted = evaluateAgentHealth(makeRecord(), {
       monitor_alive: false,
@@ -187,7 +207,7 @@ describe("agent lifecycle health", () => {
     );
   });
 
-  it("marks ambiguous auto-discovered repo labels as degraded label hygiene", () => {
+  it("reports ambiguous auto-discovered repo labels without degrading health", () => {
     const health = evaluateAgentHealth(
       makeRecord({
         agent_id: "auto-codex-surface-999",
@@ -198,7 +218,7 @@ describe("agent lifecycle health", () => {
       { monitor_alive: false },
     );
 
-    expect(health.status).toBe("degraded");
+    expect(health.status).toBe("healthy");
     expect(health.issue_codes).toContain("ambiguous_repo_cwd_label");
     expect(health.issue_severities?.ambiguous_repo_cwd_label).toBe("info");
   });

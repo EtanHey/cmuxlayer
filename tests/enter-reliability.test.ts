@@ -632,10 +632,11 @@ describe("enter reliability", () => {
     expect(parsed.error).toMatch(/press_enter|allow_busy|boolean/i);
   });
 
-  it("does not retry Enter for send_to when the agent composer remains ambiguously pending", async () => {
+  it("retries Enter once when a Codex composer still holds the exact send", async () => {
     const client = new FakeClaudeSurfaceClient();
+    client.cli = "codex";
     server = createReliabilityServer(client);
-    registerAgent(server);
+    registerAgent(server, { cli: "codex" });
 
     const result = await callTool(server, "send_to", {
       agent_id: "agent-1",
@@ -646,22 +647,21 @@ describe("enter reliability", () => {
     const parsed = parseResult(result);
     const events = readEventLog();
 
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe("input_still_pending");
-    expect(parsed.retry_safe).toBe(false);
-    expect(parsed.retry_count).toBe(0);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("submitted");
+    expect(parsed.submit_verified).toBe(true);
+    expect(parsed.retry_count).toBe(1);
     expect(client.sendCalls.join("")).toHaveLength(2000);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
+      2,
     );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
-          event.submit_verified === false &&
-          event.retry_count === 0,
+          event.submit_verified === true &&
+          event.retry_count === 1,
       ),
     ).toBe(true);
     expect(
@@ -971,7 +971,7 @@ describe("enter reliability", () => {
     expect(events[0]?.submit_verified).toBeNull();
   });
 
-  it("Probe B: rejects an allow_busy Codex receipt when Return leaves the follow-up in the composer", async () => {
+  it("Probe B: retries once before rejecting a Codex composer that still holds the follow-up", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -993,17 +993,17 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.submit_verified).toBe(false);
-    expect(parsed.retry_count).toBe(0);
+    expect(parsed.retry_count).toBe(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
+      2,
     );
     expect(client.sendCalls.join("")).toBe(followUp);
     expect(events).toHaveLength(1);
     expect(events[0]?.submit_verified).toBe(false);
-    expect(events[0]?.retry_count).toBe(0);
+    expect(events[0]?.retry_count).toBe(1);
   }, 10_000);
 
-  it("rejects the exact PR343 live Codex queue fixture for allow_busy send_to", async () => {
+  it("accepts the exact PR343 live Codex queue as a nonterminal delivery", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1032,16 +1032,19 @@ describe("enter reliability", () => {
       "› Summarize recent commits",
     );
     expect(client.sendCalls.join("")).toBe(PR343_LIVE_QUEUE_PAYLOAD);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("rejects a correlated live Codex queue on the first verification frame within 600ms", async () => {
+  it("accepts a correlated live Codex queue on the first verification frame within 600ms", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1078,18 +1081,22 @@ describe("enter reliability", () => {
     const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).toBe(true);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(settledAt).not.toBeNull();
     expect(settledAt! - startedAt).toBeLessThanOrEqual(600);
-    expect(client.postReturnScreenReadAttempts).toBe(1);
+    expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("bounds a definitive allow_busy queued/composer failure to 600ms", async () => {
+  it("bounds a definitive allow_busy composer failure to 1000ms", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1127,14 +1134,14 @@ describe("enter reliability", () => {
     expect(result.isError).toBe(true);
     expect(parsed.submit_verified).toBe(false);
     expect(settledAt).not.toBeNull();
-    expect(settledAt! - startedAt).toBeLessThanOrEqual(600);
+    expect(settledAt! - startedAt).toBeLessThanOrEqual(1000);
     expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(2);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
+      2,
     );
   }, 10_000);
 
-  it("Probe E: rejects working status across a truncated Codex queue-to-composer transition", async () => {
+  it("Probe E: accepts when a correlated Codex queue appears before a truncated composer transition", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1163,9 +1170,12 @@ describe("enter reliability", () => {
     );
 
     expect(followUp).toHaveLength(541);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(queuedScreen).toContain("↳ Probe E queued follow-up evidence");
     expect(queuedScreen).not.toContain(tail);
@@ -1175,7 +1185,7 @@ describe("enter reliability", () => {
       1,
     );
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBe(false);
+    expect(events[0]?.submit_verified).toBeNull();
     expect(events[0]?.retry_count).toBe(0);
   }, 10_000);
 
@@ -1210,7 +1220,7 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
-  it("detects a wrapped live Codex queue heading before accepting working status", async () => {
+  it("accepts a wrapped live Codex queue heading as a nonterminal delivery", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1235,16 +1245,19 @@ describe("enter reliability", () => {
       "Messages to be submitted after next\n  tool call",
     );
     expect(queuedScreen).toContain("↳ narrow-pane queued follow-up");
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("rejects decorated wrapped Codex queue chrome correlated to this send", async () => {
+  it("accepts decorated wrapped Codex queue chrome correlated to this send", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
     client.cli = "codex";
@@ -1268,9 +1281,12 @@ describe("enter reliability", () => {
 
     expect(queuedScreen).toContain("│   tool call");
     expect(queuedScreen).toContain("│   ↳ decorated correlated queue payload");
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
   }, 10_000);
 

@@ -42,7 +42,7 @@ export interface PrepareWorktreeInput {
   repo: string;
   repoRoot?: string;
   homeGitsDir?: string;
-  worktree?: boolean | WorktreeRequest;
+  worktree?: boolean | string | WorktreeRequest;
   exec?: WorktreeExec;
 }
 
@@ -114,14 +114,18 @@ function assertAllowedWorktreePath(
 
 function normalizeWorktreeRequest(
   repo: string,
-  request: boolean | WorktreeRequest | undefined,
+  request: boolean | string | WorktreeRequest | undefined,
 ): Required<Pick<WorktreeRequest, "create" | "reuse" | "base">> &
   Omit<WorktreeRequest, "create" | "reuse" | "base"> & {
     generatedName: boolean;
     name: string;
   } {
   const spec: WorktreeRequest =
-    request === true || request === false || request === undefined ? {} : request;
+    typeof request === "string"
+      ? { name: request }
+      : request === true || request === false || request === undefined
+        ? {}
+        : request;
   const generatedName = spec.name === undefined;
   const name = generatedName ? defaultWorkerName(repo) : safeName(spec.name ?? "");
   return {

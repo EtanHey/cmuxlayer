@@ -9893,10 +9893,13 @@ codex>
     const queued = parseToolResult(result);
     expect(result.isError).toBeFalsy();
     expect(queued).toMatchObject({
+      ok: true,
       agent_id: agentId,
       delivery_id: expect.any(String),
+      delivery: "queued",
       delivery_state: "queued",
       terminal: false,
+      submit_verified: null,
     });
     expect(
       mockExec.mock.calls.filter(([, args]) => args.includes("send")),

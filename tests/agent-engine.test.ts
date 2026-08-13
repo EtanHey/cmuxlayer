@@ -12036,6 +12036,45 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("persists a composer-accepted queue without replaying it", async () => {
+      const submitter = vi.fn();
+      engine.setDeliverySubmitter(submitter);
+
+      const receipt = engine.acceptComposerQueue({
+        delivery_id: "composer-queue-1",
+        agent_id: "composer-queued-agent",
+        text: "already accepted by the Codex queue",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      expect(receipt).toMatchObject({
+        delivery_state: "queued",
+        terminal: false,
+        composer_accepted: true,
+        submit_verified: null,
+      });
+      await engine.drainDeliveryQueue();
+      expect(submitter).not.toHaveBeenCalled();
+
+      const restartedState = new StateManager(TEST_DIR);
+      const restarted = new AgentEngine(
+        restartedState,
+        new AgentRegistry(restartedState, async () => []),
+        mockClient,
+      );
+      try {
+        expect(restarted.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+          delivery_state: "queued",
+          terminal: false,
+          composer_accepted: true,
+        });
+      } finally {
+        restarted.dispose();
+      }
+    });
+
     it("makes a hung queued submission terminal-uncertain without replay", async () => {
       stateMgr.writeState(
         makeRecord({

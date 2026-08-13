@@ -440,9 +440,10 @@ export const SEND_INPUT_MAX_INLINE_CHARS = parseMaxInlineChars(
 );
 const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 // Busy relays are interjections into an already-running UI. Observe several
-// repaint frames, but fail quickly when the submitted text remains queued or
-// in the composer so fleet fan-out does not inherit the general 5s timeout.
-const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 500;
+// repaint frames, accept a correlated TUI queue, and bound exact-composer
+// recovery so fleet fan-out does not inherit the general 5s timeout.
+const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 1_000;
+const CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS = 250;
 const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
 const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
@@ -536,11 +537,8 @@ export const THIN_CORE_LEGACY_REPLACEMENTS: Readonly<Record<string, string>> = {
   broadcast: "send_to(targeting={...})",
   send_to_agent: "send_to(mode=agent)",
   send_input: "send_to(mode=surface)",
-  send_command: "send_to(mode=command)",
-  send_key: "send_to(mode=key)",
   new_worktree_split: "spawn_agent(worktree=true, role=worker)",
   spawn_in_workspace: "spawn_agent(workspace=...)",
-  new_split: "spawn_agent(role=...)",
   wait_for_all: "wait_for(ids=[...])",
 };
 
@@ -956,7 +954,12 @@ function withDeprecationWarning(
   result: ToolReturn,
   legacyName: string,
   replacement: string,
+  emittedWarnings: Set<string>,
 ): ToolReturn {
+  if (emittedWarnings.has(legacyName)) {
+    return result;
+  }
+  emittedWarnings.add(legacyName);
   const warning = `${legacyName} is deprecated for one release; use ${replacement}`;
   console.warn(`[cmuxlayer] ${warning}`);
   return {
@@ -1818,7 +1821,11 @@ function formatToolValidationError(
       return `${path}: ${issue.message}`;
     })
     .join("; ");
-  return `${toolName} invalid arguments: ${details}`;
+  const example =
+    toolName === "send_to"
+      ? ' Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })'
+      : "";
+  return `${toolName} invalid arguments: ${details}.${example}`;
 }
 
 function isSubmitVerifiedStatus(
@@ -2717,7 +2724,12 @@ export type LifecycleAgentInputDeliverer = (args: {
   allow_busy?: boolean;
   source_event: DeliveryEventType;
   delivery_id?: string;
-}) => Promise<unknown>;
+}) => Promise<{
+  bytes: number;
+  retry_count: number;
+  submit_verified: boolean | null;
+  delivery: "submitted" | "queued";
+}>;
 
 export interface CmuxServerContext {
   client: CmuxLayerClient;
@@ -3476,6 +3488,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     string,
     (args: Record<string, unknown>, extra: unknown) => Promise<ToolReturn>
   >();
+  const emittedDeprecationWarnings = new Set<string>();
   const palette = createDefaultToolPalette(
     opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
   );
@@ -3794,6 +3807,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   const worktreeArgSchema = z.union([
     z.boolean(),
+    z.string(),
     z.object({
       create: z.boolean().optional(),
       reuse: z.boolean().optional(),
@@ -4195,6 +4209,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
+    delivery: "submitted" | "queued";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -4203,6 +4218,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verified: null,
         submit_verification_reason: null,
         retry_count: 0,
+        delivery: "submitted",
       };
     }
 
@@ -4255,10 +4271,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts.text,
       );
       if (hasQueuedAgentInput) {
+        if (
+          opts.source_event !== "send_to" &&
+          opts.source_event !== "dispatch_nudge"
+        ) {
+          return {
+            submit_verified: false,
+            submit_verification_reason: "input_still_pending",
+            retry_count: retryCount,
+            delivery: "submitted",
+          };
+        }
         return {
-          submit_verified: false,
-          submit_verification_reason: "input_still_pending",
+          submit_verified: null,
+          submit_verification_reason: null,
           retry_count: retryCount,
+          delivery: "queued",
         };
       }
       const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
@@ -4282,6 +4310,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: true,
           submit_verification_reason: null,
           retry_count: retryCount,
+          delivery: "submitted",
         };
       }
       const hasClearedAgentComposer =
@@ -4300,6 +4329,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             submit_verified: true,
             submit_verification_reason: null,
             retry_count: retryCount,
+            delivery: "submitted",
           };
         }
       }
@@ -4308,12 +4338,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         hasPendingInput ||
         (opts.source_event === "spawn_agent" &&
           screenIncludesSubmittedText(snapshot.text));
-      const retryEligiblePendingInput =
+      const spawnRetryEligiblePendingInput =
         opts.allow_recovery_enter_retry !== false &&
         shouldRetryEnter &&
         !screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed) &&
         opts.source_event === "spawn_agent" &&
         !hasParsedAgentIdentity(snapshot.parsed);
+      const codexRetryEligiblePendingInput =
+        opts.allow_recovery_enter_retry !== false &&
+        (opts.source_event === "send_to" ||
+          opts.source_event === "dispatch_nudge") &&
+        hasPendingSubmitEvidence &&
+        screenCli === "codex";
+      const retryEligiblePendingInput =
+        spawnRetryEligiblePendingInput || codexRetryEligiblePendingInput;
       lastRetryEligiblePendingInput = retryEligiblePendingInput;
       if (retryEligiblePendingInput) {
         retryEligiblePendingSince ??= Date.now();
@@ -4321,8 +4359,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         retryEligiblePendingSince = null;
       }
       const retryObserveMs =
-        opts.source_event === "spawn_agent" &&
-        !hasParsedAgentIdentity(snapshot.parsed)
+        codexRetryEligiblePendingInput
+          ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
+          : opts.source_event === "spawn_agent" &&
+              !hasParsedAgentIdentity(snapshot.parsed)
           ? 0
           : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
@@ -4367,6 +4407,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: false,
           submit_verification_reason: "input_still_pending",
           retry_count: retryCount,
+          delivery: "submitted",
         };
       }
 
@@ -4377,6 +4418,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verified: true,
         submit_verification_reason: null,
         retry_count: retryCount,
+        delivery: "submitted",
       };
     }
 
@@ -4403,6 +4445,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified: submitVerified,
       submit_verification_reason: failureReason,
       retry_count: retryCount,
+      delivery: "submitted",
     };
   };
 
@@ -4427,6 +4470,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     bytes: number;
     retry_count: number;
     submit_verified: boolean | null;
+    delivery: "submitted" | "queued";
   }> => {
     await opts.beforeMutation?.();
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
@@ -4468,6 +4512,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
+    let delivery: "submitted" | "queued" = "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
@@ -4526,6 +4571,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified = verification.submit_verified;
       submit_verification_reason = verification.submit_verification_reason;
       retry_count = verification.retry_count;
+      delivery = verification.delivery;
     }
 
     await maybeRenameTask({
@@ -4549,7 +4595,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? {
               delivery_id: opts.delivery_id,
               delivery_state:
-                submit_verified === false
+                delivery === "queued"
+                  ? ("queued" as const)
+                  : submit_verified === false
                   ? ("failed" as const)
                   : ("submitted" as const),
             }
@@ -4557,7 +4605,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
 
-    if (submit_verified === false) {
+    if (submit_verified === false && delivery !== "queued") {
       const timeoutMs =
         opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
       throw new SubmitVerificationError(
@@ -4567,7 +4615,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       );
     }
 
-    return { bytes, retry_count, submit_verified };
+    return { bytes, retry_count, submit_verified, delivery };
   };
 
   const waitForBootPromptReady = async (opts: {
@@ -7056,7 +7104,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     {
       direction: z
         .enum(["left", "right", "up", "down"])
-        .describe("Split direction"),
+        .optional()
+        .default("right")
+        .describe(
+          "Split-direction hint for direct placement; role-based placement may override it. Defaults to right.",
+        ),
       workspace: z.string().optional().describe("Target workspace ref"),
       surface: z.string().optional().describe("Target surface ref"),
       pane: z.string().optional().describe("Target pane ref"),
@@ -8814,7 +8866,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // directly into the agent's surface, regardless of registry state.
   server.tool(
     "dispatch_to_agent",
-    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox. The durable envelope automatically carries reply_to=<resolved sender agent_id> plus optional via:<observed surface_ref> and observed_at metadata; reply_to is the only routing address, via is a stale-able hint, and tab names never enter the contract. The only connector-authored composer wake is `[inbox] <msg_id> — reply_to: <sender_agent_id>[ via:<surface_ref> observed_at:<stamp>] — read <path>`. With nudge='auto' (default), an idle live agent is woken once on enqueue; a stale/absent monitor also gets the same best-effort pointer independent of lifecycle state. A never-armed reader returns a non-retryable error after the durable append; a previously armed but stale reader returns explicit degraded success. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox. The durable envelope automatically carries reply_to=<resolved sender agent_id> plus optional via:<observed surface_ref> and observed_at metadata; reply_to is the only routing address, via is a stale-able hint, and tab names never enter the contract. The only connector-authored composer wake is `[inbox] <msg_id> — reply_to: <sender_agent_id>[ via:<surface_ref> observed_at:<stamp>] — read <path>`. With nudge='auto' (default), an idle live agent is woken once on enqueue; a stale/absent monitor also gets the same best-effort pointer independent of lifecycle state. A never-armed reader is successful when the verified nudge path submits or queues the pointer; otherwise the durable append returns a non-retryable error. A previously armed but stale reader returns explicit degraded success. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
     {
       agent_id: z
         .string()
@@ -8883,6 +8935,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           sent: boolean;
           reason: string;
           error_code?: string;
+          delivery?: "submitted" | "queued";
+          delivery_id?: string;
         } = { attempted: false, sent: false, reason: "" };
         const acceptedRecord = context.lifecycleRegistry?.get(args.agent_id) ?? null;
         const wakeIdleAgent =
@@ -8918,17 +8972,63 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 msg,
                 inboxPath(args.agent_id, inboxOpts),
               );
-              await lifecycleAgentInputDeliverer({
-                agent_id: args.agent_id,
-                text: pointer,
-                press_enter: true,
-                allow_busy: true,
-                source_event: "dispatch_nudge",
-              });
+              if (
+                record.state === "working" &&
+                context.lifecycleSweepEngine
+              ) {
+                const queued = context.lifecycleSweepEngine.queueDelivery({
+                  agent_id: args.agent_id,
+                  text: pointer,
+                  press_enter: true,
+                  source_event: "dispatch_nudge",
+                });
+                nudge.delivery = "queued";
+                nudge.delivery_id = queued.delivery_id;
+              } else {
+                const deliveryId = context.lifecycleSweepEngine
+                  ? randomUUID()
+                  : undefined;
+                const delivered = await lifecycleAgentInputDeliverer({
+                  agent_id: args.agent_id,
+                  text: pointer,
+                  press_enter: true,
+                  allow_busy: true,
+                  source_event: "dispatch_nudge",
+                  delivery_id: deliveryId,
+                });
+                nudge.delivery = delivered.delivery;
+                if (context.lifecycleSweepEngine && deliveryId) {
+                  const receipt =
+                    delivered.delivery === "queued"
+                      ? context.lifecycleSweepEngine.acceptComposerQueue({
+                          delivery_id: deliveryId,
+                          agent_id: args.agent_id,
+                          text: pointer,
+                          press_enter: true,
+                          source_event: "dispatch_nudge",
+                          retry_count: delivered.retry_count,
+                        })
+                      : context.lifecycleSweepEngine.resolveDelivery({
+                          delivery_id: deliveryId,
+                          agent_id: args.agent_id,
+                          text: pointer,
+                          press_enter: true,
+                          source_event: "dispatch_nudge",
+                          delivery_state: "submitted",
+                          terminal: true,
+                          retry_count: delivered.retry_count,
+                          submit_verified: delivered.submit_verified,
+                          error: null,
+                        });
+                  nudge.delivery_id = receipt.delivery_id;
+                }
+              }
               nudge.sent = true;
               nudge.reason = wakeIdleAgent
                 ? `idle live agent — typed inbox pointer into ${record.surface_id}`
-                : `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
+                : record.state === "working"
+                  ? `busy agent — queued inbox pointer for verified lifecycle delivery to ${record.surface_id}`
+                  : `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
             } catch (e) {
               if (e instanceof DeliverySafetyGateError) {
                 nudge.error_code = e.error_code;
@@ -8963,7 +9063,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           health,
           nudge,
         };
-        if (monitor_state === "never-armed") {
+        const nudgeAccepted =
+          nudge.sent &&
+          (nudge.delivery === "submitted" || nudge.delivery === "queued");
+        if (monitor_state === "never-armed" && !nudgeAccepted) {
           return err(
             "inbox message was queued, but the recipient has never proved that its inbox monitor is armed",
             {
@@ -9636,7 +9739,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const prepareSpawnWorktree = async (
       repo: string,
-      worktree: boolean | object | undefined,
+      worktree: boolean | string | object | undefined,
       mcpProfile: McpProfile | undefined,
     ) => {
       if (!worktree) {
@@ -9850,14 +9953,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             delivery_id: args.delivery_id,
             // Verify every submitted agent relay — not just long ones. A short
             // relay (the common agent-to-agent case) to a frozen terminal must
-            // be caught, never reported as ok. Busy sends do not retry Return:
-            // accepted queued input can repaint slowly, but text still proven
-            // inside the active composer must not receive a success receipt.
+            // be caught, never reported as ok. Verified agent messages may
+            // retry Return once only while the exact text remains in a Codex
+            // composer; accepted TUI queues are nonterminal receipts instead.
             verify_submit:
               args.press_enter &&
               (args.allow_busy ||
                 INTERACTIVE_AGENT_STATES.has(deliveryRoute.state)),
-            allow_recovery_enter_retry: !args.allow_busy,
+            // A single recovery Return is part of verified sends and inbox
+            // wakeups. Other lifecycle mutations (notably goal supersession)
+            // retain their stricter no-retry evidence semantics.
+            allow_recovery_enter_retry:
+              args.source_event === "send_to" ||
+              args.source_event === "dispatch_nudge",
             submit_verify_timeout_ms: args.allow_busy
               ? BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS
               : undefined,
@@ -10000,7 +10108,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "When set, create or reuse a git worktree before launch. A repoGolem registration with an absolute path is required; that registry path is the repo root. true uses <registered-root>/.worktrees/<generated-name> (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09). If a later spawn step fails before a recoverable surface exists, a newly created worktree and branch are rolled back. Object fields can set name, path, branch, base, create, and reuse.",
+            'When set, create or reuse a git worktree before launch. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an object with name, path, branch, base, create, and reuse. A repoGolem registration with an absolute path is required; that registry path is the repo root. true uses <registered-root>/.worktrees/<generated-name> (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09). If a later spawn step fails before a recoverable surface exists, a newly created worktree and branch are rolled back.',
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -10741,7 +10849,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            "Worktree options. A repoGolem registration with an absolute path is required. Defaults to true, creating/reusing <registered-root>/.worktrees/<generated-name>; a newly created worktree and branch are rolled back if spawn fails before a recoverable surface exists (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09).",
+            'Worktree options. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an options object. A repoGolem registration with an absolute path is required. Defaults to true, creating/reusing <registered-root>/.worktrees/<generated-name>; a newly created worktree and branch are rolled back if spawn fails before a recoverable surface exists (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09).',
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -13118,7 +13226,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const deliveryId = randomUUID();
               if (!args.allow_busy && agent.state === "working") {
-                const queued = engine.queueDelivery({
+              const queued = engine.queueDelivery({
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -13128,6 +13236,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
                   delivery_id: queued.delivery_id,
+                  delivery: "queued",
                   delivery_state: queued.delivery_state,
                   terminal: queued.terminal,
                   submit_verified: queued.submit_verified,
@@ -13145,27 +13254,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "send_to",
                   delivery_id: deliveryId,
                 });
-                const submitted = engine.resolveDelivery({
-                  delivery_id: deliveryId,
-                  agent_id: agent.agent_id,
-                  text: args.text,
-                  press_enter: args.press_enter,
-                  source_event: "send_to",
-                  delivery_state: "submitted",
-                  terminal: true,
-                  retry_count: delivery.retry_count,
-                  submit_verified: delivery.submit_verified,
-                  error: null,
-                });
+                const accepted =
+                  delivery.delivery === "queued"
+                    ? engine.acceptComposerQueue({
+                        delivery_id: deliveryId,
+                        agent_id: agent.agent_id,
+                        text: args.text,
+                        press_enter: args.press_enter,
+                        source_event: "send_to",
+                        retry_count: delivery.retry_count,
+                      })
+                    : engine.resolveDelivery({
+                        delivery_id: deliveryId,
+                        agent_id: agent.agent_id,
+                        text: args.text,
+                        press_enter: args.press_enter,
+                        source_event: "send_to",
+                        delivery_state: "submitted",
+                        terminal: true,
+                        retry_count: delivery.retry_count,
+                        submit_verified: delivery.submit_verified,
+                        error: null,
+                      });
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
-                  delivery_id: submitted.delivery_id,
-                  delivery_state: submitted.delivery_state,
-                  terminal: submitted.terminal,
-                  submit_verified: submitted.submit_verified,
+                  delivery_id: accepted.delivery_id,
+                  delivery: accepted.delivery_state,
+                  delivery_state: accepted.delivery_state,
+                  terminal: accepted.terminal,
+                  submit_verified: accepted.submit_verified,
                   accepted: true,
-                  delivered: true,
+                  delivered: accepted.delivery_state === "submitted",
                 });
               } catch (error) {
                 const failed = engine.resolveDelivery(
@@ -13265,18 +13385,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               accepted: true,
               agent_id: agentId,
               delivery_id: receipt.delivery_id,
+              delivery: "queued",
               delivery_state: receipt.delivery_state,
               terminal: receipt.terminal,
+              submit_verified: receipt.submit_verified,
             };
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `send_to accepted — delivery ${receipt.delivery_id} queued`,
-                },
-              ],
-              structuredContent: data,
-            };
+            return okFormatted(
+              `send_to accepted — delivery ${receipt.delivery_id} queued`,
+              data,
+            );
           }
           const deliveryId = randomUUID();
           let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
@@ -13320,18 +13437,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             throw error;
           }
-          const receipt = engine.resolveDelivery({
-            delivery_id: deliveryId,
-            agent_id: agentId,
-            text: args.text,
-            press_enter: args.press_enter,
-            source_event: "send_to",
-            delivery_state: "submitted",
-            terminal: true,
-            retry_count: delivery.retry_count,
-            submit_verified: delivery.submit_verified,
-            error: null,
-          });
+          const receipt =
+            delivery.delivery === "queued"
+              ? engine.acceptComposerQueue({
+                  delivery_id: deliveryId,
+                  agent_id: agentId,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  source_event: "send_to",
+                  retry_count: delivery.retry_count,
+                })
+              : engine.resolveDelivery({
+                  delivery_id: deliveryId,
+                  agent_id: agentId,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  source_event: "send_to",
+                  delivery_state: "submitted",
+                  terminal: true,
+                  retry_count: delivery.retry_count,
+                  submit_verified: delivery.submit_verified,
+                  error: null,
+                });
           // Preserve the already-terminal receipt if optional evidence
           // collection fails after the pane mutation has succeeded.
           failedReceiptPayload = {
@@ -13343,6 +13470,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const data = {
             agent_id: agentId,
             delivery_id: receipt.delivery_id,
+            delivery: receipt.delivery_state,
             delivery_state: receipt.delivery_state,
             terminal: receipt.terminal,
             retry_count: delivery.retry_count,
@@ -13520,7 +13648,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const error = new SubmitVerificationError(
               `Supersede submission could not be verified for ${args.agent_id}`,
               delivery.retry_count,
-              "submit_evidence_absent",
+              delivery.delivery === "queued"
+                ? "input_still_pending"
+                : "submit_evidence_absent",
             );
             return err(error, {
               error_code: "supersede_submit_unverified",
@@ -14182,6 +14312,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   await originalHandler(args, extra),
                   name,
                   replacement,
+                  emittedDeprecationWarnings,
                 ),
             }
           : {}),

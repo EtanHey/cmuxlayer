@@ -31,6 +31,12 @@ const LEGACY_TOOL_NAMES = [
   "wait_for_all",
 ] as const;
 
+const REQUIRED_ESCAPE_HATCHES = [
+  "send_command",
+  "send_key",
+  "new_split",
+] as const;
+
 function makeExec(): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("list-workspaces")) {
@@ -151,13 +157,45 @@ describe("thin-core tool palette", () => {
       { _meta?: Record<string, unknown> }
     >;
 
-    for (const name of LEGACY_TOOL_NAMES) {
+    for (const name of LEGACY_TOOL_NAMES.filter(
+      (candidate) => !REQUIRED_ESCAPE_HATCHES.includes(candidate as any),
+    )) {
       expect(tools[name]?._meta).toMatchObject({
         defer_loading: true,
         deprecated: true,
         "cmuxlayer/interim": true,
       });
     }
+    for (const name of REQUIRED_ESCAPE_HATCHES) {
+      expect(tools[name]?._meta).toMatchObject({
+        defer_loading: true,
+        "cmuxlayer/interim": true,
+      });
+      expect(tools[name]?._meta?.deprecated).not.toBe(true);
+    }
+  });
+
+  it("accepts optional new_split direction and string worktree shorthand in tool schemas", () => {
+    const server = createServer({
+      exec: makeExec(),
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    expect(
+      server._registeredTools.new_split.inputSchema.safeParse({
+        type: "terminal",
+        role: "worker",
+      }).success,
+    ).toBe(true);
+    expect(
+      server._registeredTools.spawn_agent.inputSchema.safeParse({
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        worktree: "tool-usage",
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -300,7 +338,30 @@ describe("consolidated compatibility", () => {
     expect(parseResult(result)).toMatchObject({
       deprecation_warning: expect.stringContaining("send_to(mode=surface)"),
     });
+    const second = await server._registeredTools.send_input.handler(
+      { surface: "surface:1", text: "legacy again", press_enter: false },
+      {},
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(parseResult(second)).not.toHaveProperty("deprecation_warning");
     warn.mockRestore();
+  });
+
+  it("prints one working send_to example for invalid mode input", async () => {
+    const server = createServer({
+      exec: makeExec(),
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    const result = await server._registeredTools.send_to.handler(
+      { mode: "message", target: "agent-1", text: "hello" },
+      {},
+    );
+
+    expect(parseResult(result).error).toMatch(
+      /Example: send_to\(\{ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" \}\)/,
+    );
   });
 });
 
