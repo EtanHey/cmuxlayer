@@ -474,9 +474,17 @@ const READY_PATTERN_CLIS: CliType[] = [
   "kiro",
   "cursor",
 ];
+const SEND_TO_WORKING_EXAMPLE =
+  'Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })';
 const SendToArgsSchema = z.object({
   mode: z
-    .enum(["agent", "surface", "command", "key"])
+    .enum(["agent", "surface", "command", "key"], {
+      errorMap: () => ({
+        message:
+          'Expected one of "agent" | "surface" | "command" | "key". ' +
+          SEND_TO_WORKING_EXAMPLE,
+      }),
+    })
     .optional()
     .default("agent"),
   target: z.string().optional(),
@@ -1823,7 +1831,7 @@ function formatToolValidationError(
     .join("; ");
   const example =
     toolName === "send_to"
-      ? ' Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })'
+      ? ` ${SEND_TO_WORKING_EXAMPLE}`
       : "";
   return `${toolName} invalid arguments: ${details}.${example}`;
 }
@@ -7720,6 +7728,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const sourceEvent =
+          (
+            args as typeof args & {
+              _cmuxlayer_source_event?: DeliveryEventType;
+            }
+          )._cmuxlayer_source_event ?? "send_input";
         assertInlineInputAllowed({
           tool: "send_input",
           arg: "text",
@@ -7823,7 +7837,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               press_enter: args.press_enter,
               rename_to_task: args.rename_to_task,
               stableSurfaceIdentity: route.stableSurfaceIdentity,
-              source_event: "send_input",
+              source_event: sourceEvent,
               verify_submit: shouldVerifySubmit,
               beforeMutation: route.assertCurrent,
             });
@@ -7837,16 +7851,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         const identity = resolveTargetIdentity(stateMgr, route.surface);
+        const queued = delivery.delivery === "queued";
         const data = {
           ...identity,
-          delivered: true,
+          delivered: !queued,
+          delivery: delivery.delivery,
+          delivery_state: delivery.delivery,
+          terminal: !queued,
           retry_count: delivery.retry_count,
           submit_verified: delivery.submit_verified,
         };
         return okFormatted(
           formatDelivery("send_input", {
             ...identity,
-            delivered: true,
+            delivered: !queued,
+            pending: queued,
             submit_verified: delivery.submit_verified,
           }),
           data,
@@ -13029,6 +13048,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   press_enter: args.press_enter,
                   rename_to_task: args.rename_to_task,
                   allow_long_inline: args.allow_long_inline,
+                  _cmuxlayer_source_event: "send_to",
                 },
                 {},
               );
@@ -13534,41 +13554,43 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!agentId || args.text === undefined) {
             throw new Error("send_to_agent requires agent_id and text");
           }
-          assertInlineInputAllowed({
-            tool: "send_to_agent",
-            arg: "text",
-            value: args.text,
-            allowLongInline: args.allow_long_inline,
-          });
-          assertDenseInlineInputAllowed({
-            tool: "send_to_agent",
-            arg: "text",
-            value: args.text,
-            allowLongInline: args.allow_long_inline,
-          });
-          const targetAgent =
-            engine.getAgentState(agentId) ?? registry.get(agentId);
-          assertInteractiveMultilineInputAllowed({
-            tool: "send_to_agent",
-            value: args.text,
-            cli: targetAgent?.cli,
-            allowLongInline: args.allow_long_inline,
-          });
-          const delivery = await deliverAgentInput({
-            agent_id: agentId,
-            text: args.text,
-            press_enter: args.press_enter,
-            allow_busy: args.allow_busy,
-            source_event: "send_to_agent",
-          });
-          const evidence = await collectDeliveryEvidence(agentId);
-          const data = {
-            agent_id: agentId,
-            retry_count: delivery.retry_count,
-            submit_verified: delivery.submit_verified,
-            ...evidence,
+          const sendToHandler = toolHandlersByName.get("send_to");
+          if (!sendToHandler) {
+            throw new Error("Internal tool handler unavailable: send_to");
+          }
+          const result = await sendToHandler(
+            {
+              ...args,
+              mode: "agent",
+              agent_id: agentId,
+              target: undefined,
+              targeting: undefined,
+            },
+            {},
+          );
+          if (!result.isError) return result;
+
+          const preserveLegacyToolLabel = (value: string): string =>
+            value.replaceAll("send_to.", "send_to_agent.");
+          return {
+            ...result,
+            content: result.content.map((item) => ({
+              ...item,
+              text: preserveLegacyToolLabel(item.text),
+            })),
+            structuredContent: result.structuredContent
+              ? {
+                  ...result.structuredContent,
+                  ...(typeof result.structuredContent.error === "string"
+                    ? {
+                        error: preserveLegacyToolLabel(
+                          result.structuredContent.error,
+                        ),
+                      }
+                    : {}),
+                }
+              : undefined,
           };
-          return okFormatted(formatOk("send_to_agent", data), data);
         } catch (e) {
           if (e instanceof DeliverySafetyGateError) {
             return err(e, {

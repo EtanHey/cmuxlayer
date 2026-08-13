@@ -485,6 +485,51 @@ describe("createServer", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
+  it("includes a working send_to example in SDK-level invalid-mode errors", async () => {
+    const stateDir = processScopedTmpDir("cmuxlayer-send-to-schema-error");
+    rmSync(stateDir, { recursive: true, force: true });
+    const server = createServer({
+      exec: vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" }),
+      stateDir,
+      controlHealthIntervalMs: 0,
+      defaultPalette: "send_to",
+    });
+    const client = new Client({
+      name: "send-to-schema-error",
+      version: "0.1.0",
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    try {
+      const result = await client.callTool({
+        name: "send_to",
+        arguments: {
+          mode: "message",
+          agent_id: "cmuxlayerCodex-1234",
+          text: "hello",
+        },
+      });
+      expect(result.isError).toBe(true);
+      const validationText = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => item.text)
+        .join("\n")
+        .replaceAll('\\"', '"');
+      expect(validationText).toContain(
+        'Example: send_to({ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" })',
+      );
+    } finally {
+      await client.close();
+      await server.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("registers Claude channel capability when enabled", () => {
     const server = createServer({
       skipAgentLifecycle: true,

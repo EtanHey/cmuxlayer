@@ -1044,6 +1044,61 @@ describe("enter reliability", () => {
     );
   }, 10_000);
 
+  it("accepts the exact Codex queue through send_to mode=surface", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    client.cli = "codex";
+    client.keepWorkingStatusWhilePending = true;
+    client.postReturnPendingScreenText =
+      CODEX_PR343_LIVE_QUEUED_FOLLOWUP_SCREEN;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "ready", cli: "codex" });
+
+    const result = await callToolInTimerSteps(server, "send_to", {
+      mode: "surface",
+      surface: client.surface,
+      text: PR343_LIVE_QUEUE_PAYLOAD,
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
+  }, 10_000);
+
+  it("routes send_to_agent through the truthful queued receipt path", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 99;
+    client.cli = "codex";
+    client.keepWorkingStatusWhilePending = true;
+    client.postReturnPendingScreenText =
+      CODEX_PR343_LIVE_QUEUED_FOLLOWUP_SCREEN;
+    server = createReliabilityServer(client);
+    registerAgent(server, { state: "ready", cli: "codex" });
+
+    const result = await callToolInTimerSteps(server, "send_to_agent", {
+      agent_id: "agent-1",
+      text: PR343_LIVE_QUEUE_PAYLOAD,
+      press_enter: true,
+    });
+    const parsed = parseResult(result);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state).toBe("queued");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.deprecation_warning).toContain("send_to(mode=agent)");
+  }, 10_000);
+
   it("accepts a correlated live Codex queue on the first verification frame within 600ms", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 99;
