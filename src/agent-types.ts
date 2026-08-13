@@ -28,6 +28,10 @@ export type AgentReviveOutcome =
   | "failed"
   | "revived"
   | "unrecoverable";
+export type AgentHaltType =
+  | "awaiting_input"
+  | "idle_without_done"
+  | "wedged";
 
 export interface Observed<T> {
   value: T;
@@ -107,6 +111,18 @@ export interface AgentRecord {
   revive_previous_state?: AgentState | null;
   revive_consecutive_observations?: number;
   revive_notification_sent_at?: string | null;
+  /** Set false for deliberate debugging lanes that must not notify ancestors. */
+  halt_escalation?: boolean;
+  /** Durable identity and delivery state for one continuous live-halt episode. */
+  halt_episode_type?: AgentHaltType | null;
+  halt_episode_started_at?: string | null;
+  halt_episode_observations?: number;
+  halt_notification_sent_at?: string | null;
+  halt_notified_ancestor_id?: string | null;
+  halt_last_observable_action?: string | null;
+  halt_last_active_at?: string | null;
+  halt_last_progress_at_ms?: number | null;
+  halt_last_progress_signature?: string | null;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
   // Spawn settlement evidence (PR #326): a managed agent must not report

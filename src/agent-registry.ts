@@ -825,9 +825,9 @@ export class AgentRegistry {
       }
     }
 
-    // Phase 2: Reparent orphans — children of crashed agents get parent_agent_id=null.
-    // Children keep running independently (orphan survival), but are detached from
-    // the dead parent so getSubtree on the dead parent no longer includes them.
+    // Phase 2: Reparent orphans to the nearest ancestor that survived this
+    // reconciliation pass. Keeping that link gives lifecycle notices a live
+    // delivery path while still detaching the child from the crashed subtree.
     if (crashedIds.size > 0) {
       for (const [id, agent] of this.agents) {
         if (
@@ -835,9 +835,24 @@ export class AgentRegistry {
           agent.parent_agent_id &&
           crashedIds.has(agent.parent_agent_id)
         ) {
+          let nextParentId: string | null = agent.parent_agent_id;
+          const visited = new Set<string>();
+          while (nextParentId && crashedIds.has(nextParentId)) {
+            if (visited.has(nextParentId)) {
+              nextParentId = null;
+              break;
+            }
+            visited.add(nextParentId);
+            nextParentId =
+              this.agents.get(nextParentId)?.parent_agent_id ?? null;
+          }
+          const nextSpawnDepth = nextParentId
+            ? (this.agents.get(nextParentId)?.spawn_depth ?? -1) + 1
+            : 0;
           try {
             const reparented = this.stateMgr.updateRecord(id, {
-              parent_agent_id: null,
+              parent_agent_id: nextParentId,
+              spawn_depth: Math.max(0, nextSpawnDepth),
             });
             this.agents.set(id, reparented);
           } catch (error) {
@@ -2124,6 +2139,16 @@ export class AgentRegistry {
       revive_previous_state: null,
       revive_consecutive_observations: 0,
       revive_notification_sent_at: null,
+      halt_escalation: true,
+      halt_episode_type: null,
+      halt_episode_started_at: null,
+      halt_episode_observations: 0,
+      halt_notification_sent_at: null,
+      halt_notified_ancestor_id: null,
+      halt_last_observable_action: null,
+      halt_last_active_at: null,
+      halt_last_progress_at_ms: null,
+      halt_last_progress_signature: null,
       parsed_effort: null,
       effort_mismatch: null,
     };

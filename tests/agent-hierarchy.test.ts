@@ -556,10 +556,12 @@ describe("Agent Hierarchy", () => {
       await engine.getRegistry().reconcile();
 
       expect(engine.getAgentState("mid")!.state).toBe("error");
-      // Leaf reparented to null (orphaned to root level)
+      // Leaf keeps the nearest surviving ancestor so lifecycle notices still
+      // have an actionable delivery path.
       const leaf = engine.getAgentState("leaf");
       expect(leaf!.state).toBe("working");
-      expect(leaf!.parent_agent_id).toBeNull();
+      expect(leaf!.parent_agent_id).toBe("root");
+      expect(leaf!.spawn_depth).toBe(1);
     });
   });
 });

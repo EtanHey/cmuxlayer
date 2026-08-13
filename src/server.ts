@@ -10639,6 +10639,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "Automatically resume a captured CLI session in the same surviving surface after unexpected CLI exit. Set false for debugging sessions where CLI death is intentional evidence.",
           ),
+        halt_escalation: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe(
+            "Notify the nearest live ancestor when this agent remains awaiting input, idle without done evidence, or wedged past its dwell threshold. Set false for deliberate debugging lanes.",
+          ),
         force_new: z
           .boolean()
           .optional()
@@ -11033,6 +11040,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
               auto_revive: args.auto_revive,
+              halt_escalation: args.halt_escalation,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
                 surfaceCreated = true;
@@ -11440,6 +11448,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         auto_archive_on_done: z.boolean().optional().default(false),
         crash_recover: z.boolean().optional(),
         auto_revive: z.boolean().optional().default(true),
+        halt_escalation: z.boolean().optional().default(true),
         verbose: z
           .boolean()
           .optional()
@@ -11505,6 +11514,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
             auto_revive: args.auto_revive,
+            halt_escalation: args.halt_escalation,
             on_surface_created: async (created) => {
               surfaceCreated = true;
               creation.record({
