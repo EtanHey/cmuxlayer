@@ -45,7 +45,7 @@ import {
 } from "../src/agent-types.js";
 import { SpawnGuard, SpawnRateLimitedError } from "../src/spawn-guard.js";
 import type { CmuxSurface, CmuxNewSplitResult } from "../src/types.js";
-import { readInbox, writeHeartbeat } from "../src/inbox.js";
+import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -10176,6 +10176,267 @@ Session ID: ${sessionId}`,
       ).toHaveLength(2);
     });
 
+    it("treats PROBE C's ambient background-terminal footer as healthy idle", async () => {
+      let nowMs = Date.parse("2026-08-13T13:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltWedgedDwellMs: 0,
+          haltWedgedSweeps: 1,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "probe-c-parent",
+        surface_id: "surface:probe-c-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "probe-c-child",
+        surface_id: "surface:probe-c-child",
+        state: "done",
+        cli: "codex",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_last_active_at: new Date(nowMs - 60_000).toISOString(),
+        halt_last_progress_at_ms: nowMs - 60_000,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const ambientFooterScreen = [
+        "• Waited for background terminal · tail -n0 -F /Users/example/.cmux/agents/probe-c-child/inbox.jsonl",
+        "• OK",
+        "─ Worked for 3m 44s ─",
+        "1 background terminal running · /ps to view · /stop to close",
+        "› Find and fix a bug in @filename",
+        "gpt-5.6-sol high · ~/Gits/cmuxlayer",
+      ].join("\n");
+      await (engine as any).maybeEscalateLiveHalt(child, ambientFooterScreen);
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        ambientFooterScreen,
+      );
+
+      expect(engine.getAgentState(child.agent_id)?.halt_episode_type).toBe(
+        "idle_without_done",
+      );
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+          message.tag.startsWith("agent_halt_"),
+        ),
+      ).toEqual([]);
+    });
+
+    it("does not re-report idle when durable DONE evidence has scrolled off screen", async () => {
+      const nowMs = Date.parse("2026-08-13T14:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltIdleWithoutDoneDwellMs: 0,
+        },
+      );
+      const child = makeRecord({
+        agent_id: "probe-f-recorded-done",
+        surface_id: "surface:probe-f-recorded-done",
+        state: "done",
+        task_done_detected_at: new Date(nowMs - 600_000).toISOString(),
+        halt_last_active_at: new Date(nowMs - 600_000).toISOString(),
+      });
+      stateMgr.writeState(child);
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_episode_type: null,
+        halt_last_active_at: null,
+      });
+    });
+
+    it("does not re-report idle when the settled transcript records DONE", async () => {
+      const nowMs = Date.now();
+      const transcriptPath = join(TEST_DIR, "probe-f-transcript-done.jsonl");
+      writeCodexDoneTranscript(transcriptPath);
+      const stale = new Date(nowMs - 10_000);
+      utimesSync(transcriptPath, stale, stale);
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltIdleWithoutDoneDwellMs: 0,
+        },
+      );
+      const child = makeRecord({
+        agent_id: "probe-f-transcript-done",
+        surface_id: "surface:probe-f-transcript-done",
+        state: "done",
+        cli: "codex",
+        cli_session_id: "019eab06-57d6-72b1-b3a8-6cf98a30a3f6",
+        cli_session_path: transcriptPath,
+        halt_last_active_at: new Date(nowMs - 600_000).toISOString(),
+      });
+      stateMgr.writeState(child);
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_episode_type: null,
+        halt_last_active_at: null,
+      });
+    });
+
+    it("suppresses idle escalation after the child reports to its parent", async () => {
+      let nowMs = Date.parse("2026-08-13T15:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltIdleWithoutDoneDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "reported-parent",
+        surface_id: "surface:reported-parent",
+        state: "working",
+      });
+      const child = makeRecord({
+        agent_id: "reported-child",
+        surface_id: "surface:reported-child",
+        state: "done",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_last_active_at: new Date(nowMs - 60_000).toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      dispatch(
+        parent.agent_id,
+        {
+          id: "child-finished-report",
+          from: child.agent_id,
+          reply_to: child.agent_id,
+          to: parent.agent_id,
+          task: "Finished the assigned lane and posted the PR.",
+          ts_ms: nowMs - 30_000,
+        },
+        { baseDir: TEST_DIR },
+      );
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        idleScreen,
+      );
+
+      expect(engine.getAgentState(child.agent_id)?.halt_episode_type).toBeNull();
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+          message.tag.startsWith("agent_halt_"),
+        ),
+      ).toEqual([]);
+    });
+
+    it("uses a 15-minute production dwell for idle-without-done", async () => {
+      let nowMs = Date.parse("2026-08-13T16:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "idle-dwell-parent",
+        surface_id: "surface:idle-dwell-parent",
+        state: "working",
+      });
+      const child = makeRecord({
+        agent_id: "idle-dwell-child",
+        surface_id: "surface:idle-dwell-child",
+        state: "done",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_last_active_at: new Date(nowMs - 60_000).toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen = "OpenAI Codex\n› Find and fix a bug in @filename\ngpt-5.6-sol high";
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+      nowMs += 899_999;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        idleScreen,
+      );
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+          message.tag === "agent_halt_idle_without_done",
+        ),
+      ).toEqual([]);
+
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        idleScreen,
+      );
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
+          message.tag === "agent_halt_idle_without_done",
+        ),
+      ).toHaveLength(1);
+    });
+
     it("detects a wedged active turn after unchanged dwell sweeps but ignores progressing work", async () => {
       let nowMs = Date.parse("2026-08-13T10:00:00.000Z");
       engine.dispose();
@@ -10238,13 +10499,14 @@ Session ID: ${sessionId}`,
       wedgedScreen = [
         "OpenAI Codex",
         "Model: gpt-5.6",
-        "Waited for background terminal · tail -n0 -F /tmp/probe.log",
-        "1 background terminal running · /ps to view · /stop to close",
-        "›",
+        "Waiting for background terminal (5s • esc to interrupt) · 1 background terminal running",
+        "└ tail -n0 -F /tmp/probe.log",
       ].join("\n");
       nowMs += 500;
       await engine.runSweep();
       nowMs += 501;
+      await engine.runSweep();
+      nowMs += 500;
       await engine.runSweep();
       await engine.runSweep();
 

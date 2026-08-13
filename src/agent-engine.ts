@@ -167,6 +167,7 @@ import {
 import {
   DEFAULT_CHANNEL_MARKER_RETENTION_MS,
   dispatchOnce,
+  readInbox,
   reapOrphanedPendingChannelMarkers,
   removePendingChannelMarkerAfterRegistration,
   type InboxOpts,
@@ -584,7 +585,7 @@ const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
 const CLI_EXIT_ERROR = "Agent CLI exited to shell without done evidence";
 const DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS = 1_000;
 const DEFAULT_HALT_AWAITING_INPUT_DWELL_MS = 120_000;
-const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 180_000;
+const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 15 * 60_000;
 const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
 const DEFAULT_HALT_WEDGED_SWEEPS = 3;
 const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
@@ -3170,12 +3171,26 @@ export class AgentEngine {
     }
   }
 
-  private hasUnfinishedBackgroundTool(screenText: string): boolean {
-    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
-    return (
-      /\b\d+\s+background terminals? running\b/i.test(visibleTail) ||
-      /\bWait(?:ing|ed) for background terminal\b/i.test(visibleTail)
+  private hasParentVisibleArtifactSinceIdle(agent: AgentRecord): boolean {
+    if (!agent.parent_agent_id || !agent.halt_last_active_at) return false;
+    const idleBoundaryMs = Date.parse(agent.halt_last_active_at);
+    if (!Number.isFinite(idleBoundaryMs)) return false;
+    return readInbox(agent.parent_agent_id, this.inboxOpts).some(
+      (message) =>
+        message.reply_to === agent.agent_id && message.ts_ms >= idleBoundaryMs,
     );
+  }
+
+  private blockingBackgroundWaitElapsedMs(screenText: string): number | null {
+    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
+    const match = visibleTail.match(
+      /\bWait(?:ing|ed) for background terminal\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\s*•\s*esc to interrupt\)/i,
+    );
+    if (!match) return null;
+    const hours = Number.parseInt(match[1] ?? "0", 10);
+    const minutes = Number.parseInt(match[2] ?? "0", 10);
+    const seconds = Number.parseInt(match[3] ?? "0", 10);
+    return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
   }
 
   private observableHaltProgressSignature(
@@ -3270,7 +3285,12 @@ export class AgentEngine {
       parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
       parsed.control_state === "stale_surface" ||
-      this.hasOutputDoneEvidence(agent.cli, screenText)
+      this.hasOutputDoneEvidence(agent.cli, screenText) ||
+      this.hasRecordedOutputDoneEvidence(agent) ||
+      this.transcriptHasSettledDone(agent) ||
+      (parsed.status === "idle" &&
+        parsed.control_state === "ready" &&
+        this.hasParentVisibleArtifactSinceIdle(agent))
     ) {
       const hasProgressMemory = Boolean(
         agent.halt_last_active_at ||
@@ -3295,6 +3315,9 @@ export class AgentEngine {
     );
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
+    const blockingBackgroundWaitMs = this.blockingBackgroundWaitElapsedMs(
+      screenText,
+    );
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
     if (
@@ -3303,27 +3326,26 @@ export class AgentEngine {
     ) {
       haltType = "awaiting_input";
     } else if (screenActive) {
-      if (agent.halt_last_progress_signature !== progressSignature) {
+      if (blockingBackgroundWaitMs !== null) {
+        haltType = "wedged";
+        episodeStartedAtMs = nowMs - blockingBackgroundWaitMs;
+      } else if (agent.halt_last_progress_signature !== progressSignature) {
         return this.clearHaltEpisode(agent, {
           halt_last_active_at: nowIso,
           halt_last_progress_at_ms: nowMs,
           halt_last_progress_signature: progressSignature,
         });
+      } else {
+        haltType = "wedged";
+        episodeStartedAtMs = agent.halt_last_progress_at_ms ?? nowMs;
       }
-      haltType = "wedged";
-      episodeStartedAtMs = agent.halt_last_progress_at_ms ?? nowMs;
     } else if (
       parsed.status === "idle" &&
       parsed.control_state === "ready" &&
       parsed.agent_type !== "unknown" &&
       agent.halt_last_active_at
     ) {
-      if (this.hasUnfinishedBackgroundTool(screenText)) {
-        haltType = "wedged";
-        episodeStartedAtMs = agent.halt_last_progress_at_ms ?? nowMs;
-      } else {
-        haltType = "idle_without_done";
-      }
+      haltType = "idle_without_done";
     }
     if (!haltType) return this.clearHaltEpisode(agent);
 
@@ -3332,7 +3354,10 @@ export class AgentEngine {
       episode = this.stateMgr.updateRecord(agent.agent_id, {
         halt_episode_type: haltType,
         halt_episode_started_at: new Date(episodeStartedAtMs).toISOString(),
-        halt_episode_observations: 1,
+        halt_episode_observations:
+          haltType === "wedged" && blockingBackgroundWaitMs !== null
+            ? this.haltWedgedSweeps
+            : 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
         halt_last_observable_action: parsed.current_action ?? haltType,
