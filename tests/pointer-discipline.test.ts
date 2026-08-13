@@ -1223,13 +1223,11 @@ describe("pane input pointer discipline", () => {
     for (const toolName of [
       "send_input",
       "send_command",
-      "spawn_agent",
       "new_split",
       "new_surface",
       "new_worktree_split",
       "spawn_in_workspace",
       "broadcast",
-      "send_to",
       "send_to_agent",
     ]) {
       const description = server._registeredTools[toolName].description;

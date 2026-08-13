@@ -138,6 +138,6 @@ describe("spawn response shaping", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
 
     expect(JSON.parse(result.content[0]!.text)).toEqual(result.structuredContent);
-    expect(result.structuredContent).not.toHaveProperty("retry_count");
+    expect(result.structuredContent.retry_count).toBe(0);
   });
 });

@@ -166,6 +166,7 @@ const EXPECTED_TOOLS = [
   "send_key",
   "read_screen",
   "rename_tab",
+  "update_surface",
   "notify",
   "set_status",
   "set_progress",
@@ -1156,6 +1157,46 @@ describe("tool handler integration", () => {
       workspace: "workspace:7",
       title: "red-team",
     });
+  });
+
+  it("close_surface scope=workspace preserves the delete_workspace superset", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [{ ref: "workspace:probe", title: "probe" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:probe",
+            panes: [],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const close = (server as any)._registeredTools["close_surface"];
+
+    const result = await close.handler(
+      { scope: "workspace", workspace: "workspace:probe", force: true },
+      {} as any,
+    );
+
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      scope: "workspace",
+      workspace: "workspace:probe",
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["workspace", "close", "workspace:probe"]),
+    );
   });
 
   it("create_workspace refuses a manual-mode caller workspace before creating", async () => {
@@ -3052,7 +3093,10 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(data.delivered).toBe(true);
+    expect(data.delivered).toBe(false);
+    expect(data.terminal).toBe(false);
+    expect(data.typed).toBe(true);
+    expect(data.submit_attempted).toBe(false);
     expect(data.surface).toBe("surface:95");
     expect(data.title).toBe("BL-LEAD");
     expect(data.model).toBe("Opus 4.8");
@@ -3073,7 +3117,10 @@ describe("tool handler integration", () => {
       {} as any,
     );
     const data = result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(data.delivered).toBe(true);
+    expect(data.delivered).toBe(false);
+    expect(data.terminal).toBe(false);
+    expect(data.typed).toBe(true);
+    expect(data.submit_attempted).toBe(false);
     expect(data.surface).toBe("surface:unknown");
     expect(data.title).toBeUndefined();
     expect(data.model).toBeUndefined();
@@ -3220,6 +3267,97 @@ describe("tool handler integration", () => {
       ),
     ).toBe(true);
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("routes every raw text-delivery entry point through one receipt vocabulary", async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const server = createServer({ exec: mockExec });
+    const registeredTools = (server as any)._registeredTools;
+    const receiptKeys = [
+      "delivered",
+      "delivery",
+      "delivery_state",
+      "terminal",
+      "typed",
+      "submit_attempted",
+      "submit_verified",
+      "retry_count",
+    ];
+
+    const messageResult = await registeredTools.send_input.handler(
+      {
+        surface: "surface:receipt-parity",
+        text: "echo parity",
+        press_enter: true,
+      },
+      {} as any,
+    );
+    const commandResult = await registeredTools.send_command.handler(
+      {
+        surface: "surface:receipt-parity",
+        command: "echo parity",
+      },
+      {} as any,
+    );
+    const keyResult = await registeredTools.send_key.handler(
+      { surface: "surface:receipt-parity", key: "escape" },
+      {} as any,
+    );
+    const publicMessageResult = await registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        surface: "surface:receipt-parity",
+        text: "echo parity",
+        press_enter: true,
+      },
+      {} as any,
+    );
+    const publicCommandResult = await registeredTools.send_to.handler(
+      {
+        mode: "command",
+        surface: "surface:receipt-parity",
+        command: "echo parity",
+      },
+      {} as any,
+    );
+    const publicKeyResult = await registeredTools.send_to.handler(
+      {
+        mode: "key",
+        surface: "surface:receipt-parity",
+        key: "escape",
+      },
+      {} as any,
+    );
+    const receiptShape = (result: any) => {
+      const data =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      return Object.fromEntries(
+        receiptKeys
+          .filter((key) => key in data)
+          .map((key) => [key, data[key]]),
+      );
+    };
+
+    expect(receiptShape(commandResult)).toEqual(receiptShape(messageResult));
+    expect(receiptShape(publicMessageResult)).toEqual(receiptShape(messageResult));
+    expect(receiptShape(publicCommandResult)).toEqual(receiptShape(commandResult));
+    expect(receiptShape(publicKeyResult)).toEqual(receiptShape(keyResult));
+    expect(receiptShape(commandResult)).toEqual({
+      delivered: false,
+      terminal: false,
+      typed: true,
+      submit_attempted: true,
+      submit_verified: null,
+      retry_count: 0,
+    });
+    expect(receiptShape(keyResult)).toEqual({
+      delivered: false,
+      terminal: false,
+      typed: false,
+      submit_attempted: false,
+      submit_verified: null,
+      retry_count: 0,
+    });
   });
 
   it("move_surface returns a slim, phone-readable confirmation (F8)", async () => {
@@ -9427,6 +9565,16 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
     expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.boot_prompt_receipt).toMatchObject({
+      delivered: true,
+      delivery: "submitted",
+      delivery_state: "submitted",
+      terminal: true,
+      typed: true,
+      submit_attempted: true,
+      submit_verified: true,
+      retry_count: 0,
+    });
     expect(returnPresses).toBe(1);
   }, 10_000);
 
@@ -10153,6 +10301,16 @@ describe("tool handler integration", () => {
     expect(parsed.submit_verification_reason).toBe("input_still_pending");
     expect(parsed.retry_safe).toBe(false);
     expect(parsed.boot_prompt_delivered).not.toBe(true);
+    expect(parsed).toMatchObject({
+      delivered: false,
+      terminal: false,
+      typed: true,
+      submit_attempted: true,
+      submit_verified: false,
+      retry_count: 0,
+    });
+    expect(parsed).not.toHaveProperty("delivery");
+    expect(parsed).not.toHaveProperty("delivery_state");
     expect(returnPresses).toBe(1);
   }, 10_000);
 
@@ -11888,6 +12046,54 @@ describe("tool handler integration", () => {
         "surface:1",
         "New Title",
       ]),
+    );
+  });
+
+  it("update_surface is a superset adapter for both move_surface and rename_tab", async () => {
+    mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => ({
+      stdout: args.includes("move-surface")
+        ? JSON.stringify({
+            workspace: "workspace:1",
+            surface: "surface:1",
+            pane: "pane:2",
+          })
+        : "{}",
+      stderr: "",
+    }));
+    const server = createServer({ exec: mockExec, skipAgentLifecycle: true });
+    const update = (server as any)._registeredTools["update_surface"];
+
+    const renamed = await update.handler(
+      { action: "rename", surface: "surface:1", title: "Merged title" },
+      {} as any,
+    );
+    const moved = await update.handler(
+      {
+        action: "move",
+        surface: "surface:1",
+        pane: "pane:2",
+        workspace: "workspace:1",
+      },
+      {} as any,
+    );
+
+    expect(renamed.structuredContent).toMatchObject({
+      ok: true,
+      action: "rename",
+      title: "Merged title",
+    });
+    expect(moved.structuredContent).toMatchObject({
+      ok: true,
+      action: "move",
+      surface: "surface:1",
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["rename-tab", "Merged title"]),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining(["move-surface", "--pane", "pane:2"]),
     );
   });
 

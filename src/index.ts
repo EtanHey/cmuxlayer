@@ -3,15 +3,8 @@
 /**
  * cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
  *
- * 42 registered MCP tools with a 12-tool default palette (keep in sync with
- * server.ts and the total-tool-count assertion):
- *   Default (12): spawn_agent, send_to, wait_for, read_screen, my_agents,
- *                 list_agents, broadcast, close_surface, dispatch_to_agent,
- *                 list_surfaces, control_health, stop_agent
- *   Remaining tools are INTERIM ToolSearch-deferred and remain callable;
- *   reorder_surface is the single approved deletion.
- *   Legacy aliases retire next release; the broader deferral is deliberately
- *   reversible pending the MCP-vs-CLI/programmatic architecture rethink.
+ * Nine public MCP tools. Internal lifecycle and compatibility handlers remain
+ * engine implementation details and are never registered on the MCP surface.
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
