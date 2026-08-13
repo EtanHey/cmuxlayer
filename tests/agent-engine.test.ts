@@ -10451,13 +10451,15 @@ Session ID: ${sessionId}`,
         label: "an orchestrator",
         role: "orchestrator" as const,
         footer: "⏵⏵ bypass permissions on",
+        expectedType: null,
       },
       {
-        label: "an agent visibly supervising a child",
+        label: "a worker with Claude's agent status marker",
         role: "worker" as const,
         footer: "⏵⏵ bypass permissions on · ← 1 agent",
+        expectedType: "idle_without_done" as const,
       },
-    ])("does not report $label waiting at an idle prompt", async ({ role, footer }) => {
+    ])("classifies $label by its durable role", async ({ role, footer, expectedType }) => {
       let nowMs = Date.parse("2026-08-13T14:00:00.000Z");
       engine.dispose();
       engine = new AgentEngine(
@@ -10490,6 +10492,12 @@ Session ID: ${sessionId}`,
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
       liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
       await engine.getRegistry().reconstitute();
 
       const idleScreen = `Claude Code\nCompleted the previous turn.\n❯\n${footer}`;
@@ -10502,12 +10510,16 @@ Session ID: ${sessionId}`,
 
       expect(
         engine.getAgentState(child.agent_id)?.halt_episode_type ?? null,
-      ).toBeNull();
+      ).toBe(expectedType);
       expect(
         readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter((message) =>
           message.tag.startsWith("agent_halt_"),
         ),
-      ).toEqual([]);
+      ).toEqual(
+        expectedType === null
+          ? []
+          : [expect.objectContaining({ tag: `agent_halt_${expectedType}` })],
+      );
     });
 
     it("suppresses idle escalation after the child reports to its parent", async () => {

@@ -3205,10 +3205,8 @@ export class AgentEngine {
     return ((hours * 60 + minutes) * 60 + seconds) * 1_000;
   }
 
-  private isIdleSupervisor(agent: AgentRecord, screenText: string): boolean {
-    if (agent.role === "orchestrator") return true;
-    const visibleTail = screenText.split(/\r?\n/).slice(-24).join("\n");
-    return /←\s*\d+\s+agents?\b/i.test(visibleTail);
+  private isIdleSupervisor(agent: AgentRecord, _screenText: string): boolean {
+    return agent.role === "orchestrator";
   }
 
   private observableHaltProgressSignature(
