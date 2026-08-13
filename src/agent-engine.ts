@@ -574,6 +574,12 @@ const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_ID_RE = new RegExp(`\\b${SESSION_ID_PATTERN}\\b`, "gi");
+const CODEX_SHELL_RESUME_RE = new RegExp(
+  `(?:^|\\n)[^\\n]*[$%#]\\s*codex\\s+resume\\s+${SESSION_ID_PATTERN}\\b`,
+  "gim",
+);
+const CODEX_READY_MARKER_RE =
+  /(?:^|\n)[^\n]*(?:\bOpenAI\s+Codex\b|\bcodex>\s*$|\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]*)/gim;
 const CONTEXTUAL_SESSION_ID_PATTERNS = [
   new RegExp(
     `(?:codex\\s+resume|--resume(?:-id)?|resume-id)\\s+(${SESSION_ID_PATTERN})`,
@@ -696,6 +702,30 @@ function screenTextSignature(text: string): string {
     hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
   }
   return `${text.length}:${hash.toString(16)}`;
+}
+
+function lastMatchIndex(text: string, pattern: RegExp): number {
+  let latest = -1;
+  for (const match of text.matchAll(pattern)) {
+    latest = match.index;
+  }
+  return latest;
+}
+
+function codexResumeAwaitsFreshReadiness(
+  agent: AgentRecord,
+  screenText: string,
+): boolean {
+  if (
+    agent.cli !== "codex" ||
+    agent.auto_revive !== true ||
+    agent.revive_last_outcome !== "pending"
+  ) {
+    return false;
+  }
+  const latestResume = lastMatchIndex(screenText, CODEX_SHELL_RESUME_RE);
+  if (latestResume < 0) return false;
+  return latestResume > lastMatchIndex(screenText, CODEX_READY_MARKER_RE);
 }
 
 function safeMtimeMs(path: string): number {
@@ -2359,7 +2389,9 @@ export class AgentEngine {
       screenText,
       parsed,
     );
-    const canBeInteractive = parsed.control_state !== "shell";
+    const canBeInteractive =
+      parsed.control_state !== "shell" &&
+      !codexResumeAwaitsFreshReadiness(agent, screenText);
     const activeCodex =
       agent.cli === "codex" &&
       canBeInteractive &&

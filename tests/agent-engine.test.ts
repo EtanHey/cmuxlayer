@@ -9347,6 +9347,53 @@ Session ID: ${sessionId}`,
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
     });
 
+    it("does not finalize revival while a newer resume command has not produced fresh Codex readiness", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-failed-before-shell",
+          state: "booting",
+          surface_id: "surface:cli-auto-revive-failed-before-shell",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          cli: "codex",
+          cli_session_id: "019faccc-4545-7555-8666-777788889999",
+          auto_revive: true,
+          effort: "xhigh",
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+          revive_previous_state: "working",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("surface:cli-auto-revive-failed-before-shell"),
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-failed-before-shell",
+        text:
+          "› signal: killed my current changes\n" +
+          "gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
+          "% codex resume 019faccc-4545-7555-8666-777788889999\n" +
+          "Shellbook: starting the agent directly.\n" +
+          "Error: Failed to resume session: no rollout found (code -32600)\n" +
+          "exit status 1",
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-failed-before-shell"),
+      ).toMatchObject({
+        state: "booting",
+        revive_attempts: 1,
+        revive_last_outcome: "pending",
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+    });
+
     it("accepts a successful retry after stale failed-resume scrollback", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -9373,6 +9420,7 @@ Session ID: ${sessionId}`,
         text:
           "Error: Failed to resume session: no rollout found (code -32600)\n" +
           "exit status 1\n" +
+          "% codex resume 019faccc-5050-7666-8777-888899990000\n" +
           "OpenAI Codex\n" +
           "Model: gpt-5.6-sol xhigh\n" +
           "› Continue the previous task\n" +
