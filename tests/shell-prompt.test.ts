@@ -47,4 +47,24 @@ describe("shell prompt recognition", () => {
     expect(launcherFailureFromShell("build failed earlier\nsummary\n$ ")).toBeNull();
     expect(launcherFailureFromShell("error: cached warning\n$ ")).toBeNull();
   });
+
+  it.each([
+    "⠋ Building bundle... 62%",
+    "Installing dependencies  45%",
+    "Context left: 12%",
+    "Total cost: $",
+    "issue #",
+  ])("does not treat a loose readiness suffix as launcher-exit evidence: %s", (line) => {
+    expect(
+      launcherFailureFromShell(`zsh: command not found: pyenv\n${line}`),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["➜  cmuxlayer git:(main) $ ralphCodex -s", "ralphCodex -s"],
+    ["bash-5.2$ ralphCodex -s", "ralphCodex -s"],
+    ["[etan@mac cmuxlayer]$ ralphCodex -s", "ralphCodex -s"],
+  ])("captures pending input from decorated prompt %s", (line, input) => {
+    expect(matchShellPromptLine(line)).toEqual({ input });
+  });
 });

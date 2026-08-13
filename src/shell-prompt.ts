@@ -2,7 +2,7 @@ const SHELL_PROMPT_TERMINATOR = "[$%#>❯›»]";
 
 export function matchShellPromptLine(
   line: string,
-  opts?: { allowRootInput?: boolean },
+  opts?: { allowRootInput?: boolean; strict?: boolean },
 ): { input: string } | null {
   const normalized = line.trimEnd();
   const barePrompt = normalized.match(
@@ -18,11 +18,15 @@ export function matchShellPromptLine(
     return { input: barePrompt[2] ?? "" };
   }
 
-  // Preserve the app-server's established contract: any decorated prompt
-  // ending in $, %, or # is ready. Pending input follows the terminator and
-  // therefore cannot match this suffix-only fallback.
-  if (/^.+[$%#]$/u.test(normalized)) {
-    return { input: "" };
+  if (!opts?.strict) {
+    // Preserve the app-server's established readiness contract while still
+    // exposing text after the decorated terminator to pending-input checks.
+    const decoratedPrompt = normalized.match(
+      /^.+?[$%#](?:\s+(.*))?$/u,
+    );
+    if (decoratedPrompt) {
+      return { input: decoratedPrompt[1] ?? "" };
+    }
   }
 
   const prefixedPrompt = normalized.match(
@@ -35,17 +39,28 @@ export function matchShellPromptLine(
 }
 
 export function matchesShellPrompt(text: string): boolean {
+  return matchesShellPromptWithOptions(text, false);
+}
+
+export function matchesShellPromptStrict(text: string): boolean {
+  return matchesShellPromptWithOptions(text, true);
+}
+
+function matchesShellPromptWithOptions(text: string, strict: boolean): boolean {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   let end = lines.length;
   while (end > 0 && !lines[end - 1]?.trim()) {
     end -= 1;
   }
-  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
+  const prompt =
+    end > 0
+      ? matchShellPromptLine(lines[end - 1] ?? "", { strict })
+      : null;
   return prompt?.input.trim() === "";
 }
 
 export function launcherFailureFromShell(text: string): string | null {
-  if (!matchesShellPrompt(text)) return null;
+  if (!matchesShellPromptStrict(text)) return null;
   const lines = text
     .replace(/\r\n?/g, "\n")
     .split("\n")

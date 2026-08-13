@@ -3900,6 +3900,90 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("spawn_agent ignores transient shell-rc errors above percentage boot progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-progress");
+      const registryPath = join(TEST_DIR, "launchers-progress.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "boot-progress");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /ralphCodex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 500
+                  ? "zsh: command not found: pyenv\n⠋ Installing... 62%"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "boot-progress",
+            branch: "wt/boot-progress",
+          },
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn_agent keeps a generic launch-timeout surface and worktree recoverable", async () => {
     vi.useFakeTimers();
     try {
@@ -4730,7 +4814,7 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   }, 10_000);
 
-  it("spawn_agent fails with pending launcher evidence when Return never submits", async () => {
+  it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
     vi.useFakeTimers();
     try {
       const baseExec = makeLifecycleExec();
@@ -4750,7 +4834,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: "$ voicelayerCodex -s",
+              text: "bash-5.2$ voicelayerCodex -s",
               lines: 20,
               scrollback_used: false,
             }),
@@ -4778,7 +4862,9 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.error).toContain(
         "launcher command remained pending after Return",
       );
-      expect(parsed.last_10_lines).toContain("$ voicelayerCodex -s");
+      expect(parsed.last_10_lines).toContain(
+        "bash-5.2$ voicelayerCodex -s",
+      );
       expect(launcherReturns).toBeGreaterThanOrEqual(1);
     } finally {
       vi.useRealTimers();

@@ -2316,8 +2316,19 @@ export function screenShowsPendingShellInput(
   let activePromptIndex = -1;
   for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    const prompt = matchShellPromptLine(line, promptOptions);
+    const strictPrompt = matchShellPromptLine(line, {
+      ...promptOptions,
+      strict: true,
+    });
+    const prompt = strictPrompt ?? matchShellPromptLine(line, promptOptions);
     if (prompt) {
+      // The readiness matcher intentionally accepts any decorated $/%/#
+      // suffix. Only use that loose fallback as pending-input evidence for a
+      // launcher command; ordinary output such as "Building... 62%" is not a
+      // trustworthy prompt anchor.
+      if (!strictPrompt && !promptOptions.allowRootInput) {
+        return false;
+      }
       activePromptIndex = index;
       break;
     }
