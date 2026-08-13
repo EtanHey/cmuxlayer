@@ -39,6 +39,7 @@ import {
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import { makeCodexRolloutFillProvider } from "../src/codex-rollout-fill.js";
 import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
+import { readInbox } from "../src/inbox.js";
 import {
   currentCallerContext,
   runWithCallerContext,
@@ -10037,6 +10038,77 @@ codex>
     expect(parsed.health.issue_codes).not.toContain(
       "registry_screen_disagreement",
     );
+  });
+
+  it("re-tasking a done worker through send_to still escalates a later approval halt", async () => {
+    const retaskAt = Date.parse("2026-08-13T14:00:00.000Z");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(retaskAt);
+    try {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const sendTo = (server as any)._registeredTools["send_to"];
+      const spawnResult = await spawn.handler(
+        {
+          repo: "cmuxlayer",
+          model: "gpt-5.6-sol",
+          cli: "codex",
+        },
+        {} as any,
+      );
+      const agentId = (
+        spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
+      ).agent_id;
+      const engine = (server as any)._registeredTools["interact"]._engine;
+      const registry = engine.getRegistry();
+      const parent = makeServerAgentRecord({
+        agent_id: "retask-parent",
+        surface_id: "surface:retask-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      engine.stateMgr.writeState(parent);
+      registry.set(parent.agent_id, parent);
+      const idle = engine.stateMgr.resetState(
+        agentId,
+        "idle",
+        {},
+        "task one completed",
+      );
+      const completedTaskOne = engine.stateMgr.updateRecord(agentId, {
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        task_done_detected_at: new Date(retaskAt - 7_200_000).toISOString(),
+        halt_last_active_at: null,
+      });
+      registry.set(agentId, { ...idle, ...completedTaskOne });
+
+      const sendResult = await sendTo.handler(
+        { agent_id: agentId, text: "Begin task two", press_enter: true },
+        {} as any,
+      );
+      expect(sendResult.isError).toBeFalsy();
+
+      const approvalScreen =
+        "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+      nowSpy.mockReturnValue(retaskAt + 1);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(agentId) as AgentRecord,
+        approvalScreen,
+      );
+      nowSpy.mockReturnValue(retaskAt + 120_002);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(agentId) as AgentRecord,
+        approvalScreen,
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_awaiting_input",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("send_to omits post-delivery evidence when the stable UUID disappears", async () => {

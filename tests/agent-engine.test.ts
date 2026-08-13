@@ -10276,6 +10276,63 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("does not let a prior task's recorded DONE suppress a newer approval halt", async () => {
+      let nowMs = Date.parse("2026-08-13T14:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "stale-done-parent",
+        surface_id: "surface:stale-done-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "stale-done-child",
+        surface_id: "surface:stale-done-child",
+        state: "working",
+        cli: "codex",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        task_done_detected_at: new Date(nowMs - 7_200_000).toISOString(),
+        halt_last_active_at: new Date(nowMs - 600_000).toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const approvalScreen =
+        "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+      await (engine as any).maybeEscalateLiveHalt(child, approvalScreen);
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        approvalScreen,
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_awaiting_input",
+        ),
+      ).toHaveLength(1);
+    });
+
     it("does not re-report idle when the settled transcript records DONE", async () => {
       const nowMs = Date.now();
       const transcriptPath = join(TEST_DIR, "probe-f-transcript-done.jsonl");
@@ -10313,6 +10370,80 @@ Session ID: ${sessionId}`,
         halt_episode_type: null,
         halt_last_active_at: null,
       });
+    });
+
+    it("does not treat a settled Claude end_turn transcript as task DONE", async () => {
+      let nowMs = Date.now();
+      const transcriptPath = join(TEST_DIR, "probe-j-claude-end-turn.jsonl");
+      writeFileSync(
+        transcriptPath,
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            model: "claude-opus-5",
+            stop_reason: "end_turn",
+            content: [
+              { type: "text", text: "Looking into the failing spec." },
+            ],
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+        }),
+      );
+      const stale = new Date(nowMs - 10_000);
+      utimesSync(transcriptPath, stale, stale);
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltIdleWithoutDoneDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "probe-j-parent",
+        surface_id: "surface:probe-j-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "probe-j-child",
+        surface_id: "surface:probe-j-child",
+        state: "working",
+        cli: "claude",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        cli_session_path: transcriptPath,
+        halt_last_active_at: new Date(nowMs - 600_000).toISOString(),
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(parent.surface_id), makeSurface(child.surface_id)];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const idleScreen =
+        "Claude Code\n\n  Looking into the failing spec.\n\n❯ \n  ⏵⏵ bypass permissions on";
+      await (engine as any).maybeEscalateLiveHalt(child, idleScreen);
+      nowMs += 1;
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id) as AgentRecord,
+        idleScreen,
+      );
+
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_idle_without_done",
+        ),
+      ).toHaveLength(1);
     });
 
     it("suppresses idle escalation after the child reports to its parent", async () => {
