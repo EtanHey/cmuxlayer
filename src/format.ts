@@ -282,7 +282,7 @@ export function formatDelivery(
   );
   const parens = meta.length > 0 ? ` (${meta.join(" \u00b7 ")})` : "";
   let head: string;
-  if (info.typed) {
+  if (info.typed && !info.submit_attempted) {
     head = `typed into ${label}${parens} (not submitted)`;
   } else if (info.pending) {
     head = `delivering to ${label}${parens}`;

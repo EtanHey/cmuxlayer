@@ -6,6 +6,7 @@ const FRESH_SPAWN_INFO_CODES = new Set([
 ]);
 
 const ESSENTIAL_FIELDS = [
+  "retry_count",
   "agent_id",
   "surface_id",
   "workspace_id",
@@ -18,8 +19,10 @@ const ESSENTIAL_FIELDS = [
   "parent_agent_id",
   "version",
   "type",
+  "resumed",
   "cwd",
   "boot_prompt_delivered",
+  "boot_prompt_receipt",
   "boot_prompt_submit_verified",
 ] as const;
 

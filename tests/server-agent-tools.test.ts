@@ -745,6 +745,7 @@ describe("lean spawn tool responses", () => {
       version: 1,
       type: "terminal",
       cwd: "/tmp/spawn-spec-terminal",
+      title: "P5 live probe",
     });
 
     const result = await runWithCallerContext(
@@ -759,6 +760,15 @@ describe("lean spawn tool responses", () => {
       workspace_id: "workspace:1",
       surface_id: "surface:new",
       cwd: "/tmp/spawn-spec-terminal",
+      title: "P5 live probe",
+      cwd_receipt: {
+        delivered: false,
+        terminal: false,
+        typed: true,
+        submit_attempted: true,
+        submit_verified: null,
+        retry_count: 0,
+      },
     });
     expect(result.structuredContent).not.toHaveProperty("agent_id");
     expect(result.structuredContent).not.toHaveProperty("role");
@@ -767,6 +777,13 @@ describe("lean spawn tool responses", () => {
         ([, callArgs]) =>
           callArgs.includes("send") &&
           callArgs.includes("cd -- '/tmp/spawn-spec-terminal'"),
+      ),
+    ).toBe(true);
+    expect(
+      exec.mock.calls.some(
+        ([, callArgs]) =>
+          callArgs.includes("rename-tab") &&
+          callArgs.includes("P5 live probe"),
       ),
     ).toBe(true);
   });
@@ -1067,7 +1084,7 @@ describe("lean spawn tool responses", () => {
     });
     expect(parsed).not.toHaveProperty("health");
     expect(parsed).not.toHaveProperty("model_policy");
-    expect(parsed).not.toHaveProperty("retry_count");
+    expect(parsed.retry_count).toBe(0);
     expect(parsed).not.toHaveProperty("monitor_boot");
   });
 
@@ -1893,11 +1910,11 @@ describe("agent lifecycle tool registration", () => {
     }
   });
 
-  it("total registered tool count is 43 after adding arm_watch", () => {
+  it("registers the internal compatibility handlers in test mode", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
-    expect(Object.keys(registeredTools)).toHaveLength(43);
+    expect(Object.keys(registeredTools)).toHaveLength(44);
   });
 
   it("keeps resync_agents only as a removed compatibility stub", async () => {
@@ -2228,6 +2245,40 @@ describe("agent lifecycle tool handlers", () => {
     const persisted =
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
     expect(persisted.auto_archive_on_done).toBe(false);
+  });
+
+  it("spawn_agent resume_agent_id rebinds a captured session without minting a new public id", async () => {
+    const agentId = "cmuxlayerCodex-stable-resume";
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeServerAgentRecord({
+        agent_id: agentId,
+        repo: "brainlayer",
+        cli: "codex",
+        state: "done",
+        surface_id: "surface:old",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      }),
+    );
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { resume_agent_id: agentId },
+      {} as any,
+    );
+    const parsed = parseToolResult(result) as Record<string, unknown>;
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      resumed: true,
+      agent_id: agentId,
+      surface_id: "surface:new",
+    });
+    expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
   it("spawn_agent accepts placement as the canonical role-placement argument", async () => {
@@ -2879,6 +2930,23 @@ describe("agent lifecycle tool handlers", () => {
     expect(typeof stopEvents[0].caller).toBe("string");
     expect((stopEvents[0].caller as string).length).toBeGreaterThan(0);
     expect(typeof stopEvents[0].ts).toBe("string");
+  });
+
+  it("close_surface scope=agent preserves the stop_agent path", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const close = (server as any)._registeredTools["close_surface"];
+
+    const result = await close.handler(
+      { scope: "agent", agent_id: "missing-agent", force: true },
+      {} as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result)).toMatchObject({
+      ok: false,
+      scope: "agent",
+      error: expect.stringMatching(/agent not found/i),
+    });
   });
 
   it("kill logs a durable close entry per killed agent with caller and force", async () => {
@@ -7026,7 +7094,7 @@ describe("agent lifecycle tool handlers", () => {
       },
       target_count: 3,
       resolved_target_count: 1,
-      delivered_count: 1,
+      delivered_count: 0,
       failed_count: 0,
       skipped_count: 2,
       receipts: expect.arrayContaining([
@@ -7034,7 +7102,9 @@ describe("agent lifecycle tool handlers", () => {
           requested_agent_id: "reviewer-a",
           agent_id: "reviewer-a",
           resolution: "resolved",
-          delivered: true,
+          delivered: false,
+          typed: true,
+          terminal: false,
         }),
         expect.objectContaining({
           requested_agent_id: "reviewer-excluded",
@@ -7081,14 +7151,16 @@ describe("agent lifecycle tool handlers", () => {
       ok: true,
       target_count: 2,
       resolved_target_count: 1,
-      delivered_count: 1,
+      delivered_count: 0,
       skipped_count: 1,
       receipts: expect.arrayContaining([
         expect.objectContaining({
           requested_agent_id: "reviewer-known",
           agent_id: "reviewer-known",
           resolution: "resolved",
-          delivered: true,
+          delivered: false,
+          typed: true,
+          terminal: false,
         }),
         expect.objectContaining({
           requested_agent_id: "reviewer-typo",
@@ -7150,7 +7222,9 @@ describe("agent lifecycle tool handlers", () => {
         requested_agent_id: "cmuxlayerClaude-9c55",
         agent_id: "cmuxlayerClaude-9c55eb04",
         resolution: "resolved",
-        delivered: true,
+        delivered: false,
+        typed: true,
+        terminal: false,
       }),
     ]);
     expect(sendCalls.map((call) => call.surface)).toEqual(["surface:lead"]);
@@ -7205,7 +7279,9 @@ describe("agent lifecycle tool handlers", () => {
         requested_agent_id: `auto-codex-${secondUuid}`,
         agent_id: `auto-codex-${secondUuid}`,
         resolution: "resolved",
-        delivered: true,
+        delivered: false,
+        typed: true,
+        terminal: false,
       }),
     ]);
     expect(routeClient.sendCalls.map((call) => call.surface)).toEqual([
@@ -10094,7 +10170,7 @@ codex>
     ).not.toContain("registry_screen_disagreement");
   });
 
-  it("send_to preserves a submitted receipt when post-delivery evidence throws", async () => {
+  it("send_to preserves an honest typed-only receipt when post-delivery evidence throws", async () => {
     const routeClient = makeUuidRouteClient([
       {
         ref: "surface:evidence-error",
@@ -10133,12 +10209,18 @@ codex>
     );
 
     expect(result.isError).toBe(true);
-    expect(parseToolResult(result)).toMatchObject({
+    const receipt = parseToolResult(result);
+    expect(receipt).toMatchObject({
       delivery_id: expect.any(String),
-      delivery_state: "submitted",
-      terminal: true,
+      delivered: false,
+      terminal: false,
+      typed: true,
+      submit_attempted: false,
+      submit_verified: null,
       error: expect.stringContaining("post-delivery topology unavailable"),
     });
+    expect(receipt).not.toHaveProperty("delivery");
+    expect(receipt).not.toHaveProperty("delivery_state");
   });
 
   it("send_to omits evidence when a UUID-less row becomes foreign after delivery", async () => {
@@ -11193,6 +11275,36 @@ codex>
       session_id: "sess-1",
     });
     expect(getPublicAgentSpy).not.toHaveBeenCalled();
+  });
+
+  it("wait_for mine=true preserves wait_for_all over the caller's direct children", async () => {
+    const server = createLifecycleServer(mockExec);
+    const waitFor = (server as any)._registeredTools["wait_for"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const parent = makeServerAgentRecord({
+      agent_id: "parent-agent",
+      surface_id: "surface:parent",
+      state: "ready",
+    });
+    const child = makeServerAgentRecord({
+      agent_id: "child-agent",
+      parent_agent_id: parent.agent_id,
+      surface_id: "surface:child",
+      state: "done",
+    });
+    engine.stateMgr.writeState(parent);
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(parent.agent_id, parent);
+    engine.getRegistry().set(child.agent_id, child);
+    const waitForAll = vi.spyOn(engine, "waitForAll").mockResolvedValue([]);
+
+    const result = await runWithCallerContext(
+      { surfaceId: parent.surface_id },
+      () => waitFor.handler({ mine: true, target_state: "done" }, {} as any),
+    );
+
+    expect(result.structuredContent).toMatchObject({ ok: true, results: [] });
+    expect(waitForAll).toHaveBeenCalledWith([child.agent_id], "done", undefined);
   });
 
   it("wait_for returns an error for an unknown agent_id", async () => {

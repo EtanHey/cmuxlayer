@@ -1096,7 +1096,7 @@ describe("enter reliability", () => {
     expect(parsed.delivery_state).toBe("queued");
     expect(parsed.terminal).toBe(false);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.deprecation_warning).toContain("send_to(mode=agent)");
+    expect(parsed.deprecation_warning).toBeUndefined();
   }, 10_000);
 
   it("accepts a correlated live Codex queue on the first verification frame within 600ms", async () => {

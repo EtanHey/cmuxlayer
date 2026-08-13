@@ -1745,7 +1745,7 @@ describe("CmuxLayerDaemon", () => {
     await daemon.start();
 
     await expect(rawToolsList(path, 100)).resolves.toMatchObject({
-      toolCount: 25,
+      toolCount: 26,
     });
 
     await daemon.shutdown();
@@ -2007,15 +2007,21 @@ describe("CmuxLayerDaemon", () => {
     });
     const agentId = String(spawned.structuredContent?.agent_id);
     const state = await clientB.callTool({
-      name: "get_agent_state",
-      arguments: { agent_id: agentId },
+      name: "list_agents",
+      arguments: { agent_ids: [agentId], detail: "full" },
     });
 
     expect(state.structuredContent).toMatchObject({
       ok: true,
-      agent_id: agentId,
-      surface_id: "surface:new",
-      cli: "codex",
+      agents: [
+        expect.objectContaining({
+          agent_id: agentId,
+          detail: expect.objectContaining({
+            surface_id: "surface:new",
+            cli: "codex",
+          }),
+        }),
+      ],
     });
 
     await clientA.close();

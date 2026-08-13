@@ -3656,6 +3656,32 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
+    it("explicitly resumes a captured session on a new surface without changing the public agent id", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stable-resume",
+          state: "done",
+          surface_id: "surface:old",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      const resumed = await engine.resumeAgent("agent-stable-resume");
+
+      expect(resumed.agent_id).toBe("agent-stable-resume");
+      expect(resumed.surface_id).toBe("surface:new");
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "ws:1" },
+      );
+      expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
+    });
+
     it("rejects an invalid crash-recovery session before creating a surface", async () => {
       stateMgr.writeState(
         makeRecord({

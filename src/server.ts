@@ -524,30 +524,153 @@ const SendToArgsSchema = z.object({
     .optional(),
 });
 
-export const THIN_CORE_TOOL_NAMES = new Set([
+export const PUBLIC_TOOL_NAMES = [
   "spawn_agent",
   "send_to",
-  "wait_for",
-  "arm_watch",
   "read_screen",
-  "my_agents",
   "list_agents",
-  "close_surface",
-  "dispatch_to_agent",
-  "list_surfaces",
+  "wait_for",
   "control_health",
-  "stop_agent",
-]);
+  "close_surface",
+  "update_surface",
+  "list_surfaces",
+] as const;
 
-// DRIFT: retire next release. P6 supplies broadcast as the ninth legacy alias
-// by replacing its fan-out semantics with send_to structured targeting.
-export const THIN_CORE_LEGACY_REPLACEMENTS: Readonly<Record<string, string>> = {
-  broadcast: "send_to(targeting={...})",
-  send_to_agent: "send_to(mode=agent)",
-  send_input: "send_to(mode=surface)",
-  new_worktree_split: "spawn_agent(worktree=true, role=worker)",
-  spawn_in_workspace: "spawn_agent(workspace=...)",
-  wait_for_all: "wait_for(ids=[...])",
+const PUBLIC_TOOL_NAME_SET = new Set<string>(PUBLIC_TOOL_NAMES);
+
+const BaseOutputShape = {
+  ok: z.boolean(),
+  retry_count: z.number().int().nonnegative(),
+};
+const DeliveryOutputShape = {
+  delivered: z.boolean().optional(),
+  delivery: z.enum(["submitted", "queued", "failed"]).optional(),
+  delivery_state: z.enum(["submitted", "queued", "failed"]).optional(),
+  terminal: z.boolean().optional(),
+  typed: z.boolean().optional(),
+  submit_attempted: z.boolean().optional(),
+  submit_verified: z.boolean().nullable().optional(),
+  delivery_id: z.string().optional(),
+};
+const DeliveryReceiptOutputSchema = z
+  .object({
+    ...DeliveryOutputShape,
+    bytes: z.number().int().nonnegative().optional(),
+    prompt_text: z.string().nullable().optional(),
+    prompt_warning: z.string().nullable().optional(),
+  })
+  .passthrough();
+const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
+  spawn_agent: z
+    .object({
+      ...BaseOutputShape,
+      version: z.literal(1).optional(),
+      type: z.enum(["agent", "terminal"]).optional(),
+      agent_id: z.string().optional(),
+      parent_agent_id: z.string().nullable().optional(),
+      role: z.string().optional(),
+      surface_id: z.string().optional(),
+      workspace_id: z.string().nullable().optional(),
+      cwd: z.string().nullable().optional(),
+      title: z.string().nullable().optional(),
+      cwd_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_delivered: z.boolean().optional(),
+      boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      boot_prompt_submit_verified: z.boolean().nullable().optional(),
+    })
+    .passthrough(),
+  send_to: z
+    .object({
+      ...BaseOutputShape,
+      ...DeliveryOutputShape,
+      agent_id: z.string().optional(),
+      surface: z.string().optional(),
+      command: z.string().optional(),
+      key: z.string().optional(),
+      title: z.string().optional(),
+      model: z.string().optional(),
+      agent_type: z.string().optional(),
+      accepted: z.boolean().optional(),
+      status: z.string().optional(),
+      boot_prompt_delivered: z.boolean().optional(),
+      boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      boot_prompt_submit_verified: z.boolean().nullable().optional(),
+      boot_prompt_warning: z.string().nullable().optional(),
+      registry_state: z.string().nullable().optional(),
+      screen: z.record(z.unknown()).nullable().optional(),
+      state_conflict: z.boolean().optional(),
+      health: z.record(z.unknown()).optional(),
+      receipts: z.array(z.object({ ...DeliveryOutputShape }).passthrough()).optional(),
+    })
+    .passthrough(),
+  read_screen: z
+    .object({
+      ...BaseOutputShape,
+      surface: z.string().optional(),
+      parsed: z.record(z.unknown()).optional(),
+    })
+    .passthrough(),
+  list_agents: z
+    .object({
+      ...BaseOutputShape,
+      agents: z.array(z.record(z.unknown())).optional(),
+      count: z.number().int().nonnegative().optional(),
+      derived_at: z.number().optional(),
+    })
+    .passthrough(),
+  wait_for: z
+    .object({
+      ...BaseOutputShape,
+      agent_id: z.string().optional(),
+      results: z.array(z.record(z.unknown())).optional(),
+      watch: z.record(z.unknown()).optional(),
+    })
+    .passthrough(),
+  control_health: z
+    .object({
+      ...BaseOutputShape,
+      health: z.record(z.unknown()).optional(),
+    })
+    .passthrough(),
+  close_surface: z
+    .object({
+      ...BaseOutputShape,
+      scope: z.enum(["surface", "agent", "workspace"]).optional(),
+      surface: z.string().optional(),
+      agent_id: z.string().optional(),
+      workspace: z.string().optional(),
+      state: z.string().optional(),
+      force: z.boolean().optional(),
+      removed: z.record(z.unknown()).optional(),
+      pane: z.string().optional(),
+      collapse_pane: z.boolean().optional(),
+      refused: z.boolean().optional(),
+      caller_workspace: z.boolean().optional(),
+      surfaces: z.array(z.record(z.unknown())).optional(),
+      agents: z.array(z.record(z.unknown())).optional(),
+      live_agents: z.array(z.record(z.unknown())).optional(),
+    })
+    .passthrough(),
+  update_surface: z
+    .object({
+      ...BaseOutputShape,
+      action: z.enum(["move", "rename"]).optional(),
+      surface: z.string().optional(),
+      pane: z.string().optional(),
+      workspace: z.string().optional(),
+      title: z.string().optional(),
+    })
+    .passthrough(),
+  list_surfaces: z
+    .object({
+      ...BaseOutputShape,
+      workspaces: z.array(z.record(z.unknown())).optional(),
+      surfaces: z.array(z.record(z.unknown())).optional(),
+      column_count: z.number().int().nonnegative().optional(),
+    })
+    .passthrough(),
 };
 
 const BroadcastRoleSchema = z.enum(["leads", "workers", "all"]);
@@ -696,6 +819,66 @@ type BroadcastReceipt = {
 
 type DeliveryStatus = "delivering" | "delivered" | "failed";
 
+export const DELIVERY_RECEIPT_VOCABULARY = [
+  "delivered",
+  "delivery",
+  "delivery_state",
+  "terminal",
+  "typed",
+  "submit_attempted",
+  "submit_verified",
+  "retry_count",
+] as const;
+
+type PublicDeliveryState = "submitted" | "queued" | "failed";
+
+export interface PublicDeliveryReceipt {
+  delivered: boolean;
+  terminal: boolean;
+  typed: boolean;
+  submit_attempted: boolean;
+  submit_verified: boolean | null;
+  retry_count: number;
+  delivery?: PublicDeliveryState;
+  delivery_state?: PublicDeliveryState;
+  delivery_id?: string;
+}
+
+/**
+ * The only public receipt builder for text/key delivery. A delivery
+ * discriminator is intentionally absent until the engine has evidence for a
+ * queued, failed, or verified-submitted outcome.
+ */
+export function buildPublicDeliveryReceipt(input: {
+  delivery_state?: PublicDeliveryState;
+  delivery_id?: string;
+  typed: boolean;
+  submit_attempted: boolean;
+  submit_verified: boolean | null;
+  retry_count: number;
+}): PublicDeliveryReceipt {
+  const evidencedState =
+    input.delivery_state === "queued" || input.delivery_state === "failed"
+      ? input.delivery_state
+      : input.delivery_state === "submitted" && input.submit_verified === true
+        ? "submitted"
+        : undefined;
+  const terminal =
+    evidencedState === "submitted" || evidencedState === "failed";
+  return {
+    delivered: evidencedState === "submitted",
+    terminal,
+    typed: input.typed,
+    submit_attempted: input.submit_attempted,
+    submit_verified: input.submit_verified,
+    retry_count: input.retry_count,
+    ...(evidencedState
+      ? { delivery: evidencedState, delivery_state: evidencedState }
+      : {}),
+    ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
+  };
+}
+
 export interface DeliveryRecord {
   delivery_id: string;
   surface: string;
@@ -744,27 +927,43 @@ type SubmitVerificationFailureReason =
 
 class SubmitVerificationError extends Error {
   readonly retry_safe = false;
+  readonly receipt: PublicDeliveryReceipt;
 
   constructor(
     message: string,
     readonly retry_count: number,
     readonly reason: SubmitVerificationFailureReason,
+    receipt?: PublicDeliveryReceipt,
   ) {
     super(message);
     this.name = "SubmitVerificationError";
+    this.receipt =
+      receipt ??
+      buildPublicDeliveryReceipt({
+        typed: true,
+        submit_attempted: true,
+        submit_verified: false,
+        retry_count,
+      });
   }
 }
 
 const submitVerificationFailurePayload = (error: SubmitVerificationError) => ({
-  submit_verified: false as const,
+  ...error.receipt,
   submit_verification_reason: error.reason,
   retry_safe: error.retry_safe,
-  retry_count: error.retry_count,
 });
 
 class DeliverySafetyGateError extends Error {
-  readonly delivered = false;
-  readonly submit_verified = false;
+  readonly receipt = buildPublicDeliveryReceipt({
+    delivery_state: "failed",
+    typed: false,
+    submit_attempted: false,
+    submit_verified: false,
+    retry_count: 0,
+  });
+  readonly delivered = this.receipt.delivered;
+  readonly submit_verified = this.receipt.submit_verified;
 
   constructor(
     readonly error_code:
@@ -958,27 +1157,6 @@ function okFormatted(
   };
 }
 
-function withDeprecationWarning(
-  result: ToolReturn,
-  legacyName: string,
-  replacement: string,
-  emittedWarnings: Set<string>,
-): ToolReturn {
-  if (emittedWarnings.has(legacyName)) {
-    return result;
-  }
-  emittedWarnings.add(legacyName);
-  const warning = `${legacyName} is deprecated for one release; use ${replacement}`;
-  console.warn(`[cmuxlayer] ${warning}`);
-  return {
-    ...result,
-    structuredContent: {
-      ...(result.structuredContent ?? {}),
-      deprecation_warning: warning,
-    },
-  };
-}
-
 function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
   const modeExtra =
@@ -994,9 +1172,8 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const deliverySafetyExtra =
     error instanceof DeliverySafetyGateError
       ? {
-          delivered: error.delivered,
+          ...error.receipt,
           error_code: error.error_code,
-          submit_verified: error.submit_verified,
           screen: error.screen,
         }
       : {};
@@ -2643,6 +2820,8 @@ export interface CreateServerOptions {
   safetyCallerContextProvider?: () => CallerContext | undefined;
   /** Override the per-session resident-tool palette (primarily for entry wiring/tests). */
   defaultPalette?: string;
+  /** Keep retired handlers registered only for direct unit coverage. Never set in production. */
+  exposeInternalToolsForTests?: boolean;
   /** Opt into Claude Code channel notifications for lifecycle events */
   enableClaudeChannels?: boolean;
   /** Override spawn preflight checks (primarily for tests). */
@@ -2732,12 +2911,7 @@ export type LifecycleAgentInputDeliverer = (args: {
   allow_busy?: boolean;
   source_event: DeliveryEventType;
   delivery_id?: string;
-}) => Promise<{
-  bytes: number;
-  retry_count: number;
-  submit_verified: boolean | null;
-  delivery: "submitted" | "queued";
-}>;
+}) => Promise<PublicDeliveryReceipt & { bytes: number }>;
 
 export interface CmuxServerContext {
   client: CmuxLayerClient;
@@ -3492,14 +3666,74 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined,
   );
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  const rawRegisterTool = server.registerTool.bind(server) as (
+    name: string,
+    config: Record<string, unknown>,
+    handler: (...args: unknown[]) => unknown,
+  ) => unknown;
+  const registerLegacyToolWithOutputSchema = (
+    args: unknown[],
+    outputSchema: z.ZodTypeAny,
+  ): unknown => {
+    const toolName = args[0];
+    const handler = args.at(-1);
+    if (typeof toolName !== "string" || typeof handler !== "function") {
+      throw new Error("Invalid legacy MCP tool registration");
+    }
+
+    const legacyArgs = args.slice(1, -1);
+    const description =
+      typeof legacyArgs[0] === "string"
+        ? (legacyArgs.shift() as string)
+        : undefined;
+    let inputSchema: unknown;
+    let annotations: unknown;
+    if (legacyArgs.length > 1) {
+      inputSchema = legacyArgs.shift();
+      annotations = legacyArgs.shift();
+    } else if (legacyArgs.length === 1) {
+      const candidate = legacyArgs.shift();
+      const annotationKeys = new Set([
+        "title",
+        "readOnlyHint",
+        "destructiveHint",
+        "idempotentHint",
+        "openWorldHint",
+      ]);
+      const keys =
+        typeof candidate === "object" && candidate !== null
+          ? Object.keys(candidate)
+          : [];
+      if (keys.length > 0 && keys.every((key) => annotationKeys.has(key))) {
+        annotations = candidate;
+      } else {
+        inputSchema = candidate;
+      }
+    }
+    if (legacyArgs.length > 0) {
+      throw new Error(`Unsupported legacy MCP registration for ${toolName}`);
+    }
+
+    return rawRegisterTool(
+      toolName,
+      {
+        ...(description ? { description } : {}),
+        ...(inputSchema !== undefined ? { inputSchema } : {}),
+        outputSchema,
+        ...(annotations !== undefined ? { annotations } : {}),
+      },
+      handler as (...args: unknown[]) => unknown,
+    );
+  };
   const toolHandlersByName = new Map<
     string,
     (args: Record<string, unknown>, extra: unknown) => Promise<ToolReturn>
   >();
-  const emittedDeprecationWarnings = new Set<string>();
   const palette = createDefaultToolPalette(
     opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
   );
+  const exposeInternalToolsForTests =
+    opts?.exposeInternalToolsForTests ?? process.env.VITEST === "true";
   (server as unknown as { tool: (...args: unknown[]) => unknown }).tool = (
     ...args: unknown[]
   ): unknown => {
@@ -3521,11 +3755,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
     }
     if (
-      palette &&
       typeof toolName === "string" &&
-      !palette.shouldRegister(toolName)
+      !PUBLIC_TOOL_NAME_SET.has(toolName) &&
+      !exposeInternalToolsForTests
     ) {
+      return {
+        update(updates: Record<string, unknown>) {
+          const callback = updates.callback;
+          if (typeof callback === "function") {
+            toolHandlersByName.set(
+              toolName,
+              callback as (
+                args: Record<string, unknown>,
+                extra: unknown,
+              ) => Promise<ToolReturn>,
+            );
+          }
+        },
+      };
+    }
+    if (palette && typeof toolName === "string" && !palette.shouldRegister(toolName)) {
       return palette.defer(toolName, args);
+    }
+    if (typeof toolName === "string") {
+      const outputSchema = PUBLIC_TOOL_OUTPUT_SCHEMAS[toolName];
+      if (outputSchema) {
+        return registerLegacyToolWithOutputSchema(args, outputSchema);
+      }
     }
     return rawTool(...args);
   };
@@ -4457,10 +4713,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
   };
 
-  const deliverInputChunks = async (opts: {
+  const executeDeliveryEngine = async (opts: {
     surface: string;
     workspace?: string;
     chunks: string[];
+    key?: string;
     chunk_size: number;
     chunk_delay_ms: number;
     press_enter: boolean;
@@ -4474,13 +4731,38 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verify_timeout_ms?: number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
-  }): Promise<{
-    bytes: number;
-    retry_count: number;
-    submit_verified: boolean | null;
-    delivery: "submitted" | "queued";
-  }> => {
+  }): Promise<PublicDeliveryReceipt & { bytes: number }> => {
     await opts.beforeMutation?.();
+    if (opts.key !== undefined) {
+      if (opts.chunks.length > 0 || opts.press_enter) {
+        throw new Error("Delivery engine key input is mutually exclusive with text submission");
+      }
+      const key = normalizeKeyName(opts.key);
+      await sendKeyWithRetry(
+        opts.surface,
+        key,
+        opts.workspace,
+        opts.beforeMutation,
+      );
+      const receipt = buildPublicDeliveryReceipt({
+        typed: false,
+        submit_attempted: key === "return",
+        submit_verified: null,
+        retry_count: 0,
+      });
+      if (opts.source_event) {
+        appendDeliveryEvent({
+          event_type: opts.source_event,
+          source_agent: opts.source_agent ?? null,
+          target_surface: opts.surface,
+          bytes: 0,
+          press_enter: key === "return",
+          submit_verified: null,
+          retry_count: 0,
+        });
+      }
+      return { ...receipt, bytes: 0 };
+    }
     const deliverySafetySnapshot = await assertDeliveryTargetIsSafe(
       opts.surface,
       opts.workspace,
@@ -4520,7 +4802,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
-    let delivery: "submitted" | "queued" = "submitted";
+    let deliveryOutcome: "submitted" | "queued" = "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
@@ -4579,7 +4861,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verified = verification.submit_verified;
       submit_verification_reason = verification.submit_verification_reason;
       retry_count = verification.retry_count;
-      delivery = verification.delivery;
+      deliveryOutcome = verification.delivery;
     }
 
     await maybeRenameTask({
@@ -4603,7 +4885,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ? {
               delivery_id: opts.delivery_id,
               delivery_state:
-                delivery === "queued"
+                deliveryOutcome === "queued"
                   ? ("queued" as const)
                   : submit_verified === false
                   ? ("failed" as const)
@@ -4613,17 +4895,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       });
     }
 
-    if (submit_verified === false && delivery !== "queued") {
+    const receipt = buildPublicDeliveryReceipt({
+      delivery_state:
+        deliveryOutcome === "queued"
+          ? "queued"
+          : submit_verified === true
+            ? "submitted"
+            : undefined,
+      delivery_id: opts.delivery_id,
+      typed: bytes > 0,
+      submit_attempted: Boolean(opts.press_enter),
+      submit_verified,
+      retry_count,
+    });
+
+    if (submit_verified === false && deliveryOutcome !== "queued") {
       const timeoutMs =
         opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
       throw new SubmitVerificationError(
         `Enter submit could not be verified for ${opts.surface} within ${timeoutMs}ms`,
         retry_count,
         submit_verification_reason ?? "submit_evidence_absent",
+        receipt,
       );
     }
 
-    return { bytes, retry_count, submit_verified, delivery };
+    return { ...receipt, bytes };
   };
 
   const waitForBootPromptReady = async (opts: {
@@ -5154,8 +5451,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // Return is a mutation: retrying after a lost acknowledgement can
             // submit into the newly started CLI. Probe before any fallback.
             await opts.assertSurfaceBindingCurrent?.();
-            await client.sendKey(opts.surface, "return", {
+            await executeDeliveryEngine({
+              surface: opts.surface,
               workspace: opts.workspace,
+              chunks: [],
+              key: "return",
+              chunk_size: 0,
+              chunk_delay_ms: 0,
+              press_enter: false,
+              source_event: "send_key",
+              beforeMutation: opts.assertSurfaceBindingCurrent,
             });
             return true;
           } catch (error) {
@@ -5178,7 +5483,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         };
         const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
           await opts.assertSurfaceBindingCurrent?.();
-          await sendKeyWithRetry(opts.surface, "ctrl-c", opts.workspace);
+          await executeDeliveryEngine({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            chunks: [],
+            key: "ctrl-c",
+            chunk_size: 0,
+            chunk_delay_ms: 0,
+            press_enter: false,
+            source_event: "send_key",
+            beforeMutation: opts.assertSurfaceBindingCurrent,
+          });
           await waitForLaunchShellReady({
             surface: opts.surface,
             workspace: opts.workspace,
@@ -5194,7 +5509,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const relaunchOriginalCommand = async (): Promise<void> => {
           await clearAndVerifyFreshShellPrompt();
-          await deliverInputChunks({
+          await executeDeliveryEngine({
             surface: opts.surface,
             workspace: opts.workspace,
             chunks,
@@ -5207,7 +5522,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         };
         try {
-          const delivery = await deliverInputChunks({
+          const delivery = await executeDeliveryEngine({
             surface: opts.surface,
             workspace: opts.workspace,
             chunks,
@@ -5292,10 +5607,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     timeout_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
-  }): Promise<{
+  }): Promise<PublicDeliveryReceipt & {
     bytes: number;
-    retry_count: number;
-    submit_verified: boolean | null;
     prompt_text: string | null;
     prompt_warning: string | null;
   }> => {
@@ -5307,9 +5620,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       !hasInlinePrompt(opts.injected_prompt)
     ) {
       return {
+        ...buildPublicDeliveryReceipt({
+          typed: false,
+          submit_attempted: false,
+          submit_verified: null,
+          retry_count: 0,
+        }),
         bytes: 0,
-        retry_count: 0,
-        submit_verified: null,
         prompt_text: null,
         prompt_warning: null,
       };
@@ -5391,7 +5708,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const delivery = await withSurfaceWrite(
         deliveryRoute.surface,
         async () =>
-          deliverInputChunks({
+          executeDeliveryEngine({
             surface: deliveryRoute.surface,
             workspace: deliveryRoute.workspace,
             chunks,
@@ -5461,9 +5778,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           return {
+            ...buildPublicDeliveryReceipt({
+              delivery_state: "submitted",
+              typed: true,
+              submit_attempted: true,
+              submit_verified: true,
+              retry_count: error.retry_count,
+            }),
             bytes: Buffer.byteLength(sanitizedText, "utf8"),
-            retry_count: error.retry_count,
-            submit_verified: true,
             prompt_text: rawPrompt,
             prompt_warning: promptWarning,
           };
@@ -5885,7 +6207,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     const run = async () => {
       try {
-        const delivery = await deliverInputChunks({
+        const delivery = await executeDeliveryEngine({
           surface: record.surface,
           workspace: record.workspace,
           chunks: record.chunks,
@@ -6585,7 +6907,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 1. list_surfaces
   server.tool(
     "list_surfaces",
-    "List all surfaces (terminal/browser panes) across workspaces. Condensed by default; verbose:true returns every raw cmux field per workspace and surface, materially increasing token usage, and is rarely needed.",
+    "List workspace, pane, and surface topology. Condensed by default; verbose=true adds raw cmux fields.",
     {
       workspace: z.string().optional().describe("Filter by workspace ref"),
       verbose: z
@@ -7412,6 +7734,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (bootPromptDelivery) {
           data.boot_prompt_delivered =
             isBootPromptDelivered(bootPromptDelivery);
+          data.boot_prompt_receipt = bootPromptDelivery;
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
           data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
         }
@@ -7571,6 +7894,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (bootPromptDelivery) {
           data.boot_prompt_delivered =
             isBootPromptDelivered(bootPromptDelivery);
+          data.boot_prompt_receipt = bootPromptDelivery;
           data.boot_prompt_bytes = bootPromptDelivery.bytes;
           data.boot_prompt_submit_verified = bootPromptDelivery.submit_verified;
         }
@@ -7808,11 +8132,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const identity = resolveTargetIdentity(stateMgr, route.surface);
           const data = {
             ...identity,
-            delivered: false,
-            delivery_id: record.delivery_id,
+            ...buildPublicDeliveryReceipt({
+              delivery_state: "queued",
+              delivery_id: record.delivery_id,
+              typed: false,
+              submit_attempted: args.press_enter,
+              submit_verified: record.submit_verified,
+              retry_count: record.retry_count,
+            }),
             status: record.status,
-            submit_verified: record.submit_verified,
-            retry_count: record.retry_count,
           };
           return okFormatted(
             formatDelivery("send_input", {
@@ -7828,7 +8156,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           route.surface,
           async () => {
             await route.assertCurrent();
-            return deliverInputChunks({
+            return executeDeliveryEngine({
               surface: route.surface,
               workspace: route.workspace,
               chunks,
@@ -7851,38 +8179,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         );
 
         const identity = resolveTargetIdentity(stateMgr, route.surface);
-        const queued = delivery.delivery === "queued";
-        const submitted =
-          delivery.delivery === "submitted" &&
-          delivery.submit_verified === true;
-        const typed = !args.press_enter;
-        const acceptedDelivery = queued
-          ? "queued"
-          : submitted
-            ? "submitted"
-            : null;
         const data = {
           ...identity,
-          delivered: !queued,
-          ...(acceptedDelivery
-            ? {
-                delivery: acceptedDelivery,
-                delivery_state: acceptedDelivery,
-              }
-            : {}),
-          terminal: submitted,
-          ...(typed ? { typed: true } : {}),
-          submit_attempted: args.press_enter,
-          retry_count: delivery.retry_count,
-          submit_verified: delivery.submit_verified,
+          ...delivery,
         };
         return okFormatted(
           formatDelivery("send_input", {
             ...identity,
-            delivered: !queued,
-            pending: queued,
-            typed,
-            submit_attempted: args.press_enter,
+            delivered: delivery.delivered,
+            pending: delivery.delivery === "queued",
+            typed: delivery.typed,
+            submit_attempted: delivery.submit_attempted,
             submit_verified: delivery.submit_verified,
           }),
           data,
@@ -7900,6 +8207,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
+            ...(e.receipt ?? {}),
             submit_verified: false,
             retry_count: e.retry_count,
           });
@@ -7995,7 +8303,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           route.surface,
           async () => {
             await route.assertCurrent();
-            return deliverInputChunks({
+            return executeDeliveryEngine({
               surface: route.surface,
               workspace: route.workspace,
               chunks,
@@ -8046,10 +8354,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data = {
           ...identity,
           command: sanitizedCommand,
-          delivered: true,
-          retry_count: delivery.retry_count,
-          submit_verified: delivery.submit_verified,
+          ...delivery,
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+          boot_prompt_receipt: bootPromptDelivery,
           boot_prompt_bytes: bootPromptDelivery?.bytes,
           boot_prompt_submit_verified:
             bootPromptDelivery?.submit_verified ?? null,
@@ -8058,7 +8365,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return okFormatted(
           formatDelivery("send_command", {
             ...identity,
-            delivered: true,
+            delivered: delivery.delivered,
+            pending: delivery.delivery === "queued",
+            typed: delivery.typed,
+            submit_attempted: delivery.submit_attempted,
             submit_verified: delivery.submit_verified,
           }),
           data,
@@ -8076,6 +8386,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         if (e instanceof SubmitVerificationError) {
           return err(e, {
+            ...(e.receipt ?? {}),
             submit_verified: false,
             retry_count: e.retry_count,
           });
@@ -8121,16 +8432,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           args.workspace,
           "send_key",
         );
-        await withSurfaceWrite(
+        const delivery = await withSurfaceWrite(
           route.surface,
           async () => {
             await route.assertCurrent();
-            await sendKeyWithRetry(
-              route.surface,
+            return executeDeliveryEngine({
+              surface: route.surface,
+              workspace: route.workspace,
+              chunks: [],
               key,
-              route.workspace,
-              route.assertCurrent,
-            );
+              chunk_size: 0,
+              chunk_delay_ms: 0,
+              press_enter: false,
+              stableSurfaceIdentity: route.stableSurfaceIdentity,
+              source_event: "send_key",
+              beforeMutation: route.assertCurrent,
+            });
           },
           {
             toolName: "send_key",
@@ -8139,7 +8456,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
           },
         );
-        const data = { surface: route.surface, key };
+        const data = { surface: route.surface, key, ...delivery };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -8150,7 +8467,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 9. read_screen
   server.tool(
     "read_screen",
-    "Read terminal screen with parsed agent status. Returns parsed fields: agent_type, status, model, token_count, context_pct (% used), context_window (max tokens), cost, done_signal, response, errors, plus delivery metadata. LEAN BY DEFAULT: the response is returned once (parsed.response); the raw terminal dump is NOT included — instead a compact, de-chromed screen_preview (box-drawing rules + status-bar art stripped) is included only when there is no parsed.response. Pass raw=true for the full untrimmed terminal content, or parsed_only=true for parsed fields alone (best for monitoring). Do not treat read_screen alone as visual confirmation of the highlighted row in interactive terminal menus.",
+    "Read a terminal screen and parsed harness status. Use raw=true for full text or parsed_only=true for monitoring.",
     {
       surface: z.string().describe("Target surface ref"),
       workspace: z.string().optional().describe("Target workspace ref"),
@@ -8376,6 +8693,62 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     },
   );
 
+  server.tool(
+    "update_surface",
+    "Move or rename one terminal surface.",
+    {
+      action: z.enum(["move", "rename"]),
+      surface: z.string(),
+      workspace: z.string().optional(),
+      pane: z.string().optional(),
+      before: z.string().optional(),
+      after: z.string().optional(),
+      index: z.number().int().optional(),
+      focus: z.boolean().optional(),
+      title: z.string().optional(),
+      preserve_prefix: z.boolean().optional().default(false),
+    },
+    ANNOTATIONS.mutating,
+    async (args) => {
+      try {
+        const handlerName = args.action === "move" ? "move_surface" : "rename_tab";
+        const handler = toolHandlersByName.get(handlerName);
+        if (!handler) {
+          throw new Error(`Internal surface adapter unavailable: ${handlerName}`);
+        }
+        if (args.action === "rename" && !args.title) {
+          throw new Error("update_surface action=rename requires title");
+        }
+        const result = await handler(
+          args.action === "move"
+            ? {
+                surface: args.surface,
+                workspace: args.workspace,
+                pane: args.pane,
+                before: args.before,
+                after: args.after,
+                index: args.index,
+                focus: args.focus,
+              }
+            : {
+                surface: args.surface,
+                workspace: args.workspace,
+                title: args.title,
+                preserve_prefix: args.preserve_prefix,
+              },
+          {},
+        );
+        const structured = result.structuredContent ?? {};
+        return {
+          ...result,
+          structuredContent: { ...structured, action: args.action },
+        };
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
   // 7. notify
   server.tool(
     "notify",
@@ -8483,9 +8856,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // 10. close_surface
   server.tool(
     "close_surface",
-    "Close a surface (terminal or browser pane). SAFETY: if the surface still backs a live agent (not done/error), the close is REFUSED unless force:true, and the response includes a fresh read of the pane so you can confirm for yourself whether it is really finished before destroying it. force:true bypasses only the live-agent lifecycle gate; it never bypasses stable surface identity checks. Browser panes and surfaces with no tracked agent close normally.",
+    "Close one surface, managed agent, or workspace with live-agent guards.",
     {
-      surface: z.string().describe("Target surface ref"),
+      scope: z
+        .enum(["surface", "agent", "workspace"])
+        .optional()
+        .default("surface"),
+      surface: z.string().optional().describe("Target surface ref"),
+      agent_id: z.string().optional().describe("Managed agent ID"),
       workspace: z.string().optional().describe("Target workspace ref"),
       force: z
         .boolean()
@@ -8498,6 +8876,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.destructive,
     async (args) => {
       try {
+        if (args.scope === "agent") {
+          if (!args.agent_id) {
+            throw new Error("close_surface scope=agent requires agent_id");
+          }
+          const handler = toolHandlersByName.get("stop_agent");
+          if (!handler) throw new Error("Internal agent close adapter unavailable");
+          const result = await handler(
+            { agent_id: args.agent_id, force: args.force },
+            {},
+          );
+          return {
+            ...result,
+            structuredContent: {
+              ...(result.structuredContent ?? {}),
+              scope: "agent",
+            },
+          };
+        }
+        if (args.scope === "workspace") {
+          if (!args.workspace) {
+            throw new Error("close_surface scope=workspace requires workspace");
+          }
+          const handler = toolHandlersByName.get("delete_workspace");
+          if (!handler) {
+            throw new Error("Internal workspace close adapter unavailable");
+          }
+          const result = await handler(
+            { workspace: args.workspace, force: args.force },
+            {},
+          );
+          return {
+            ...result,
+            structuredContent: {
+              ...(result.structuredContent ?? {}),
+              scope: "workspace",
+            },
+          };
+        }
+        if (!args.surface) {
+          throw new Error("close_surface scope=surface requires surface");
+        }
         const route = await resolveRawSurfaceMutationRoute(
           args.surface,
           args.workspace,
@@ -9032,6 +9451,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "dispatch_nudge",
                   delivery_id: deliveryId,
                 });
+                if (
+                  delivered.delivery !== "submitted" &&
+                  delivered.delivery !== "queued"
+                ) {
+                  throw new Error(
+                    "inbox nudge produced no evidence-backed delivery state",
+                  );
+                }
                 nudge.delivery = delivered.delivery;
                 if (context.lifecycleSweepEngine && deliveryId) {
                   const receipt =
@@ -9976,7 +10403,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         deliveryRoute.surface_id,
         async () => {
           await assertDeliveryRouteCurrent();
-          const delivery = await deliverInputChunks({
+          const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
             workspace: deliveryRoute.workspace_id ?? undefined,
             chunks,
@@ -10023,16 +10450,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Expose the guarded relay to dispatch_to_agent's nudge (registered above,
     // outside this lifecycle block).
     lifecycleAgentInputDeliverer = deliverAgentInput;
-    engine.setDeliverySubmitter(async (receipt) =>
-      deliverAgentInput({
+    engine.setDeliverySubmitter(async (receipt) => {
+      const delivery = await deliverAgentInput({
         agent_id: receipt.agent_id,
         text: receipt.text,
         press_enter: receipt.press_enter,
         allow_busy: false,
         source_event: receipt.source_event,
         delivery_id: receipt.delivery_id,
-      }),
-    );
+      });
+      return {
+        retry_count: delivery.retry_count,
+        submit_verified: delivery.submit_verified,
+        ...(delivery.delivery === "submitted" || delivery.delivery === "queued"
+          ? { delivery: delivery.delivery }
+          : {}),
+      };
+    });
 
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a
@@ -10078,7 +10512,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 11. spawn_agent
     server.tool(
       "spawn_agent",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} SpawnSpec v1 creates either a managed AI agent or a plain terminal. Agent identity, authority, job function, and placement are spawn-time facts and never derive from the selected CLI. Agent spawns return a stable agent_id plus parent_agent_id and role; terminal spawns return only terminal routing fields. For collabs, call list_agents/get_agent_state first and reuse or supersede a viable existing agent instead of spawning a duplicate lane. Unless workspace is explicitly provided, the new surface lands in the caller/current workspace; lead authority places left and worker authority places right. A managed worker caller is recorded as parent and its child is forced to worker with a warning. The created tab is focused long enough to initialize, then the exact origin focus is restored; pass focus:true to stay on the created tab. Use send_to and wait_for with the returned agent_id instead of remembering the created surface. If prompt or boot_prompt_path is provided, waits for the agent ready prompt, submits that boot instruction, and returns after submission evidence; submission is not proof of task completion or healthy lifecycle state. Multi-paragraph inline prompts are refused for interactive agents unless allow_long_inline:true. Prefer boot_prompt_path: it is checked before spawning and safely submits multiline or over-cap files as one \`Read and follow <path>\` pointer after readiness. Without a boot prompt, returns immediately and wait_for can be used separately. ${ZSH_BANG_INLINE_WARNING}`,
+      "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot prompts return evidence-backed receipts.",
       {
         version: z
           .literal(1)
@@ -10090,6 +10524,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .default("agent")
           .describe("Spawn an AI agent or a plain terminal"),
+        resume_agent_id: z
+          .string()
+          .optional()
+          .describe(
+            "Resume this captured agent session on a fresh surface while preserving its public agent ID. Mutually exclusive with new-spawn fields.",
+          ),
         repo: z
           .string()
           .optional()
@@ -10114,6 +10554,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe("Initial working directory for type=terminal"),
+        title: z
+          .string()
+          .optional()
+          .describe("Tab title for type=terminal"),
         prompt: z
           .string()
           .optional()
@@ -10228,6 +10672,89 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         const creation = new CreatedIdentityScope();
         try {
+          if (args.resume_agent_id) {
+            const incompatible = [
+              "repo",
+              "model",
+              "effort",
+              "cli",
+              "cwd",
+              "prompt",
+              "boot_prompt_path",
+              "worktree",
+              "mcp_profile",
+              "parent_agent_id",
+              "role",
+              "placement",
+              "authority",
+              "max_cost_per_agent",
+              "crash_recover",
+            ].filter((field) =>
+              Object.prototype.hasOwnProperty.call(args, field),
+            );
+            if ((args.type ?? "agent") !== "agent" || incompatible.length > 0) {
+              return err(
+                new Error(
+                  `resume_agent_id is mutually exclusive with new-spawn fields${
+                    incompatible.length > 0
+                      ? `: ${incompatible.join(", ")}`
+                      : ""
+                  }`,
+                ),
+                { error_code: "INVALID_RESUME_SPEC" },
+              );
+            }
+            await awaitLifecycleStart();
+            const existing = engine.getAgentState(args.resume_agent_id);
+            if (!existing) {
+              return err(
+                new Error(`Agent not found: ${args.resume_agent_id}`),
+              );
+            }
+            const workspace = await canonicalWorkspaceRef(
+              args.workspace ?? existing.workspace_id ?? undefined,
+            );
+            await assertWorkspaceMutationAllowed("spawn_agent", workspace);
+            let focusRestoreLease = await focusTargetBeforeSplit(
+              workspace,
+              args.focus !== true,
+            );
+            const result = await engine.resumeAgent(args.resume_agent_id, {
+              workspace,
+            });
+            creation.record({
+              agent_id: result.agent_id,
+              surface_id: result.surface_id,
+              workspace_id: result.workspace_id ?? workspace ?? null,
+            });
+            focusRestoreLease = await capturePostCreationFocus(
+              focusRestoreLease,
+              {
+                surface: result.surface_id,
+                workspace: result.workspace_id ?? workspace,
+              },
+            );
+            const focusRestoreWarning = await restoreFocusAfterRender(
+              focusRestoreLease,
+              result.surface_id,
+              result.workspace_id ?? workspace,
+            );
+            const resumed = {
+              version: 1,
+              type: "agent",
+              resumed: true,
+              ...result,
+              role: inferRecordRoleOrNull(existing) ?? "worker",
+              ...(focusRestoreWarning
+                ? { warning: focusRestoreWarning, warnings: [focusRestoreWarning] }
+                : {}),
+            };
+            return buildSpawnToolReturn(
+              { retry_count: currentTransportRetryCount(), ...resumed },
+              args.verbose,
+              formatOk("spawn_agent", resumed),
+            );
+          }
           if (args.type === "terminal") {
             if (
               args.role !== undefined ||
@@ -10278,22 +10805,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface_id: created.surface,
               workspace_id: created.workspace ?? workspace ?? null,
             });
-            if (args.cwd) {
-              await client.send(
-                created.surface,
-                `cd -- ${shellQuote(args.cwd)}`,
-                { workspace: created.workspace ?? workspace },
-              );
-              await client.sendKey(created.surface, "return", {
+            if (args.title) {
+              await client.renameTab(created.surface, args.title, {
                 workspace: created.workspace ?? workspace,
               });
             }
+            const cwdReceipt = args.cwd
+              ? await withSurfaceWrite(
+                  created.surface,
+                  () =>
+                    executeDeliveryEngine({
+                      surface: created.surface,
+                      workspace: created.workspace ?? workspace,
+                      chunks: [`cd -- ${shellQuote(args.cwd!)}`],
+                      chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+                      chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+                      press_enter: true,
+                      source_event: "send_command",
+                      verify_submit: false,
+                    }),
+                  {
+                    toolName: "spawn_agent",
+                    workspace: created.workspace ?? workspace,
+                    observePtyWrite: true,
+                  },
+                )
+              : undefined;
             return ok({
               version: 1,
               type: "terminal",
               surface_id: created.surface,
               workspace_id: created.workspace ?? workspace ?? null,
               cwd: args.cwd ?? null,
+              title: args.title ?? null,
+              ...(cwdReceipt ? { cwd_receipt: cwdReceipt } : {}),
             });
           }
           requireValue(args.repo, "repo is required for type=agent");
@@ -10800,6 +11345,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             existing_same_lane_agents: existingSameLaneAgents,
             monitor_boot: monitorBoot,
             boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+            boot_prompt_receipt: bootPromptDelivery,
             boot_prompt_bytes: bootPromptDelivery?.bytes,
             boot_prompt_submit_verified:
               bootPromptDelivery?.submit_verified ?? null,
@@ -11057,6 +11603,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             worktree: worktree.prepared,
             mcp_profile: worktree.mcpProfileLabel ?? "inherit",
             boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+            boot_prompt_receipt: bootPromptDelivery,
             boot_prompt_bytes: bootPromptDelivery?.bytes,
             boot_prompt_submit_verified:
               bootPromptDelivery?.submit_verified ?? null,
@@ -11251,6 +11798,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           health?: ReturnType<typeof evaluateAgentHealth>;
           monitor_boot?: MonitorBootResult;
           boot_prompt_delivered?: boolean;
+          boot_prompt_receipt?: PublicDeliveryReceipt & {
+            bytes: number;
+            prompt_text: string | null;
+            prompt_warning: string | null;
+          };
           boot_prompt_submit_verified?: boolean | null;
         }> = [];
         const leanSpawnedAgents: Record<string, unknown>[] = [];
@@ -11451,6 +12003,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               health,
               monitor_boot: monitorBoot,
               boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+              boot_prompt_receipt: bootPromptDelivery,
               boot_prompt_submit_verified:
                 bootPromptDelivery?.submit_verified ?? null,
             });
@@ -11460,6 +12013,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 role,
                 health,
                 boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+                boot_prompt_receipt: bootPromptDelivery,
                 boot_prompt_submit_verified:
                   bootPromptDelivery?.submit_verified ?? null,
               }),
@@ -11626,6 +12180,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .min(1)
           .optional()
           .describe("Agent IDs to wait for together"),
+        mine: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Wait for every direct child of the calling agent"),
         target_state: z
           .enum(["ready", "working", "idle", "done", "error"])
           .optional()
@@ -11643,9 +12202,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           if (args.watch) {
-            if (args.agent_id || args.ids) {
+            if (args.agent_id || args.ids || args.mine) {
               throw new Error(
-                "wait_for watch is mutually exclusive with agent_id and ids",
+                "wait_for watch is mutually exclusive with agent_id, ids, and mine",
               );
             }
             const result = await engine.waitForWatch(
@@ -11661,9 +12220,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           const targetState = args.target_state ?? "done";
-          if (args.ids) {
+          if (args.mine && (args.agent_id || args.ids)) {
+            throw new Error(
+              "wait_for mine=true is mutually exclusive with agent_id and ids",
+            );
+          }
+          let waitIds = args.ids;
+          if (args.mine) {
+            const caller = resolveCurrentCallerAgent();
+            if (!caller) {
+              throw new Error(
+                "wait_for mine=true requires a managed calling agent identity",
+              );
+            }
+            waitIds = registry
+              .getChildren(caller.agent_id)
+              .map((agent) => agent.agent_id);
+          }
+          if (waitIds) {
+            if (waitIds.length === 0) {
+              return okFormatted(
+                formatOk("wait_for", { count: 0, target: targetState }),
+                { results: [], mine: args.mine },
+              );
+            }
             const results = await engine.waitForAll(
-              args.ids,
+              waitIds,
               targetState,
               args.timeout_ms,
             );
@@ -11923,7 +12505,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List public agent handles derived from live topology with provenance-labelled facts and optional filters by state, repo, or model. max_age_ms permits reuse of a same-topology snapshot for at most five seconds. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
+      "List live-derived agents; filter to children with mine/parent_agent_id and request full diagnostics with detail=full.",
       {
         state: z
           .enum([
@@ -11939,6 +12521,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Filter by state"),
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
+        mine: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("Return direct children of the calling agent"),
+        parent_agent_id: z
+          .string()
+          .optional()
+          .describe("Return direct children of this agent"),
+        agent_ids: z
+          .array(z.string())
+          .optional()
+          .describe("Return only these agent IDs"),
+        detail: z
+          .enum(["summary", "full"])
+          .optional()
+          .default("summary"),
         max_age_ms: z
           .number()
           .int()
@@ -11951,6 +12550,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        if (args.mine && args.parent_agent_id) {
+          return err(
+            new Error(
+              "list_agents accepts either mine=true or parent_agent_id, not both",
+            ),
+          );
+        }
+        const parentAgentId = args.mine
+          ? resolveCurrentCallerAgent()?.agent_id
+          : args.parent_agent_id;
+        if (args.mine && !parentAgentId) {
+          return err(
+            new Error(
+              "list_agents mine=true requires a managed calling agent identity",
+            ),
+          );
+        }
         const filter = {
           repo: args.repo,
           model: args.model,
@@ -11960,6 +12576,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           state: args.state ?? null,
           repo: args.repo ?? null,
           model: args.model ?? null,
+          parent_agent_id: parentAgentId ?? null,
+          agent_ids: args.agent_ids ?? null,
+          detail: args.detail,
         });
         const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
           const data = {
@@ -12060,6 +12679,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         ? { screen_observation: screenObservation }
                         : {}),
                     },
+                    ...(args.detail === "full"
+                      ? {
+                          detail: {
+                            ...toAgentStatePayload(agent),
+                            harvestability: engine.assessHarvestability(agent),
+                          },
+                        }
+                      : {}),
                   },
                   skipped: null,
                 };
@@ -12128,7 +12755,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               force: true,
               discovered,
             });
-            return { merged, discovered, observedAtMs };
+            const requestedIds = args.agent_ids
+              ? new Set(args.agent_ids)
+              : null;
+            const scoped = merged.filter(
+              (agent) =>
+                (!parentAgentId ||
+                  agent.parent_agent_id === parentAgentId) &&
+                (!requestedIds || requestedIds.has(agent.agent_id)),
+            );
+            return { merged: scoped, discovered, observedAtMs };
           });
           return await buildListAgentsResponse(
             live.merged,
@@ -12143,7 +12779,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (isSurfaceEnumerationError(e)) {
             try {
               return await buildListAgentsResponse(
-                registry.list(filter),
+                registry
+                  .list(filter)
+                  .filter((agent) => {
+                    const requestedIds = args.agent_ids
+                      ? new Set(args.agent_ids)
+                      : null;
+                    return (
+                      (!parentAgentId ||
+                        agent.parent_agent_id === parentAgentId) &&
+                      (!requestedIds || requestedIds.has(agent.agent_id))
+                    );
+                  }),
                 null,
                 listAgentsTopologySignature(null),
               );
@@ -13005,7 +13652,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Unified send path. mode=agent (default) routes by one agent_id or a mutually exclusive structured targeting object {role,workspace,agent_ids,exclude}; targeting.role is the job function implementor|reviewer|gatherer and returns one immutable per-agent receipt set. A busy agent returns a nonterminal queued delivery receipt that the lifecycle sweep drains when the agent becomes interactive. mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends. ${ZSH_BANG_INLINE_WARNING}`,
+      "Send text or a key through the shared delivery engine. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode.",
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -13225,11 +13872,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ...(plan.agent ? { agent_id: plan.agent.agent_id } : {}),
                   resolution: plan.resolution,
                   ...(plan.predicate ? { predicate: plan.predicate } : {}),
-                  delivery_state: "skipped",
-                  terminal: true,
-                  submit_verified: null,
+                  ...buildPublicDeliveryReceipt({
+                    typed: false,
+                    submit_attempted: false,
+                    submit_verified: null,
+                    retry_count: 0,
+                  }),
                   accepted: false,
-                  delivered: false,
                   skipped:
                     plan.resolution === "unknown"
                       ? "unknown_agent_id"
@@ -13252,11 +13901,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
-                  delivery_state: "skipped",
-                  terminal: true,
-                  submit_verified: null,
+                  ...buildPublicDeliveryReceipt({
+                    typed: false,
+                    submit_attempted: false,
+                    submit_verified: null,
+                    retry_count: 0,
+                  }),
                   accepted: false,
-                  delivered: false,
                   skipped,
                 });
                 continue;
@@ -13272,13 +13923,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
-                  delivery_id: queued.delivery_id,
-                  delivery: "queued",
-                  delivery_state: queued.delivery_state,
-                  terminal: queued.terminal,
-                  submit_verified: queued.submit_verified,
+                  ...buildPublicDeliveryReceipt({
+                    delivery_state: "queued",
+                    delivery_id: queued.delivery_id,
+                    typed: false,
+                    submit_attempted: false,
+                    submit_verified: queued.submit_verified,
+                    retry_count: queued.retry_count,
+                  }),
                   accepted: true,
-                  delivered: false,
                 });
                 continue;
               }
@@ -13301,7 +13954,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
                       })
-                    : engine.resolveDelivery({
+                    : delivery.delivery === "submitted"
+                    ? engine.resolveDelivery({
                         delivery_id: deliveryId,
                         agent_id: agent.agent_id,
                         text: args.text,
@@ -13312,17 +13966,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         retry_count: delivery.retry_count,
                         submit_verified: delivery.submit_verified,
                         error: null,
-                      });
+                      })
+                    : null;
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
-                  delivery_id: accepted.delivery_id,
-                  delivery: accepted.delivery_state,
-                  delivery_state: accepted.delivery_state,
-                  terminal: accepted.terminal,
-                  submit_verified: accepted.submit_verified,
+                  ...buildPublicDeliveryReceipt({
+                    delivery_state: accepted?.delivery_state,
+                    delivery_id: accepted?.delivery_id ?? deliveryId,
+                    typed: delivery.typed,
+                    submit_attempted: delivery.submit_attempted,
+                    submit_verified: delivery.submit_verified,
+                    retry_count: delivery.retry_count,
+                  }),
                   accepted: true,
-                  delivered: accepted.delivery_state === "submitted",
                 });
               } catch (error) {
                 const failed = engine.resolveDelivery(
@@ -13351,12 +14008,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
-                  delivery_id: failed.delivery_id,
-                  delivery_state: failed.delivery_state,
-                  terminal: failed.terminal,
-                  submit_verified: failed.submit_verified,
+                  ...buildPublicDeliveryReceipt({
+                    delivery_state: "failed",
+                    delivery_id: failed.delivery_id,
+                    typed:
+                      error instanceof SubmitVerificationError
+                        ? error.receipt?.typed ?? true
+                        : false,
+                    submit_attempted:
+                      error instanceof SubmitVerificationError
+                        ? error.receipt?.submit_attempted ?? args.press_enter
+                        : false,
+                    submit_verified: failed.submit_verified,
+                    retry_count: failed.retry_count,
+                  }),
                   accepted: false,
-                  delivered: false,
                   error: failed.error,
                 });
               }
@@ -13374,7 +14040,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               (receipt) => receipt.delivery_state === "failed",
             ).length;
             const skippedCount = receipts.filter(
-              (receipt) => receipt.delivery_state === "skipped",
+              (receipt) => receipt.skipped !== undefined,
             ).length;
             const data = {
               targeting: Object.freeze({ ...args.targeting }),
@@ -13421,11 +14087,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const data = {
               accepted: true,
               agent_id: agentId,
-              delivery_id: receipt.delivery_id,
-              delivery: "queued",
-              delivery_state: receipt.delivery_state,
-              terminal: receipt.terminal,
-              submit_verified: receipt.submit_verified,
+              ...buildPublicDeliveryReceipt({
+                delivery_state: "queued",
+                delivery_id: receipt.delivery_id,
+                typed: false,
+                submit_attempted: false,
+                submit_verified: receipt.submit_verified,
+                retry_count: receipt.retry_count,
+              }),
             };
             return okFormatted(
               `send_to accepted — delivery ${receipt.delivery_id} queued`,
@@ -13467,11 +14136,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 appendFailureEvent: !(error instanceof SubmitVerificationError),
               },
             );
-            failedReceiptPayload = {
+            failedReceiptPayload = { ...buildPublicDeliveryReceipt({
+              delivery_state: "failed",
               delivery_id: failedReceipt.delivery_id,
-              delivery_state: failedReceipt.delivery_state,
-              terminal: failedReceipt.terminal,
-            };
+              typed:
+                error instanceof SubmitVerificationError
+                  ? error.receipt?.typed ?? true
+                  : false,
+              submit_attempted:
+                error instanceof SubmitVerificationError
+                  ? error.receipt?.submit_attempted ?? args.press_enter
+                  : false,
+              submit_verified: failedReceipt.submit_verified,
+              retry_count: failedReceipt.retry_count,
+            }) };
             throw error;
           }
           const receipt =
@@ -13484,7 +14162,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
                 })
-              : engine.resolveDelivery({
+              : delivery.delivery === "submitted"
+              ? engine.resolveDelivery({
                   delivery_id: deliveryId,
                   agent_id: agentId,
                   text: args.text,
@@ -13495,23 +14174,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   retry_count: delivery.retry_count,
                   submit_verified: delivery.submit_verified,
                   error: null,
-                });
+                })
+              : null;
           // Preserve the already-terminal receipt if optional evidence
           // collection fails after the pane mutation has succeeded.
-          failedReceiptPayload = {
-            delivery_id: receipt.delivery_id,
-            delivery_state: receipt.delivery_state,
-            terminal: receipt.terminal,
-          };
+          const publicReceipt = buildPublicDeliveryReceipt({
+            delivery_state: receipt?.delivery_state,
+            delivery_id: receipt?.delivery_id ?? deliveryId,
+            typed: delivery.typed,
+            submit_attempted: delivery.submit_attempted,
+            submit_verified: delivery.submit_verified,
+            retry_count: delivery.retry_count,
+          });
+          failedReceiptPayload = { ...publicReceipt };
           const evidence = await collectDeliveryEvidence(agentId);
           const data = {
             agent_id: agentId,
-            delivery_id: receipt.delivery_id,
-            delivery: receipt.delivery_state,
-            delivery_state: receipt.delivery_state,
-            terminal: receipt.terminal,
-            retry_count: delivery.retry_count,
-            submit_verified: delivery.submit_verified,
+            ...publicReceipt,
             ...evidence,
           };
           return okFormatted(formatOk("send_to", data), data);
@@ -14283,80 +14962,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   if (palette) {
     palette.warnAboutUnknownTools();
-    rawTool(
+    rawRegisterTool(
       "expand_palette",
-      "Register the tools deferred by CMUXLAYER_DEFAULT_PALETTE for this MCP session",
-      {},
-      ANNOTATIONS.idempotentMutating,
+      {
+        description: "Register the remaining Phase 5 tools for this MCP session.",
+        inputSchema: {},
+        outputSchema: z
+          .object({
+            ...BaseOutputShape,
+            expanded: z.boolean(),
+            already_expanded: z.boolean(),
+            registered_tools: z.array(z.string()),
+          })
+          .passthrough(),
+        annotations: ANNOTATIONS.idempotentMutating,
+      },
       async () =>
         withTransportRetryTracking(async () => {
           const sendToolListChanged = server.sendToolListChanged;
           server.sendToolListChanged = () => {};
           let expansion;
           try {
-            expansion = palette.expand(rawTool);
+            expansion = palette.expand((...args) => {
+              const toolName = args[0];
+              const outputSchema =
+                typeof toolName === "string"
+                  ? PUBLIC_TOOL_OUTPUT_SCHEMAS[toolName]
+                  : undefined;
+              return outputSchema
+                ? registerLegacyToolWithOutputSchema(args, outputSchema)
+                : rawTool(...args);
+            });
           } finally {
             server.sendToolListChanged = sendToolListChanged;
           }
-          if (expansion.expanded) {
-            server.sendToolListChanged();
-          }
+          if (expansion.expanded) server.sendToolListChanged();
           return ok({ ...expansion });
         }),
     );
-  } else {
-    // The hardcoded thin-core cut is the default. A configured per-session
-    // palette supersedes it above and controls residency until expansion.
-    const registeredTools = (server as any)._registeredTools as Record<
-      string,
-      {
-        _meta?: Record<string, unknown>;
-        handler: (
-          args: Record<string, unknown>,
-          extra: unknown,
-        ) => Promise<ToolReturn>;
-        _cmuxlayerOriginalHandler?: (
-          args: Record<string, unknown>,
-          extra: unknown,
-        ) => Promise<ToolReturn>;
-        update: (updates: {
-          _meta?: Record<string, unknown>;
-          callback?: (
-            args: Record<string, unknown>,
-            extra: unknown,
-          ) => Promise<ToolReturn>;
-        }) => void;
-      }
-    >;
-    for (const [name, tool] of Object.entries(registeredTools)) {
-      if (THIN_CORE_TOOL_NAMES.has(name)) continue;
-      const replacement = THIN_CORE_LEGACY_REPLACEMENTS[name];
-      const originalHandler = tool.handler;
-      if (replacement) {
-        tool._cmuxlayerOriginalHandler = originalHandler;
-      }
-      tool.update({
-        _meta: {
-          ...(tool._meta ?? {}),
-          defer_loading: true,
-          "cmuxlayer/interim": true,
-          ...(replacement
-            ? { deprecated: true, "cmuxlayer/replacement": replacement }
-            : {}),
-        },
-        ...(replacement
-          ? {
-              callback: async (args: Record<string, unknown>, extra: unknown) =>
-                withDeprecationWarning(
-                  await originalHandler(args, extra),
-                  name,
-                  replacement,
-                  emittedDeprecationWarnings,
-                ),
-            }
-          : {}),
-      });
-    }
   }
 
   return server;

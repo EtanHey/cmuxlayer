@@ -7,21 +7,17 @@ import { REGISTERED_TOOL_NAMES } from "../src/palette.js";
 
 const ENV_KEY = "CMUXLAYER_DEFAULT_PALETTE";
 const originalEnv = process.env[ENV_KEY];
-const THIN_CORE_TOOL_NAMES = [
-  "spawn_agent",
-  "send_to",
-  "wait_for",
-  "arm_watch",
-  "read_screen",
-  "my_agents",
-  "list_agents",
+const RATIFIED_TOOL_SURFACE = [
   "close_surface",
-  "dispatch_to_agent",
-  "list_surfaces",
   "control_health",
-  "stop_agent",
+  "list_agents",
+  "list_surfaces",
+  "read_screen",
+  "send_to",
+  "spawn_agent",
+  "update_surface",
+  "wait_for",
 ] as const;
-
 afterEach(() => {
   if (originalEnv === undefined) {
     delete process.env[ENV_KEY];
@@ -33,7 +29,10 @@ afterEach(() => {
 
 async function connectPaletteServer(value: string) {
   process.env[ENV_KEY] = value;
-  const server = createServer({ skipAgentLifecycle: true });
+  const server = createServer({
+    skipAgentLifecycle: true,
+    exposeInternalToolsForTests: false,
+  });
   const client = new Client({ name: "palette-test", version: "0.1.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -54,9 +53,33 @@ async function closePaletteServer(
 }
 
 describe("CMUXLAYER_DEFAULT_PALETTE", () => {
+  it("publishes only the ratified Phase 5 surface with an output schema per tool", async () => {
+    delete process.env[ENV_KEY];
+    const server = createServer({ exposeInternalToolsForTests: false });
+    const client = new Client({ name: "tool-cut-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    try {
+      await Promise.all([
+        server.connect(serverTransport),
+        client.connect(clientTransport),
+      ]);
+      const tools = (await client.listTools()).tools;
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
+        ...RATIFIED_TOOL_SURFACE,
+      ]);
+      for (const tool of tools) {
+        expect(tool.outputSchema, tool.name).toMatchObject({ type: "object" });
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("keeps the palette validation registry aligned with the full tool surface", async () => {
     delete process.env[ENV_KEY];
-    const server = createServer();
+    const server = createServer({ exposeInternalToolsForTests: false });
     try {
       const registered = Object.keys(
         (server as unknown as { _registeredTools: Record<string, unknown> })
@@ -70,7 +93,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
 
   it("lets the env palette override thin-core residency", async () => {
     const fixture = await connectPaletteServer(
-      "select_workspace,control_health,read_screen",
+      "update_surface,control_health,read_screen",
     );
     try {
       const listed = await fixture.client.listTools();
@@ -78,10 +101,10 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         "control_health",
         "expand_palette",
         "read_screen",
-        "select_workspace",
+        "update_surface",
       ]);
       expect(
-        listed.tools.find((tool) => tool.name === "select_workspace")?._meta
+        listed.tools.find((tool) => tool.name === "update_surface")?._meta
           ?.defer_loading,
       ).not.toBe(true);
     } finally {
@@ -105,13 +128,18 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         expanded: true,
       });
       const expandedTools = (await fixture.client.listTools()).tools;
-      expect(expandedTools).toHaveLength(26);
+      expect(expandedTools.map((tool) => tool.name).sort()).toEqual([
+        "close_surface",
+        "control_health",
+        "expand_palette",
+        "list_surfaces",
+        "read_screen",
+        "update_surface",
+      ]);
       expect(
-        expandedTools.find((tool) => tool.name === "delete_workspace")?._meta,
-      ).toMatchObject({
-        defer_loading: true,
-        "cmuxlayer/interim": true,
-      });
+        expandedTools.find((tool) => tool.name === "update_surface")
+          ?.outputSchema,
+      ).toMatchObject({ type: "object" });
       expect(fixture.listChanged).toHaveBeenCalledTimes(1);
 
       const notificationCount = fixture.listChanged.mock.calls.length;
@@ -124,7 +152,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
         expanded: false,
         already_expanded: true,
       });
-      expect((await fixture.client.listTools()).tools).toHaveLength(26);
+      expect((await fixture.client.listTools()).tools).toHaveLength(6);
       expect(fixture.listChanged).toHaveBeenCalledTimes(notificationCount);
     } finally {
       await closePaletteServer(fixture);
@@ -139,13 +167,13 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
       } else {
         process.env[ENV_KEY] = value;
       }
-      const server = createServer();
+      const server = createServer({ exposeInternalToolsForTests: false });
       try {
         const names = Object.keys(
           (server as unknown as { _registeredTools: Record<string, unknown> })
             ._registeredTools,
         );
-        expect(names).toHaveLength(43);
+        expect(names).toHaveLength(RATIFIED_TOOL_SURFACE.length);
         expect(names).not.toContain("expand_palette");
         const tools = (
           server as unknown as {
@@ -159,7 +187,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
           .filter(([, tool]) => tool._meta?.defer_loading !== true)
           .map(([name]) => name)
           .sort();
-        expect(resident).toEqual([...THIN_CORE_TOOL_NAMES].sort());
+        expect(resident).toEqual([...RATIFIED_TOOL_SURFACE].sort());
       } finally {
         await server.close();
       }
@@ -168,7 +196,7 @@ describe("CMUXLAYER_DEFAULT_PALETTE", () => {
 
   it("keeps deferred lifecycle tools skipped without crashing lifecycle setup", async () => {
     process.env[ENV_KEY] = "list_surfaces,control_health,read_screen";
-    const server = createServer();
+    const server = createServer({ exposeInternalToolsForTests: false });
     try {
       expect(
         Object.keys(

@@ -231,6 +231,7 @@ export type DeliveryEventType =
   | "spawn_agent"
   | "send_input"
   | "send_command"
+  | "send_key"
   | "send_to"
   | "send_to_agent"
   | "supersede_agent_goal"

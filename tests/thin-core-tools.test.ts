@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { createServer } from "../src/server.js";
+import { createServer, PUBLIC_TOOL_NAMES } from "../src/server.js";
 import type { ExecFn } from "../src/cmux-client.js";
 
 const CORE_TOOL_NAMES = [
@@ -112,66 +112,37 @@ function parseResult(result: {
 }
 
 describe("thin-core tool palette", () => {
-  it("lists exactly 12 signed core tools, defers interact, and deletes reorder_surface", () => {
+  it("publishes only the ratified Phase 5 surface", () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
+      exposeInternalToolsForTests: false,
     }) as any;
     const tools = server._registeredTools as Record<
       string,
       { _meta?: Record<string, unknown>; handler?: unknown }
     >;
 
-    expect(Object.keys(tools)).toHaveLength(43);
+    expect(Object.keys(tools).sort()).toEqual([...PUBLIC_TOOL_NAMES].sort());
     expect(tools.reorder_surface).toBeUndefined();
-    const immediate = Object.entries(tools)
-      .filter(([, tool]) => tool._meta?.defer_loading !== true)
-      .map(([name]) => name)
-      .sort();
-    expect(immediate).toEqual([...CORE_TOOL_NAMES].sort());
-    expect(tools.interact?._meta).toMatchObject({
-      defer_loading: true,
-      "cmuxlayer/interim": true,
-    });
-
-    for (const [name, tool] of Object.entries(tools)) {
-      if (!CORE_TOOL_NAMES.includes(name as (typeof CORE_TOOL_NAMES)[number])) {
-        expect(tool._meta, `${name} must be ToolSearch-deferred`).toMatchObject({
-          defer_loading: true,
-          "cmuxlayer/interim": true,
-        });
-      }
-      expect(tool.handler, `${name} remains callable`).toBeTypeOf("function");
-    }
+    expect(tools.interact).toBeUndefined();
   });
 
-  it("marks all one-release legacy aliases as deferred deprecations", () => {
+  it("removes legacy aliases instead of advertising deprecations", () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,
       controlHealthIntervalMs: 0,
+      exposeInternalToolsForTests: false,
     }) as any;
     const tools = server._registeredTools as Record<
       string,
       { _meta?: Record<string, unknown> }
     >;
 
-    for (const name of LEGACY_TOOL_NAMES.filter(
-      (candidate) => !REQUIRED_ESCAPE_HATCHES.includes(candidate as any),
-    )) {
-      expect(tools[name]?._meta).toMatchObject({
-        defer_loading: true,
-        deprecated: true,
-        "cmuxlayer/interim": true,
-      });
-    }
-    for (const name of REQUIRED_ESCAPE_HATCHES) {
-      expect(tools[name]?._meta).toMatchObject({
-        defer_loading: true,
-        "cmuxlayer/interim": true,
-      });
-      expect(tools[name]?._meta?.deprecated).not.toBe(true);
+    for (const name of LEGACY_TOOL_NAMES) {
+      expect(tools[name]).toBeUndefined();
     }
   });
 
@@ -284,7 +255,7 @@ describe("send_to consolidated modes", () => {
     expect(parsed.delivery).not.toBe("submitted");
     expect(parsed.delivery_state).not.toBe("submitted");
     expect(parsed.terminal).not.toBe(true);
-    expect(parsed.delivered).toBe(true);
+    expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
     expect(result.content[0].text).toContain("typed into");
     expect(result.content[0].text).toContain("not submitted");
@@ -317,8 +288,8 @@ describe("send_to consolidated modes", () => {
     expect(parsed.delivery).not.toBe("submitted");
     expect(parsed.delivery_state).not.toBe("submitted");
     expect(parsed.terminal).not.toBe(true);
-    expect(parsed.delivered).toBe(true);
-    expect(parsed.typed).toBeUndefined();
+    expect(parsed.delivered).toBe(false);
+    expect(parsed.typed).toBe(true);
     expect(result.content[0].text).toContain("submission attempted");
     expect(result.content[0].text).toContain("not verified");
   });
@@ -384,7 +355,7 @@ describe("consolidated compatibility", () => {
     expect(parseResult(result)).toMatchObject({ ok: true, results: [] });
   });
 
-  it("legacy aliases emit a runtime deprecation warning", async () => {
+  it("internal compatibility adapters use the survivor receipt without warnings", async () => {
     const server = createServer({
       exec: makeExec(),
       disableSpawnPreflight: true,
@@ -397,17 +368,17 @@ describe("consolidated compatibility", () => {
       {},
     );
 
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("send_input is deprecated"),
-    );
+    expect(warn).not.toHaveBeenCalled();
     expect(parseResult(result)).toMatchObject({
-      deprecation_warning: expect.stringContaining("send_to(mode=surface)"),
+      delivered: false,
+      terminal: false,
+      typed: true,
     });
     const second = await server._registeredTools.send_input.handler(
       { surface: "surface:1", text: "legacy again", press_enter: false },
       {},
     );
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
     expect(parseResult(second)).not.toHaveProperty("deprecation_warning");
     warn.mockRestore();
   });

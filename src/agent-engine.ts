@@ -6057,6 +6057,124 @@ export class AgentEngine {
     };
   }
 
+  /** Resume a captured CLI session on a fresh surface while preserving its
+   * stable public agent ID. This is the explicit counterpart to crash recovery. */
+  async resumeAgent(
+    agentId: string,
+    opts?: { workspace?: string },
+  ): Promise<SpawnAgentResult> {
+    const agent =
+      this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    if (!agent) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (!TERMINAL_STATES.has(agent.state)) {
+      throw new Error(
+        `Agent "${agent.agent_id}" is ${agent.state}; explicit resume requires a terminal agent`,
+      );
+    }
+    if (!agent.cli_session_id) {
+      throw new Error(
+        `Agent "${agent.agent_id}" has no captured CLI session to resume`,
+      );
+    }
+    const resumeCommand = buildResumeCommand(
+      agent.cli,
+      agent.repo,
+      agent.cli_session_id,
+      agent.launcher_name,
+    );
+    const requestedWorkspace = opts?.workspace ?? agent.workspace_id ?? undefined;
+    this.spawnGuard.check(requestedWorkspace);
+
+    let surface: CreatedAgentSurface | null = null;
+    let surfaceBound = false;
+    let recordReopened = false;
+    try {
+      surface = await this.createAgentSurface(requestedWorkspace, {
+        role: inferRecordRole(agent),
+        parentAgent: agent.parent_agent_id
+          ? this.registry.get(agent.parent_agent_id)
+          : null,
+        repo: agent.repo,
+        worktree: Boolean(agent.worktree_path),
+      });
+      this.assertSurfaceObserverEpochCurrent(
+        surface.observerEpoch,
+        "explicit agent resume",
+      );
+      const workspace = surface.actual_workspace ?? surface.workspace;
+      await this.client.focusSurface(surface.surface, {
+        workspace,
+        beforeMutation: async () => {
+          this.assertSurfaceObserverEpochCurrent(
+            surface!.observerEpoch,
+            "explicit agent resume focus",
+          );
+        },
+      });
+
+      const creating = this.stateMgr.reopenForResume(agent.agent_id);
+      recordReopened = true;
+      this.registry.set(agent.agent_id, creating);
+      const rebound = this.stateMgr.updateRecord(agent.agent_id, {
+        surface_id: surface.surface,
+        surface_uuid: surface.surface_id ?? null,
+        surface_observer_id: surface.observerId,
+        surface_provenance: "cmuxlayer_spawn",
+        workspace_id: workspace,
+        user_killed: false,
+        deletion_intent: false,
+        error: null,
+        pid: null,
+      });
+      this.registry.set(agent.agent_id, rebound);
+      surfaceBound = true;
+      const booting = this.stateMgr.transition(agent.agent_id, "booting", {
+        error: null,
+        pid: null,
+        cli_session_id: agent.cli_session_id,
+      });
+      this.registry.set(agent.agent_id, booting);
+      await this.sendLaunchCommand(
+        surface.surface,
+        workspace,
+        resumeCommand,
+        agent.agent_id,
+        surface.observerEpoch,
+      );
+      await this.reconcileRolePlacements("spawn", {
+        agentIds: new Set([agent.agent_id]),
+      });
+      return {
+        agent_id: agent.agent_id,
+        parent_agent_id: agent.parent_agent_id,
+        surface_id: surface.surface,
+        workspace_id: workspace,
+        state: "booting",
+        model: agent.model,
+        cwd: agent.launch_cwd ?? undefined,
+      };
+    } catch (error) {
+      if (surface && !surfaceBound) {
+        await this.cleanupUnboundCreatedSurface(surface, "agent-placement");
+      }
+      if (recordReopened) {
+        try {
+          const failed = this.stateMgr.transition(agent.agent_id, "error", {
+            error: `Explicit resume failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+          this.registry.set(agent.agent_id, failed);
+        } catch {
+          // Preserve the original failure.
+        }
+      }
+      throw error;
+    }
+  }
+
   /**
    * Cascade-kill all agents in the subtree rooted at rootId.
    * Uses DFS post-order (children before root). Continues on failures (best-effort).

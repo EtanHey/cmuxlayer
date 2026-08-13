@@ -91,9 +91,9 @@ describe("B1: ToolAnnotations on all tools", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("all 43 registered tools have annotations", () => {
+  it("all registered test-mode tools have annotations", () => {
     const toolNames = Object.keys(tools);
-    expect(toolNames.length).toBe(43);
+    expect(toolNames.length).toBe(44);
     for (const name of toolNames) {
       expect(
         tools[name].annotations,

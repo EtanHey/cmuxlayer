@@ -374,6 +374,43 @@ export class StateManager {
     return updated;
   }
 
+  /** Explicitly reopen a terminal record for stable-ID session resume.
+   * This is intentionally separate from the normal lifecycle transition graph. */
+  reopenForResume(agentId: string): AgentRecord {
+    const dirName = this.resolveStateDir(agentId);
+    const current = dirName ? this.readStateFromDir(dirName) : null;
+    if (!current) throw new Error(`Agent not found: ${agentId}`);
+    if (current.state !== "done" && current.state !== "error") {
+      throw new Error(
+        `Agent ${agentId} cannot reopen from non-terminal state ${current.state}`,
+      );
+    }
+    const updated: AgentRecord = {
+      ...current,
+      state: "creating",
+      error: null,
+      pid: null,
+      version: current.version + 1,
+      updated_at: new Date().toISOString(),
+    };
+    const agentDir = join(this.baseDir, dirName!);
+    const tmpFile = join(agentDir, "state.json.tmp");
+    writeFileSync(tmpFile, JSON.stringify(updated, null, 2), "utf-8");
+    renameSync(tmpFile, this.stateFilePath(dirName!));
+    this.surfaceSessionIndex.persistRecord(updated);
+    this.eventLog.append({
+      ts: updated.updated_at,
+      agent_id: agentId,
+      event: "transition",
+      from_state: current.state,
+      to_state: "creating",
+      surface_id: current.surface_id,
+      source: "explicit_resume",
+      error: null,
+    });
+    return updated;
+  }
+
   /**
    * Update arbitrary non-state fields on an agent record without transition validation.
    */
