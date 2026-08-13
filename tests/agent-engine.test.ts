@@ -948,6 +948,35 @@ describe("AgentEngine", () => {
       });
     });
 
+    it("persists the requested Codex effort for post-revive verification", async () => {
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        effort: "max",
+        cli: "codex",
+        prompt: "Keep the effort pin observable",
+      });
+
+      expect(stateMgr.readState(result.agent_id)).toMatchObject({
+        effort: "max",
+        parsed_effort: null,
+        effort_mismatch: null,
+      });
+    });
+
+    it("persists the live launcher default effort for Codex", async () => {
+      const result = await engine.spawnAgent({
+        repo: "brainlayer",
+        model: "gpt-5.4",
+        cli: "codex",
+        prompt: "Track the launcher default",
+      });
+
+      expect(stateMgr.readState(result.agent_id)).toMatchObject({
+        effort: "high",
+      });
+    });
+
     it("cleans the created surface when initial state persistence fails before commit", async () => {
       vi.spyOn(stateMgr, "writeState").mockImplementationOnce(() => {
         throw new Error("state disk unavailable");
@@ -9196,6 +9225,7 @@ Session ID: ${sessionId}`,
           parent_agent_id: "cmuxlayerClaude",
           spawn_depth: 1,
           model: "gpt-5.4",
+          effort: "xhigh",
           cli: "codex",
           cli_session_id: sessionId,
           auto_revive: true,
@@ -9251,6 +9281,8 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("cmuxlayerCodex-auto-revive")).toMatchObject({
         state: "ready",
         parsed_model: "gpt-5.4 xhigh",
+        parsed_effort: "xhigh",
+        effort_mismatch: false,
         revive_attempts: 1,
         revive_last_outcome: "revived",
         revive_completed_at: expect.any(String),
@@ -9263,6 +9295,83 @@ Session ID: ${sessionId}`,
           ),
         }),
       ]);
+    });
+
+    it("preserves the lifetime attempt count across repeated CLI-death episodes", async () => {
+      const sessionId = "019faccc-1010-7222-8333-444455556666";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-flapping",
+          state: "working",
+          surface_id: "surface:cli-auto-revive-flapping",
+          surface_provenance: "cmuxlayer_spawn",
+          cli: "codex",
+          cli_session_id: sessionId,
+          auto_revive: true,
+          revive_attempts: 9,
+          revive_last_outcome: "revived",
+          revive_completed_at: "2026-08-13T06:59:00.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-flapping")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-flapping",
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:cli-auto-revive-flapping",
+        `codex resume ${sessionId}`,
+        expect.objectContaining({ workspace: undefined }),
+      );
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-flapping"),
+      ).toMatchObject({
+        state: "booting",
+        revive_attempts: MAX_RESPAWN_ATTEMPTS,
+        revive_last_outcome: "pending",
+      });
+    });
+
+    it("does not route an active failed auto-revive through legacy crash recovery", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-no-legacy-overlap",
+          state: "error",
+          surface_id: "surface:cli-auto-revive-no-legacy-overlap",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: "019faccc-2020-7333-8444-555566667777",
+          crash_recover: true,
+          auto_revive: true,
+          revive_attempts: 1,
+          revive_last_outcome: "failed",
+          revive_last_error: "agent disappeared during guarded resume",
+          revive_next_attempt_at: "2099-08-13T07:00:00.000Z",
+          error:
+            'Auto-revive attempt 1 failed: Agent "child" disappeared during agent launch',
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("surface:cli-auto-revive-no-legacy-overlap"),
+      ];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-no-legacy-overlap"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: 1,
+        revive_last_outcome: "failed",
+      });
     });
 
     it("records a failed same-surface revive attempt without sending a premature parent notification", async () => {
@@ -11342,6 +11451,34 @@ Session ID: ${sessionId}`,
         state: "working",
         user_killed: false,
       });
+    });
+
+    it("marks an intentional stop before sending the CLI signal", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stop-intent-before-signal",
+          state: "working",
+          surface_id: "surface:42",
+          surface_provenance: "cmuxlayer_spawn",
+          auto_revive: true,
+          cli_session_id: "019faccc-3030-7444-8555-666677778888",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        async () => {
+          expect(
+            engine.getAgentState("agent-stop-intent-before-signal"),
+          ).toMatchObject({ user_killed: true });
+        },
+      );
+
+      await engine.stopAgent("agent-stop-intent-before-signal");
+
+      expect(
+        engine.getAgentState("agent-stop-intent-before-signal"),
+      ).toMatchObject({ state: "done", user_killed: true });
     });
 
     it("throws for non-existent agent", async () => {

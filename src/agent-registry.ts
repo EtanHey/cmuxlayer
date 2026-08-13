@@ -2124,6 +2124,8 @@ export class AgentRegistry {
       revive_previous_state: null,
       revive_consecutive_observations: 0,
       revive_notification_sent_at: null,
+      parsed_effort: null,
+      effort_mismatch: null,
     };
   }
 

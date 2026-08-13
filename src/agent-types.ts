@@ -52,6 +52,8 @@ export interface AgentRecord {
   state: AgentState;
   repo: string;
   model: string;
+  /** Requested Codex reasoning effort; null/absent for other harnesses. */
+  effort?: string | null;
   cli: CliType;
   cli_session_id: string | null;
   cli_session_path?: string | null;
@@ -114,6 +116,9 @@ export interface AgentRecord {
   prompt_delivered?: boolean;
   parsed_model?: string | null;
   model_mismatch?: boolean | null;
+  /** Codex effort observed in the live status line. */
+  parsed_effort?: string | null;
+  effort_mismatch?: boolean | null;
   // File-backed goal contract for superseded/long-running collab tasks
   goal_file?: string | null;
   // Launch context for worktree/profile-aware spawns
@@ -179,7 +184,12 @@ export function isCrashRecoveryExhausted(error: string | null): boolean {
 export function isCrashRecoveryEligible(
   agent: Pick<
     AgentRecord,
-    "state" | "crash_recover" | "user_killed" | "cli_session_id" | "error"
+    | "state"
+    | "crash_recover"
+    | "user_killed"
+    | "cli_session_id"
+    | "error"
+    | "revive_last_outcome"
   >,
 ): boolean {
   return (
@@ -187,6 +197,9 @@ export function isCrashRecoveryEligible(
     agent.crash_recover === true &&
     agent.user_killed !== true &&
     !!agent.cli_session_id &&
+    !["pending", "failed", "unrecoverable"].includes(
+      agent.revive_last_outcome ?? "",
+    ) &&
     hasRecoverableCrashError(agent.error)
   );
 }

@@ -648,6 +648,8 @@ export class StateManager {
       prompt_delivered: true,
       parsed_model: discovered.model ?? null,
       model_mismatch: null,
+      parsed_effort: null,
+      effort_mismatch: null,
     };
     this.writeState(record);
     return record;

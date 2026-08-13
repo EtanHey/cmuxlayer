@@ -119,6 +119,7 @@ import {
   type HarnessSessionWithMeta,
 } from "./harness-session.js";
 import {
+  CODEX_EFFORT_VALUES,
   MODEL_OVERRIDE_ENV,
   resolveLaunchModelFlag,
   resolveSpawnEffort,
@@ -617,6 +618,25 @@ export function computeModelMismatch(
   const parsed = parsedModel?.toLowerCase().trim();
   if (!requested || !parsed) return null;
   return !parsed.includes(requested) && !requested.includes(parsed);
+}
+
+export function parseCodexEffort(
+  parsedModel: string | null,
+): CodexEffort | null {
+  const candidate = parsedModel?.trim().split(/\s+/).at(-1)?.toLowerCase();
+  return candidate &&
+    (CODEX_EFFORT_VALUES as readonly string[]).includes(candidate)
+    ? (candidate as CodexEffort)
+    : null;
+}
+
+export function computeEffortMismatch(
+  requestedEffort: string | null | undefined,
+  parsedEffort: string | null,
+): boolean | null {
+  const requested = requestedEffort?.trim().toLowerCase();
+  if (!requested || !parsedEffort) return null;
+  return requested !== parsedEffort;
 }
 
 export { buildRawResumeCommand, buildResumeCommand } from "./agent-command.js";
@@ -2844,9 +2864,13 @@ export class AgentEngine {
     try {
       const screen = await this.readSweepScreen(agent, ctx);
       const parsed = parseScreen(screen.text);
+      const parsedEffort =
+        agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
       const settlement = {
         parsed_model: parsed.model,
         model_mismatch: computeModelMismatch(agent.model, parsed.model),
+        parsed_effort: parsedEffort,
+        effort_mismatch: computeEffortMismatch(agent.effort, parsedEffort),
       };
       const evidence = this.readReadyEvidence(agent, screen.text);
       const promptStillPending =
@@ -3347,7 +3371,6 @@ export class AgentEngine {
 
     if (this.shouldAutoReviveCliExit(exited)) {
       const tracked = this.stateMgr.updateRecord(exited.agent_id, {
-        revive_attempts: 0,
         revive_last_attempt_at: null,
         revive_next_attempt_at: null,
         revive_completed_at: null,
@@ -5747,6 +5770,8 @@ export class AgentEngine {
       state: "booting",
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
+      effort:
+        spawnParams.cli === "codex" ? (effort ?? "high") : null,
       cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
@@ -5795,6 +5820,8 @@ export class AgentEngine {
       prompt_delivered: false,
       parsed_model: null,
       model_mismatch: null,
+      parsed_effort: null,
+      effort_mismatch: null,
       launch_cwd: launchCwd,
       mcp_profile: spawnParams.mcp_profile_label ?? null,
       worktree_path: spawnParams.cwd ?? null,
@@ -6782,6 +6809,26 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
+    const previousUserKilled = agent.user_killed ?? false;
+    let stopIntentMarked = false;
+    if (userInitiated && !previousUserKilled) {
+      agent = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: true,
+      });
+      this.registry.set(canonicalAgentId, agent);
+      stopIntentMarked = true;
+    }
+    const rollbackUnacceptedStopIntent = (): void => {
+      if (!stopIntentMarked) return;
+      const current = this.registry.get(canonicalAgentId);
+      if (!current) return;
+      const restored = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: previousUserKilled,
+      });
+      this.registry.set(canonicalAgentId, restored);
+      stopIntentMarked = false;
+    };
+
     let forceSignalAccepted = force === true && !agent.pid;
     if (force && agent.pid) {
       try {
@@ -6789,6 +6836,7 @@ export class AgentEngine {
         forceSignalAccepted = true;
       } catch (error) {
         forceSignalAccepted = this.isProcessMissingError(error);
+        if (!forceSignalAccepted) rollbackUnacceptedStopIntent();
         // Process may already be dead; other failures must preserve tracking.
       }
     } else {
@@ -6800,11 +6848,16 @@ export class AgentEngine {
           "Ctrl+C",
         );
       };
-      await this.client.sendKey(route.surface_id, "c-c", {
-        workspace: route.workspace_id ?? undefined,
-        ...this.stableSurfaceWriteOptions(route.surface_uuid),
-        beforeMutation: assertSignalRouteCurrent,
-      });
+      try {
+        await this.client.sendKey(route.surface_id, "c-c", {
+          workspace: route.workspace_id ?? undefined,
+          ...this.stableSurfaceWriteOptions(route.surface_uuid),
+          beforeMutation: assertSignalRouteCurrent,
+        });
+      } catch (error) {
+        rollbackUnacceptedStopIntent();
+        throw error;
+      }
     }
 
     // Ctrl+C and process teardown can move the stable UUID to a replacement
