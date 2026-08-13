@@ -198,6 +198,8 @@ export interface AgentDeliveryReceipt {
   submission_started_at?: string | null;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
   next_attempt_at?: string | null;
+  /** The receiving TUI visibly accepted this into its own queue; never replay it. */
+  composer_accepted?: boolean;
 }
 
 /** A known pre-mutation delivery rejection that is safe to retry. */
@@ -210,7 +212,11 @@ export class RetryableDeliveryError extends Error {
 
 type DeliverySubmitter = (
   receipt: AgentDeliveryReceipt,
-) => Promise<{ retry_count: number; submit_verified: boolean | null }>;
+) => Promise<{
+  retry_count: number;
+  submit_verified: boolean | null;
+  delivery?: "submitted" | "queued";
+}>;
 
 export interface SpawnAgentParams {
   repo: string;
@@ -5057,7 +5063,8 @@ export class AgentEngine {
           };
           if (
             receipt.delivery_state === "queued" &&
-            receipt.submission_started_at
+            receipt.submission_started_at &&
+            receipt.composer_accepted !== true
           ) {
             receipt.delivery_state = "failed";
             receipt.terminal = true;
@@ -5127,6 +5134,37 @@ export class AgentEngine {
     return { ...receipt };
   }
 
+  acceptComposerQueue(input: {
+    delivery_id: string;
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: DeliveryEventType;
+    retry_count: number;
+  }): AgentDeliveryReceipt {
+    const acceptedAt = new Date().toISOString();
+    const receipt: AgentDeliveryReceipt = {
+      ...input,
+      delivery_state: "queued",
+      terminal: false,
+      created_at: acceptedAt,
+      resolved_at: null,
+      submit_verified: null,
+      error: null,
+      submission_started_at: acceptedAt,
+      next_attempt_at: null,
+      composer_accepted: true,
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    try {
+      this.persistDeliveryReceipts();
+    } catch (error) {
+      this.deliveryReceipts.delete(receipt.delivery_id);
+      throw error;
+    }
+    return { ...receipt };
+  }
+
   resolveDelivery(
     input: Omit<AgentDeliveryReceipt, "created_at" | "resolved_at"> & {
       created_at?: string;
@@ -5157,6 +5195,7 @@ export class AgentEngine {
     try {
       for (const receipt of this.deliveryReceipts.values()) {
         if (receipt.delivery_state !== "queued") continue;
+        if (receipt.composer_accepted === true) continue;
         const agent = this.getAgentState(receipt.agent_id);
         if (!agent) {
           receipt.delivery_state = "failed";
@@ -5195,13 +5234,21 @@ export class AgentEngine {
           ]).finally(() => {
             if (timeout) clearTimeout(timeout);
           });
-          receipt.delivery_state = "submitted";
-          receipt.terminal = true;
-          receipt.resolved_at = new Date().toISOString();
           receipt.retry_count += result.retry_count;
-          receipt.submit_verified = result.submit_verified;
           receipt.error = null;
           receipt.next_attempt_at = null;
+          if (result.delivery === "queued") {
+            receipt.delivery_state = "queued";
+            receipt.terminal = false;
+            receipt.resolved_at = null;
+            receipt.submit_verified = null;
+            receipt.composer_accepted = true;
+          } else {
+            receipt.delivery_state = "submitted";
+            receipt.terminal = true;
+            receipt.resolved_at = new Date().toISOString();
+            receipt.submit_verified = result.submit_verified;
+          }
         } catch (error) {
           if (error instanceof RetryableDeliveryError) {
             receipt.submission_started_at = null;

@@ -170,6 +170,9 @@ function issueSeverity(
   ) {
     return "info";
   }
+  if (code === "inbox_monitor_not_alive" && context.autoDiscovered) {
+    return "info";
+  }
   if (
     code === "inbox_monitor_not_alive" &&
     !context.inboxMonitorWithinBootGrace

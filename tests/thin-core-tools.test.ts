@@ -31,6 +31,12 @@ const LEGACY_TOOL_NAMES = [
   "wait_for_all",
 ] as const;
 
+const REQUIRED_ESCAPE_HATCHES = [
+  "send_command",
+  "send_key",
+  "new_split",
+] as const;
+
 function makeExec(): ExecFn {
   return vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     if (args.includes("list-workspaces")) {
@@ -151,13 +157,45 @@ describe("thin-core tool palette", () => {
       { _meta?: Record<string, unknown> }
     >;
 
-    for (const name of LEGACY_TOOL_NAMES) {
+    for (const name of LEGACY_TOOL_NAMES.filter(
+      (candidate) => !REQUIRED_ESCAPE_HATCHES.includes(candidate as any),
+    )) {
       expect(tools[name]?._meta).toMatchObject({
         defer_loading: true,
         deprecated: true,
         "cmuxlayer/interim": true,
       });
     }
+    for (const name of REQUIRED_ESCAPE_HATCHES) {
+      expect(tools[name]?._meta).toMatchObject({
+        defer_loading: true,
+        "cmuxlayer/interim": true,
+      });
+      expect(tools[name]?._meta?.deprecated).not.toBe(true);
+    }
+  });
+
+  it("accepts optional new_split direction and string worktree shorthand in tool schemas", () => {
+    const server = createServer({
+      exec: makeExec(),
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    expect(
+      server._registeredTools.new_split.inputSchema.safeParse({
+        type: "terminal",
+        role: "worker",
+      }).success,
+    ).toBe(true);
+    expect(
+      server._registeredTools.spawn_agent.inputSchema.safeParse({
+        repo: "cmuxlayer",
+        cli: "codex",
+        role: "worker",
+        worktree: "tool-usage",
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -218,6 +256,71 @@ describe("send_to consolidated modes", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:1"]),
     );
+  });
+
+  it("does not claim a terminal submission when surface mode only types text", async () => {
+    const exec = makeExec();
+    const server = createServer({
+      exec,
+      defaultPalette: "send_to",
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    const result = await server._registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        target: "surface:1",
+        text: "typed but not submitted",
+        press_enter: false,
+      },
+      {},
+    );
+    const parsed = parseResult(result);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.delivery).not.toBe("submitted");
+    expect(parsed.delivery_state).not.toBe("submitted");
+    expect(parsed.terminal).not.toBe(true);
+    expect(parsed.delivered).toBe(true);
+    expect(parsed.typed).toBe(true);
+    expect(result.content[0].text).toContain("typed into");
+    expect(result.content[0].text).toContain("not submitted");
+  });
+
+  it("does not claim a terminal submission when surface verification was skipped", async () => {
+    const exec = makeExec();
+    const server = createServer({
+      exec,
+      defaultPalette: "send_to",
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    const result = await server._registeredTools.send_to.handler(
+      {
+        mode: "surface",
+        target: "surface:1",
+        text: "return pressed without verification",
+        press_enter: true,
+      },
+      {},
+    );
+    const parsed = parseResult(result);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.submit_attempted).toBe(true);
+    expect(parsed.submit_verified).toBeNull();
+    expect(parsed.delivery).not.toBe("submitted");
+    expect(parsed.delivery_state).not.toBe("submitted");
+    expect(parsed.terminal).not.toBe(true);
+    expect(parsed.delivered).toBe(true);
+    expect(parsed.typed).toBeUndefined();
+    expect(result.content[0].text).toContain("submission attempted");
+    expect(result.content[0].text).toContain("not verified");
   });
 
   it("routes command mode through atomic raw-surface command delivery", async () => {
@@ -300,7 +403,30 @@ describe("consolidated compatibility", () => {
     expect(parseResult(result)).toMatchObject({
       deprecation_warning: expect.stringContaining("send_to(mode=surface)"),
     });
+    const second = await server._registeredTools.send_input.handler(
+      { surface: "surface:1", text: "legacy again", press_enter: false },
+      {},
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(parseResult(second)).not.toHaveProperty("deprecation_warning");
     warn.mockRestore();
+  });
+
+  it("prints one working send_to example for invalid mode input", async () => {
+    const server = createServer({
+      exec: makeExec(),
+      disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0,
+    }) as any;
+
+    const result = await server._registeredTools.send_to.handler(
+      { mode: "message", target: "agent-1", text: "hello" },
+      {},
+    );
+
+    expect(parseResult(result).error).toMatch(
+      /Example: send_to\(\{ mode: "agent", agent_id: "cmuxlayerCodex-1234", text: "hello" \}\)/,
+    );
   });
 });
 

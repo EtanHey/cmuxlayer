@@ -249,7 +249,7 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     rmSync(inboxDir, { recursive: true, force: true });
   });
 
-  it("returns a non-success durable receipt when never armed, while still nudging a TERMINAL agent", async () => {
+  it("returns verified success when never armed but the TERMINAL-agent nudge submits", async () => {
     const agentId = await spawnTestAgent(server);
 
     // Poison-equivalent: force a terminal state. The nudge must still go out.
@@ -272,16 +272,22 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(parsed.ok).toBe(true);
     expect(parsed.monitor_state).toBe("never-armed");
     expect(parsed.delivery_status).toBe("queued_monitor_never_armed");
-    expect(parsed.retryable).toBe(false);
     expect(parsed.durable).toBe(true);
     expect(parsed.dispatched.task).toBe("GO");
     expect(parsed.monitor_alive).toBe(false);
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(true);
+    expect(parsed.nudge.delivery).toBe("submitted");
+    expect(parsed.nudge.delivery_id).toEqual(expect.any(String));
+    const engine = server._registeredTools["interact"]._engine;
+    expect(engine.getDeliveryReceipt(parsed.nudge.delivery_id)).toMatchObject({
+      delivery_state: "submitted",
+      terminal: true,
+      source_event: "dispatch_nudge",
+    });
     // The pointer was typed into the agent's surface despite terminal state.
     const after = sendCalls(exec);
     expect(after.length).toBeGreaterThan(before);
@@ -324,6 +330,71 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(parsed.nudge.attempted).toBe(true);
     expect(parsed.nudge.sent).toBe(true);
     expect(readInbox(agentId, { baseDir: inboxDir })).toHaveLength(1);
+  });
+
+  it("queues a busy-agent inbox wake without typing into its active composer", async () => {
+    const agentId = await spawnTestAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
+    engine.getRegistry().set(agentId, working);
+    writeHeartbeat(agentId, { baseDir: inboxDir, now: () => 1 });
+
+    const before = sendCalls(exec).length;
+    const result = await server._registeredTools["dispatch_to_agent"].handler(
+      {
+        agent_id: agentId,
+        task: "Read the durable inbox after the current turn",
+        from: "orc",
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.nudge).toMatchObject({
+      attempted: true,
+      sent: true,
+      delivery: "queued",
+      delivery_id: expect.any(String),
+    });
+    expect(sendCalls(exec)).toHaveLength(before);
+    expect(engine.getDeliveryReceipt(parsed.nudge.delivery_id)).toMatchObject({
+      delivery_state: "queued",
+      terminal: false,
+      source_event: "dispatch_nudge",
+    });
+  });
+
+  it("reports success when a never-armed busy recipient accepts the verified nudge queue", async () => {
+    const agentId = await spawnTestAgent(server);
+    const engine = server._registeredTools["interact"]._engine;
+    const working = engine.stateMgr.updateRecord(agentId, { state: "working" });
+    engine.getRegistry().set(agentId, working);
+
+    const before = sendCalls(exec).length;
+    const result = await server._registeredTools["dispatch_to_agent"].handler(
+      {
+        agent_id: agentId,
+        task: "Live queue acceptance is delivery evidence",
+        from: "orc",
+        nudge: "auto",
+      },
+      {} as any,
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.monitor_state).toBe("never-armed");
+    expect(parsed.nudge).toMatchObject({
+      attempted: true,
+      sent: true,
+      delivery: "queued",
+      delivery_id: expect.any(String),
+    });
+    expect(sendCalls(exec)).toHaveLength(before);
   });
 
   it("does NOT nudge when the monitor heartbeat is fresh", async () => {

@@ -273,7 +273,7 @@ describe("spawn monitor boot", () => {
     }
   });
 
-  it("durably nudges but does not report delivery success until the agent heartbeats", async () => {
+  it("reports success when the verified nudge submits before the agent heartbeats", async () => {
     const spawn = server._registeredTools["spawn_agent"];
     const dispatch = server._registeredTools["dispatch_to_agent"];
 
@@ -302,11 +302,9 @@ describe("spawn monitor boot", () => {
     );
 
     const parsed = parseToolResult(result);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(parsed.ok).toBe(true);
     expect(parsed.monitor_state).toBe("never-armed");
     expect(parsed.delivery_status).toBe("queued_monitor_never_armed");
-    expect(parsed.retryable).toBe(false);
     expect(parsed.durable).toBe(true);
     expect(parsed.monitor_alive).toBe(false);
     expect(parsed.health.issue_codes).toContain("inbox_monitor_not_alive");

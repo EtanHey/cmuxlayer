@@ -199,6 +199,26 @@ describe("worktree helpers", () => {
     ]);
   });
 
+  it("accepts a worktree name string as shorthand for a named request", async () => {
+    const repoRoot = join(TEST_ROOT, "repo");
+    mkdirSync(repoRoot, { recursive: true });
+    const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
+
+    const result = await prepareWorktree({
+      repo: "cmuxlayer",
+      repoRoot,
+      homeGitsDir: TEST_ROOT,
+      worktree: "tool usage",
+      exec,
+    });
+
+    expect(result).toMatchObject({
+      path: join(repoRoot, ".worktrees", "tool-usage"),
+      name: "tool-usage",
+      branch: "wt/tool-usage",
+    });
+  });
+
   it("rejects an empty explicit worktree name", async () => {
     await expect(
       prepareWorktree({
