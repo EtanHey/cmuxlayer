@@ -2359,9 +2359,7 @@ export class AgentEngine {
       screenText,
       parsed,
     );
-    const canBeInteractive =
-      parsed.control_state !== "shell" &&
-      !/(?:^|\n)\s*exit status [1-9]\d*\s*(?:\n|$)/im.test(screenText);
+    const canBeInteractive = parsed.control_state !== "shell";
     const activeCodex =
       agent.cli === "codex" &&
       canBeInteractive &&

@@ -9347,6 +9347,60 @@ Session ID: ${sessionId}`,
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
     });
 
+    it("accepts a successful retry after stale failed-resume scrollback", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-retry-success",
+          state: "booting",
+          surface_id: "surface:cli-auto-revive-retry-success",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          cli: "codex",
+          cli_session_id: "019faccc-5050-7666-8777-888899990000",
+          auto_revive: true,
+          effort: "xhigh",
+          revive_attempts: 2,
+          revive_last_outcome: "pending",
+          revive_previous_state: "working",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("surface:cli-auto-revive-retry-success"),
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-retry-success",
+        text:
+          "Error: Failed to resume session: no rollout found (code -32600)\n" +
+          "exit status 1\n" +
+          "OpenAI Codex\n" +
+          "Model: gpt-5.6-sol xhigh\n" +
+          "› Continue the previous task\n" +
+          "gpt-5.6-sol xhigh · ~/Gits/cmuxlayer",
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-retry-success"),
+      ).toMatchObject({
+        state: "ready",
+        revive_attempts: 2,
+        revive_last_outcome: "revived",
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_cli_exit_revived",
+          task: expect.stringContaining(
+            "cmuxlayerCodex-auto-revive-retry-success revived automatically on attempt 2",
+          ),
+        }),
+      ]);
+    });
+
     it("preserves the lifetime attempt count across repeated CLI-death episodes", async () => {
       const sessionId = "019faccc-1010-7222-8333-444455556666";
       stateMgr.writeState(
