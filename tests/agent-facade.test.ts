@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRouteTable,
   resolveAgentRoute,
+  toObservedPublicAgent,
   toPublicAgent,
 } from "../src/agent-facade.js";
 import type { AgentRecord } from "../src/agent-types.js";
@@ -35,6 +36,20 @@ function makeRecord(overrides?: Partial<AgentRecord>): AgentRecord {
 }
 
 describe("agent facade projections", () => {
+  it("timestamps a registry model fallback as a registry observation", () => {
+    const projected = toObservedPublicAgent(makeRecord(), {
+      derivedAtMs: 2_000,
+      screenObservedAtMs: 1_000,
+      screenModel: null,
+    });
+
+    expect(projected.model).toEqual({
+      value: "sonnet",
+      source: "registry",
+      observed_at_ms: 2_000,
+    });
+  });
+
   it("projects a PublicAgent without leaking surface topology", () => {
     const projected = toPublicAgent(makeRecord());
 

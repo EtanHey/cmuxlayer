@@ -22,6 +22,13 @@ export type AgentFunction = "implementor" | "reviewer" | "gatherer";
 export type AgentPlacement = "left" | "right";
 export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
+export type ObservationSource = "screen" | "registry" | "process";
+
+export interface Observed<T> {
+  value: T;
+  source: ObservationSource;
+  observed_at_ms: number;
+}
 
 export const MAX_SPAWN_DEPTH = 2;
 export const MAX_CHILDREN = 10;
@@ -113,6 +120,19 @@ export interface PublicAgent {
   resume_command?: string;
   submit_verified?: boolean | null;
   model_mismatch?: boolean | null;
+}
+
+/** Provenance-labelled projection used by live-derived list_agents output. */
+export interface ObservedPublicAgent {
+  agent_id: string;
+  repo: string;
+  model: Observed<string | null>;
+  state: Observed<AgentState | null>;
+  session_id: Observed<string | null>;
+  resumable: Observed<boolean>;
+  resume_command?: string;
+  submit_verified: Observed<boolean | null>;
+  model_mismatch: Observed<boolean | null>;
 }
 
 export interface AgentRoute {

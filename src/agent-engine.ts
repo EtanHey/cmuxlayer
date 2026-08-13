@@ -4577,6 +4577,18 @@ export class AgentEngine {
       confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
       now: Date.now(),
     });
+    for (const record of [...this.registry.list()]) {
+      if (!record.agent_id.includes("-pending-") || !record.cli_session_id) {
+        continue;
+      }
+      const finalized = this.finalizeCapturedSession(record, {
+        session_id: record.cli_session_id,
+        path: record.cli_session_path ?? null,
+      });
+      if (newlySurfacelessAgentIds.delete(record.agent_id)) {
+        newlySurfacelessAgentIds.add(finalized.agent_id);
+      }
+    }
     this.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
@@ -5865,7 +5877,7 @@ export class AgentEngine {
   }
 
   listPublicAgents(filter?: AgentFilter): PublicAgent[] {
-    return this.listAgents(filter).map(toPublicAgent);
+    return this.listAgents(filter).map((agent) => toPublicAgent(agent));
   }
 
   resolveAgentRoute(agentId: string): AgentRoute {

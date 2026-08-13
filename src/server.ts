@@ -77,11 +77,12 @@ import {
 import {
   resumeCommandForAgent,
   toAgentStatePayload,
-  toPublicAgent,
+  toObservedPublicAgent,
 } from "./agent-facade.js";
 import {
   DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
+  type AgentHealth,
   type AgentHealthIssueCode,
 } from "./agent-health.js";
 import {
@@ -95,6 +96,7 @@ import type {
   AgentAuthority,
   AgentFunction,
   AgentPlacement,
+  ObservedPublicAgent,
   AgentRole,
   AgentState,
   CliType,
@@ -6289,6 +6291,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (
       binding &&
       (overrides?.screen_status === undefined ||
+        overrides?.screen_agent_type === undefined ||
+        overrides?.screen_control_state === undefined ||
         overrides?.screen_actions === undefined)
     ) {
       parsedSurface = await readParsedSurface(
@@ -6303,16 +6307,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     const safeSurfaceOverrides: AgentHealthInputOverrides = {
       ...surfaceOverrides,
-      screen_status: binding
-        ? overrides?.screen_status !== undefined
+      screen_status:
+        overrides?.screen_status !== undefined
           ? overrides.screen_status
-          : (parsedSurface?.parsed.status ?? null)
-        : null,
-      screen_actions: binding
-        ? overrides?.screen_actions !== undefined
+          : binding
+            ? (parsedSurface?.parsed.status ?? null)
+            : null,
+      screen_agent_type:
+        overrides?.screen_agent_type !== undefined
+          ? overrides.screen_agent_type
+          : binding
+            ? (parsedSurface?.parsed.agent_type ?? null)
+            : null,
+      screen_control_state:
+        overrides?.screen_control_state !== undefined
+          ? overrides.screen_control_state
+          : binding
+            ? (parsedSurface?.parsed.control_state ?? null)
+            : null,
+      screen_actions:
+        overrides?.screen_actions !== undefined
           ? overrides.screen_actions
-          : (parsedSurface?.parsed.actions ?? null)
-        : null,
+          : binding
+            ? (parsedSurface?.parsed.actions ?? null)
+            : null,
       surface_write_liveness: binding
         ? surfaceWriteLiveness.observe(
             binding.surfaceRef,
@@ -6349,7 +6367,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ...safeSurfaceOverrides,
       },
     );
-    return evaluateAgentHealth(agent, input);
+    const health = evaluateAgentHealth(agent, input);
+    return {
+      ...health,
+      ...(parsedSurface
+        ? {
+            screen_observation: {
+              observed_at_ms: Date.now(),
+              status: parsedSurface.parsed.status,
+              agent_type: parsedSurface.parsed.agent_type,
+              control_state: parsedSurface.parsed.control_state,
+              model: parsedSurface.parsed.model,
+            },
+          }
+        : {}),
+    };
   };
 
   const spawnDeliveryWorkspace = (
@@ -11679,9 +11711,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 15. list_agents
+    type ListAgentsCacheEntry = {
+      topology_signature: string;
+      derived_at: number;
+      agents: Array<ObservedPublicAgent & { health: AgentHealth }>;
+      skipped_agents: Array<{ agent_id: string; error: string }>;
+    };
+    const listAgentsCache = new Map<string, ListAgentsCacheEntry>();
+    const listAgentsTopologySignature = (
+      topology: SurfaceTopologySnapshot | null,
+    ): string =>
+      JSON.stringify({
+        complete: topology?.complete ?? false,
+        surfaces: topology
+          ? [...topology.workspaceBySurface]
+              .map(([surface, workspace]) => ({
+                surface,
+                workspace,
+                uuid: topology.surfaceIdByRef.get(surface) ?? null,
+              }))
+              .sort((a, b) => a.surface.localeCompare(b.surface))
+          : [],
+      });
+
     server.tool(
       "list_agents",
-      "List public agent handles with optional filters by state, repo, or model, including health. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
+      "List public agent handles derived from live topology with provenance-labelled facts and optional filters by state, repo, or model. max_age_ms permits reuse of a same-topology snapshot for at most five seconds. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
       {
         state: z
           .enum([
@@ -11697,31 +11752,127 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Filter by state"),
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
+        max_age_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(5_000)
+          .optional()
+          .describe(
+            "Maximum acceptable snapshot age in milliseconds (0-5000); topology changes always invalidate the snapshot",
+          ),
       },
-      ANNOTATIONS.readOnly,
+      ANNOTATIONS.mutating,
       async (args) => {
         const filter = {
           repo: args.repo,
           model: args.model,
         };
         const requestedState = args.state;
-        const buildListAgentsResponse = async (records: AgentRecord[]) => {
-          const topology = await collectSurfaceTopology();
+        const cacheKey = JSON.stringify({
+          state: args.state ?? null,
+          repo: args.repo ?? null,
+          model: args.model ?? null,
+        });
+        const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
+          const data = {
+            derived_at: entry.derived_at,
+            agents: entry.agents as unknown as Record<string, unknown>[],
+            count: entry.agents.length,
+            ...(entry.skipped_agents.length > 0
+              ? { skipped_agents: entry.skipped_agents }
+              : {}),
+          };
+          const formatted = formatListAgents(
+            entry.agents,
+            entry.agents.length,
+            entry.skipped_agents,
+          );
+          return okFormatted(formatted, data);
+        };
+        const buildListAgentsResponse = async (
+          records: AgentRecord[],
+          topology: SurfaceTopologySnapshot | null,
+          topologySignature: string,
+          liveDiscovery?: {
+            rows: DiscoveredAgent[];
+            observed_at_ms: number;
+          },
+        ) => {
+          const registryObservedAt = Date.now();
+          const uuidKey = (value: string | null | undefined) =>
+            value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
             records.map(async (agent) => {
               try {
+                const agentUuid = uuidKey(agent.surface_uuid);
+                const observedSurface = liveDiscovery?.rows.find((surface) => {
+                  const surfaceUuid = uuidKey(surface.surface_uuid);
+                  return agentUuid && surfaceUuid
+                    ? agentUuid === surfaceUuid
+                    : Boolean(
+                        !agentUuid &&
+                          !surfaceUuid &&
+                          agent.surface_observer_id &&
+                          agent.surface_observer_id === registry.getObserverId() &&
+                          surface.surface_id === agent.surface_id,
+                      );
+                });
+                const trustedScreenObservation =
+                  observedSurface && !observedSurface.read_error
+                    ? observedSurface
+                    : null;
                 const health = await evaluateServerAgentHealth(
                   agent,
                   {
                     ...healthTopologyOverrides(agent, topology),
+                    ...(trustedScreenObservation
+                      ? {
+                          screen_status:
+                            trustedScreenObservation.parsed_status,
+                          screen_agent_type:
+                            trustedScreenObservation.cli === "kiro"
+                              ? "unknown"
+                              : trustedScreenObservation.cli,
+                          screen_control_state:
+                            trustedScreenObservation.control_state,
+                          screen_actions:
+                            trustedScreenObservation.actions ?? [],
+                        }
+                      : {}),
                   },
                   topology,
                 );
+                const reconciledState = health.reconciled_state ?? agent.state;
+                const screenObservation = trustedScreenObservation
+                  ? {
+                      observed_at_ms: liveDiscovery!.observed_at_ms,
+                      status: trustedScreenObservation.parsed_status,
+                      agent_type:
+                        trustedScreenObservation.cli === "kiro"
+                          ? "unknown"
+                          : trustedScreenObservation.cli,
+                      control_state: trustedScreenObservation.control_state,
+                      model: trustedScreenObservation.model,
+                    }
+                  : health.screen_observation;
                 return {
                   agent: {
-                    ...toPublicAgent(agent),
-                    state: health.reconciled_state ?? agent.state,
-                    health,
+                    ...toObservedPublicAgent(agent, {
+                      derivedAtMs: registryObservedAt,
+                      state: reconciledState,
+                      stateSource: health.screen_confirmed_state
+                        ? "screen"
+                        : "registry",
+                      screenObservedAtMs: screenObservation?.observed_at_ms,
+                      screenModel: screenObservation?.model,
+                    }),
+                    health: {
+                      ...health,
+                      ...(screenObservation
+                        ? { screen_observation: screenObservation }
+                        : {}),
+                    },
                   },
                   skipped: null,
                 };
@@ -11744,33 +11895,71 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             row.skipped ? [row.skipped] : [],
           );
           const agents = requestedState
-            ? enrichedAgents.filter((agent) => agent.state === requestedState)
+            ? enrichedAgents.filter(
+                (agent) => agent.state.value === requestedState,
+              )
             : enrichedAgents;
-          const data = {
-            agents: agents as unknown as Record<string, unknown>[],
-            count: agents.length,
-            ...(skippedAgents.length > 0
-              ? { skipped_agents: skippedAgents }
-              : {}),
+          const entry: ListAgentsCacheEntry = {
+            topology_signature: topologySignature,
+            derived_at: Date.now(),
+            agents: agents as Array<
+              ObservedPublicAgent & { health: AgentHealth }
+            >,
+            skipped_agents: skippedAgents,
           };
-          const formatted = formatListAgents(
-            agents,
-            agents.length,
-            skippedAgents,
-          );
-          return okFormatted(formatted, data);
+          listAgentsCache.set(cacheKey, entry);
+          return renderListAgentsResponse(entry);
         };
 
         try {
           await awaitLifecycleStart();
-          const merged = await engine.runLifecycleMutation(() =>
-            registry.listMerged(discovery, { filter }),
+          const topology = await collectSurfaceTopology();
+          const topologySignature = listAgentsTopologySignature(topology);
+          const maxAgeMs = args.max_age_ms ?? 0;
+          const cached = listAgentsCache.get(cacheKey);
+          if (
+            maxAgeMs > 0 &&
+            cached &&
+            cached.topology_signature === topologySignature &&
+            Date.now() - cached.derived_at <= maxAgeMs
+          ) {
+            return renderListAgentsResponse(cached);
+          }
+          const live = await engine.runLifecycleMutation(async () => {
+            discovery.invalidate();
+            const discovered = await discovery.scan(true);
+            const observedAtMs = Date.now();
+            if (
+              registry
+                .list()
+                .some((record) => record.agent_id.includes("-pending-"))
+            ) {
+              registry.repairFromDiscovery(discovered, { seatRegistry });
+            }
+            const merged = await registry.listMerged(discovery, {
+              filter,
+              force: true,
+              discovered,
+            });
+            return { merged, discovered, observedAtMs };
+          });
+          return await buildListAgentsResponse(
+            live.merged,
+            topology,
+            topologySignature,
+            {
+              rows: live.discovered,
+              observed_at_ms: live.observedAtMs,
+            },
           );
-          return await buildListAgentsResponse(merged);
         } catch (e) {
           if (isSurfaceEnumerationError(e)) {
             try {
-              return await buildListAgentsResponse(registry.list(filter));
+              return await buildListAgentsResponse(
+                registry.list(filter),
+                null,
+                listAgentsTopologySignature(null),
+              );
             } catch (fallbackError) {
               return err(fallbackError);
             }
@@ -12007,10 +12196,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "resync_agents",
-      "Force-refresh the agent registry by scanning all surfaces. Evicts ghosts, registers discovered agents, and returns a diff.",
+      "Removed compatibility stub. Agent discovery and reconciliation now happen automatically on list_agents; callers must not resync manually.",
       {},
-      ANNOTATIONS.mutating,
+      ANNOTATIONS.readOnly,
       async () => {
+        const compatibilityStubRemoved: boolean = true;
+        if (compatibilityStubRemoved) {
+          return err(
+            new Error(
+              "resync_agents was removed; call list_agents for an automatically refreshed live view",
+            ),
+          );
+        }
+        /* c8 ignore start -- retained for one release as unreachable rollback reference */
         await awaitLifecycleStart();
         return engine.runLifecycleMutation(async () => {
           try {
@@ -12572,6 +12770,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e);
           }
         });
+        /* c8 ignore stop */
       },
     );
 
