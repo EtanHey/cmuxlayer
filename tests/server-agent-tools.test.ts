@@ -50,6 +50,7 @@ const hermeticSpawnStateDirs: string[] = [];
 let hermeticSpawnFixtureSequence = 0;
 const originalLauncherRegistryPath =
   process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH;
+const originalAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
 
 afterEach(async () => {
   if (originalLauncherRegistryPath === undefined) {
@@ -57,6 +58,11 @@ afterEach(async () => {
   } else {
     process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH =
       originalLauncherRegistryPath;
+  }
+  if (originalAllowModel === undefined) {
+    delete process.env.REPOGOLEM_ALLOW_MODEL;
+  } else {
+    process.env.REPOGOLEM_ALLOW_MODEL = originalAllowModel;
   }
   await Promise.allSettled(
     serverContexts.map(
@@ -93,6 +99,7 @@ const AGENT_TOOLS = [
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
+  shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
@@ -131,7 +138,7 @@ function makeLifecycleExec(opts?: {
         createdSurfaceCount === 1
           ? "surface:new"
           : `surface:new-${createdSurfaceCount}`;
-      readyText = "$ ";
+      readyText = opts?.shellPrompt ?? "$ ";
       promptPending = false;
     }
     if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
@@ -1217,6 +1224,7 @@ describe("lean spawn tool responses", () => {
   });
 
   it("spawn_agent rejects an unsupported model before creating a surface", async () => {
+    delete process.env.REPOGOLEM_ALLOW_MODEL;
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -3737,6 +3745,302 @@ describe("agent lifecycle tool handlers", () => {
     expect(existsSync(worktreePath)).toBe(true);
   });
 
+  it("spawn_agent closes a failed launcher surface before rolling back its new worktree", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-launch-failure");
+      const registryPath = join(TEST_DIR, "launchers-post-surface-rollback.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "post-surface-failure");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        if (args.includes("worktree") && args.includes("remove")) {
+          rmSync(worktreePath, { recursive: true, force: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec({ surfaceUuid: "surface-uuid:new" });
+      let launcherSent = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /ralphCodex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "zsh: command not found: ralphCodex\n$ ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "post-surface-failure",
+            branch: "wt/post-surface-failure",
+          },
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("zsh: command not found: ralphCodex");
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["close-surface", "surface-uuid:new"]),
+      );
+      expect(worktreeExec).toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove", "--force", worktreePath]),
+      );
+      expect(worktreeExec).toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["branch", "-D", "wt/post-surface-failure"]),
+      );
+      const getState = (server as any)._registeredTools["get_agent_state"];
+      const state = parseToolResult(
+        await getState.handler({ agent_id: parsed.agent_id }, {} as any),
+      );
+      expect(state.state).toBe("error");
+      expect(existsSync(worktreePath)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent waits through an 800ms launcher first-paint delay without cleanup", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "voicelayerCodex -s") {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (
+          launcherSentAt !== null &&
+          args.includes("send-key") &&
+          args.includes("return")
+        ) {
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 800
+                  ? "$ voicelayerCodex -s"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.error).toBeUndefined();
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent ignores transient shell-rc errors above percentage boot progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-progress");
+      const registryPath = join(TEST_DIR, "launchers-progress.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "boot-progress");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /ralphCodex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 500
+                  ? "zsh: command not found: pyenv\n⠋ Installing... 62%"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "boot-progress",
+            branch: "wt/boot-progress",
+          },
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent keeps a generic launch-timeout surface and worktree recoverable", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-timeout");
+      const registryPath = join(TEST_DIR, "launchers-timeout.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "launch-timeout");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const exec = makeLifecycleExec({ shellNeverReady: true });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "launch-timeout",
+            branch: "wt/launch-timeout",
+          },
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("new_worktree_split rolls back a newly created worktree and branch when spawning fails", async () => {
     const gitsDir = join(TEST_DIR, "Gits");
     const repoRoot = join(gitsDir, "cmuxlayer");
@@ -4510,6 +4814,63 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   }, 10_000);
 
+  it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSent = false;
+      let launcherReturns = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "voicelayerCodex -s") {
+          launcherSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("send-key") && args.includes("return")) {
+          launcherReturns += 1;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "bash-5.2$ voicelayerCodex -s",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "launcher command remained pending after Return",
+      );
+      expect(parsed.last_10_lines).toContain(
+        "bash-5.2$ voicelayerCodex -s",
+      );
+      expect(launcherReturns).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
@@ -4751,6 +5112,58 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it.each(["user in ~/repo > ", "❯ ", "› ", "» "])(
+    "spawn_agent launches from a ready %s shell prompt",
+    async (shellPrompt) => {
+      const server = createLifecycleServer(makeLifecycleExec({ shellPrompt }));
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.surface_id).toBe("surface:new");
+    },
+  );
+
+  it("spawn terminal preserves created identity when cwd delivery fails", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "").startsWith("cd -- ")
+      ) {
+        throw new Error("deliberate terminal cwd failure");
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        version: 1,
+        type: "terminal",
+        cwd: "/tmp/cmuxlayer-p7-terminal",
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("deliberate terminal cwd failure");
+    expect(parsed.surface_id).toBe("surface:new");
+    expect(parsed.workspace_id).toBe("workspace:1");
+  });
+
   it("spawn_agent preserves the 10000ms shell-readiness default when no override is supplied", async () => {
     vi.useFakeTimers();
     try {
@@ -4888,6 +5301,9 @@ describe("agent lifecycle tool handlers", () => {
       );
       expect(parsed.agent_id).toEqual(expect.any(String));
       expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.last_10_lines).toContain(
+        "agent launcher still starting",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -5015,6 +5431,7 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.agent_id).toEqual(expect.any(String));
       expect(parsed.surface_id).toBe("surface:new");
       expect(parsed.workspace_id).toBe("ws:1");
+      expect(parsed.last_10_lines).toContain("terminal initializing");
     } finally {
       vi.useRealTimers();
     }

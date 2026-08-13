@@ -23,6 +23,7 @@ import type { InboxOpts } from "./inbox.js";
 import { parseScreen } from "./screen-parser.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
 import { matchReadyPattern } from "./pattern-registry.js";
+import { matchesShellPrompt } from "./shell-prompt.js";
 import { assertMutationAllowed } from "./mode-policy.js";
 import { findWorkspaceRefForRepo } from "./repo-workspace.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
@@ -150,10 +151,6 @@ function chunkTerminalInput(text: string, chunkSize: number): string[] {
 
 async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function matchesShellPrompt(text: string): boolean {
-  return /(?:^|\n)[^\n]*[$%#]\s*$/.test(text);
 }
 
 function deriveRepoFromCwd(cwd: string): string {
