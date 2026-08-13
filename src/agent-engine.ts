@@ -718,7 +718,7 @@ function codexResumeAwaitsFreshReadiness(
 ): boolean {
   if (
     agent.cli !== "codex" ||
-    agent.auto_revive !== true ||
+    agent.auto_revive === false ||
     agent.revive_last_outcome !== "pending"
   ) {
     return false;
