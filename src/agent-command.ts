@@ -70,3 +70,35 @@ export function buildResumeCommand(
       return `${launcher} -s --resume ${sessionId}`;
   }
 }
+
+/**
+ * Resume a captured harness session without routing through a repoGolem
+ * launcher. The surviving terminal is already at a shell prompt, and launcher
+ * resume wrappers are not concurrency-safe for this engine-owned recovery
+ * path.
+ */
+export function buildRawResumeCommand(
+  cli: CliType,
+  repo: string,
+  sessionId: string,
+): string {
+  if (!FULL_SESSION_UUID_RE.test(sessionId)) {
+    throw new Error(
+      `Invalid session id: "${sessionId}". A full session UUID is required.`,
+    );
+  }
+  switch (cli) {
+    case "claude":
+      return `${AGENT_ENV} claude --resume ${sessionId}`;
+    case "codex":
+      return `codex resume ${sessionId}`;
+    case "cursor":
+      return `cursor agent --session ${sessionId}`;
+    case "gemini":
+      return `${AGENT_ENV} gemini --resume ${sessionId}`;
+    case "kiro": {
+      const safeRepo = sanitizeRepoName(repo);
+      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
+    }
+  }
+}

@@ -629,6 +629,55 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
     }
   });
 
+  it("Codex: matches a managed prompt with the appended mailbox contract", () => {
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-mailbox-prompt-"));
+    const cwd = "/Users/e/Gits/cmuxlayer";
+    const root = join(localHome, ".codex", "sessions", "2026", "08", "13");
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "rollout-managed.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "managed-session", cwd },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Repair the agent automatically.\n\n" +
+                  "cmuxlayer mailbox contract for cmuxlayerCodex-abcd1234: monitor with tail -n0 -F /Users/e/.cmux/agents/cmuxlayerCodex-abcd1234/inbox.jsonl; after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> cmuxlayer inbox-cursor 'cmuxlayerCodex-abcd1234'",
+              },
+            ],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    try {
+      expect(
+        findLatestHarnessSessionIdentity("codex", cwd, {
+          home: localHome,
+          expectedText: "Repair the agent automatically.",
+        })?.session_id,
+      ).toBe("managed-session");
+      expect(
+        findLatestHarnessSessionIdentity("codex", cwd, {
+          home: localHome,
+          expectedText: "Different task.",
+        }),
+      ).toBeNull();
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
+  });
+
   it("Codex: skips malformed lines and session_meta entries missing ids", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-bad-jsonl-"));
     const root = join(localHome, ".codex", "sessions", "2026", "06", "05");

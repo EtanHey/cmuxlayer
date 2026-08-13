@@ -6,11 +6,11 @@ else
 fi
 
 _golem_parse_codex_flags() {
-  _flag_codex_effort="xhigh"
+  _flag_codex_effort="high"
   case "$1" in
     --effort)
       case "$2" in
-        medium|high|xhigh|ultra) _flag_codex_effort="$2" ;;
+        low|medium|high|xhigh|max|ultra) _flag_codex_effort="$2" ;;
       esac
       ;;
   esac

@@ -6,9 +6,11 @@ export const MODEL_OVERRIDE_ENV = "REPOGOLEM_ALLOW_MODEL";
 // checkout. Codex model validation is delegated to `codex debug models
 // --bundled` during spawn preflight, before any worktree or surface is created.
 export const CODEX_EFFORT_VALUES = [
+  "low",
   "medium",
   "high",
   "xhigh",
+  "max",
   "ultra",
 ] as const;
 export type CodexEffort = (typeof CODEX_EFFORT_VALUES)[number];

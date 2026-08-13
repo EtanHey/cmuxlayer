@@ -1145,12 +1145,12 @@ describe("lean spawn tool responses", () => {
     );
   });
 
-  it("spawn_agent schema advertises only the cross-version Codex effort set", () => {
+  it("spawn_agent schema advertises the installed Codex effort set", () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    for (const effort of ["medium", "high", "xhigh", "ultra"]) {
+    for (const effort of ["low", "medium", "high", "xhigh", "max", "ultra"]) {
       expect(
         spawn.inputSchema.safeParse({
           repo: "cmuxlayer",
@@ -1160,7 +1160,7 @@ describe("lean spawn tool responses", () => {
       ).toBe(true);
     }
 
-    for (const effort of ["low", "max", "turbo"]) {
+    for (const effort of ["turbo"]) {
       expect(
         spawn.inputSchema.safeParse({
           repo: "cmuxlayer",
@@ -1192,7 +1192,7 @@ describe("lean spawn tool responses", () => {
       {
         repo: "cmuxlayer",
         cli: "codex",
-        effort: "low",
+        effort: "turbo",
         worktree: {
           name: "incompatible-effort",
           branch: "wt/incompatible-effort",
@@ -1203,7 +1203,7 @@ describe("lean spawn tool responses", () => {
 
     expect(result.structuredContent).toMatchObject({ ok: false });
     expect(result.structuredContent.error).toContain(
-      'Invalid Codex effort "low" (expected: medium, high, xhigh, ultra)',
+      'Invalid Codex effort "turbo" (expected: low, medium, high, xhigh, max, ultra)',
     );
     expect(worktreeExec).not.toHaveBeenCalled();
     expect(
@@ -5729,6 +5729,57 @@ describe("agent lifecycle tool handlers", () => {
       stateResult.structuredContent ?? JSON.parse(stateResult.content[0].text);
 
     expect(state.crash_recover).toBe(true);
+  });
+
+  it("spawn_agent defaults managed agents to auto_revive and persists an explicit opt-out", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const getState = (server as any)._registeredTools["get_agent_state"];
+
+    const defaultArgs = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      role: "implementor",
+      authority: "worker",
+      prompt: "default auto revive",
+    });
+    const optedOutArgs = spawn.inputSchema.parse({
+      repo: "cmuxlayer",
+      model: "gpt-5.4",
+      cli: "codex",
+      role: "implementor",
+      authority: "worker",
+      prompt: "debug CLI death",
+      auto_revive: false,
+      force_new: true,
+    });
+
+    const defaultResult = await spawn.handler(defaultArgs, {} as any);
+    const optedOutResult = await spawn.handler(optedOutArgs, {} as any);
+    const defaultId = (
+      defaultResult.structuredContent ?? JSON.parse(defaultResult.content[0].text)
+    ).agent_id;
+    const optedOutId = (
+      optedOutResult.structuredContent ?? JSON.parse(optedOutResult.content[0].text)
+    ).agent_id;
+    const defaultStateResult = await getState.handler(
+      { agent_id: defaultId },
+      {} as any,
+    );
+    const optedOutStateResult = await getState.handler(
+      { agent_id: optedOutId },
+      {} as any,
+    );
+    const defaultState =
+      defaultStateResult.structuredContent ??
+      JSON.parse(defaultStateResult.content[0].text);
+    const optedOutState =
+      optedOutStateResult.structuredContent ??
+      JSON.parse(optedOutStateResult.content[0].text);
+
+    expect(defaultState.auto_revive).toBe(true);
+    expect(optedOutState.auto_revive).toBe(false);
   });
 
   it("lifecycle crash recovery refuses placement in a manual workspace", async () => {

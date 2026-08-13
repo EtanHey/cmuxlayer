@@ -23,6 +23,7 @@ import {
   RetryableDeliveryError,
   assertLauncherAvailable,
   buildLaunchCommand,
+  buildRawResumeCommand,
   buildResumeCommand,
   extractSessionId,
   resolveSweepTiming,
@@ -9184,6 +9185,347 @@ Session ID: ${sessionId}`,
       );
     });
 
+    it("auto-revives a resumable managed agent in the same surface with the raw harness command", async () => {
+      const sessionId = "019faccc-1111-7222-8333-444455556666";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive",
+          state: "working",
+          surface_id: "surface:cli-auto-revive",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: sessionId,
+          auto_revive: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive")];
+      const readScreen = mockClient.readScreen as ReturnType<typeof vi.fn>;
+      readScreen
+        .mockResolvedValueOnce({
+          surface: "surface:cli-auto-revive",
+          text: DEAD_CODEX_SHELL_SCREEN,
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValueOnce({
+          surface: "surface:cli-auto-revive",
+          text: DEAD_CODEX_SHELL_SCREEN,
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValue({
+          surface: "surface:cli-auto-revive",
+          text: "gpt-5.4 xhigh · 64% left\nWorking (2s • esc to interrupt)",
+          lines: 80,
+          scrollback_used: false,
+        });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:cli-auto-revive",
+        `codex resume ${sessionId}`,
+        expect.objectContaining({ workspace: undefined }),
+      );
+      expect(mockClient.sendKey).toHaveBeenCalledWith(
+        "surface:cli-auto-revive",
+        "return",
+        expect.objectContaining({ workspace: undefined }),
+      );
+      expect(engine.getAgentState("cmuxlayerCodex-auto-revive")).toMatchObject({
+        state: "booting",
+        revive_attempts: 1,
+        revive_last_outcome: "pending",
+        revive_last_attempt_at: expect.any(String),
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("cmuxlayerCodex-auto-revive")).toMatchObject({
+        state: "ready",
+        parsed_model: "gpt-5.4 xhigh",
+        revive_attempts: 1,
+        revive_last_outcome: "revived",
+        revive_completed_at: expect.any(String),
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_cli_exit_revived",
+          task: expect.stringContaining(
+            "cmuxlayerCodex-auto-revive revived automatically on attempt 1",
+          ),
+        }),
+      ]);
+    });
+
+    it("records a failed same-surface revive attempt without sending a premature parent notification", async () => {
+      engine.dispose();
+      const resumeSender = vi.fn();
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        launchCommandSender: resumeSender,
+      });
+      (mockClient.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("resume command rejected"),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-retry",
+          state: "working",
+          surface_id: "surface:cli-auto-revive-retry",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli_session_id: "019faccc-2222-7333-8444-555566667777",
+          auto_revive: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-retry")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-retry",
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(resumeSender).not.toHaveBeenCalled();
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-retry"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: 1,
+        revive_last_outcome: "failed",
+        revive_last_error: "resume command rejected",
+        revive_next_attempt_at: expect.any(String),
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+    });
+
+    it("keeps legacy death notification behavior when auto_revive is explicitly disabled", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-disabled",
+          state: "working",
+          surface_id: "surface:cli-auto-revive-disabled",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli_session_id: "019faccc-3333-7444-8555-666677778888",
+          auto_revive: false,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-disabled")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-disabled",
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({ tag: "agent_cli_exit" }),
+      ]);
+    });
+
+    it("treats a managed record with only a session-id prefix as non-resumable", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-invalid-session",
+          state: "working",
+          surface_id: "surface:cli-auto-revive-invalid-session",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli_session_id: "019faccc",
+          auto_revive: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-invalid-session")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-invalid-session",
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-invalid-session"),
+      ).toMatchObject({
+        state: "error",
+      });
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-invalid-session"),
+      ).not.toHaveProperty("revive_last_outcome");
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({ tag: "agent_cli_exit" }),
+      ]);
+    });
+
+    it("emits one unrecoverable notification with the exact raw manual fallback at the attempt cap", async () => {
+      const sessionId = "019faccc-4444-7555-8666-777788889999";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-exhausted",
+          state: "error",
+          surface_id: "surface:cli-auto-revive-exhausted",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli_session_id: sessionId,
+          auto_revive: true,
+          revive_attempts: MAX_RESPAWN_ATTEMPTS,
+          revive_last_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_last_outcome: "failed",
+          revive_last_error: "readiness timed out",
+          revive_previous_state: "working",
+          revive_consecutive_observations: 2,
+          error: "Auto-revive attempt failed",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-exhausted")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-exhausted"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: MAX_RESPAWN_ATTEMPTS,
+        revive_last_outcome: "unrecoverable",
+        revive_completed_at: expect.any(String),
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_cli_exit_unrecoverable",
+          task: expect.stringContaining(`Manual fallback: codex resume ${sessionId}`),
+        }),
+      ]);
+      expect(
+        readInbox("cmuxlayerClaude", { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_cli_exit_revived",
+        ),
+      ).toEqual([]);
+    });
+
+    it("does not retry a failed auto-revive after the agent is intentionally stopped", async () => {
+      const launchCommandSender = vi.fn().mockResolvedValue(undefined);
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        launchCommandSender,
+        autoReviveBackoffBaseMs: 0,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-stopped",
+          state: "error",
+          surface_id: "surface:cli-auto-revive-stopped",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: "019faccc-5555-7666-8777-888899990000",
+          auto_revive: true,
+          user_killed: true,
+          revive_attempts: 1,
+          revive_last_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_next_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_last_outcome: "failed",
+          revive_last_error: "first resume failed",
+          error: "Auto-revive attempt 1 failed",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-stopped")];
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(launchCommandSender).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-stopped"),
+      ).toMatchObject({
+        state: "error",
+        user_killed: true,
+        revive_attempts: 1,
+        revive_last_outcome: "failed",
+      });
+    });
+
+    it("retries failed auto-revive attempts with exponential backoff", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-13T07:00:00.000Z"));
+      const rawResumeSend = mockClient.send as ReturnType<typeof vi.fn>;
+      rawResumeSend.mockRejectedValue(new Error("resume still unavailable"));
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        autoReviveBackoffBaseMs: 1_000,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-backoff",
+          state: "working",
+          surface_id: "surface:cli-auto-revive-backoff",
+          surface_provenance: "cmuxlayer_spawn",
+          cli_session_id: "019faccc-6666-7777-8888-999900001111",
+          auto_revive: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cli-auto-revive-backoff")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-backoff",
+        text: DEAD_CODEX_SHELL_SCREEN,
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+      expect(rawResumeSend).toHaveBeenCalledTimes(1);
+
+      await engine.runSweep();
+      expect(rawResumeSend).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1_000);
+      await engine.runSweep();
+
+      expect(rawResumeSend).toHaveBeenCalledTimes(2);
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-backoff"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: 2,
+        revive_last_outcome: "failed",
+        revive_last_attempt_at: "2026-08-13T07:00:01.000Z",
+        revive_next_attempt_at: "2026-08-13T07:00:03.000Z",
+      });
+      vi.useRealTimers();
+    });
+
     it("prefers settled done evidence over a shell-state screen", async () => {
       vi.useFakeTimers();
       const now = new Date("2026-08-11T09:00:00.000Z");
@@ -11752,6 +12094,24 @@ describe("launcherNameCandidates", () => {
 
 describe("buildResumeCommand", () => {
   const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+
+  it("builds raw harness resume commands for engine-owned same-surface revival", () => {
+    expect(buildRawResumeCommand("codex", "brainlayer", sessionId)).toBe(
+      `codex resume ${sessionId}`,
+    );
+    expect(buildRawResumeCommand("claude", "brainlayer", sessionId)).toBe(
+      `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume ${sessionId}`,
+    );
+    expect(buildRawResumeCommand("cursor", "brainlayer", sessionId)).toBe(
+      `cursor agent --session ${sessionId}`,
+    );
+    expect(buildRawResumeCommand("gemini", "brainlayer", sessionId)).toBe(
+      `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume ${sessionId}`,
+    );
+    expect(buildRawResumeCommand("kiro", "brainlayer", sessionId)).toBe(
+      `cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id ${sessionId}`,
+    );
+  });
 
   it("uses the verified resume command for each supported CLI", () => {
     expect(buildResumeCommand("claude", "brainlayer", sessionId)).toBe(

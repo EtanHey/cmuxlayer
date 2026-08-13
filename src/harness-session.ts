@@ -596,11 +596,22 @@ function normalizePromptText(value: string): string {
   return normalizeText(value.replace(/<\/?\s*user_query\s*>/gi, " "));
 }
 
+function stripManagedMailboxContract(value: string): string {
+  const normalized = normalizePromptText(value);
+  const match = normalized.match(
+    /^(.*?) cmuxlayer mailbox contract for ([A-Za-z0-9_-]+): monitor with tail -n0 -F (\/\S+\/([A-Za-z0-9_-]+)\/inbox\.jsonl); after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> cmuxlayer inbox-cursor '([A-Za-z0-9_-]+)'$/,
+  );
+  if (!match || match[2] !== match[4] || match[2] !== match[5]) {
+    return normalized;
+  }
+  return match[1]!.trim();
+}
+
 function promptTextMatchesExpected(
   value: string,
   expectedText: string,
 ): boolean {
-  return normalizePromptText(value) === expectedText;
+  return stripManagedMailboxContract(value) === expectedText;
 }
 
 function promptFieldContainsExpectedText(

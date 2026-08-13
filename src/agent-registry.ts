@@ -2112,6 +2112,18 @@ export class AgentRegistry {
       crash_recover: candidate.role === "orchestrator",
       respawn_attempts: 0,
       user_killed: false,
+      auto_revive: false,
+      revive_attempts: 0,
+      revive_last_attempt_at: null,
+      revive_next_attempt_at: null,
+      revive_completed_at: null,
+      revive_last_outcome: null,
+      revive_last_error: null,
+      revive_observation_source: null,
+      revive_observed_at_ms: null,
+      revive_previous_state: null,
+      revive_consecutive_observations: 0,
+      revive_notification_sent_at: null,
     };
   }
 

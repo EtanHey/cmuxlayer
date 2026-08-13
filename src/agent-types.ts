@@ -23,6 +23,11 @@ export type AgentPlacement = "left" | "right";
 export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 export type ObservationSource = "screen" | "registry" | "process";
+export type AgentReviveOutcome =
+  | "pending"
+  | "failed"
+  | "revived"
+  | "unrecoverable";
 
 export interface Observed<T> {
   value: T;
@@ -87,6 +92,19 @@ export interface AgentRecord {
   crash_recover?: boolean;
   respawn_attempts?: number;
   user_killed?: boolean;
+  /** Engine-owned same-surface CLI recovery; managed spawns default true. */
+  auto_revive?: boolean;
+  revive_attempts?: number;
+  revive_last_attempt_at?: string | null;
+  revive_next_attempt_at?: string | null;
+  revive_completed_at?: string | null;
+  revive_last_outcome?: AgentReviveOutcome | null;
+  revive_last_error?: string | null;
+  revive_observation_source?: ObservationSource | null;
+  revive_observed_at_ms?: number | null;
+  revive_previous_state?: AgentState | null;
+  revive_consecutive_observations?: number;
+  revive_notification_sent_at?: string | null;
   // Boot prompt delivery guard
   boot_prompt_pending?: boolean;
   // Spawn settlement evidence (PR #326): a managed agent must not report
@@ -245,6 +263,11 @@ export interface AgentCliExitEvent {
   consecutive_observations: number;
   inbox_dispatched: boolean;
   error: string;
+  auto_revive?: boolean;
+  revive_attempts?: number;
+  revive_outcome?: AgentReviveOutcome | null;
+  verified_model?: string | null;
+  manual_resume_command?: string | null;
 }
 
 /** Which close/kill path emitted the event. */
