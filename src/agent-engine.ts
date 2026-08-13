@@ -1769,6 +1769,18 @@ export class AgentEngine {
     return !!agent.task_done_detected_at;
   }
 
+  private hasCurrentRecordedOutputDoneEvidence(agent: AgentRecord): boolean {
+    if (!agent.task_done_detected_at) return false;
+    if (!agent.halt_last_active_at) return true;
+    const doneAtMs = Date.parse(agent.task_done_detected_at);
+    const lastActiveAtMs = Date.parse(agent.halt_last_active_at);
+    return (
+      Number.isFinite(doneAtMs) &&
+      Number.isFinite(lastActiveAtMs) &&
+      doneAtMs >= lastActiveAtMs
+    );
+  }
+
   private loadGroundTruthSession(
     agent: AgentRecord,
   ): HarnessSessionWithMeta | null {
@@ -3286,8 +3298,8 @@ export class AgentEngine {
       parsed.control_state === "dead" ||
       parsed.control_state === "stale_surface" ||
       this.hasOutputDoneEvidence(agent.cli, screenText) ||
-      this.hasRecordedOutputDoneEvidence(agent) ||
-      this.transcriptHasSettledDone(agent) ||
+      this.hasCurrentRecordedOutputDoneEvidence(agent) ||
+      (agent.cli === "codex" && this.transcriptHasSettledDone(agent)) ||
       (parsed.status === "idle" &&
         parsed.control_state === "ready" &&
         this.hasParentVisibleArtifactSinceIdle(agent))
@@ -6656,16 +6668,19 @@ export class AgentEngine {
     return this.registry.get(agentId);
   }
 
-  /** Reserve an idle agent from placement before releasing its surface lock. */
+  /** Reserve a re-tasked interactive agent before releasing its surface lock. */
   markAgentWorking(agentId: string): AgentRecord | null {
     const current =
       this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
     if (!current || current.state !== "idle") {
       return current;
     }
-    const working = this.stateMgr.transition(agentId, "working");
-    this.registry.set(agentId, working);
-    return working;
+    this.stateMgr.transition(agentId, "working");
+    const reTasked = this.stateMgr.updateRecord(agentId, {
+      halt_last_active_at: new Date(this.haltNow()).toISOString(),
+    });
+    this.registry.set(agentId, reTasked);
+    return reTasked;
   }
 
   getPublicAgent(agentId: string): PublicAgent | null {

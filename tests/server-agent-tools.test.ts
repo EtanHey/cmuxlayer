@@ -10044,7 +10044,13 @@ codex>
     const retaskAt = Date.parse("2026-08-13T14:00:00.000Z");
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(retaskAt);
     try {
-      const server = createLifecycleServer(mockExec);
+      const server = createTrackedServer({
+        exec: mockExec,
+        stateDir: TEST_DIR,
+        inboxBaseDir: TEST_DIR,
+        disableSpawnPreflight: true,
+        sessionIdentityResolver: () => null,
+      });
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const sendTo = (server as any)._registeredTools["send_to"];
       const spawnResult = await spawn.handler(
@@ -10060,9 +10066,11 @@ codex>
       ).agent_id;
       const engine = (server as any)._registeredTools["interact"]._engine;
       const registry = engine.getRegistry();
+      const spawned = engine.getAgentState(agentId) as AgentRecord;
       const parent = makeServerAgentRecord({
         agent_id: "retask-parent",
-        surface_id: "surface:retask-parent",
+        surface_id: spawned.surface_id,
+        workspace_id: spawned.workspace_id,
         state: "working",
         role: "orchestrator",
       });
@@ -10087,6 +10095,16 @@ codex>
         {} as any,
       );
       expect(sendResult.isError).toBeFalsy();
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        state: "working",
+        halt_last_active_at: new Date(retaskAt).toISOString(),
+      });
+      vi.spyOn(engine as any, "readAgentScreen").mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nProcessed child report\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
 
       const approvalScreen =
         "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
@@ -10095,6 +10113,10 @@ codex>
         engine.getAgentState(agentId) as AgentRecord,
         approvalScreen,
       );
+      expect(engine.getAgentState(agentId)).toMatchObject({
+        halt_episode_type: "awaiting_input",
+        halt_notification_sent_at: null,
+      });
       nowSpy.mockReturnValue(retaskAt + 120_002);
       await (engine as any).maybeEscalateLiveHalt(
         engine.getAgentState(agentId) as AgentRecord,
