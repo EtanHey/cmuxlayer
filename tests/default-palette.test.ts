@@ -15,7 +15,6 @@ const THIN_CORE_TOOL_NAMES = [
   "read_screen",
   "my_agents",
   "list_agents",
-  "broadcast",
   "close_surface",
   "dispatch_to_agent",
   "list_surfaces",

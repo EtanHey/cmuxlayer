@@ -154,12 +154,35 @@ describe("inbox write-channel", () => {
   it("dispatch appends a message with defaults (to=agent, tag=dispatch) and id", () => {
     const m = dispatch("a1", { from: "orc", task: "do X" }, opts);
     expect(m.to).toBe("a1");
+    expect(m.reply_to).toBe("orc");
     expect(m.tag).toBe("dispatch");
     expect(m.id).toBeTruthy();
     expect(m.ts_ms).toBe(1_000_000);
     const all = readInbox("a1", opts);
     expect(all).toHaveLength(1);
     expect(all[0].task).toBe("do X");
+  });
+
+  it("stores an optional stale-able surface hint only beside the durable reply id", () => {
+    const m = dispatch(
+      "coach",
+      {
+        from: "golems",
+        reply_to: "golems-agent-id",
+        via: "surface:golems",
+        observed_at: "2026-08-12T18:00:00.000Z",
+        task: "reply through the registry",
+      },
+      opts,
+    );
+
+    expect(m).toMatchObject({
+      reply_to: "golems-agent-id",
+      via: "surface:golems",
+      observed_at: "2026-08-12T18:00:00.000Z",
+    });
+    expect(m).not.toHaveProperty("tab");
+    expect(m).not.toHaveProperty("tab_name");
   });
 
   it("dispatchOnce keeps one durable message for a stable recovery id", () => {

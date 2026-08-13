@@ -23,7 +23,7 @@ import {
   readMonitorRegistry,
   registerMonitor,
 } from "../src/monitor-registry.js";
-import { ack, readInbox } from "../src/inbox.js";
+import { ack, inboxPath, readInbox } from "../src/inbox.js";
 
 const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
@@ -920,15 +920,15 @@ describe("CmuxLayerDaemon", () => {
       collapsed_reason: "owner-wedged",
     });
     expect(monitorOwnerWedgedNotify).toHaveBeenCalledTimes(1);
-    expect(guardedRelays[0]).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agent_id: "worker-a",
-        text: expect.stringContaining("read"),
-        press_enter: true,
-        allow_busy: true,
-        source_event: "dispatch_nudge",
-      }),
-    );
+    const rearmMessage = readInbox("worker-a", { baseDir: inboxBaseDir })[0]!;
+    expect(rearmMessage.reply_to).toBe("cmuxlayer-daemon");
+    expect(guardedRelays[0]).toHaveBeenCalledWith({
+      agent_id: "worker-a",
+      text: `[inbox] ${rearmMessage.id} — reply_to: ${rearmMessage.reply_to} — read ${inboxPath("worker-a", { baseDir: inboxBaseDir })}`,
+      press_enter: true,
+      allow_busy: true,
+      source_event: "dispatch_nudge",
+    });
     expect(clients[0]?.send).not.toHaveBeenCalled();
     expect(clients[0]?.sendKey).not.toHaveBeenCalled();
   });

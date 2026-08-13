@@ -39,6 +39,12 @@ export interface InboxMessage {
   id: string;
   ts_ms: number;
   from: string;
+  /** Authoritative agent id to use for replies. Never infer this from pane focus. */
+  reply_to: string;
+  /** Optional observed surface ref. Stale-able hint only; never a routing address. */
+  via?: string;
+  /** Observation timestamp paired with via. */
+  observed_at?: string;
   /** Recipient agent id (own-tag) or "orc". Each agent monitors only its own inbox. */
   to: string;
   tag: string;
@@ -90,6 +96,12 @@ export type InboxMonitorState = "never-armed" | "alive" | "stale";
 
 export interface DispatchInput {
   from: string;
+  /** Resolved sender agent id. Defaults to from for non-engine/internal callers. */
+  reply_to?: string;
+  /** Optional sender surface ref hint. Routing must continue to use reply_to. */
+  via?: string;
+  /** Optional ISO timestamp for the via observation. */
+  observed_at?: string;
   to?: string;
   tag?: string;
   task: string;
@@ -325,6 +337,13 @@ export function dispatch(
     id: input.id ?? genId(ts),
     ts_ms: ts,
     from: input.from,
+    reply_to: input.reply_to ?? input.from,
+    ...(input.via
+      ? {
+          via: input.via,
+          observed_at: input.observed_at ?? new Date(ts).toISOString(),
+        }
+      : {}),
     to: input.to ?? agentId,
     tag: input.tag ?? "dispatch",
     task: input.task,
@@ -332,6 +351,16 @@ export function dispatch(
   };
   appendFileSync(inboxPath(agentId, opts), JSON.stringify(msg) + "\n");
   return msg;
+}
+
+/** One connector-authored composer shape for all inbox wakes. */
+export function formatInboxPing(message: InboxMessage, path: string): string {
+  const replyTo = message.reply_to || message.from;
+  const viaHint =
+    message.via && message.observed_at
+      ? ` via:${message.via} observed_at:${message.observed_at}`
+      : "";
+  return `[inbox] ${message.id} — reply_to: ${replyTo}${viaHint} — read ${path}`;
 }
 
 export function dispatchOnce(

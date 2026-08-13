@@ -32,6 +32,7 @@ import {
 import {
   ackedIds,
   dispatchOnce,
+  formatInboxPing,
   inboxPath,
   monitorAlive,
   readLastAgentHeartbeat,
@@ -872,7 +873,10 @@ export class CmuxLayerDaemon {
           }
           await guardedRelay({
             agent_id: owner.agent_id,
-            text: `[inbox] monitor recovery message ${message.id} — read ${inboxPath(owner.agent_id, inboxOpts)}, re-arm, then ack`,
+            text: formatInboxPing(
+              message,
+              inboxPath(owner.agent_id, inboxOpts),
+            ),
             press_enter: true,
             allow_busy: true,
             source_event: "dispatch_nudge",

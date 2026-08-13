@@ -132,6 +132,7 @@ import {
 import {
   dispatch,
   ensureInboxFile,
+  formatInboxPing,
   inboxCursorPath,
   inboxMonitorState,
   inboxPath,
@@ -497,6 +498,21 @@ const SendToArgsSchema = z.object({
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
   allow_long_inline: z.boolean().optional().default(false),
+  targeting: z
+    .object({
+      role: z.enum(["implementor", "reviewer", "gatherer"]).optional(),
+      workspace: z.string().optional(),
+      agent_ids: z.array(z.string()).optional(),
+      exclude: z.array(z.string()).optional().default([]),
+    })
+    .refine(
+      (targeting) =>
+        targeting.role !== undefined ||
+        targeting.workspace !== undefined ||
+        targeting.agent_ids !== undefined,
+      "targeting requires at least one of role, workspace, or agent_ids",
+    )
+    .optional(),
 });
 
 export const THIN_CORE_TOOL_NAMES = new Set([
@@ -507,7 +523,6 @@ export const THIN_CORE_TOOL_NAMES = new Set([
   "read_screen",
   "my_agents",
   "list_agents",
-  "broadcast",
   "close_surface",
   "dispatch_to_agent",
   "list_surfaces",
@@ -515,9 +530,10 @@ export const THIN_CORE_TOOL_NAMES = new Set([
   "stop_agent",
 ]);
 
-// DRIFT: retire next release. The signed-off prose says 9 legacy names, while
-// its exhaustive mapping names these 8; do not invent an unnamed alias.
+// DRIFT: retire next release. P6 supplies broadcast as the ninth legacy alias
+// by replacing its fan-out semantics with send_to structured targeting.
 export const THIN_CORE_LEGACY_REPLACEMENTS: Readonly<Record<string, string>> = {
+  broadcast: "send_to(targeting={...})",
   send_to_agent: "send_to(mode=agent)",
   send_input: "send_to(mode=surface)",
   send_command: "send_to(mode=command)",
@@ -3140,6 +3156,23 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     } catch {
       // Health/read paths should not fail just because a refresh scan failed.
     }
+  };
+  const resolveCurrentCallerAgent = (): AgentRecord | null => {
+    const callerSurface = currentCallerContext()?.surfaceId?.trim();
+    if (!callerSurface) return null;
+    const normalizedSurface = callerSurface.toLowerCase();
+    const records = [
+      ...(context.lifecycleRegistry?.list() ?? []),
+      ...stateMgr.listStates(),
+    ].filter((agent) => !TERMINAL_AGENT_STATES.has(agent.state));
+    return (
+      records.find(
+        (agent) =>
+          agent.surface_uuid?.trim().toLowerCase() === normalizedSurface,
+      ) ??
+      records.find((agent) => agent.surface_id === callerSurface) ??
+      null
+    );
   };
   const resolveModeWorkspace = async (
     surface: string,
@@ -8781,7 +8814,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // directly into the agent's surface, regardless of registry state.
   server.tool(
     "dispatch_to_agent",
-    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox — NO send_input/TUI typing. If the recipient's monitor heartbeat is stale/absent, nudge='auto' (default) best-effort types a one-line inbox pointer into the agent's surface — independent of agent lifecycle state. A never-armed reader returns a non-retryable error after the durable append; a previously armed but stale reader returns explicit degraded success. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
+    "Append a task to an agent's inbox FILE (the deterministic write channel). The agent acts on it via a persistent native Monitor on its inbox. The durable envelope automatically carries reply_to=<resolved sender agent_id> plus optional via:<observed surface_ref> and observed_at metadata; reply_to is the only routing address, via is a stale-able hint, and tab names never enter the contract. The only connector-authored composer wake is `[inbox] <msg_id> — reply_to: <sender_agent_id>[ via:<surface_ref> observed_at:<stamp>] — read <path>`. With nudge='auto' (default), an idle live agent is woken once on enqueue; a stale/absent monitor also gets the same best-effort pointer independent of lifecycle state. A never-armed reader returns a non-retryable error after the durable append; a previously armed but stale reader returns explicit degraded success. Address to:'orc' to flag the orchestrator (own-tag triage). Channel is EPHEMERAL plumbing — set persist:true only for decisions that should be brain_store'd.",
     {
       agent_id: z
         .string()
@@ -8807,16 +8840,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         .optional()
         .default("auto")
         .describe(
-          "auto: when the recipient's inbox-monitor heartbeat is stale/absent, best-effort type a one-line inbox pointer into its surface (bypasses agent-state gates — works even when registry state is poisoned). never: file append only.",
+          "auto: wake an idle live agent once on enqueue; when the inbox-monitor heartbeat is stale/absent, best-effort type the same exact inbox pointer into its surface (bypasses agent-state gates — works even when registry state is poisoned). never: file append only.",
         ),
     },
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        const callerAgent = resolveCurrentCallerAgent();
+        const replyTo = callerAgent?.agent_id ?? args.from.trim();
+        if (!replyTo || /[\r\n]/.test(replyTo)) {
+          throw new Error(
+            "dispatch_to_agent requires a one-line sender agent_id for reply_to",
+          );
+        }
         const msg = dispatch(
           args.agent_id,
           {
             from: args.from,
+            reply_to: replyTo,
+            ...(callerAgent ? { via: callerAgent.surface_id } : {}),
             to: args.agent_id,
             tag: args.tag,
             task: args.task,
@@ -8842,9 +8884,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           reason: string;
           error_code?: string;
         } = { attempted: false, sent: false, reason: "" };
+        const acceptedRecord = context.lifecycleRegistry?.get(args.agent_id) ?? null;
+        const wakeIdleAgent =
+          monitor_alive && acceptedRecord?.state === "idle";
         if (args.nudge === "never") {
           nudge.reason = "nudge disabled by caller";
-        } else if (monitor_alive) {
+        } else if (monitor_alive && !wakeIdleAgent) {
           nudge.reason = "monitor heartbeat fresh — Monitor will deliver";
         } else {
           // State-independent surface lookup: ANY registry record (including
@@ -8869,7 +8914,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } else {
             nudge.attempted = true;
             try {
-              const pointer = `[inbox] new message from ${msg.from} (id ${msg.id}) — read ${inboxPath(args.agent_id, inboxOpts)}, act, then ack`;
+              const pointer = formatInboxPing(
+                msg,
+                inboxPath(args.agent_id, inboxOpts),
+              );
               await lifecycleAgentInputDeliverer({
                 agent_id: args.agent_id,
                 text: pointer,
@@ -8878,7 +8926,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 source_event: "dispatch_nudge",
               });
               nudge.sent = true;
-              nudge.reason = `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
+              nudge.reason = wakeIdleAgent
+                ? `idle live agent — typed inbox pointer into ${record.surface_id}`
+                : `heartbeat stale/absent — typed inbox pointer into ${record.surface_id} (state: ${record.state})`;
             } catch (e) {
               if (e instanceof DeliverySafetyGateError) {
                 nudge.error_code = e.error_code;
@@ -9481,23 +9531,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         registry.set(agentId, registryDirect);
       }
       return registryDirect;
-    };
-
-    const resolveCurrentCallerAgent = (): AgentRecord | null => {
-      const callerSurface = currentCallerContext()?.surfaceId?.trim();
-      if (!callerSurface) return null;
-      const normalizedSurface = callerSurface.toLowerCase();
-      const records = [...registry.list(), ...stateMgr.listStates()].filter(
-        (agent) => !TERMINAL_AGENT_STATES.has(agent.state),
-      );
-      return (
-        records.find(
-          (agent) =>
-            agent.surface_uuid?.trim().toLowerCase() === normalizedSurface,
-        ) ??
-        records.find((agent) => agent.surface_id === callerSurface) ??
-        null
-      );
     };
 
     const resolveManagedDeliveryRoute = async (
@@ -12032,6 +12065,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const agentSeatLabel = (agent: AgentRecord): string =>
       agent.seat_id?.trim() || agent.surface_id || agent.agent_id;
 
+    const collectTargetRecords = async (): Promise<AgentRecord[]> => {
+      try {
+        return await engine.runLifecycleMutation(async () => {
+          try {
+            discovery.invalidate();
+            const discovered = await discovery.scan(true);
+            return await registry.listMerged(discovery, {
+              force: true,
+              discovered,
+            });
+          } catch (error) {
+            if (!(error instanceof SurfaceBindingChangedDuringDiscoveryError)) {
+              throw error;
+            }
+            discovery.invalidate();
+            return registry.listMerged(discovery, { force: true });
+          }
+        });
+      } catch (e) {
+        if (isSurfaceEnumerationError(e)) {
+          throw new Error(
+            `Refusing target resolution because live surface enumeration failed: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+        throw e;
+      }
+    };
+
     server.tool(
       "broadcast",
       `${PANE_INPUT_BREAKAGE_GUIDANCE} Fan out a short pointer-style message to registered agents by role using the same guarded delivery path as send_to. Defaults to role=leads (orchestrator). Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters. Returns per-agent receipts so one failed target never hides the rest. ${ZSH_BANG_INLINE_WARNING}`,
@@ -12077,39 +12140,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const isCaller = (agent: AgentRecord): boolean =>
             callerRefs.has(agent.agent_id) || callerRefs.has(agent.surface_id);
 
-          const collectTargets = async (): Promise<AgentRecord[]> => {
-            try {
-              return await engine.runLifecycleMutation(async () => {
-                try {
-                  return await registry.listMerged(discovery);
-                } catch (error) {
-                  if (
-                    !(
-                      error instanceof SurfaceBindingChangedDuringDiscoveryError
-                    )
-                  ) {
-                    throw error;
-                  }
-                  // The first scan's screen evidence was correctly rejected.
-                  // Retry once from the now-current topology; a second move
-                  // still propagates and fails the broadcast closed.
-                  discovery.invalidate();
-                  return registry.listMerged(discovery, { force: true });
-                }
-              });
-            } catch (e) {
-              if (isSurfaceEnumerationError(e)) {
-                throw new Error(
-                  `Refusing broadcast because live surface enumeration failed: ${
-                    e instanceof Error ? e.message : String(e)
-                  }`,
-                );
-              }
-              throw e;
-            }
-          };
-
-          const targets = (await collectTargets()).filter(
+          const targets = (await collectTargetRecords()).filter(
             (agent) =>
               broadcastRoleMatches(
                 args.role,
@@ -12820,7 +12851,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // 17. send_to
     server.tool(
       "send_to",
-      `${PANE_INPUT_BREAKAGE_GUIDANCE} Unified send path. mode=agent (default) routes by agent_id without exposing surface details; a busy agent returns a nonterminal queued delivery receipt that the lifecycle sweep drains when the agent becomes interactive. mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends. ${ZSH_BANG_INLINE_WARNING}`,
+      `${PANE_INPUT_BREAKAGE_GUIDANCE} Unified send path. mode=agent (default) routes by one agent_id or a mutually exclusive structured targeting object {role,workspace,agent_ids,exclude}; targeting.role is the job function implementor|reviewer|gatherer and returns one immutable per-agent receipt set. A busy agent returns a nonterminal queued delivery receipt that the lifecycle sweep drains when the agent becomes interactive. mode=surface writes text to a raw surface; mode=command atomically sends a command and Return; mode=key sends one normalized key. Raw-surface modes accept target or surface directly and deliberately do not require a healthy agent registry, preserving the fleet recovery escape hatch. Inline text is capped at ${SEND_INPUT_MAX_INLINE_CHARS} characters by default; use file-backed boot_prompt_path for launcher prompts or allow_long_inline:true only for deliberate raw sends. ${ZSH_BANG_INLINE_WARNING}`,
       {
         ...SendToArgsSchema.shape,
         text: SendToArgsSchema.shape.text.describe(
@@ -12849,6 +12880,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           const args = parsedArgs.data;
           const mode = args.mode ?? "agent";
+          if (args.targeting && mode !== "agent") {
+            throw new Error("send_to.targeting is supported only in mode=agent");
+          }
           if (mode !== "agent") {
             const surface = args.surface ?? args.target;
             if (!surface) {
@@ -12909,9 +12943,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
 
-          const agentId = args.agent_id ?? args.target;
-          if (!agentId) {
-            throw new Error("send_to mode=agent requires agent_id or target");
+          if (args.targeting && (args.agent_id || args.target)) {
+            throw new Error(
+              "send_to accepts either targeting or agent_id/target, not both",
+            );
+          }
+          if (!args.targeting && !args.agent_id && !args.target) {
+            throw new Error(
+              "send_to mode=agent requires agent_id/target or targeting",
+            );
           }
           if (args.text === undefined) {
             throw new Error("send_to mode=agent requires text");
@@ -12928,6 +12968,274 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             value: args.text,
             allowLongInline: args.allow_long_inline,
           });
+          if (args.targeting) {
+            await awaitLifecycleStart();
+            const allTargets = await collectTargetRecords();
+            const excludedIds = new Set(args.targeting.exclude);
+            const scopedWorkspace = await canonicalWorkspaceRef(
+              args.targeting.workspace,
+            );
+            type TargetPlan = {
+              requested_agent_id?: string;
+              agent?: Readonly<AgentRecord>;
+              resolution: "resolved" | "filtered_out" | "unknown";
+              predicate?: "exclude" | "role" | "workspace";
+            };
+            const filterPredicate = (
+              agent: AgentRecord,
+            ): TargetPlan["predicate"] | null => {
+              if (excludedIds.has(agent.agent_id)) return "exclude";
+              if (
+                args.targeting?.role &&
+                agent.function !== args.targeting.role
+              ) {
+                return "role";
+              }
+              if (
+                scopedWorkspace &&
+                agent.workspace_id !== scopedWorkspace &&
+                agent.workspace_id !== args.targeting?.workspace
+              ) {
+                return "workspace";
+              }
+              return null;
+            };
+            const targetPlan: TargetPlan[] = [];
+            if (args.targeting.agent_ids) {
+              for (const requestedId of args.targeting.agent_ids) {
+                const exact = allTargets.find(
+                  (agent) => agent.agent_id === requestedId,
+                );
+                const candidates = exact
+                  ? [exact]
+                  : allTargets.filter((agent) =>
+                      agent.agent_id.startsWith(requestedId),
+                    );
+                if (candidates.length > 1) {
+                  throw new Error(
+                    `Ambiguous agent_id prefix "${requestedId}"; candidates: ${candidates
+                      .map((agent) => agent.agent_id)
+                      .sort()
+                      .join(", ")}. Refusing to guess.`,
+                  );
+                }
+                const agent = candidates[0];
+                if (!agent) {
+                  targetPlan.push({
+                    requested_agent_id: requestedId,
+                    resolution: "unknown",
+                  });
+                  continue;
+                }
+                const predicate = filterPredicate(agent);
+                targetPlan.push({
+                  requested_agent_id: requestedId,
+                  agent: Object.freeze({ ...agent }),
+                  resolution: predicate ? "filtered_out" : "resolved",
+                  ...(predicate ? { predicate } : {}),
+                });
+              }
+            } else {
+              for (const agent of allTargets) {
+                if (filterPredicate(agent)) continue;
+                targetPlan.push({
+                  agent: Object.freeze({ ...agent }),
+                  resolution: "resolved",
+                });
+              }
+            }
+            const resolvedTargets = Object.freeze(
+              targetPlan
+                .filter(
+                  (entry): entry is TargetPlan & { agent: Readonly<AgentRecord> } =>
+                    entry.resolution === "resolved" && entry.agent !== undefined,
+                )
+                .map((entry) => entry.agent),
+            );
+            for (const agent of resolvedTargets) {
+              assertInteractiveMultilineInputAllowed({
+                tool: "send_to",
+                value: args.text,
+                cli: agent.cli,
+                allowLongInline: args.allow_long_inline,
+              });
+            }
+            const mutableReceipts: Array<Record<string, unknown>> = [];
+            for (const plan of targetPlan) {
+              if (plan.resolution !== "resolved" || !plan.agent) {
+                mutableReceipts.push({
+                  ...(plan.requested_agent_id
+                    ? { requested_agent_id: plan.requested_agent_id }
+                    : {}),
+                  ...(plan.agent ? { agent_id: plan.agent.agent_id } : {}),
+                  resolution: plan.resolution,
+                  ...(plan.predicate ? { predicate: plan.predicate } : {}),
+                  delivery_state: "skipped",
+                  terminal: true,
+                  submit_verified: null,
+                  accepted: false,
+                  delivered: false,
+                  skipped:
+                    plan.resolution === "unknown"
+                      ? "unknown_agent_id"
+                      : `filtered_out:${plan.predicate}`,
+                });
+                continue;
+              }
+              const agent = plan.agent;
+              const resolutionMetadata = plan.requested_agent_id
+                ? {
+                    requested_agent_id: plan.requested_agent_id,
+                    resolution: "resolved",
+                  }
+                : {};
+              const skipped =
+                agent.state === "working"
+                  ? null
+                  : await broadcastSkipReason(agent);
+              if (skipped) {
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  delivery_state: "skipped",
+                  terminal: true,
+                  submit_verified: null,
+                  accepted: false,
+                  delivered: false,
+                  skipped,
+                });
+                continue;
+              }
+              const deliveryId = randomUUID();
+              if (!args.allow_busy && agent.state === "working") {
+                const queued = engine.queueDelivery({
+                  agent_id: agent.agent_id,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  source_event: "send_to",
+                });
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  delivery_id: queued.delivery_id,
+                  delivery_state: queued.delivery_state,
+                  terminal: queued.terminal,
+                  submit_verified: queued.submit_verified,
+                  accepted: true,
+                  delivered: false,
+                });
+                continue;
+              }
+              try {
+                const delivery = await deliverAgentInput({
+                  agent_id: agent.agent_id,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  allow_busy: args.allow_busy,
+                  source_event: "send_to",
+                  delivery_id: deliveryId,
+                });
+                const submitted = engine.resolveDelivery({
+                  delivery_id: deliveryId,
+                  agent_id: agent.agent_id,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  source_event: "send_to",
+                  delivery_state: "submitted",
+                  terminal: true,
+                  retry_count: delivery.retry_count,
+                  submit_verified: delivery.submit_verified,
+                  error: null,
+                });
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  delivery_id: submitted.delivery_id,
+                  delivery_state: submitted.delivery_state,
+                  terminal: submitted.terminal,
+                  submit_verified: submitted.submit_verified,
+                  accepted: true,
+                  delivered: true,
+                });
+              } catch (error) {
+                const failed = engine.resolveDelivery(
+                  {
+                    delivery_id: deliveryId,
+                    agent_id: agent.agent_id,
+                    text: args.text,
+                    press_enter: args.press_enter,
+                    source_event: "send_to",
+                    delivery_state: "failed",
+                    terminal: true,
+                    retry_count:
+                      error instanceof SubmitVerificationError
+                        ? error.retry_count
+                        : 0,
+                    submit_verified:
+                      error instanceof SubmitVerificationError ? false : null,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                  {
+                    appendFailureEvent: !(
+                      error instanceof SubmitVerificationError
+                    ),
+                  },
+                );
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  delivery_id: failed.delivery_id,
+                  delivery_state: failed.delivery_state,
+                  terminal: failed.terminal,
+                  submit_verified: failed.submit_verified,
+                  accepted: false,
+                  delivered: false,
+                  error: failed.error,
+                });
+              }
+            }
+            const receipts = Object.freeze(
+              mutableReceipts.map((receipt) => Object.freeze({ ...receipt })),
+            );
+            const submittedCount = receipts.filter(
+              (receipt) => receipt.delivery_state === "submitted",
+            ).length;
+            const queuedCount = receipts.filter(
+              (receipt) => receipt.delivery_state === "queued",
+            ).length;
+            const failedCount = receipts.filter(
+              (receipt) => receipt.delivery_state === "failed",
+            ).length;
+            const skippedCount = receipts.filter(
+              (receipt) => receipt.delivery_state === "skipped",
+            ).length;
+            const data = {
+              targeting: Object.freeze({ ...args.targeting }),
+              target_count: receipts.length,
+              resolved_target_count: resolvedTargets.length,
+              submitted_count: submittedCount,
+              queued_count: queuedCount,
+              delivered_count: submittedCount,
+              failed_count: failedCount,
+              skipped_count: skippedCount,
+              receipts,
+            };
+            if (resolvedTargets.length === 0) {
+              return err(
+                new Error("send_to targeting resolved zero targets; refusing silent no-op"),
+                data,
+              );
+            }
+            return okFormatted(
+              `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued, ${failedCount} failed, ${skippedCount} skipped`,
+              data,
+            );
+          }
+
+          const agentId = args.agent_id ?? args.target;
+          if (!agentId) {
+            throw new Error("send_to mode=agent requires agent_id or target");
+          }
           const targetAgent =
             engine.getAgentState(agentId) ?? registry.get(agentId);
           assertInteractiveMultilineInputAllowed({

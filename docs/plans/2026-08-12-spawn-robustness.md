@@ -79,4 +79,3 @@
 4. Review the final diff and run the bounded local CodeRabbit pre-commit review.
 5. Commit with the live agent-identity trailer, push the assigned branch, and open a signed ready-for-review PR.
 6. Append the collab log line and inbox-ping `cmuxlayerClaude-9c55eb04` with the PR URL. If the inbox is unarmed, append the PR URL as the final line of `phase-7/findings.md`.
-
