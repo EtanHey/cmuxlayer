@@ -10699,6 +10699,11 @@ Session ID: ${sessionId}`,
       ].join("\n");
       nowMs += 500;
       await engine.runSweep();
+      expect(
+        readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(
+          (message) => message.tag === "agent_halt_wedged",
+        ),
+      ).toEqual([]);
       nowMs += 501;
       await engine.runSweep();
       nowMs += 500;
