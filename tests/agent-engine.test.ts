@@ -9248,7 +9248,9 @@ Session ID: ${sessionId}`,
         })
         .mockResolvedValue({
           surface: "surface:cli-auto-revive",
-          text: "gpt-5.4 xhigh · 64% left\nWorking (2s • esc to interrupt)",
+          text:
+            `❯ codex resume ${sessionId}\n` +
+            "gpt-5.4 xhigh · 64% left\nWorking (2s • esc to interrupt)",
           lines: 80,
           scrollback_used: false,
         });
@@ -9347,17 +9349,67 @@ Session ID: ${sessionId}`,
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
     });
 
-    it("does not finalize revival while a newer resume command has not produced fresh Codex readiness", async () => {
+    it.each(["$", "#", "❯", "➜", ">"])(
+      "does not finalize revival from stale Codex readiness after a %s shell prompt resume",
+      async (shellPrompt) => {
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: "cmuxlayerCodex-auto-revive-failed-before-shell",
+            state: "booting",
+            surface_id: "surface:cli-auto-revive-failed-before-shell",
+            surface_provenance: "cmuxlayer_spawn",
+            parent_agent_id: "cmuxlayerClaude",
+            cli: "codex",
+            cli_session_id: "019faccc-4545-7555-8666-777788889999",
+            auto_revive: undefined,
+            effort: "xhigh",
+            revive_attempts: 1,
+            revive_last_outcome: "pending",
+            revive_previous_state: "working",
+            updated_at: new Date().toISOString(),
+          }),
+        );
+        liveSurfaces = [
+          makeSurface("surface:cli-auto-revive-failed-before-shell"),
+        ];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: "surface:cli-auto-revive-failed-before-shell",
+          text:
+            "› signal: killed my current changes\n" +
+            "gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
+            `${shellPrompt} codex resume 019faccc-4545-7555-8666-777788889999\n` +
+            "Shellbook: starting the agent directly.\n" +
+            "Error: Failed to resume session: no rollout found (code -32600)\n" +
+            "exit status 1",
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+
+        expect(
+          engine.getAgentState("cmuxlayerCodex-auto-revive-failed-before-shell"),
+        ).toMatchObject({
+          state: "booting",
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+        });
+        expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+      },
+    );
+
+    it("defers pending auto-revive readiness when the engine command echo is not visible", async () => {
       stateMgr.writeState(
         makeRecord({
-          agent_id: "cmuxlayerCodex-auto-revive-failed-before-shell",
+          agent_id: "cmuxlayerCodex-auto-revive-unrecognized-screen",
           state: "booting",
-          surface_id: "surface:cli-auto-revive-failed-before-shell",
+          surface_id: "surface:cli-auto-revive-unrecognized-screen",
           surface_provenance: "cmuxlayer_spawn",
           parent_agent_id: "cmuxlayerClaude",
           cli: "codex",
-          cli_session_id: "019faccc-4545-7555-8666-777788889999",
-          auto_revive: undefined,
+          cli_session_id: "019faccc-4747-7555-8666-777788889999",
+          auto_revive: true,
           effort: "xhigh",
           revive_attempts: 1,
           revive_last_outcome: "pending",
@@ -9366,14 +9418,13 @@ Session ID: ${sessionId}`,
         }),
       );
       liveSurfaces = [
-        makeSurface("surface:cli-auto-revive-failed-before-shell"),
+        makeSurface("surface:cli-auto-revive-unrecognized-screen"),
       ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
-        surface: "surface:cli-auto-revive-failed-before-shell",
+        surface: "surface:cli-auto-revive-unrecognized-screen",
         text:
           "› signal: killed my current changes\n" +
           "gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
-          "% codex resume 019faccc-4545-7555-8666-777788889999\n" +
           "Shellbook: starting the agent directly.\n" +
           "Error: Failed to resume session: no rollout found (code -32600)\n" +
           "exit status 1",
@@ -9385,7 +9436,7 @@ Session ID: ${sessionId}`,
       await engine.runSweep();
 
       expect(
-        engine.getAgentState("cmuxlayerCodex-auto-revive-failed-before-shell"),
+        engine.getAgentState("cmuxlayerCodex-auto-revive-unrecognized-screen"),
       ).toMatchObject({
         state: "booting",
         revive_attempts: 1,
@@ -9393,6 +9444,119 @@ Session ID: ${sessionId}`,
       });
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
     });
+
+    it("does not finalize revival from stale Claude readiness after a failed resume", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerClaude-auto-revive-failed-before-shell",
+          state: "booting",
+          surface_id: "surface:claude-auto-revive-failed-before-shell",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          cli: "claude",
+          cli_session_id: "019faccc-4646-7555-8666-777788889999",
+          auto_revive: true,
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+          revive_previous_state: "working",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("surface:claude-auto-revive-failed-before-shell"),
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:claude-auto-revive-failed-before-shell",
+        text:
+          "Claude Code\n" +
+          "❯\n" +
+          "➜ MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume 019faccc-4646-7555-8666-777788889999\n" +
+          "Error: No conversation found with session ID 019faccc-4646-7555-8666-777788889999\n" +
+          "exit status 1",
+        lines: 80,
+        scrollback_used: true,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerClaude-auto-revive-failed-before-shell"),
+      ).toMatchObject({
+        state: "booting",
+        revive_attempts: 1,
+        revive_last_outcome: "pending",
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+    });
+
+    it.each([
+      {
+        cli: "cursor" as const,
+        id: "019faccc-4848-7555-8666-777788889999",
+        command:
+          "cursor agent --session 019faccc-4848-7555-8666-777788889999",
+        staleReady: "Cursor Agent\ncursor>",
+      },
+      {
+        cli: "gemini" as const,
+        id: "019faccc-4949-7555-8666-777788889999",
+        command:
+          "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume 019faccc-4949-7555-8666-777788889999",
+        staleReady: "Gemini CLI\n>",
+      },
+      {
+        cli: "kiro" as const,
+        id: "019faccc-5151-7555-8666-777788889999",
+        command:
+          "cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id 019faccc-5151-7555-8666-777788889999",
+        staleReady: "kiro>",
+      },
+    ])(
+      "does not finalize revival from stale $cli readiness after a failed resume",
+      async ({ cli, id, command, staleReady }) => {
+        const agentId = `cmuxlayer-${cli}-auto-revive-failed-before-shell`;
+        const surfaceId = `surface:${cli}-auto-revive-failed-before-shell`;
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            state: "booting",
+            surface_id: surfaceId,
+            surface_provenance: "cmuxlayer_spawn",
+            parent_agent_id: "cmuxlayerClaude",
+            cli,
+            cli_session_id: id,
+            auto_revive: true,
+            revive_attempts: 1,
+            revive_last_outcome: "pending",
+            revive_previous_state: "working",
+            updated_at: new Date().toISOString(),
+          }),
+        );
+        liveSurfaces = [makeSurface(surfaceId)];
+        (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+          surface: surfaceId,
+          text:
+            `${staleReady}\n` +
+            `➜ ${command}\n` +
+            "Error: resume failed\n" +
+            "exit status 1",
+          lines: 80,
+          scrollback_used: true,
+        });
+        await engine.getRegistry().reconstitute();
+
+        await engine.runSweep();
+        await engine.runSweep();
+
+        expect(engine.getAgentState(agentId)).toMatchObject({
+          state: "booting",
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+        });
+        expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+      },
+    );
 
     it("accepts a successful retry after stale failed-resume scrollback", async () => {
       stateMgr.writeState(
