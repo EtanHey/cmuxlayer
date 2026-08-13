@@ -552,19 +552,32 @@ const DeliveryOutputShape = {
   submit_verified: z.boolean().nullable().optional(),
   delivery_id: z.string().optional(),
 };
+const DeliveryReceiptOutputSchema = z
+  .object({
+    ...DeliveryOutputShape,
+    bytes: z.number().int().nonnegative().optional(),
+    prompt_text: z.string().nullable().optional(),
+    prompt_warning: z.string().nullable().optional(),
+  })
+  .passthrough();
 const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
   spawn_agent: z
     .object({
       ...BaseOutputShape,
+      version: z.literal(1).optional(),
+      type: z.enum(["agent", "terminal"]).optional(),
       agent_id: z.string().optional(),
       parent_agent_id: z.string().nullable().optional(),
       role: z.string().optional(),
       surface_id: z.string().optional(),
-      workspace_id: z.string().optional(),
-      boot_prompt_receipt: z
-        .object(DeliveryOutputShape)
-        .passthrough()
-        .optional(),
+      workspace_id: z.string().nullable().optional(),
+      cwd: z.string().nullable().optional(),
+      title: z.string().nullable().optional(),
+      cwd_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_delivered: z.boolean().optional(),
+      boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      boot_prompt_submit_verified: z.boolean().nullable().optional(),
     })
     .passthrough(),
   send_to: z
@@ -573,6 +586,22 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       ...DeliveryOutputShape,
       agent_id: z.string().optional(),
       surface: z.string().optional(),
+      command: z.string().optional(),
+      key: z.string().optional(),
+      title: z.string().optional(),
+      model: z.string().optional(),
+      agent_type: z.string().optional(),
+      accepted: z.boolean().optional(),
+      status: z.string().optional(),
+      boot_prompt_delivered: z.boolean().optional(),
+      boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
+      boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      boot_prompt_submit_verified: z.boolean().nullable().optional(),
+      boot_prompt_warning: z.string().nullable().optional(),
+      registry_state: z.string().nullable().optional(),
+      screen: z.record(z.unknown()).nullable().optional(),
+      state_conflict: z.boolean().optional(),
+      health: z.record(z.unknown()).optional(),
       receipts: z.array(z.object({ ...DeliveryOutputShape }).passthrough()).optional(),
     })
     .passthrough(),
@@ -612,6 +641,16 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       surface: z.string().optional(),
       agent_id: z.string().optional(),
       workspace: z.string().optional(),
+      state: z.string().optional(),
+      force: z.boolean().optional(),
+      removed: z.record(z.unknown()).optional(),
+      pane: z.string().optional(),
+      collapse_pane: z.boolean().optional(),
+      refused: z.boolean().optional(),
+      caller_workspace: z.boolean().optional(),
+      surfaces: z.array(z.record(z.unknown())).optional(),
+      agents: z.array(z.record(z.unknown())).optional(),
+      live_agents: z.array(z.record(z.unknown())).optional(),
     })
     .passthrough(),
   update_surface: z
@@ -888,29 +927,43 @@ type SubmitVerificationFailureReason =
 
 class SubmitVerificationError extends Error {
   readonly retry_safe = false;
+  readonly receipt: PublicDeliveryReceipt;
 
   constructor(
     message: string,
     readonly retry_count: number,
     readonly reason: SubmitVerificationFailureReason,
-    readonly receipt?: PublicDeliveryReceipt,
+    receipt?: PublicDeliveryReceipt,
   ) {
     super(message);
     this.name = "SubmitVerificationError";
+    this.receipt =
+      receipt ??
+      buildPublicDeliveryReceipt({
+        typed: true,
+        submit_attempted: true,
+        submit_verified: false,
+        retry_count,
+      });
   }
 }
 
 const submitVerificationFailurePayload = (error: SubmitVerificationError) => ({
-  ...(error.receipt ?? {}),
-  submit_verified: false as const,
+  ...error.receipt,
   submit_verification_reason: error.reason,
   retry_safe: error.retry_safe,
-  retry_count: error.retry_count,
 });
 
 class DeliverySafetyGateError extends Error {
-  readonly delivered = false;
-  readonly submit_verified = false;
+  readonly receipt = buildPublicDeliveryReceipt({
+    delivery_state: "failed",
+    typed: false,
+    submit_attempted: false,
+    submit_verified: false,
+    retry_count: 0,
+  });
+  readonly delivered = this.receipt.delivered;
+  readonly submit_verified = this.receipt.submit_verified;
 
   constructor(
     readonly error_code:
@@ -1104,27 +1157,6 @@ function okFormatted(
   };
 }
 
-function withDeprecationWarning(
-  result: ToolReturn,
-  legacyName: string,
-  replacement: string,
-  emittedWarnings: Set<string>,
-): ToolReturn {
-  if (emittedWarnings.has(legacyName)) {
-    return result;
-  }
-  emittedWarnings.add(legacyName);
-  const warning = `${legacyName} is deprecated for one release; use ${replacement}`;
-  console.warn(`[cmuxlayer] ${warning}`);
-  return {
-    ...result,
-    structuredContent: {
-      ...(result.structuredContent ?? {}),
-      deprecation_warning: warning,
-    },
-  };
-}
-
 function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const message = error instanceof Error ? error.message : String(error);
   const modeExtra =
@@ -1140,9 +1172,8 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
   const deliverySafetyExtra =
     error instanceof DeliverySafetyGateError
       ? {
-          delivered: error.delivered,
+          ...error.receipt,
           error_code: error.error_code,
-          submit_verified: error.submit_verified,
           screen: error.screen,
         }
       : {};
@@ -3635,6 +3666,65 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       : undefined,
   );
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+  const rawRegisterTool = server.registerTool.bind(server) as (
+    name: string,
+    config: Record<string, unknown>,
+    handler: (...args: unknown[]) => unknown,
+  ) => unknown;
+  const registerLegacyToolWithOutputSchema = (
+    args: unknown[],
+    outputSchema: z.ZodTypeAny,
+  ): unknown => {
+    const toolName = args[0];
+    const handler = args.at(-1);
+    if (typeof toolName !== "string" || typeof handler !== "function") {
+      throw new Error("Invalid legacy MCP tool registration");
+    }
+
+    const legacyArgs = args.slice(1, -1);
+    const description =
+      typeof legacyArgs[0] === "string"
+        ? (legacyArgs.shift() as string)
+        : undefined;
+    let inputSchema: unknown;
+    let annotations: unknown;
+    if (legacyArgs.length > 1) {
+      inputSchema = legacyArgs.shift();
+      annotations = legacyArgs.shift();
+    } else if (legacyArgs.length === 1) {
+      const candidate = legacyArgs.shift();
+      const annotationKeys = new Set([
+        "title",
+        "readOnlyHint",
+        "destructiveHint",
+        "idempotentHint",
+        "openWorldHint",
+      ]);
+      const keys =
+        typeof candidate === "object" && candidate !== null
+          ? Object.keys(candidate)
+          : [];
+      if (keys.length > 0 && keys.every((key) => annotationKeys.has(key))) {
+        annotations = candidate;
+      } else {
+        inputSchema = candidate;
+      }
+    }
+    if (legacyArgs.length > 0) {
+      throw new Error(`Unsupported legacy MCP registration for ${toolName}`);
+    }
+
+    return rawRegisterTool(
+      toolName,
+      {
+        ...(description ? { description } : {}),
+        ...(inputSchema !== undefined ? { inputSchema } : {}),
+        outputSchema,
+        ...(annotations !== undefined ? { annotations } : {}),
+      },
+      handler as (...args: unknown[]) => unknown,
+    );
+  };
   const toolHandlersByName = new Map<
     string,
     (args: Record<string, unknown>, extra: unknown) => Promise<ToolReturn>
@@ -3685,29 +3775,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       };
     }
     if (palette && typeof toolName === "string" && !palette.shouldRegister(toolName)) {
-      const deferred = palette.defer(toolName, args) as {
-        update?: (updates: Record<string, unknown>) => void;
-      };
-      const outputSchema = PUBLIC_TOOL_OUTPUT_SCHEMAS[toolName];
-      if (outputSchema) {
-        deferred.update?.({
-          outputSchema: (outputSchema as z.AnyZodObject).shape,
-        });
-      }
-      return deferred;
+      return palette.defer(toolName, args);
     }
-    const registered = rawTool(...args) as {
-      update?: (updates: Record<string, unknown>) => void;
-    };
     if (typeof toolName === "string") {
       const outputSchema = PUBLIC_TOOL_OUTPUT_SCHEMAS[toolName];
       if (outputSchema) {
-        registered.update?.({
-          outputSchema: (outputSchema as z.AnyZodObject).shape,
-        });
+        return registerLegacyToolWithOutputSchema(args, outputSchema);
       }
     }
-    return registered;
+    return rawTool(...args);
   };
   if (ownsContext) {
     const close = server.close.bind(server);
@@ -14886,35 +14962,44 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
   if (palette) {
     palette.warnAboutUnknownTools();
-    const expansionTool = rawTool(
+    rawRegisterTool(
       "expand_palette",
-      "Register the remaining Phase 5 tools for this MCP session.",
-      {},
-      ANNOTATIONS.idempotentMutating,
+      {
+        description: "Register the remaining Phase 5 tools for this MCP session.",
+        inputSchema: {},
+        outputSchema: z
+          .object({
+            ...BaseOutputShape,
+            expanded: z.boolean(),
+            already_expanded: z.boolean(),
+            registered_tools: z.array(z.string()),
+          })
+          .passthrough(),
+        annotations: ANNOTATIONS.idempotentMutating,
+      },
       async () =>
         withTransportRetryTracking(async () => {
           const sendToolListChanged = server.sendToolListChanged;
           server.sendToolListChanged = () => {};
           let expansion;
           try {
-            expansion = palette.expand(rawTool);
+            expansion = palette.expand((...args) => {
+              const toolName = args[0];
+              const outputSchema =
+                typeof toolName === "string"
+                  ? PUBLIC_TOOL_OUTPUT_SCHEMAS[toolName]
+                  : undefined;
+              return outputSchema
+                ? registerLegacyToolWithOutputSchema(args, outputSchema)
+                : rawTool(...args);
+            });
           } finally {
             server.sendToolListChanged = sendToolListChanged;
           }
           if (expansion.expanded) server.sendToolListChanged();
           return ok({ ...expansion });
         }),
-    ) as { update?: (updates: Record<string, unknown>) => void };
-    expansionTool.update?.({
-      outputSchema: z
-        .object({
-          ...BaseOutputShape,
-          expanded: z.boolean(),
-          already_expanded: z.boolean(),
-          registered_tools: z.array(z.string()),
-        })
-        .passthrough().shape,
-    });
+    );
   }
 
   return server;

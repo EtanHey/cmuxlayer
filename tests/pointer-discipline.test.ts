@@ -444,7 +444,15 @@ describe("pane input pointer discipline", () => {
     expect(result.isError).toBe(true);
     expect(parsed.ok).toBe(false);
     expect(parsed.error_code).toBe("blocked_by_interactive_prompt");
-    expect(parsed.submit_verified).toBe(false);
+    expect(parsed).toMatchObject({
+      delivered: false,
+      delivery: "failed",
+      delivery_state: "failed",
+      terminal: true,
+      typed: false,
+      submit_attempted: false,
+      submit_verified: false,
+    });
     expect(parsed.screen).toMatchObject({
       control_state: "interactive_overlay",
       errors: expect.arrayContaining(["interactive_prompt"]),
@@ -486,6 +494,11 @@ describe("pane input pointer discipline", () => {
     expect(parsed).toMatchObject({
       ok: false,
       delivered: false,
+      delivery: "failed",
+      delivery_state: "failed",
+      terminal: true,
+      typed: false,
+      submit_attempted: false,
       error_code: "blocked_by_interactive_prompt",
       submit_verified: false,
       error:
