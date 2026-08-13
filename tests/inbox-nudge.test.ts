@@ -437,6 +437,37 @@ describe("dispatch_to_agent nudge (state-independent inbox wake)", () => {
     expect(String(after.at(-1)?.at(-1) ?? "")).not.toContain("workspace:");
   });
 
+  it("durably appends with the supplied sender id when caller surface is unresolved", async () => {
+    const agentId = await spawnTestAgent(server);
+
+    const result = await runWithCallerContext(
+      { surfaceId: "surface:missing-caller" },
+      () =>
+        server._registeredTools["dispatch_to_agent"].handler(
+          {
+            agent_id: agentId,
+            task: "Recovery message must survive stale caller state",
+            from: "cmuxlayerClaude-recovery",
+            nudge: "never",
+          },
+          {} as any,
+        ),
+    );
+    const parsed =
+      result.structuredContent ?? JSON.parse(result.content[0].text);
+    const message = readInbox(agentId, { baseDir: inboxDir }).at(-1)!;
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.durable).toBe(true);
+    expect(parsed.error_code).toBe("inbox_monitor_never_armed");
+    expect(message).toMatchObject({
+      from: "cmuxlayerClaude-recovery",
+      reply_to: "cmuxlayerClaude-recovery",
+      task: "Recovery message must survive stale caller state",
+    });
+    expect(message).not.toHaveProperty("via");
+  });
+
   it("republishes a Claude idle-to-working transition without shrinking any lane", async () => {
     await server.close();
     const idleScreen = [

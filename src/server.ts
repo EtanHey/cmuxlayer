@@ -8719,13 +8719,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
-        const callerContext = currentCallerContext();
         const callerAgent = resolveCurrentCallerAgent();
-        if (callerContext?.surfaceId && !callerAgent) {
-          throw new Error(
-            `dispatch_to_agent could not resolve caller surface ${callerContext.surfaceId} to a sender agent_id`,
-          );
-        }
         const replyTo = callerAgent?.agent_id ?? args.from.trim();
         if (!replyTo || /[\r\n]/.test(replyTo)) {
           throw new Error(
@@ -12562,26 +12556,87 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
           if (args.targeting) {
             await awaitLifecycleStart();
-            const requestedIds = args.targeting.agent_ids
-              ? new Set(args.targeting.agent_ids)
-              : null;
+            const allTargets = await collectTargetRecords();
             const excludedIds = new Set(args.targeting.exclude);
             const scopedWorkspace = await canonicalWorkspaceRef(
               args.targeting.workspace,
             );
+            type TargetPlan = {
+              requested_agent_id?: string;
+              agent?: Readonly<AgentRecord>;
+              resolution: "resolved" | "filtered_out" | "unknown";
+              predicate?: "exclude" | "role" | "workspace";
+            };
+            const filterPredicate = (
+              agent: AgentRecord,
+            ): TargetPlan["predicate"] | null => {
+              if (excludedIds.has(agent.agent_id)) return "exclude";
+              if (
+                args.targeting?.role &&
+                agent.function !== args.targeting.role
+              ) {
+                return "role";
+              }
+              if (
+                scopedWorkspace &&
+                agent.workspace_id !== scopedWorkspace &&
+                agent.workspace_id !== args.targeting?.workspace
+              ) {
+                return "workspace";
+              }
+              return null;
+            };
+            const targetPlan: TargetPlan[] = [];
+            if (args.targeting.agent_ids) {
+              for (const requestedId of args.targeting.agent_ids) {
+                const exact = allTargets.find(
+                  (agent) => agent.agent_id === requestedId,
+                );
+                const candidates = exact
+                  ? [exact]
+                  : allTargets.filter((agent) =>
+                      agent.agent_id.startsWith(requestedId),
+                    );
+                if (candidates.length > 1) {
+                  throw new Error(
+                    `Ambiguous agent_id prefix "${requestedId}"; candidates: ${candidates
+                      .map((agent) => agent.agent_id)
+                      .sort()
+                      .join(", ")}. Refusing to guess.`,
+                  );
+                }
+                const agent = candidates[0];
+                if (!agent) {
+                  targetPlan.push({
+                    requested_agent_id: requestedId,
+                    resolution: "unknown",
+                  });
+                  continue;
+                }
+                const predicate = filterPredicate(agent);
+                targetPlan.push({
+                  requested_agent_id: requestedId,
+                  agent: Object.freeze({ ...agent }),
+                  resolution: predicate ? "filtered_out" : "resolved",
+                  ...(predicate ? { predicate } : {}),
+                });
+              }
+            } else {
+              for (const agent of allTargets) {
+                if (filterPredicate(agent)) continue;
+                targetPlan.push({
+                  agent: Object.freeze({ ...agent }),
+                  resolution: "resolved",
+                });
+              }
+            }
             const resolvedTargets = Object.freeze(
-              (await collectTargetRecords())
+              targetPlan
                 .filter(
-                  (agent) =>
-                    (!args.targeting?.role ||
-                      agent.function === args.targeting.role) &&
-                    (!scopedWorkspace ||
-                      agent.workspace_id === scopedWorkspace ||
-                      agent.workspace_id === args.targeting?.workspace) &&
-                    (!requestedIds || requestedIds.has(agent.agent_id)) &&
-                    !excludedIds.has(agent.agent_id),
+                  (entry): entry is TargetPlan & { agent: Readonly<AgentRecord> } =>
+                    entry.resolution === "resolved" && entry.agent !== undefined,
                 )
-                .map((agent) => Object.freeze({ ...agent })),
+                .map((entry) => entry.agent),
             );
             for (const agent of resolvedTargets) {
               assertInteractiveMultilineInputAllowed({
@@ -12592,10 +12647,41 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
             }
             const mutableReceipts: Array<Record<string, unknown>> = [];
-            for (const agent of resolvedTargets) {
-              const skipped = await broadcastSkipReason(agent);
+            for (const plan of targetPlan) {
+              if (plan.resolution !== "resolved" || !plan.agent) {
+                mutableReceipts.push({
+                  ...(plan.requested_agent_id
+                    ? { requested_agent_id: plan.requested_agent_id }
+                    : {}),
+                  ...(plan.agent ? { agent_id: plan.agent.agent_id } : {}),
+                  resolution: plan.resolution,
+                  ...(plan.predicate ? { predicate: plan.predicate } : {}),
+                  delivery_state: "skipped",
+                  terminal: true,
+                  submit_verified: null,
+                  accepted: false,
+                  delivered: false,
+                  skipped:
+                    plan.resolution === "unknown"
+                      ? "unknown_agent_id"
+                      : `filtered_out:${plan.predicate}`,
+                });
+                continue;
+              }
+              const agent = plan.agent;
+              const resolutionMetadata = plan.requested_agent_id
+                ? {
+                    requested_agent_id: plan.requested_agent_id,
+                    resolution: "resolved",
+                  }
+                : {};
+              const skipped =
+                agent.state === "working"
+                  ? null
+                  : await broadcastSkipReason(agent);
               if (skipped) {
                 mutableReceipts.push({
+                  ...resolutionMetadata,
                   agent_id: agent.agent_id,
                   delivery_state: "skipped",
                   terminal: true,
@@ -12615,6 +12701,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "send_to",
                 });
                 mutableReceipts.push({
+                  ...resolutionMetadata,
                   agent_id: agent.agent_id,
                   delivery_id: queued.delivery_id,
                   delivery_state: queued.delivery_state,
@@ -12647,6 +12734,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   error: null,
                 });
                 mutableReceipts.push({
+                  ...resolutionMetadata,
                   agent_id: agent.agent_id,
                   delivery_id: submitted.delivery_id,
                   delivery_state: submitted.delivery_state,
@@ -12680,6 +12768,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   },
                 );
                 mutableReceipts.push({
+                  ...resolutionMetadata,
                   agent_id: agent.agent_id,
                   delivery_id: failed.delivery_id,
                   delivery_state: failed.delivery_state,
@@ -12709,6 +12798,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const data = {
               targeting: Object.freeze({ ...args.targeting }),
               target_count: receipts.length,
+              resolved_target_count: resolvedTargets.length,
               submitted_count: submittedCount,
               queued_count: queuedCount,
               delivered_count: submittedCount,
@@ -12716,6 +12806,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               skipped_count: skippedCount,
               receipts,
             };
+            if (resolvedTargets.length === 0) {
+              return err(
+                new Error("send_to targeting resolved zero targets; refusing silent no-op"),
+                data,
+              );
+            }
             return okFormatted(
               `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued, ${failedCount} failed, ${skippedCount} skipped`,
               data,
