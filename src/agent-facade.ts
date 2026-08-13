@@ -1,4 +1,12 @@
-import type { AgentRecord, AgentRoute, PublicAgent } from "./agent-types.js";
+import type {
+  AgentRecord,
+  AgentRoute,
+  AgentState,
+  ObservationSource,
+  Observed,
+  ObservedPublicAgent,
+  PublicAgent,
+} from "./agent-types.js";
 import { buildResumeCommand } from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
@@ -22,18 +30,83 @@ export function resumeCommandForAgent(
   }
 }
 
-export function toPublicAgent(record: AgentRecord): PublicAgent {
+function observed<T>(
+  value: T,
+  source: ObservationSource,
+  observedAtMs: number,
+): Observed<T> {
+  return { value, source, observed_at_ms: observedAtMs };
+}
+
+export function toPublicAgent(
+  record: AgentRecord,
+): PublicAgent {
   const resumeCommand = resumeCommandForAgent(record);
-  const resumable = !!resumeCommand;
   return {
     agent_id: record.agent_id,
     repo: record.repo,
     model: record.model,
     state: record.state,
     session_id: record.cli_session_id,
-    resumable,
+    resumable: !!resumeCommand,
     submit_verified: record.submit_verified ?? null,
     model_mismatch: record.model_mismatch ?? null,
+    ...(resumeCommand ? { resume_command: resumeCommand } : {}),
+  };
+}
+
+export function toObservedPublicAgent(
+  record: AgentRecord,
+  opts: {
+    derivedAtMs?: number;
+    state?: AgentState;
+    stateSource?: ObservationSource;
+    screenObservedAtMs?: number;
+    screenModel?: string | null;
+  } = {},
+): ObservedPublicAgent {
+  const derivedAtMs = opts.derivedAtMs ?? Date.now();
+  const registryObservedAtMs = derivedAtMs;
+  const resumeCommand = resumeCommandForAgent(record);
+  const resumable = !!resumeCommand;
+  const hasScreenModelObservation =
+    opts.screenObservedAtMs !== undefined && opts.screenModel != null;
+  const model = hasScreenModelObservation
+    ? (opts.screenModel ?? null)
+    : (record.model ?? null);
+  return {
+    agent_id: record.agent_id,
+    repo: record.repo,
+    model: observed(
+      model,
+      hasScreenModelObservation ? "screen" : "registry",
+      hasScreenModelObservation
+        ? opts.screenObservedAtMs!
+        : registryObservedAtMs,
+    ),
+    state: observed(
+      opts.state ?? record.state,
+      opts.stateSource ?? "registry",
+      opts.stateSource === "screen"
+        ? (opts.screenObservedAtMs ?? derivedAtMs)
+        : registryObservedAtMs,
+    ),
+    session_id: observed(
+      record.cli_session_id,
+      "registry",
+      registryObservedAtMs,
+    ),
+    resumable: observed(resumable, "registry", registryObservedAtMs),
+    submit_verified: observed(
+      record.submit_verified ?? null,
+      "registry",
+      registryObservedAtMs,
+    ),
+    model_mismatch: observed(
+      record.model_mismatch ?? null,
+      "registry",
+      registryObservedAtMs,
+    ),
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }

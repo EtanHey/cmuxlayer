@@ -235,6 +235,7 @@ export interface SpawnAgentParams {
    * the surface, before launcher I/O or readiness polling can give the user time to move.
    */
   on_surface_created?: (surface: {
+    agent_id: string;
     surface: string;
     workspace?: string;
   }) => void | Promise<void>;
@@ -261,8 +262,9 @@ export class AgentLaunchError extends Error {
     readonly surface_id: string,
     readonly workspace_id?: string,
     readonly launch_cause?: unknown,
+    readonly launch_phase: "focus" | "launch" = "launch",
   ) {
-    super(message);
+    super(message, launch_cause === undefined ? undefined : { cause: launch_cause });
     this.name = "AgentLaunchError";
   }
 }
@@ -4575,6 +4577,18 @@ export class AgentEngine {
       confirmationMs: SURFACE_EVICTION_CONFIRMATION_MS,
       now: Date.now(),
     });
+    for (const record of [...this.registry.list()]) {
+      if (!record.agent_id.includes("-pending-") || !record.cli_session_id) {
+        continue;
+      }
+      const finalized = this.finalizeCapturedSession(record, {
+        session_id: record.cli_session_id,
+        path: record.cli_session_path ?? null,
+      });
+      if (newlySurfacelessAgentIds.delete(record.agent_id)) {
+        newlySurfacelessAgentIds.add(finalized.agent_id);
+      }
+    }
     this.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
@@ -5389,6 +5403,7 @@ export class AgentEngine {
     }
     try {
       await spawnParams.on_surface_created?.({
+        agent_id: agentId,
         surface: surface.surface,
         workspace: createdWorkspace,
       });
@@ -5408,6 +5423,7 @@ export class AgentEngine {
         surface.surface,
         createdWorkspace,
         surfaceFocusError,
+        "focus",
       );
     }
 
@@ -5861,7 +5877,7 @@ export class AgentEngine {
   }
 
   listPublicAgents(filter?: AgentFilter): PublicAgent[] {
-    return this.listAgents(filter).map(toPublicAgent);
+    return this.listAgents(filter).map((agent) => toPublicAgent(agent));
   }
 
   resolveAgentRoute(agentId: string): AgentRoute {

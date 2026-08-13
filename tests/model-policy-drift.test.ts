@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   CODEX_EFFORT_VALUES,
@@ -98,16 +99,34 @@ describe("model-policy drift gate", () => {
   });
 });
 
-const dispatchPath = join(
+const installedDispatchPath = join(
   homedir(),
   ".config/ralphtools/golem-dispatch.zsh",
 );
-const launcherAbsent = !existsSync(dispatchPath);
+const contractFixturePath = fileURLToPath(
+  new URL("./fixtures/golem-dispatch-contract.zsh", import.meta.url),
+);
+const dispatchPath = existsSync(installedDispatchPath)
+  ? installedDispatchPath
+  : contractFixturePath;
 
-describe.skipIf(launcherAbsent)("model-policy parity with installed golem-dispatch", () => {
-  // Read lazily in beforeAll, not at describe-body collection time: a skipped
-  // suite (installed launcher absent, e.g. CI) still evaluates the describe
-  // body, so a top-level readFileSync would throw before the skip takes effect.
+describe("hermetic golem-dispatch contract", () => {
+  it("keeps the CI fallback parseable and aligned", () => {
+    const fixture = readFileSync(contractFixturePath, "utf8");
+    expect(parseClaudeDefault(fixture)).toBe(
+      MODEL_POLICY_CONTRACT.cli.claude.defaultModel,
+    );
+    expect(parseCodexEffortValues(fixture)).toEqual(CODEX_EFFORT_VALUES);
+    expect(parseCursorLauncher(fixture)).toContain(
+      "_golem_refuse_agent_model_override",
+    );
+    expect(fixture).toContain(MODEL_OVERRIDE_ENV);
+  });
+});
+
+describe("model-policy parity with golem-dispatch contract", () => {
+  // Developer machines check the installed launcher. CI checks the committed
+  // launcher-contract snapshot so this suite never silently disappears.
   let dispatchText: string;
   beforeAll(() => {
     dispatchText = readFileSync(dispatchPath, "utf8");

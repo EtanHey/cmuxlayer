@@ -77,11 +77,12 @@ import {
 import {
   resumeCommandForAgent,
   toAgentStatePayload,
-  toPublicAgent,
+  toObservedPublicAgent,
 } from "./agent-facade.js";
 import {
   DEFAULT_AGENT_HEALTH_ISSUE_SEVERITY,
   evaluateAgentHealth,
+  type AgentHealth,
   type AgentHealthIssueCode,
 } from "./agent-health.js";
 import {
@@ -95,6 +96,7 @@ import type {
   AgentAuthority,
   AgentFunction,
   AgentPlacement,
+  ObservedPublicAgent,
   AgentRole,
   AgentState,
   CliType,
@@ -118,6 +120,15 @@ import {
   isPickerOrMenuScreen,
   parseScreen,
 } from "./screen-parser.js";
+import {
+  launcherFailureFromShell,
+  matchShellPromptLine,
+  matchesShellPrompt,
+} from "./shell-prompt.js";
+import {
+  CreatedIdentityScope,
+  createdIdentityFromError,
+} from "./created-identity.js";
 import {
   dispatch,
   ensureInboxFile,
@@ -794,6 +805,16 @@ class BootPromptTimeoutError extends Error {
   }
 }
 
+class LauncherReadinessError extends Error {
+  constructor(
+    message: string,
+    readonly last_10_lines: string[],
+  ) {
+    super(message);
+    this.name = "LauncherReadinessError";
+  }
+}
+
 class BootPromptDeliveryError extends Error {
   constructor(
     message: string,
@@ -982,6 +1003,15 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     error.code === PLACEMENT_WORKSPACE_UNRESOLVED
       ? { error_code: PLACEMENT_WORKSPACE_UNRESOLVED }
       : {};
+  const readinessTimeout = findErrorInChain(
+    error,
+    (candidate): candidate is BootPromptTimeoutError | LauncherReadinessError =>
+      candidate instanceof BootPromptTimeoutError ||
+      candidate instanceof LauncherReadinessError,
+  );
+  const readinessExtra = readinessTimeout
+    ? { last_10_lines: readinessTimeout.last_10_lines }
+    : {};
   const retryMeta =
     error && typeof error === "object"
       ? {
@@ -1009,13 +1039,32 @@ function err(error: unknown, extra: Record<string, unknown> = {}): ToolReturn {
     ...deliverySafetyExtra,
     ...submitVerificationExtra,
     ...placementWorkspaceExtra,
+    ...readinessExtra,
     ...extra,
+    ...createdIdentityFromError(error),
   };
   return {
     content: [{ type: "text", text: JSON.stringify(payload) }],
     structuredContent: payload,
     isError: true,
   };
+}
+
+function findErrorInChain<T extends Error>(
+  error: unknown,
+  predicate: (error: Error) => error is T,
+): T | null {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (predicate(current)) return current;
+    seen.add(current);
+    current =
+      current instanceof AgentLaunchError && current.launch_cause !== undefined
+        ? current.launch_cause
+        : current.cause;
+  }
+  return null;
 }
 
 function requireValue(
@@ -1737,36 +1786,6 @@ function isLauncherShellCommand(command: string): boolean {
   return /(?:^|\s)[\w.-]+(?:Claude|Codex|Cursor|Gemini)(?=\s|$)/.test(command);
 }
 
-function matchShellPromptLine(
-  line: string,
-  opts?: { allowRootInput?: boolean },
-): { input: string } | null {
-  const normalized = line.trimEnd();
-  const barePrompt = normalized.match(/^\s*([$%])(?:\s+(.*))?$/);
-  if (barePrompt) {
-    return { input: barePrompt[2] ?? "" };
-  }
-  const rootPrompt = normalized.match(/^\s*#(?:\s+(.*))?$/);
-  if (rootPrompt && (!rootPrompt[1] || opts?.allowRootInput)) {
-    return { input: rootPrompt[1] ?? "" };
-  }
-
-  const prefixedPrompt = normalized.match(
-    /^\s*(?:(?:\S+@\S+)(?:\s+(?:~|\/)\S*)?|(?:\S+\s+)?(?:~|\/)\S*)(?:\s+\[[^\]]+\])?\s*[$%#](?:\s+(.*))?$/,
-  );
-  return prefixedPrompt ? { input: prefixedPrompt[1] ?? "" } : null;
-}
-
-function matchesShellPrompt(text: string): boolean {
-  const lines = normalizeTerminalText(text).split("\n");
-  let end = lines.length;
-  while (end > 0 && !lines[end - 1]?.trim()) {
-    end -= 1;
-  }
-  const prompt = end > 0 ? matchShellPromptLine(lines[end - 1] ?? "") : null;
-  return prompt?.input.trim() === "";
-}
-
 function shouldHandleCodexUpdateMenu(
   cli: CliType | undefined,
   text: string,
@@ -2315,8 +2334,19 @@ export function screenShowsPendingShellInput(
   let activePromptIndex = -1;
   for (let index = end - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trimEnd() ?? "";
-    const prompt = matchShellPromptLine(line, promptOptions);
+    const strictPrompt = matchShellPromptLine(line, {
+      ...promptOptions,
+      strict: true,
+    });
+    const prompt = strictPrompt ?? matchShellPromptLine(line, promptOptions);
     if (prompt) {
+      // The readiness matcher intentionally accepts any decorated $/%/#
+      // suffix. Only use that loose fallback as pending-input evidence for a
+      // launcher command; ordinary output such as "Building... 62%" is not a
+      // trustworthy prompt anchor.
+      if (!strictPrompt && !promptOptions.allowRootInput) {
+        return false;
+      }
       activePromptIndex = index;
       break;
     }
@@ -4584,6 +4614,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const now = Date.now();
         const updateState = parsed.cli_update_state;
 
+        const launcherFailure = launcherFailureFromShell(screen.text);
+        if (launcherFailure) {
+          throw new LauncherReadinessError(
+            `Launcher exited before reaching readiness on ${target.surface}: ${launcherFailure}`,
+            tailLines(lastText, 10),
+          );
+        }
+
         if (shouldHandleCodexUpdateMenu(opts.cli, screen.text)) {
           if (codexUpdateMenuAccepted) {
             const elapsedSinceAcceptMs =
@@ -4717,6 +4755,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } catch (error) {
         if (
           error instanceof BootPromptTimeoutError ||
+          error instanceof LauncherReadinessError ||
           error instanceof BootPromptUpdateMenuBlockedError
         ) {
           throw error;
@@ -4890,6 +4929,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const parsed = parseScreen(screen.text);
         const now = Date.now();
 
+        const launcherFailure = launcherFailureFromShell(screen.text);
+        if (launcherFailure) {
+          throw new LauncherReadinessError(
+            `Launcher exited before reaching readiness on ${opts.surface}: ${launcherFailure}`,
+            tailLines(lastText, 10),
+          );
+        }
+
         if (parsed.cli_update_state === "updating") {
           updateWasSeen = true;
           updateStartedAt ??= now;
@@ -4958,7 +5005,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return;
         }
       } catch (error) {
-        if (error instanceof BootPromptTimeoutError) {
+        if (
+          error instanceof BootPromptTimeoutError ||
+          error instanceof LauncherReadinessError
+        ) {
           throw error;
         }
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
@@ -5130,12 +5180,40 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           // The command can remain visible in shell history while the launcher is
           // already booting. Readiness detection is the authoritative launch check.
-          await waitForAgentLaunchReady({
-            surface: opts.surface,
-            workspace: opts.workspace,
-            timeout_ms: opts.timeout_ms,
-            onUpdateShellRelaunch: relaunchOriginalCommand,
-          });
+          try {
+            await waitForAgentLaunchReady({
+              surface: opts.surface,
+              workspace: opts.workspace,
+              timeout_ms: opts.timeout_ms,
+              onUpdateShellRelaunch: relaunchOriginalCommand,
+            });
+          } catch (readinessError) {
+            let pendingScreen;
+            try {
+              pendingScreen = await client.readScreen(opts.surface, {
+                workspace: opts.workspace,
+                lines: 80,
+                scrollback: false,
+              });
+            } catch (readError) {
+              if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+                throw new SurfaceGoneError(opts.surface, readError);
+              }
+              throw readinessError;
+            }
+            if (
+              screenShowsPendingShellInput(
+                pendingScreen.text,
+                sanitizedCommand,
+              )
+            ) {
+              throw new LauncherReadinessError(
+                `launcher command remained pending after Return on ${opts.surface}`,
+                tailLines(pendingScreen.text, 10),
+              );
+            }
+            throw readinessError;
+          }
         }
       },
       {
@@ -6246,6 +6324,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (
       binding &&
       (overrides?.screen_status === undefined ||
+        overrides?.screen_agent_type === undefined ||
+        overrides?.screen_control_state === undefined ||
         overrides?.screen_actions === undefined)
     ) {
       parsedSurface = await readParsedSurface(
@@ -6260,16 +6340,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
     const safeSurfaceOverrides: AgentHealthInputOverrides = {
       ...surfaceOverrides,
-      screen_status: binding
-        ? overrides?.screen_status !== undefined
+      screen_status:
+        overrides?.screen_status !== undefined
           ? overrides.screen_status
-          : (parsedSurface?.parsed.status ?? null)
-        : null,
-      screen_actions: binding
-        ? overrides?.screen_actions !== undefined
+          : binding
+            ? (parsedSurface?.parsed.status ?? null)
+            : null,
+      screen_agent_type:
+        overrides?.screen_agent_type !== undefined
+          ? overrides.screen_agent_type
+          : binding
+            ? (parsedSurface?.parsed.agent_type ?? null)
+            : null,
+      screen_control_state:
+        overrides?.screen_control_state !== undefined
+          ? overrides.screen_control_state
+          : binding
+            ? (parsedSurface?.parsed.control_state ?? null)
+            : null,
+      screen_actions:
+        overrides?.screen_actions !== undefined
           ? overrides.screen_actions
-          : (parsedSurface?.parsed.actions ?? null)
-        : null,
+          : binding
+            ? (parsedSurface?.parsed.actions ?? null)
+            : null,
       surface_write_liveness: binding
         ? surfaceWriteLiveness.observe(
             binding.surfaceRef,
@@ -6306,7 +6400,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         ...safeSurfaceOverrides,
       },
     );
-    return evaluateAgentHealth(agent, input);
+    const health = evaluateAgentHealth(agent, input);
+    return {
+      ...health,
+      ...(parsedSurface
+        ? {
+            screen_observation: {
+              observed_at_ms: Date.now(),
+              status: parsedSurface.parsed.status,
+              agent_type: parsedSurface.parsed.agent_type,
+              control_state: parsedSurface.parsed.control_state,
+              model: parsedSurface.parsed.model,
+            },
+          }
+        : {}),
+    };
   };
 
   const spawnDeliveryWorkspace = (
@@ -6989,6 +7097,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     async (args) => {
       let result: CmuxNewSplitResult | undefined;
       let focusRestoreLease: FocusRestoreLease | null = null;
+      const creation = new CreatedIdentityScope();
       try {
         const normalizedRole = normalizeToolAgentRole(args.role, "role");
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
@@ -7139,6 +7248,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   url: args.url,
                   title: args.title,
                 });
+          creation.record({
+            surface: result.surface,
+            workspace: result.workspace,
+            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
+          });
           assertSurfaceObserverEpochCurrent(
             rolePlacementObserverEpoch,
             "role-based new_split placement",
@@ -7159,6 +7273,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             type: args.type,
             url: args.url,
             title: args.title,
+          });
+          creation.record({
+            surface: result.surface,
+            workspace: result.workspace,
+            ...(result.surface_id ? { surface_id: result.surface_id } : {}),
           });
         }
         if (args.focus === true) {
@@ -7249,6 +7368,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const caught = creation.attach(e);
         // Creation or boot delivery may fail after cmuxlayer selected a target
         // workspace. Return focus when the user has not moved since then.
         await restoreFocusAfterRender(
@@ -7264,30 +7384,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(result.surface_id ? { surface_id: result.surface_id } : {}),
             }
           : {};
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e, createdIdentity));
+        if (caught instanceof SurfaceGoneError) {
+          return err(caught, surfaceGonePayload(caught, createdIdentity));
         }
-        if (e instanceof BootPromptTimeoutError) {
-          return err(e, {
+        if (caught instanceof BootPromptTimeoutError) {
+          return err(caught, {
             ...createdIdentity,
-            last_10_lines: e.last_10_lines,
+            last_10_lines: caught.last_10_lines,
           });
         }
-        if (e instanceof BootPromptUpdateMenuBlockedError) {
-          return err(e, {
+        if (caught instanceof BootPromptUpdateMenuBlockedError) {
+          return err(caught, {
             ...createdIdentity,
-            error_code: e.error_code,
-            last_10_lines: e.last_10_lines,
-            recovery: e.recovery,
+            error_code: caught.error_code,
+            last_10_lines: caught.last_10_lines,
+            recovery: caught.recovery,
           });
         }
-        if (e instanceof BootPromptDeliveryError) {
-          return err(e, {
+        if (caught instanceof BootPromptDeliveryError) {
+          return err(caught, {
             ...createdIdentity,
-            delivered_chars: e.delivered_chars,
+            delivered_chars: caught.delivered_chars,
           });
         }
-        return err(e, createdIdentity);
+        return err(caught, createdIdentity);
       }
     },
   );
@@ -7324,6 +7444,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       let result: CmuxNewSurfaceResult | undefined;
+      const creation = new CreatedIdentityScope();
       try {
         const bootPromptPath = getBootPromptPath(args.boot_prompt_path);
         if (bootPromptPath) {
@@ -7348,6 +7469,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           workspace: targetWorkspace,
           type: args.type,
           url: args.url,
+        });
+        creation.record({
+          surface: result.surface,
+          workspace: result.workspace,
+          ...(result.surface_id ? { surface_id: result.surface_id } : {}),
         });
         if (args.title) {
           await client.renameTab(result.surface, args.title, {
@@ -7399,6 +7525,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           data,
         );
       } catch (e) {
+        const caught = creation.attach(e);
         const createdIdentity = result
           ? {
               surface: result.surface,
@@ -7406,30 +7533,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(result.surface_id ? { surface_id: result.surface_id } : {}),
             }
           : {};
-        if (e instanceof SurfaceGoneError) {
-          return err(e, surfaceGonePayload(e, createdIdentity));
+        if (caught instanceof SurfaceGoneError) {
+          return err(caught, surfaceGonePayload(caught, createdIdentity));
         }
-        if (e instanceof BootPromptTimeoutError) {
-          return err(e, {
+        if (caught instanceof BootPromptTimeoutError) {
+          return err(caught, {
             ...createdIdentity,
-            last_10_lines: e.last_10_lines,
+            last_10_lines: caught.last_10_lines,
           });
         }
-        if (e instanceof BootPromptUpdateMenuBlockedError) {
-          return err(e, {
+        if (caught instanceof BootPromptUpdateMenuBlockedError) {
+          return err(caught, {
             ...createdIdentity,
-            error_code: e.error_code,
-            last_10_lines: e.last_10_lines,
-            recovery: e.recovery,
+            error_code: caught.error_code,
+            last_10_lines: caught.last_10_lines,
+            recovery: caught.recovery,
           });
         }
-        if (e instanceof BootPromptDeliveryError) {
-          return err(e, {
+        if (caught instanceof BootPromptDeliveryError) {
+          return err(caught, {
             ...createdIdentity,
-            delivered_chars: e.delivered_chars,
+            delivered_chars: caught.delivered_chars,
           });
         }
-        return err(e, createdIdentity);
+        return err(caught, createdIdentity);
       }
     },
   );
@@ -9948,6 +10075,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         try {
           if (args.type === "terminal") {
             if (
@@ -9995,6 +10123,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ...(placement.pane ? { pane: placement.pane } : {}),
                     focus: args.focus,
                   });
+            creation.record({
+              surface_id: created.surface,
+              workspace_id: created.workspace ?? workspace ?? null,
+            });
             if (args.cwd) {
               await client.send(
                 created.surface,
@@ -10127,6 +10259,56 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             args.worktree,
             args.mcp_profile as McpProfile | undefined,
           );
+          const cleanupFailedLauncherArtifacts = async (
+            error: Error,
+            agentId: string,
+            surface: string,
+            workspace?: string,
+          ): Promise<boolean> => {
+            const record = engine.getAgentState(agentId);
+            const cleanupSurface = record?.surface_uuid?.trim() || surface;
+            try {
+              await client.closeSurface(cleanupSurface, { workspace });
+            } catch (cleanupError) {
+              error.message = `${error.message}. Failed to close launcher surface ${cleanupSurface}: ${
+                cleanupError instanceof Error
+                  ? cleanupError.message
+                  : String(cleanupError)
+              }`;
+              return false;
+            }
+            const current = engine.getAgentState(agentId);
+            if (current && !TERMINAL_AGENT_STATES.has(current.state)) {
+              try {
+                const failed = stateMgr.transition(agentId, "error", {
+                  error: `Launcher surface closed after failed readiness: ${error.message}`,
+                });
+                registry.set(agentId, failed);
+              } catch (stateError) {
+                error.message = `${error.message}. Failed to mark closed launcher agent ${agentId} terminal: ${
+                  stateError instanceof Error
+                    ? stateError.message
+                    : String(stateError)
+                }`;
+              }
+            }
+            if (worktree.prepared?.created && worktree.repoRoot) {
+              try {
+                await rollbackPreparedWorktree(
+                  worktree.repoRoot,
+                  worktree.prepared,
+                  opts?.worktreeExec,
+                );
+              } catch (rollbackError) {
+                error.message = `${error.message}. Worktree rollback also failed: ${
+                  rollbackError instanceof Error
+                    ? rollbackError.message
+                    : String(rollbackError)
+                }`;
+              }
+            }
+            return true;
+          };
           let focusRestoreLease = await focusTargetBeforeSplit(
             spawnWorkspace,
             args.focus !== true,
@@ -10157,6 +10339,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
                 surfaceCreated = true;
+                creation.record({
+                  agent_id: created.agent_id,
+                  surface_id: created.surface,
+                  workspace_id: created.workspace ?? spawnWorkspace ?? null,
+                });
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
                   created,
@@ -10164,6 +10351,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               },
             });
           } catch (e) {
+            if (
+              e instanceof AgentLaunchError &&
+              e.launch_phase === "launch" &&
+              e.launch_cause instanceof LauncherReadinessError
+            ) {
+              await cleanupFailedLauncherArtifacts(
+                e,
+                e.agent_id,
+                e.surface_id,
+                e.workspace_id,
+              );
+            }
             let rollbackError: unknown = null;
             if (
               !surfaceCreated &&
@@ -10230,6 +10429,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
           let bootPromptDelivery:
             Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+          let launcherSurfaceClosed = false;
           try {
             {
               const deliveryWorkspace = spawnDeliveryWorkspace(
@@ -10292,6 +10492,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
           } catch (e) {
+            creation.attach(e);
+            if (e instanceof LauncherReadinessError) {
+              launcherSurfaceClosed = await cleanupFailedLauncherArtifacts(
+                e,
+                result.agent_id,
+                result.surface_id,
+                spawnDeliveryWorkspace(result, spawnWorkspace),
+              );
+            }
             const message = e instanceof Error ? e.message : String(e);
             const clearBootPromptPending = () => {
               const record = resolveSpawnRecord(
@@ -10333,7 +10542,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               // timeout, restore immediately instead of starting a second wait.
               await restoreFocusAfterRender(
                 focusRestoreLease,
-                result.surface_id,
+                launcherSurfaceClosed ? undefined : result.surface_id,
                 spawnDeliveryWorkspace(result, spawnWorkspace),
                 { waitForReady: false },
               );
@@ -10452,44 +10661,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("spawn_agent", formattedData),
           );
         } catch (e) {
-          if (e instanceof AgentLaunchError) {
-            if (e.launch_cause instanceof DeliverySafetyGateError) {
-              return err(e.launch_cause, {
-                agent_id: e.agent_id,
-                surface_id: e.surface_id,
-                workspace_id: e.workspace_id,
-                error_code: e.launch_cause.error_code,
-                submit_verified: e.launch_cause.submit_verified,
-                screen: e.launch_cause.screen,
+          const caught = creation.attach(e);
+          if (caught instanceof AgentLaunchError) {
+            if (caught.launch_cause instanceof DeliverySafetyGateError) {
+              creation.attach(caught.launch_cause);
+              return err(caught.launch_cause, {
+                agent_id: caught.agent_id,
+                surface_id: caught.surface_id,
+                workspace_id: caught.workspace_id,
+                error_code: caught.launch_cause.error_code,
+                submit_verified: caught.launch_cause.submit_verified,
+                screen: caught.launch_cause.screen,
               });
             }
-            if (e.launch_cause instanceof SurfaceGoneError) {
+            if (caught.launch_cause instanceof SurfaceGoneError) {
+              creation.attach(caught.launch_cause);
               return err(
-                e.launch_cause,
-                surfaceGonePayload(e.launch_cause, {
-                  agent_id: e.agent_id,
-                  surface_id: e.surface_id,
-                  workspace_id: e.workspace_id,
+                caught.launch_cause,
+                surfaceGonePayload(caught.launch_cause, {
+                  agent_id: caught.agent_id,
+                  surface_id: caught.surface_id,
+                  workspace_id: caught.workspace_id,
                 }),
               );
             }
-            return err(e, {
-              agent_id: e.agent_id,
-              surface_id: e.surface_id,
-              workspace_id: e.workspace_id,
+            return err(caught, {
+              agent_id: caught.agent_id,
+              surface_id: caught.surface_id,
+              workspace_id: caught.workspace_id,
             });
           }
-          if (e instanceof DeliverySafetyGateError) {
-            return err(e, {
-              error_code: e.error_code,
-              submit_verified: e.submit_verified,
-              screen: e.screen,
+          if (caught instanceof DeliverySafetyGateError) {
+            return err(caught, {
+              error_code: caught.error_code,
+              submit_verified: caught.submit_verified,
+              screen: caught.screen,
             });
           }
-          if (e instanceof SurfaceGoneError) {
-            return err(e, surfaceGonePayload(e));
+          if (caught instanceof SurfaceGoneError) {
+            return err(caught, surfaceGonePayload(caught));
           }
-          return err(e);
+          return err(caught);
         }
       },
     );
@@ -10539,6 +10751,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         let focusRestoreLease: FocusRestoreLease | null = null;
         let result: Awaited<ReturnType<typeof engine.spawnAgent>> | undefined;
         let mutationWorkspace: string | undefined;
@@ -10594,6 +10807,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             crash_recover: args.crash_recover,
             on_surface_created: async (created) => {
               surfaceCreated = true;
+              creation.record({
+                agent_id: created.agent_id,
+                surface_id: created.surface,
+                workspace_id: created.workspace ?? mutationWorkspace ?? null,
+              });
               focusRestoreLease = await capturePostCreationFocus(
                 focusRestoreLease,
                 created,
@@ -10698,7 +10916,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             formatOk("new_worktree_split", formattedData),
           );
         } catch (e) {
-          let caught: unknown = e;
+          let caught: unknown = creation.attach(e);
           if (
             !result &&
             !surfaceCreated &&
@@ -10727,6 +10945,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
             }
           }
+          caught = creation.attach(caught);
           await restoreFocusAfterRender(
             focusRestoreLease,
             result?.surface_id,
@@ -10852,6 +11071,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
       ANNOTATIONS.mutating,
       async (args) => {
+        const creation = new CreatedIdentityScope();
         const originFocus = await currentFocusTarget();
         let focusRestoreLease: FocusRestoreLease | null = null;
         let workspace: string | undefined;
@@ -10922,6 +11142,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!workspace) {
             throw new Error("create_workspace returned an empty workspace ref");
           }
+          creation.record({ workspace, workspace_id: workspace });
 
           focusRestoreLease = await focusTargetBeforeSplit(
             workspace,
@@ -10947,6 +11168,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               role: agent.role,
               auto_archive_on_done: false,
               on_surface_created: async (created) => {
+                const identity = {
+                  agent_id: created.agent_id,
+                  surface_id: created.surface,
+                  workspace_id: created.workspace ?? workspace ?? null,
+                };
+                creation.record(identity);
+                creation.append(
+                  "agents",
+                  identity,
+                  (left, right) =>
+                    left.surface_id === right.surface_id,
+                );
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
                   created,
@@ -10958,6 +11191,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               surface_id: result.surface_id,
               workspace_id: result.workspace_id ?? workspace ?? null,
             };
+            creation.record(activeSpawnIdentity);
+            creation.append(
+              "agents",
+              activeSpawnIdentity,
+              (left, right) => left.surface_id === right.surface_id,
+            );
             createdAgentIdentities.push(activeSpawnIdentity);
             lastSurface = result.surface_id;
             const originalLaunchCommand = originalLaunchCommandsBySurface.get(
@@ -11123,6 +11362,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             },
           );
         } catch (e) {
+          const caught = creation.attach(e);
           await restoreFocusAfterRender(
             focusRestoreLease,
             lastSurface,
@@ -11130,11 +11370,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             { waitForReady: false },
           );
           const failedIdentity =
-            e instanceof AgentLaunchError
+            caught instanceof AgentLaunchError
               ? {
-                  agent_id: e.agent_id,
-                  surface_id: e.surface_id,
-                  workspace_id: e.workspace_id ?? null,
+                  agent_id: caught.agent_id,
+                  surface_id: caught.surface_id,
+                  workspace_id: caught.workspace_id ?? null,
                 }
               : activeSpawnIdentity;
           const failureAgents = [...createdAgentIdentities];
@@ -11153,62 +11393,64 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ...(failedIdentity ?? {}),
             ...(failureAgents.length > 0 ? { agents: failureAgents } : {}),
           };
-          if (e instanceof AgentLaunchError) {
-            if (e.launch_cause instanceof DeliverySafetyGateError) {
-              return err(e.launch_cause, {
+          if (caught instanceof AgentLaunchError) {
+            if (caught.launch_cause instanceof DeliverySafetyGateError) {
+              creation.attach(caught.launch_cause);
+              return err(caught.launch_cause, {
                 ...failureIdentityPayload,
-                error_code: e.launch_cause.error_code,
-                submit_verified: e.launch_cause.submit_verified,
-                screen: e.launch_cause.screen,
+                error_code: caught.launch_cause.error_code,
+                submit_verified: caught.launch_cause.submit_verified,
+                screen: caught.launch_cause.screen,
               });
             }
-            if (e.launch_cause instanceof SurfaceGoneError) {
+            if (caught.launch_cause instanceof SurfaceGoneError) {
+              creation.attach(caught.launch_cause);
               return err(
-                e.launch_cause,
-                surfaceGonePayload(e.launch_cause, failureIdentityPayload),
+                caught.launch_cause,
+                surfaceGonePayload(caught.launch_cause, failureIdentityPayload),
               );
             }
-            return err(e, failureIdentityPayload);
+            return err(caught, failureIdentityPayload);
           }
-          if (e instanceof DeliverySafetyGateError) {
-            return err(e, {
+          if (caught instanceof DeliverySafetyGateError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              error_code: e.error_code,
-              submit_verified: e.submit_verified,
-              screen: e.screen,
+              error_code: caught.error_code,
+              submit_verified: caught.submit_verified,
+              screen: caught.screen,
             });
           }
-          if (e instanceof SubmitVerificationError) {
-            return err(e, {
+          if (caught instanceof SubmitVerificationError) {
+            return err(caught, {
               ...failureIdentityPayload,
               submit_verified: false,
-              retry_count: e.retry_count,
+              retry_count: caught.retry_count,
             });
           }
-          if (e instanceof SurfaceGoneError) {
-            return err(e, surfaceGonePayload(e, failureIdentityPayload));
+          if (caught instanceof SurfaceGoneError) {
+            return err(caught, surfaceGonePayload(caught, failureIdentityPayload));
           }
-          if (e instanceof BootPromptTimeoutError) {
-            return err(e, {
+          if (caught instanceof BootPromptTimeoutError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              last_10_lines: e.last_10_lines,
+              last_10_lines: caught.last_10_lines,
             });
           }
-          if (e instanceof BootPromptUpdateMenuBlockedError) {
-            return err(e, {
+          if (caught instanceof BootPromptUpdateMenuBlockedError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              error_code: e.error_code,
-              last_10_lines: e.last_10_lines,
-              recovery: e.recovery,
+              error_code: caught.error_code,
+              last_10_lines: caught.last_10_lines,
+              recovery: caught.recovery,
             });
           }
-          if (e instanceof BootPromptDeliveryError) {
-            return err(e, {
+          if (caught instanceof BootPromptDeliveryError) {
+            return err(caught, {
               ...failureIdentityPayload,
-              delivered_chars: e.delivered_chars,
+              delivered_chars: caught.delivered_chars,
             });
           }
-          return err(e, failureIdentityPayload);
+          return err(caught, failureIdentityPayload);
         }
       },
     );
@@ -11502,9 +11744,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     );
 
     // 15. list_agents
+    type ListAgentsCacheEntry = {
+      topology_signature: string;
+      derived_at: number;
+      agents: Array<ObservedPublicAgent & { health: AgentHealth }>;
+      skipped_agents: Array<{ agent_id: string; error: string }>;
+    };
+    const listAgentsCache = new Map<string, ListAgentsCacheEntry>();
+    const listAgentsTopologySignature = (
+      topology: SurfaceTopologySnapshot | null,
+    ): string =>
+      JSON.stringify({
+        complete: topology?.complete ?? false,
+        surfaces: topology
+          ? [...topology.workspaceBySurface]
+              .map(([surface, workspace]) => ({
+                surface,
+                workspace,
+                uuid: topology.surfaceIdByRef.get(surface) ?? null,
+              }))
+              .sort((a, b) => a.surface.localeCompare(b.surface))
+          : [],
+      });
+
     server.tool(
       "list_agents",
-      "List public agent handles with optional filters by state, repo, or model, including health. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
+      "List public agent handles derived from live topology with provenance-labelled facts and optional filters by state, repo, or model. max_age_ms permits reuse of a same-topology snapshot for at most five seconds. In collabs, use this before spawn_agent to find an existing lane agent to reuse or supersede. Use returned agent_id values with send_to and wait_for; use get_agent_state when you need internal route/session details.",
       {
         state: z
           .enum([
@@ -11520,31 +11785,127 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Filter by state"),
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
+        max_age_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(5_000)
+          .optional()
+          .describe(
+            "Maximum acceptable snapshot age in milliseconds (0-5000); topology changes always invalidate the snapshot",
+          ),
       },
-      ANNOTATIONS.readOnly,
+      ANNOTATIONS.mutating,
       async (args) => {
         const filter = {
           repo: args.repo,
           model: args.model,
         };
         const requestedState = args.state;
-        const buildListAgentsResponse = async (records: AgentRecord[]) => {
-          const topology = await collectSurfaceTopology();
+        const cacheKey = JSON.stringify({
+          state: args.state ?? null,
+          repo: args.repo ?? null,
+          model: args.model ?? null,
+        });
+        const renderListAgentsResponse = (entry: ListAgentsCacheEntry) => {
+          const data = {
+            derived_at: entry.derived_at,
+            agents: entry.agents as unknown as Record<string, unknown>[],
+            count: entry.agents.length,
+            ...(entry.skipped_agents.length > 0
+              ? { skipped_agents: entry.skipped_agents }
+              : {}),
+          };
+          const formatted = formatListAgents(
+            entry.agents,
+            entry.agents.length,
+            entry.skipped_agents,
+          );
+          return okFormatted(formatted, data);
+        };
+        const buildListAgentsResponse = async (
+          records: AgentRecord[],
+          topology: SurfaceTopologySnapshot | null,
+          topologySignature: string,
+          liveDiscovery?: {
+            rows: DiscoveredAgent[];
+            observed_at_ms: number;
+          },
+        ) => {
+          const registryObservedAt = Date.now();
+          const uuidKey = (value: string | null | undefined) =>
+            value?.trim().toLowerCase() || null;
           const rows = await Promise.all(
             records.map(async (agent) => {
               try {
+                const agentUuid = uuidKey(agent.surface_uuid);
+                const observedSurface = liveDiscovery?.rows.find((surface) => {
+                  const surfaceUuid = uuidKey(surface.surface_uuid);
+                  return agentUuid && surfaceUuid
+                    ? agentUuid === surfaceUuid
+                    : Boolean(
+                        !agentUuid &&
+                          !surfaceUuid &&
+                          agent.surface_observer_id &&
+                          agent.surface_observer_id === registry.getObserverId() &&
+                          surface.surface_id === agent.surface_id,
+                      );
+                });
+                const trustedScreenObservation =
+                  observedSurface && !observedSurface.read_error
+                    ? observedSurface
+                    : null;
                 const health = await evaluateServerAgentHealth(
                   agent,
                   {
                     ...healthTopologyOverrides(agent, topology),
+                    ...(trustedScreenObservation
+                      ? {
+                          screen_status:
+                            trustedScreenObservation.parsed_status,
+                          screen_agent_type:
+                            trustedScreenObservation.cli === "kiro"
+                              ? "unknown"
+                              : trustedScreenObservation.cli,
+                          screen_control_state:
+                            trustedScreenObservation.control_state,
+                          screen_actions:
+                            trustedScreenObservation.actions ?? [],
+                        }
+                      : {}),
                   },
                   topology,
                 );
+                const reconciledState = health.reconciled_state ?? agent.state;
+                const screenObservation = trustedScreenObservation
+                  ? {
+                      observed_at_ms: liveDiscovery!.observed_at_ms,
+                      status: trustedScreenObservation.parsed_status,
+                      agent_type:
+                        trustedScreenObservation.cli === "kiro"
+                          ? "unknown"
+                          : trustedScreenObservation.cli,
+                      control_state: trustedScreenObservation.control_state,
+                      model: trustedScreenObservation.model,
+                    }
+                  : health.screen_observation;
                 return {
                   agent: {
-                    ...toPublicAgent(agent),
-                    state: health.reconciled_state ?? agent.state,
-                    health,
+                    ...toObservedPublicAgent(agent, {
+                      derivedAtMs: registryObservedAt,
+                      state: reconciledState,
+                      stateSource: health.screen_confirmed_state
+                        ? "screen"
+                        : "registry",
+                      screenObservedAtMs: screenObservation?.observed_at_ms,
+                      screenModel: screenObservation?.model,
+                    }),
+                    health: {
+                      ...health,
+                      ...(screenObservation
+                        ? { screen_observation: screenObservation }
+                        : {}),
+                    },
                   },
                   skipped: null,
                 };
@@ -11567,33 +11928,71 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             row.skipped ? [row.skipped] : [],
           );
           const agents = requestedState
-            ? enrichedAgents.filter((agent) => agent.state === requestedState)
+            ? enrichedAgents.filter(
+                (agent) => agent.state.value === requestedState,
+              )
             : enrichedAgents;
-          const data = {
-            agents: agents as unknown as Record<string, unknown>[],
-            count: agents.length,
-            ...(skippedAgents.length > 0
-              ? { skipped_agents: skippedAgents }
-              : {}),
+          const entry: ListAgentsCacheEntry = {
+            topology_signature: topologySignature,
+            derived_at: Date.now(),
+            agents: agents as Array<
+              ObservedPublicAgent & { health: AgentHealth }
+            >,
+            skipped_agents: skippedAgents,
           };
-          const formatted = formatListAgents(
-            agents,
-            agents.length,
-            skippedAgents,
-          );
-          return okFormatted(formatted, data);
+          listAgentsCache.set(cacheKey, entry);
+          return renderListAgentsResponse(entry);
         };
 
         try {
           await awaitLifecycleStart();
-          const merged = await engine.runLifecycleMutation(() =>
-            registry.listMerged(discovery, { filter }),
+          const topology = await collectSurfaceTopology();
+          const topologySignature = listAgentsTopologySignature(topology);
+          const maxAgeMs = args.max_age_ms ?? 0;
+          const cached = listAgentsCache.get(cacheKey);
+          if (
+            maxAgeMs > 0 &&
+            cached &&
+            cached.topology_signature === topologySignature &&
+            Date.now() - cached.derived_at <= maxAgeMs
+          ) {
+            return renderListAgentsResponse(cached);
+          }
+          const live = await engine.runLifecycleMutation(async () => {
+            discovery.invalidate();
+            const discovered = await discovery.scan(true);
+            const observedAtMs = Date.now();
+            if (
+              registry
+                .list()
+                .some((record) => record.agent_id.includes("-pending-"))
+            ) {
+              registry.repairFromDiscovery(discovered, { seatRegistry });
+            }
+            const merged = await registry.listMerged(discovery, {
+              filter,
+              force: true,
+              discovered,
+            });
+            return { merged, discovered, observedAtMs };
+          });
+          return await buildListAgentsResponse(
+            live.merged,
+            topology,
+            topologySignature,
+            {
+              rows: live.discovered,
+              observed_at_ms: live.observedAtMs,
+            },
           );
-          return await buildListAgentsResponse(merged);
         } catch (e) {
           if (isSurfaceEnumerationError(e)) {
             try {
-              return await buildListAgentsResponse(registry.list(filter));
+              return await buildListAgentsResponse(
+                registry.list(filter),
+                null,
+                listAgentsTopologySignature(null),
+              );
             } catch (fallbackError) {
               return err(fallbackError);
             }
@@ -11670,7 +12069,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       try {
         return await engine.runLifecycleMutation(async () => {
           try {
-            return await registry.listMerged(discovery);
+            discovery.invalidate();
+            const discovered = await discovery.scan(true);
+            return await registry.listMerged(discovery, {
+              force: true,
+              discovered,
+            });
           } catch (error) {
             if (!(error instanceof SurfaceBindingChangedDuringDiscoveryError)) {
               throw error;
@@ -11823,10 +12227,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "resync_agents",
-      "Force-refresh the agent registry by scanning all surfaces. Evicts ghosts, registers discovered agents, and returns a diff.",
+      "Removed compatibility stub. Agent discovery and reconciliation now happen automatically on list_agents; callers must not resync manually.",
       {},
-      ANNOTATIONS.mutating,
+      ANNOTATIONS.readOnly,
       async () => {
+        const compatibilityStubRemoved: boolean = true;
+        if (compatibilityStubRemoved) {
+          return err(
+            new Error(
+              "resync_agents was removed; call list_agents for an automatically refreshed live view",
+            ),
+          );
+        }
+        /* c8 ignore start -- retained for one release as unreachable rollback reference */
         await awaitLifecycleStart();
         return engine.runLifecycleMutation(async () => {
           try {
@@ -12388,6 +12801,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             return err(e);
           }
         });
+        /* c8 ignore stop */
       },
     );
 

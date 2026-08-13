@@ -19,6 +19,7 @@ export interface DiscoveredAgent {
   model: string | null;
   token_count: number | null;
   context_pct: number | null;
+  actions?: string[];
   has_agent: boolean;
   read_error: boolean;
 }
@@ -123,6 +124,7 @@ export class AgentDiscovery {
         model: parsed.model,
         token_count: parsed.token_count,
         context_pct: parsed.context_pct,
+        actions: parsed.actions ?? [],
         has_agent: cli !== "unknown",
         read_error: false,
       };

@@ -51,6 +51,7 @@ const hermeticSpawnStateDirs: string[] = [];
 let hermeticSpawnFixtureSequence = 0;
 const originalLauncherRegistryPath =
   process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH;
+const originalAllowModel = process.env.REPOGOLEM_ALLOW_MODEL;
 
 afterEach(async () => {
   if (originalLauncherRegistryPath === undefined) {
@@ -58,6 +59,11 @@ afterEach(async () => {
   } else {
     process.env.CMUXLAYER_LAUNCHER_REGISTRY_PATH =
       originalLauncherRegistryPath;
+  }
+  if (originalAllowModel === undefined) {
+    delete process.env.REPOGOLEM_ALLOW_MODEL;
+  } else {
+    process.env.REPOGOLEM_ALLOW_MODEL = originalAllowModel;
   }
   await Promise.allSettled(
     serverContexts.map(
@@ -94,6 +100,7 @@ const AGENT_TOOLS = [
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
+  shellPrompt?: string;
   shellNeverReady?: boolean;
   surfaceUuid?: string;
 }): ExecFn {
@@ -132,7 +139,7 @@ function makeLifecycleExec(opts?: {
         createdSurfaceCount === 1
           ? "surface:new"
           : `surface:new-${createdSurfaceCount}`;
-      readyText = "$ ";
+      readyText = opts?.shellPrompt ?? "$ ";
       promptPending = false;
     }
     if (args.includes("close-surface") && !opts?.closeKeepsSurface) {
@@ -1230,6 +1237,7 @@ describe("lean spawn tool responses", () => {
   });
 
   it("spawn_agent rejects an unsupported model before creating a surface", async () => {
+    delete process.env.REPOGOLEM_ALLOW_MODEL;
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
@@ -1257,9 +1265,12 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.error).toContain(
       'would actually run "claude-opus-5[1m]"',
     );
-    expect(result.structuredContent.error).toContain(
-      "Accepted models: claude-opus-5[1m], opus, sonnet, haiku",
-    );
+    expect(result.structuredContent.error).toContain("Accepted models:");
+    for (const alias of ["opus", "sonnet", "haiku"]) {
+      expect(result.structuredContent.error).toMatch(
+        new RegExp(`Accepted models: [^.]*\\b${alias}\\b`),
+      );
+    }
     expect(
       mockExec.mock.calls.some(([, callArgs]) => callArgs.includes("new-split")),
     ).toBe(false);
@@ -1887,6 +1898,18 @@ describe("agent lifecycle tool registration", () => {
     const server = createLifecycleServer(mockExec);
     const registeredTools = (server as any)._registeredTools;
     expect(Object.keys(registeredTools)).toHaveLength(43);
+  });
+
+  it("keeps resync_agents only as a removed compatibility stub", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.resync_agents.handler(
+      {},
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(parsed.error).toContain("resync_agents was removed");
   });
 });
 
@@ -3761,6 +3784,302 @@ describe("agent lifecycle tool handlers", () => {
     expect(existsSync(worktreePath)).toBe(true);
   });
 
+  it("spawn_agent closes a failed launcher surface before rolling back its new worktree", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-launch-failure");
+      const registryPath = join(TEST_DIR, "launchers-post-surface-rollback.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "post-surface-failure");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        if (args.includes("worktree") && args.includes("remove")) {
+          rmSync(worktreePath, { recursive: true, force: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec({ surfaceUuid: "surface-uuid:new" });
+      let launcherSent = false;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /ralphCodex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "zsh: command not found: ralphCodex\n$ ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "post-surface-failure",
+            branch: "wt/post-surface-failure",
+          },
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("zsh: command not found: ralphCodex");
+      expect(parsed.surface_id).toBe("surface:new");
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["close-surface", "surface-uuid:new"]),
+      );
+      expect(worktreeExec).toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove", "--force", worktreePath]),
+      );
+      expect(worktreeExec).toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["branch", "-D", "wt/post-surface-failure"]),
+      );
+      const getState = (server as any)._registeredTools["get_agent_state"];
+      const state = parseToolResult(
+        await getState.handler({ agent_id: parsed.agent_id }, {} as any),
+      );
+      expect(state.state).toBe("error");
+      expect(existsSync(worktreePath)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent waits through an 800ms launcher first-paint delay without cleanup", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "voicelayerCodex -s") {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (
+          launcherSentAt !== null &&
+          args.includes("send-key") &&
+          args.includes("return")
+        ) {
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 800
+                  ? "$ voicelayerCodex -s"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.error).toBeUndefined();
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent ignores transient shell-rc errors above percentage boot progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-progress");
+      const registryPath = join(TEST_DIR, "launchers-progress.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "boot-progress");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const baseExec = makeLifecycleExec();
+      let launcherSentAt: number | null = null;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (
+          args.includes("send") &&
+          /ralphCodex\b/.test(String(args.at(-1) ?? ""))
+        ) {
+          launcherSentAt = Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSentAt !== null && args.includes("read-screen")) {
+          const elapsed = Date.now() - launcherSentAt;
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text:
+                elapsed < 500
+                  ? "zsh: command not found: pyenv\n⠋ Installing... 62%"
+                  : "codex> ",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "boot-progress",
+            branch: "wt/boot-progress",
+          },
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launcherSentAt).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(3_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed).toMatchObject({ ok: true });
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawn_agent keeps a generic launch-timeout surface and worktree recoverable", async () => {
+    vi.useFakeTimers();
+    try {
+      const gitsDir = join(TEST_DIR, "Gits");
+      const repoRoot = join(TEST_DIR, ".config", "ralph-timeout");
+      const registryPath = join(TEST_DIR, "launchers-timeout.zsh");
+      const worktreePath = join(repoRoot, ".worktrees", "launch-timeout");
+      mkdirSync(repoRoot, { recursive: true });
+      writeFileSync(registryPath, `repoGolem ralph "${repoRoot}"\n`);
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      const worktreeExec = vi.fn().mockImplementation(async (_cmd, args) => {
+        if (args.includes("worktree") && args.includes("add")) {
+          mkdirSync(worktreePath, { recursive: true });
+        }
+        return { stdout: "", stderr: "" };
+      });
+      const exec = makeLifecycleExec({ shellNeverReady: true });
+      const server = createTrackedServer({
+        exec,
+        stateDir: TEST_DIR,
+        sessionIdentityResolver: () => null,
+        worktreeHomeDir: gitsDir,
+        worktreeExec,
+      });
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "ralph",
+          cli: "codex",
+          role: "worker",
+          worktree: {
+            name: "launch-timeout",
+            branch: "wt/launch-timeout",
+          },
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(
+        exec.mock.calls.some(([, args]) => args.includes("close-surface")),
+      ).toBe(false);
+      expect(worktreeExec).not.toHaveBeenCalledWith(
+        "git",
+        expect.arrayContaining(["worktree", "remove"]),
+      );
+      expect(existsSync(worktreePath)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("new_worktree_split rolls back a newly created worktree and branch when spawning fails", async () => {
     const gitsDir = join(TEST_DIR, "Gits");
     const repoRoot = join(gitsDir, "cmuxlayer");
@@ -4534,6 +4853,63 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   }, 10_000);
 
+  it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let launcherSent = false;
+      let launcherReturns = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") && text === "voicelayerCodex -s") {
+          launcherSent = true;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("send-key") && args.includes("return")) {
+          launcherReturns += 1;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (launcherSent && args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "bash-5.2$ voicelayerCodex -s",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain(
+        "launcher command remained pending after Return",
+      );
+      expect(parsed.last_10_lines).toContain(
+        "bash-5.2$ voicelayerCodex -s",
+      );
+      expect(launcherReturns).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
@@ -4775,6 +5151,58 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it.each(["user in ~/repo > ", "❯ ", "› ", "» "])(
+    "spawn_agent launches from a ready %s shell prompt",
+    async (shellPrompt) => {
+      const server = createLifecycleServer(makeLifecycleExec({ shellPrompt }));
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+
+      const result = await spawn.handler(
+        {
+          repo: "brainlayer",
+          model: "codex",
+          cli: "codex",
+          boot_prompt_timeout_ms: 20,
+        },
+        {} as any,
+      );
+      const parsed = parseToolResult(result);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.surface_id).toBe("surface:new");
+    },
+  );
+
+  it("spawn terminal preserves created identity when cwd delivery fails", async () => {
+    const baseExec = makeLifecycleExec();
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (
+        args.includes("send") &&
+        String(args.at(-1) ?? "").startsWith("cd -- ")
+      ) {
+        throw new Error("deliberate terminal cwd failure");
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      {
+        version: 1,
+        type: "terminal",
+        cwd: "/tmp/cmuxlayer-p7-terminal",
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("deliberate terminal cwd failure");
+    expect(parsed.surface_id).toBe("surface:new");
+    expect(parsed.workspace_id).toBe("workspace:1");
+  });
+
   it("spawn_agent preserves the 10000ms shell-readiness default when no override is supplied", async () => {
     vi.useFakeTimers();
     try {
@@ -4912,6 +5340,9 @@ describe("agent lifecycle tool handlers", () => {
       );
       expect(parsed.agent_id).toEqual(expect.any(String));
       expect(parsed.surface_id).toBe("surface:new");
+      expect(parsed.last_10_lines).toContain(
+        "agent launcher still starting",
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -5039,6 +5470,7 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.agent_id).toEqual(expect.any(String));
       expect(parsed.surface_id).toBe("surface:new");
       expect(parsed.workspace_id).toBe("ws:1");
+      expect(parsed.last_10_lines).toContain("terminal initializing");
     } finally {
       vi.useRealTimers();
     }
@@ -5424,9 +5856,29 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(parsed.derived_at).toEqual(expect.any(Number));
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0].repo).toBe("brainlayer");
-    expect(parsed.agents[0].session_id).toBeNull();
+    expect(parsed.agents[0].state).toMatchObject({
+      value: "working",
+      source: expect.stringMatching(/^(screen|registry|process)$/),
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].model).toMatchObject({
+      value: "sonnet",
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].session_id).toMatchObject({
+      value: null,
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(parsed.agents[0].resumable).toMatchObject({
+      value: false,
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
     expect(parsed.agents[0].resume_command).toBeUndefined();
     expect(parsed.agents[0].surface_id).toBeUndefined();
     expect(parsed.agents[0].health).toMatchObject({
@@ -5435,6 +5887,248 @@ describe("agent lifecycle tool handlers", () => {
         "missing_cli_session_id",
         "non_resumable",
       ]),
+    });
+  });
+
+  it("list_agents bounds caller-declared staleness to five seconds", () => {
+    const server = createLifecycleServer(mockExec);
+    const list = (server as any)._registeredTools["list_agents"];
+
+    expect(list.inputSchema.parse({ max_age_ms: 5_000 })).toMatchObject({
+      max_age_ms: 5_000,
+    });
+    expect(() => list.inputSchema.parse({ max_age_ms: 5_001 })).toThrow();
+  });
+
+  it("list_agents stamps current observations and labels only the channel actually read", async () => {
+    const stableUuid = "21111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:truthful-observation",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "OpenAI Codex\nModel: gpt-5.6-sol xhigh\n\ncodex> ",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "truthful-observation-agent",
+      surface_id: "surface:truthful-observation",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      model: "stale-registry-model",
+      parsed_model: "stale-screen-model",
+      cli_session_id: "019fec96-588d-7000-8000-000000000099",
+      updated_at: "not-a-timestamp",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const before = Date.now();
+
+    const parsed = parseToolResult(
+      await registeredTestTool(server, "list_agents").handler({}, {}),
+    );
+    const agent = parsed.agents.find(
+      (candidate: { agent_id: string }) =>
+        candidate.agent_id === "truthful-observation-agent",
+    );
+
+    expect(agent.state).toMatchObject({
+      value: "ready",
+      source: "screen",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(agent.state.observed_at_ms).toBeGreaterThanOrEqual(before);
+    expect(agent.model).toMatchObject({
+      value: "gpt-5.6-sol xhigh",
+      source: "screen",
+      observed_at_ms: agent.state.observed_at_ms,
+    });
+    expect(agent.session_id).toMatchObject({
+      value: record.cli_session_id,
+      source: "registry",
+      observed_at_ms: expect.any(Number),
+    });
+    expect(agent.session_id.observed_at_ms).toBeGreaterThanOrEqual(before);
+    expect(parsed.derived_at).toBeGreaterThanOrEqual(
+      Math.max(
+        agent.state.observed_at_ms,
+        agent.model.observed_at_ms,
+        agent.session_id.observed_at_ms,
+      ),
+    );
+  });
+
+  it("list_agents force-discovers a surface added after lifecycle startup", async () => {
+    const firstUuid = "31111111-2222-4333-8444-555555555555";
+    const secondUuid = "41111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:first-live",
+        id: firstUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText("OpenAI Codex\nModel: gpt-5.5\n\ncodex> ");
+    const record = makeServerAgentRecord({
+      agent_id: "first-live-agent",
+      surface_id: "surface:first-live",
+      surface_uuid: firstUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const list = registeredTestTool(server, "list_agents");
+    await list.handler({}, {});
+
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:first-live",
+        id: firstUuid,
+        workspace_ref: "workspace:1",
+      },
+      {
+        ref: "surface:second-live",
+        id: secondUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const parsed = parseToolResult(await list.handler({}, {}));
+
+    expect(parsed.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agent_id: `auto-codex-${secondUuid}`,
+        }),
+      ]),
+    );
+  });
+
+  it("list_agents declares its registry-repair behavior as mutating", () => {
+    const server = createLifecycleServer(mockExec);
+    const list = registeredTestTool(server, "list_agents") as any;
+
+    expect(list.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it("list_agents publishes a tracked ready agent fallen back to shell as an unhealthy error", async () => {
+    const stableUuid = "51111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:corpse",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText("etan@mac cmuxlayer % ");
+    const record = makeServerAgentRecord({
+      agent_id: "corpse-agent",
+      surface_id: "surface:corpse",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const parsed = parseToolResult(
+      await registeredTestTool(server, "list_agents").handler({}, {}),
+    );
+    const corpse = parsed.agents.find(
+      (candidate: { agent_id: string }) => candidate.agent_id === "corpse-agent",
+    );
+
+    expect(corpse.state).toMatchObject({ value: "error", source: "screen" });
+    expect(corpse.health).toMatchObject({
+      status: "unhealthy",
+      issue_codes: expect.arrayContaining(["agent_shell_fallback"]),
+      screen_confirmed_state: "error",
+    });
+  });
+
+  it("list_agents publishes a live ready screen over a stale registry error", async () => {
+    const stableUuid = "61111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:mirror",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText("OpenAI Codex\nModel: gpt-5.6-sol\n\ncodex> ");
+    const record = makeServerAgentRecord({
+      agent_id: "mirror-agent",
+      surface_id: "surface:mirror",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "error",
+      cli: "codex",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const parsed = parseToolResult(
+      await registeredTestTool(server, "list_agents").handler({}, {}),
+    );
+    const live = parsed.agents.find(
+      (candidate: { agent_id: string }) => candidate.agent_id === "mirror-agent",
+    );
+
+    expect(live.state).toMatchObject({ value: "ready", source: "screen" });
+    expect(live.health.issue_codes).toContain("registry_screen_disagreement");
+  });
+
+  it("list_agents reuses a bounded snapshot until live topology changes", async () => {
+    const stableUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:observed",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (1s - esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "observed-cache-agent",
+      surface_id: "surface:observed",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "cmuxlayer",
+      cli: "codex",
+      model: "gpt-5.4",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const list = registeredTestTool(server, "list_agents");
+
+    const first = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+    routeClient.client.readScreen.mockClear();
+    const cached = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+
+    expect(cached.derived_at).toBe(first.derived_at);
+    expect(routeClient.client.readScreen).not.toHaveBeenCalled();
+
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:moved",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const refreshed = parseToolResult(
+      await list.handler({ max_age_ms: 5_000 }, {}),
+    );
+
+    expect(routeClient.client.readScreen).toHaveBeenCalled();
+    expect(refreshed.agents[0].state).toMatchObject({
+      value: "working",
+      source: "screen",
     });
   });
 
@@ -5502,7 +6196,7 @@ describe("agent lifecycle tool handlers", () => {
       expect.objectContaining({ agent_id: "healthy-agent" }),
       expect.objectContaining({
         agent_id: "corrupt-agent",
-        resumable: false,
+        resumable: expect.objectContaining({ value: false }),
       }),
     ]);
     expect(parsed.agents[1]).not.toHaveProperty("resume_command");
@@ -6411,6 +7105,63 @@ describe("agent lifecycle tool handlers", () => {
     expect(sendCalls.map((call) => call.surface)).toEqual(["surface:lead"]);
   });
 
+  it("send_to targeting force-discovers a surface added after lifecycle startup", async () => {
+    const firstUuid = "51111111-2222-4333-8444-555555555555";
+    const secondUuid = "61111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:first-target",
+        id: firstUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText("OpenAI Codex\nModel: gpt-5.5\n\ncodex> ");
+    const record = makeServerAgentRecord({
+      agent_id: "first-target-agent",
+      surface_id: "surface:first-target",
+      surface_uuid: firstUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:first-target",
+        id: firstUuid,
+        workspace_ref: "workspace:1",
+      },
+      {
+        ref: "surface:second-target",
+        id: secondUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        text: "Resolve against live reality",
+        press_enter: false,
+        targeting: { agent_ids: [`auto-codex-${secondUuid}`] },
+      },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.receipts).toEqual([
+      expect.objectContaining({
+        requested_agent_id: `auto-codex-${secondUuid}`,
+        agent_id: `auto-codex-${secondUuid}`,
+        resolution: "resolved",
+        delivered: true,
+      }),
+    ]);
+    expect(routeClient.sendCalls.map((call) => call.surface)).toEqual([
+      "surface:second-target",
+    ]);
+  });
+
   it("send_to targeting refuses an ambiguous agent-id prefix with candidates", async () => {
     const records = [
       makeServerAgentRecord({
@@ -6658,7 +7409,11 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.count).toBe(1);
     expect(parsed.agents[0]).toMatchObject({
       repo: "brainlayer",
-      state: "working",
+      state: {
+        value: "working",
+        source: "screen",
+        observed_at_ms: expect.any(Number),
+      },
       health: {
         status: "healthy",
         issue_codes: expect.arrayContaining([
@@ -6710,7 +7465,10 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(agent).toBeDefined();
-    expect(agent?.state).toBe("ready");
+    expect(agent?.state).toMatchObject({
+      value: "ready",
+      source: "registry",
+    });
     expect(agent?.health?.reconciled_state).toBeUndefined();
     expect(agent?.health?.issue_codes).not.toContain(
       "registry_screen_disagreement",
@@ -6748,7 +7506,10 @@ describe("agent lifecycle tool handlers", () => {
     );
 
     expect(agent).toBeDefined();
-    expect(agent?.state).toBe("ready");
+    expect(agent?.state).toMatchObject({
+      value: "ready",
+      source: "registry",
+    });
     expect(agent?.health?.reconciled_state).toBeUndefined();
     expect(agent?.health?.issue_codes).not.toContain(
       "registry_screen_disagreement",
@@ -6886,7 +7647,11 @@ describe("agent lifecycle tool handlers", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.agents[0]).toMatchObject({
-      session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      session_id: {
+        value: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        source: "registry",
+        observed_at_ms: expect.any(Number),
+      },
       resume_command:
         "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     });

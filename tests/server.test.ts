@@ -12126,8 +12126,14 @@ describe("tool handler integration", () => {
       expect(parsed.agents[0]).toMatchObject({
         agent_id: "worker-1",
         repo: "cmuxlayer",
-        model: "gpt-5.4",
-        state: "working",
+        model: expect.objectContaining({
+          value: "gpt-5.4",
+          source: "registry",
+        }),
+        state: expect.objectContaining({
+          value: "working",
+          source: "registry",
+        }),
       });
       expect(stateMgr.readState("worker-1")).toMatchObject({
         state: "working",
