@@ -9297,6 +9297,56 @@ Session ID: ${sessionId}`,
       ]);
     });
 
+    it("does not finalize revival from stale Codex identity above a failed-resume shell", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCodex-auto-revive-failed-shell",
+          state: "booting",
+          surface_id: "surface:cli-auto-revive-failed-shell",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          cli: "codex",
+          cli_session_id: "019faccc-4040-7555-8666-777788889999",
+          auto_revive: true,
+          effort: "xhigh",
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+          revive_previous_state: "working",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [
+        makeSurface("surface:cli-auto-revive-failed-shell"),
+      ];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cli-auto-revive-failed-shell",
+        text:
+          "› signal: killed my current changes\n" +
+          "  gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
+          "        %  etanheyman ~/Gits/cmuxlayer [main] $ codex resume 019faccc-4040-7555-8666-777788889999\n" +
+          "Shellbook: starting the agent directly.\n" +
+          "Shellbook: run `shellbook tui` in another terminal for the social pane.\n" +
+          "Error: Failed to resume session: no rollout found (code -32600)\n" +
+          "exit status 1\n" +
+          "        %  etanheyman ~/Gits/cmuxlayer [main] $",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerCodex-auto-revive-failed-shell"),
+      ).toMatchObject({
+        state: "booting",
+        revive_attempts: 1,
+        revive_last_outcome: "pending",
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+    });
+
     it("preserves the lifetime attempt count across repeated CLI-death episodes", async () => {
       const sessionId = "019faccc-1010-7222-8333-444455556666";
       stateMgr.writeState(

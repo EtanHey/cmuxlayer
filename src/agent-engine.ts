@@ -2359,12 +2359,16 @@ export class AgentEngine {
       screenText,
       parsed,
     );
+    const canBeInteractive =
+      parsed.control_state !== "shell" &&
+      !/(?:^|\n)\s*exit status [1-9]\d*\s*(?:\n|$)/im.test(screenText);
     const activeCodex =
       agent.cli === "codex" &&
+      canBeInteractive &&
       hasIdentity &&
       screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready: hasIdentity && match.matched,
+      ready: canBeInteractive && hasIdentity && match.matched,
       activeCodex,
       consecutive: match.consecutive,
     };
