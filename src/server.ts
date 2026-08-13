@@ -9960,7 +9960,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .enum(CODEX_EFFORT_VALUES)
           .optional()
           .describe(
-            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: medium, high, xhigh, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to XHIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
+            "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: low, medium, high, xhigh, max, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to HIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
           ),
         cli: z
           .enum(["claude", "codex", "gemini", "kiro", "cursor"])
@@ -10043,6 +10043,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "When true, automatically respawn the agent after unexpected PTY death using its captured CLI session ID.",
+          ),
+        auto_revive: z
+          .boolean()
+          .optional()
+          .default(true)
+          .describe(
+            "Automatically resume a captured CLI session in the same surviving surface after unexpected CLI exit. Set false for debugging sessions where CLI death is intentional evidence.",
           ),
         force_new: z
           .boolean()
@@ -10336,6 +10343,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               auto_archive_on_done: args.auto_archive_on_done ?? false,
               max_cost_per_agent: args.max_cost_per_agent,
               crash_recover: args.crash_recover,
+              auto_revive: args.auto_revive,
               boot_prompt_timeout_ms: args.boot_prompt_timeout_ms,
               on_surface_created: async (created) => {
                 surfaceCreated = true;
@@ -10741,6 +10749,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         parent_agent_id: z.string().optional(),
         auto_archive_on_done: z.boolean().optional().default(false),
         crash_recover: z.boolean().optional(),
+        auto_revive: z.boolean().optional().default(true),
         verbose: z
           .boolean()
           .optional()
@@ -10805,6 +10814,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             role: "worker",
             auto_archive_on_done: args.auto_archive_on_done ?? false,
             crash_recover: args.crash_recover,
+            auto_revive: args.auto_revive,
             on_surface_created: async (created) => {
               surfaceCreated = true;
               creation.record({

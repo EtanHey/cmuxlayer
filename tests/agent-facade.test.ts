@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRouteTable,
   resolveAgentRoute,
+  toAgentStatePayload,
   toObservedPublicAgent,
   toPublicAgent,
 } from "../src/agent-facade.js";
@@ -94,6 +95,22 @@ describe("agent facade projections", () => {
     expect(projected).toMatchObject({
       submit_verified: false,
       model_mismatch: true,
+    });
+  });
+
+  it("keeps auto-revive progress in the full agent-state payload", () => {
+    const projected = toAgentStatePayload(
+      makeRecord({
+        revive_attempts: 3,
+        revive_last_outcome: "failed",
+        revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
+      }),
+    );
+
+    expect(projected).toMatchObject({
+      revive_attempts: 3,
+      revive_last_outcome: "failed",
+      revive_next_attempt_at: "2026-08-13T08:00:08.000Z",
     });
   });
 });

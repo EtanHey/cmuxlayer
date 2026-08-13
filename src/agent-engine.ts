@@ -21,6 +21,7 @@ import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
   AGENT_ENV,
+  buildRawResumeCommand,
   buildResumeCommand,
   sanitizeRepoName,
   shellQuote,
@@ -118,6 +119,7 @@ import {
   type HarnessSessionWithMeta,
 } from "./harness-session.js";
 import {
+  CODEX_EFFORT_VALUES,
   MODEL_OVERRIDE_ENV,
   resolveLaunchModelFlag,
   resolveSpawnEffort,
@@ -231,6 +233,7 @@ export interface SpawnAgentParams {
   auto_archive_on_done?: boolean;
   max_cost_per_agent?: number;
   crash_recover?: boolean;
+  auto_revive?: boolean;
   /** Internal lifecycle hook: runs immediately after cmux creates and focuses
    * the surface, before launcher I/O or readiness polling can give the user time to move.
    */
@@ -523,6 +526,8 @@ export interface AgentEngineOptions {
   fleetWorkingNoProgressTimeoutMs?: number;
   /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
   deliverySubmitTimeoutMs?: number;
+  /** Base delay for same-surface CLI auto-revive retries. */
+  autoReviveBackoffBaseMs?: number;
 }
 
 export type RolePlacementReconcileTrigger = "spawn" | "idle" | "boot";
@@ -563,6 +568,8 @@ const BOOT_PROMPT_PENDING_STALE_MS = 5 * 60_000;
 const TASK_DONE_CONFIRMATION_MS = 5_000;
 const CLI_EXIT_SHELL_CONFIRMATION_SWEEPS = 2;
 const CLI_EXIT_ERROR = "Agent CLI exited to shell without done evidence";
+const DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS = 1_000;
+const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -613,7 +620,26 @@ export function computeModelMismatch(
   return !parsed.includes(requested) && !requested.includes(parsed);
 }
 
-export { buildResumeCommand } from "./agent-command.js";
+export function parseCodexEffort(
+  parsedModel: string | null,
+): CodexEffort | null {
+  const candidate = parsedModel?.trim().split(/\s+/).at(-1)?.toLowerCase();
+  return candidate &&
+    (CODEX_EFFORT_VALUES as readonly string[]).includes(candidate)
+    ? (candidate as CodexEffort)
+    : null;
+}
+
+export function computeEffortMismatch(
+  requestedEffort: string | null | undefined,
+  parsedEffort: string | null,
+): boolean | null {
+  const requested = requestedEffort?.trim().toLowerCase();
+  if (!requested || !parsedEffort) return null;
+  return requested !== parsedEffort;
+}
+
+export { buildRawResumeCommand, buildResumeCommand } from "./agent-command.js";
 
 interface SidebarStatusSnapshot {
   statusValue: string;
@@ -670,6 +696,43 @@ function screenTextSignature(text: string): string {
     hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
   }
   return `${text.length}:${hash.toString(16)}`;
+}
+
+function resumeAwaitsFreshReadiness(
+  agent: AgentRecord,
+  screenText: string,
+): boolean {
+  if (
+    agent.auto_revive === false ||
+    agent.revive_last_outcome !== "pending" ||
+    !agent.cli_session_id
+  ) {
+    return false;
+  }
+  let resumeCommand: string;
+  try {
+    resumeCommand = buildRawResumeCommand(
+      agent.cli,
+      agent.repo,
+      agent.cli_session_id,
+    );
+  } catch {
+    return false;
+  }
+  const latestResume = screenText.lastIndexOf(resumeCommand);
+  if (latestResume < 0) return true;
+  const afterResume = screenText.slice(latestResume + resumeCommand.length);
+  const parsed = parseScreen(afterResume);
+  const hasFreshIdentity =
+    screenHasReadyAgentIdentity(agent.cli, afterResume, parsed) ||
+    (agent.cli === "codex" &&
+      /\bgpt-\d[\w.-]*(?:\s+\w+)?\s*·[^\n]*/i.test(afterResume));
+  return !(
+    parsed.control_state !== "shell" &&
+    hasFreshIdentity &&
+    (matchReadyPattern(agent.cli, afterResume).matched ||
+      screenHasActiveAgentMarker(agent.cli, afterResume, parsed))
+  );
 }
 
 function safeMtimeMs(path: string): number {
@@ -1070,6 +1133,7 @@ export class AgentEngine {
   private deliverySubmitter: DeliverySubmitter | null = null;
   private deliveryDrainInFlight = false;
   private deliverySubmitTimeoutMs: number;
+  private autoReviveBackoffBaseMs: number;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -1084,6 +1148,10 @@ export class AgentEngine {
     this.deliverySubmitTimeoutMs = Math.max(
       1,
       opts?.deliverySubmitTimeoutMs ?? 30_000,
+    );
+    this.autoReviveBackoffBaseMs = Math.max(
+      0,
+      opts?.autoReviveBackoffBaseMs ?? DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS,
     );
     this.loadDeliveryReceipts();
     this.registry = registry;
@@ -2130,6 +2198,7 @@ export class AgentEngine {
     agentId: string,
     observerEpoch: SurfaceObserverEpoch,
     timeoutMs?: number,
+    bypassLaunchSender = false,
   ): Promise<void> {
     const expectedRoute = this.resolveAgentRoute(agentId);
     if (surface !== expectedRoute.surface_id) {
@@ -2159,7 +2228,7 @@ export class AgentEngine {
         );
       }
     };
-    if (this.launchCommandSender) {
+    if (this.launchCommandSender && !bypassLaunchSender) {
       await this.launchCommandSender({
         surface,
         ...this.stableSurfaceWriteOptions(expectedRoute.surface_uuid),
@@ -2327,12 +2396,16 @@ export class AgentEngine {
       screenText,
       parsed,
     );
+    const canBeInteractive =
+      parsed.control_state !== "shell" &&
+      !resumeAwaitsFreshReadiness(agent, screenText);
     const activeCodex =
       agent.cli === "codex" &&
+      canBeInteractive &&
       hasIdentity &&
       screenHasActiveAgentMarker(agent.cli, screenText, parsed);
     return {
-      ready: hasIdentity && match.matched,
+      ready: canBeInteractive && hasIdentity && match.matched,
       activeCodex,
       consecutive: match.consecutive,
     };
@@ -2832,9 +2905,13 @@ export class AgentEngine {
     try {
       const screen = await this.readSweepScreen(agent, ctx);
       const parsed = parseScreen(screen.text);
+      const parsedEffort =
+        agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
       const settlement = {
         parsed_model: parsed.model,
         model_mismatch: computeModelMismatch(agent.model, parsed.model),
+        parsed_effort: parsedEffort,
+        effort_mismatch: computeEffortMismatch(agent.effort, parsedEffort),
       };
       const evidence = this.readReadyEvidence(agent, screen.text);
       const promptStillPending =
@@ -2945,7 +3022,7 @@ export class AgentEngine {
       }
       this.registry.set(agent.agent_id, updated);
       this.readyPatternMatches.delete(agent.agent_id);
-      return updated;
+      return this.finalizeAutoReviveSuccess(updated);
     } catch {
       return agent;
     }
@@ -3012,6 +3089,282 @@ export class AgentEngine {
     }
   }
 
+  private shouldAutoReviveCliExit(agent: AgentRecord): boolean {
+    const structurallyEligible =
+      agent.surface_provenance === "cmuxlayer_spawn" &&
+      agent.auto_revive !== false &&
+      agent.user_killed !== true &&
+      !!agent.cli_session_id &&
+      this.registry.canControlSurface(agent);
+    if (!structurallyEligible) return false;
+    try {
+      buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id!);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private autoReviveBackoffMs(attempt: number): number {
+    return Math.min(
+      MAX_AUTO_REVIVE_BACKOFF_MS,
+      this.autoReviveBackoffBaseMs * 2 ** Math.max(0, attempt - 1),
+    );
+  }
+
+  private async dispatchCliExitOutcome(
+    agent: AgentRecord,
+    outcome: "revived" | "unrecoverable",
+  ): Promise<{ record: AgentRecord; dispatched: boolean }> {
+    if (!agent.parent_agent_id || agent.revive_notification_sent_at) {
+      return { record: agent, dispatched: false };
+    }
+    const attempts = agent.revive_attempts ?? 0;
+    const manualResumeCommand = agent.cli_session_id
+      ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+      : null;
+    const tag =
+      outcome === "revived"
+        ? "agent_cli_exit_revived"
+        : "agent_cli_exit_unrecoverable";
+    const task =
+      outcome === "revived"
+        ? `Agent ${agent.agent_id} revived automatically on attempt ${attempts} ` +
+          `in surface ${agent.surface_id}; verified model ${agent.parsed_model ?? "unknown"}.`
+        : `Agent ${agent.agent_id} CLI exit is unrecoverable after ${attempts} attempts ` +
+          `in surface ${agent.surface_id}. Manual fallback: ${manualResumeCommand ?? "no captured session"}`;
+    try {
+      dispatchOnce(
+        agent.parent_agent_id,
+        {
+          id: `agent-cli-exit-${outcome}:${agent.agent_id}:${agent.revive_completed_at ?? agent.updated_at}`,
+          from: "cmuxlayer:lifecycle",
+          to: agent.parent_agent_id,
+          tag,
+          task,
+        },
+        this.inboxOpts,
+      );
+      const notified = this.stateMgr.updateRecord(agent.agent_id, {
+        revive_notification_sent_at: new Date().toISOString(),
+      });
+      this.registry.set(agent.agent_id, notified);
+      return { record: notified, dispatched: true };
+    } catch {
+      return { record: agent, dispatched: false };
+    }
+  }
+
+  private appendAutoReviveCliExitEvent(
+    agent: AgentRecord,
+    outcome: "pending" | "revived" | "unrecoverable",
+    inboxDispatched: boolean,
+  ): void {
+    this.stateMgr.getEventLog().appendAgentCliExit({
+      ts: agent.updated_at,
+      event_type: "agent_cli_exit",
+      agent_id: agent.agent_id,
+      surface_id: agent.surface_id,
+      parent_agent_id: agent.parent_agent_id,
+      previous_state: agent.revive_previous_state ?? "working",
+      control_state: "shell",
+      consecutive_observations:
+        agent.revive_consecutive_observations ??
+        CLI_EXIT_SHELL_CONFIRMATION_SWEEPS,
+      inbox_dispatched: inboxDispatched,
+      error: CLI_EXIT_ERROR,
+      auto_revive: true,
+      revive_attempts: agent.revive_attempts ?? 0,
+      revive_outcome: outcome,
+      verified_model: outcome === "revived" ? agent.parsed_model ?? null : null,
+      manual_resume_command:
+        outcome === "unrecoverable" && agent.cli_session_id
+          ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+          : null,
+    });
+  }
+
+  private async markAutoReviveUnrecoverable(
+    agent: AgentRecord,
+    reason: string,
+  ): Promise<AgentRecord> {
+    const completedAt = new Date().toISOString();
+    let completed = this.stateMgr.updateRecord(agent.agent_id, {
+      revive_last_outcome: "unrecoverable",
+      revive_last_error: reason,
+      revive_next_attempt_at: null,
+      revive_completed_at: completedAt,
+      revive_observation_source: "screen",
+      revive_observed_at_ms: Date.now(),
+      error: `Auto-revive unrecoverable: ${reason}`,
+    });
+    this.registry.set(agent.agent_id, completed);
+    const notification = await this.dispatchCliExitOutcome(
+      completed,
+      "unrecoverable",
+    );
+    completed = notification.record;
+    this.appendAutoReviveCliExitEvent(
+      completed,
+      "unrecoverable",
+      notification.dispatched,
+    );
+    return completed;
+  }
+
+  private async attemptSameSurfaceAutoRevive(
+    agent: AgentRecord,
+  ): Promise<AgentRecord> {
+    const attempt = (agent.revive_attempts ?? 0) + 1;
+    if (attempt > MAX_RESPAWN_ATTEMPTS) {
+      return this.markAutoReviveUnrecoverable(
+        agent,
+        `maximum attempts exceeded (${MAX_RESPAWN_ATTEMPTS})`,
+      );
+    }
+    const sessionId = agent.cli_session_id;
+    if (!sessionId) {
+      return this.markAutoReviveUnrecoverable(
+        agent,
+        "captured session id is missing",
+      );
+    }
+    const attemptedAt = new Date().toISOString();
+    let attempted = this.stateMgr.updateRecord(agent.agent_id, {
+      revive_attempts: attempt,
+      revive_last_attempt_at: attemptedAt,
+      revive_next_attempt_at: null,
+      revive_last_outcome: "pending",
+      revive_last_error: null,
+      revive_completed_at: null,
+      revive_observation_source: "screen",
+      revive_observed_at_ms: Date.now(),
+    });
+    this.registry.set(agent.agent_id, attempted);
+    try {
+      await this.beforeCrashRecoveryMutation?.({
+        phase: "resume",
+        agent_id: attempted.agent_id,
+        surface: attempted.surface_id,
+        workspace: attempted.workspace_id ?? undefined,
+      });
+      const observerEpoch = this.captureSurfaceObserverEpoch();
+      const creating = this.stateMgr.transition(attempted.agent_id, "creating", {
+        error: null,
+        pid: null,
+        cli_session_id: sessionId,
+      });
+      this.registry.set(agent.agent_id, creating);
+      const booting = this.stateMgr.transition(attempted.agent_id, "booting", {
+        error: null,
+        pid: null,
+        cli_session_id: sessionId,
+      });
+      this.registry.set(agent.agent_id, booting);
+      await this.sendLaunchCommand(
+        booting.surface_id,
+        booting.workspace_id ?? undefined,
+        buildRawResumeCommand(booting.cli, booting.repo, sessionId),
+        booting.agent_id,
+        observerEpoch,
+        undefined,
+        true,
+      );
+      return this.registry.get(agent.agent_id) ?? booting;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = this.registry.get(agent.agent_id) ?? attempted;
+      let failed = current;
+      try {
+        failed =
+          current.state === "error"
+            ? current
+            : this.stateMgr.transition(current.agent_id, "error", {
+                error: `Auto-revive attempt ${attempt} failed: ${message}`,
+              });
+        failed = this.stateMgr.updateRecord(failed.agent_id, {
+          revive_last_outcome: "failed",
+          revive_last_error: message,
+          revive_next_attempt_at: new Date(
+            Date.now() + this.autoReviveBackoffMs(attempt),
+          ).toISOString(),
+          revive_observation_source: "screen",
+          revive_observed_at_ms: Date.now(),
+        });
+        this.registry.set(agent.agent_id, failed);
+      } catch {
+        return current;
+      }
+      if (attempt >= MAX_RESPAWN_ATTEMPTS) {
+        return this.markAutoReviveUnrecoverable(failed, message);
+      }
+      return failed;
+    }
+  }
+
+  private async finalizeAutoReviveSuccess(
+    agent: AgentRecord,
+  ): Promise<AgentRecord> {
+    if (agent.revive_last_outcome !== "pending") return agent;
+    const completedAt = new Date().toISOString();
+    let completed = this.stateMgr.updateRecord(agent.agent_id, {
+      revive_last_outcome: "revived",
+      revive_last_error: null,
+      revive_next_attempt_at: null,
+      revive_completed_at: completedAt,
+      revive_observation_source: "screen",
+      revive_observed_at_ms: Date.now(),
+      error: null,
+    });
+    this.registry.set(agent.agent_id, completed);
+    const notification = await this.dispatchCliExitOutcome(completed, "revived");
+    completed = notification.record;
+    this.appendAutoReviveCliExitEvent(
+      completed,
+      "revived",
+      notification.dispatched,
+    );
+    return completed;
+  }
+
+  private async recoverPendingCliExits(): Promise<void> {
+    for (const agent of this.registry.list()) {
+      if (
+        (agent.revive_last_outcome === "revived" ||
+          agent.revive_last_outcome === "unrecoverable") &&
+        agent.parent_agent_id &&
+        !agent.revive_notification_sent_at
+      ) {
+        await this.dispatchCliExitOutcome(agent, agent.revive_last_outcome);
+        continue;
+      }
+      if (
+        agent.state !== "error" ||
+        (agent.revive_last_outcome !== "failed" &&
+          agent.revive_last_outcome !== "pending")
+      ) {
+        continue;
+      }
+      if (!this.shouldAutoReviveCliExit(agent)) continue;
+      if ((agent.revive_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS) {
+        await this.markAutoReviveUnrecoverable(
+          agent,
+          agent.revive_last_error ?? agent.error ?? "readiness verification failed",
+        );
+        continue;
+      }
+      const nextAttemptAt = Date.parse(agent.revive_next_attempt_at ?? "");
+      const derivedNextAttemptAt =
+        Date.parse(agent.revive_last_attempt_at ?? "") +
+        this.autoReviveBackoffMs(agent.revive_attempts ?? 1);
+      const dueAt = Number.isNaN(nextAttemptAt)
+        ? derivedNextAttemptAt
+        : nextAttemptAt;
+      if (!Number.isNaN(dueAt) && Date.now() < dueAt) continue;
+      await this.attemptSameSurfaceAutoRevive(agent);
+    }
+  }
+
   private async maybeMarkCliExited(
     agent: AgentRecord,
     ctx: SweepAgentContext,
@@ -3056,6 +3409,24 @@ export class AgentEngine {
     }
     this.registry.set(agent.agent_id, exited);
     this.cliExitShellMatches.delete(agent.agent_id);
+
+    if (this.shouldAutoReviveCliExit(exited)) {
+      const tracked = this.stateMgr.updateRecord(exited.agent_id, {
+        revive_last_attempt_at: null,
+        revive_next_attempt_at: null,
+        revive_completed_at: null,
+        revive_last_outcome: "pending",
+        revive_last_error: null,
+        revive_observation_source: "screen",
+        revive_observed_at_ms: Date.now(),
+        revive_previous_state: agent.state,
+        revive_consecutive_observations: observations,
+        revive_notification_sent_at: null,
+      });
+      this.registry.set(agent.agent_id, tracked);
+      this.appendAutoReviveCliExitEvent(tracked, "pending", false);
+      return this.attemptSameSurfaceAutoRevive(tracked);
+    }
 
     let inboxDispatched = false;
     if (agent.parent_agent_id) {
@@ -4930,6 +5301,7 @@ export class AgentEngine {
     await this.registry.reconcile(surfacelessConfirmation);
     await this.reapChannelMarkersBestEffort();
     await this.registry.evictSurfaceless(surfacelessConfirmation);
+    await this.recoverPendingCliExits();
     await this.recoverCrashedAgents();
 
     await this.purgeStartupTerminalAgents();
@@ -5439,6 +5811,8 @@ export class AgentEngine {
       state: "booting",
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
+      effort:
+        spawnParams.cli === "codex" ? (effort ?? "high") : null,
       cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
@@ -5470,11 +5844,25 @@ export class AgentEngine {
         spawnParams.crash_recover ?? defaultCrashRecoverForRole(role),
       respawn_attempts: 0,
       user_killed: false,
+      auto_revive: spawnParams.auto_revive ?? true,
+      revive_attempts: 0,
+      revive_last_attempt_at: null,
+      revive_next_attempt_at: null,
+      revive_completed_at: null,
+      revive_last_outcome: null,
+      revive_last_error: null,
+      revive_observation_source: null,
+      revive_observed_at_ms: null,
+      revive_previous_state: null,
+      revive_consecutive_observations: 0,
+      revive_notification_sent_at: null,
       boot_prompt_pending: spawnParams.boot_prompt_pending ?? false,
       submit_verified: null,
       prompt_delivered: false,
       parsed_model: null,
       model_mismatch: null,
+      parsed_effort: null,
+      effort_mismatch: null,
       launch_cwd: launchCwd,
       mcp_profile: spawnParams.mcp_profile_label ?? null,
       worktree_path: spawnParams.cwd ?? null,
@@ -6462,6 +6850,26 @@ export class AgentEngine {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
+    const previousUserKilled = agent.user_killed ?? false;
+    let stopIntentMarked = false;
+    if (userInitiated && !previousUserKilled) {
+      agent = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: true,
+      });
+      this.registry.set(canonicalAgentId, agent);
+      stopIntentMarked = true;
+    }
+    const rollbackUnacceptedStopIntent = (): void => {
+      if (!stopIntentMarked) return;
+      const current = this.registry.get(canonicalAgentId);
+      if (!current) return;
+      const restored = this.stateMgr.updateRecord(canonicalAgentId, {
+        user_killed: previousUserKilled,
+      });
+      this.registry.set(canonicalAgentId, restored);
+      stopIntentMarked = false;
+    };
+
     let forceSignalAccepted = force === true && !agent.pid;
     if (force && agent.pid) {
       try {
@@ -6469,6 +6877,7 @@ export class AgentEngine {
         forceSignalAccepted = true;
       } catch (error) {
         forceSignalAccepted = this.isProcessMissingError(error);
+        if (!forceSignalAccepted) rollbackUnacceptedStopIntent();
         // Process may already be dead; other failures must preserve tracking.
       }
     } else {
@@ -6480,11 +6889,16 @@ export class AgentEngine {
           "Ctrl+C",
         );
       };
-      await this.client.sendKey(route.surface_id, "c-c", {
-        workspace: route.workspace_id ?? undefined,
-        ...this.stableSurfaceWriteOptions(route.surface_uuid),
-        beforeMutation: assertSignalRouteCurrent,
-      });
+      try {
+        await this.client.sendKey(route.surface_id, "c-c", {
+          workspace: route.workspace_id ?? undefined,
+          ...this.stableSurfaceWriteOptions(route.surface_uuid),
+          beforeMutation: assertSignalRouteCurrent,
+        });
+      } catch (error) {
+        rollbackUnacceptedStopIntent();
+        throw error;
+      }
     }
 
     // Ctrl+C and process teardown can move the stable UUID to a replacement
