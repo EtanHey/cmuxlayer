@@ -6,6 +6,7 @@ import type {
   ParsedControlPlaneState,
   ParsedScreenStatus,
 } from "./types.js";
+import { inferRepoFromDirectory } from "./repo-workspace.js";
 
 export interface DiscoveredAgent {
   surface_id: string;
@@ -13,6 +14,7 @@ export interface DiscoveredAgent {
   surface_uuid?: string | null;
   surface_title: string;
   workspace_id?: string | null;
+  current_directory?: string | null;
   cli: CliType | "unknown";
   control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
@@ -46,6 +48,15 @@ export function inferRepoFromTitle(title: string): string {
   const stripped = stripKnownAgentSuffixes(title);
   if (!stripped) return "";
   return stripped.replace(/^[A-Z]/, (match) => match.toLowerCase());
+}
+
+export function inferRepoFromDiscovery(
+  discovered: Pick<DiscoveredAgent, "current_directory" | "surface_title">,
+): string {
+  const cwd = discovered.current_directory?.trim();
+  return cwd
+    ? inferRepoFromDirectory(cwd)
+    : inferRepoFromTitle(discovered.surface_title);
 }
 
 export function discoveredStatusToAgentState(
@@ -118,6 +129,12 @@ export class AgentDiscovery {
         surface_uuid: surface.id ?? null,
         surface_title: surface.title,
         workspace_id: workspaceId,
+        current_directory:
+          surface.current_directory ??
+          surface.cwd ??
+          surface.working_directory ??
+          surface.requested_working_directory ??
+          null,
         cli,
         control_state: parsed.control_state,
         parsed_status: parsed.status,
@@ -138,6 +155,12 @@ export class AgentDiscovery {
         surface_uuid: surface.id ?? null,
         surface_title: surface.title,
         workspace_id: workspaceId,
+        current_directory:
+          surface.current_directory ??
+          surface.cwd ??
+          surface.working_directory ??
+          surface.requested_working_directory ??
+          null,
         cli: "unknown",
         control_state: "unknown",
         parsed_status: null,

@@ -40,6 +40,11 @@ function repoIdentityToken(input: string): string {
   return baseName;
 }
 
+/** Derive a repository identity from a repo root or supported worktree path. */
+export function inferRepoFromDirectory(path: string): string {
+  return repoIdentityToken(path);
+}
+
 function tokenMatchesRepo(token: string, repo: string): boolean {
   const normalizedRepo = repoIdentityToken(repo).toLowerCase();
   const normalizedRepoNoHyphen = normalizedRepo.replace(/-/g, "");

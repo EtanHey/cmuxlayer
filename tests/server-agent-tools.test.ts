@@ -2206,7 +2206,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          agent_id: "auto-codex-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          agent_id: "cmuxlayerCodex",
         }),
       ]),
     );
@@ -6122,7 +6122,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.agents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          agent_id: `auto-codex-${secondUuid}`,
+          agent_id: "cmuxlayerCodex",
         }),
       ]),
     );
@@ -6133,6 +6133,33 @@ describe("agent lifecycle tool handlers", () => {
     const list = registeredTestTool(server, "list_agents") as any;
 
     expect(list.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it("list_agents repairs discovered orphans even when no pending registration exists", async () => {
+    const stableUuid = "42111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:managed",
+        id: stableUuid,
+        workspace_ref: "workspace:1",
+        title: "cmuxlayerCodex",
+      },
+    ]);
+    routeClient.setScreenText("OpenAI Codex\nModel: gpt-5.6-sol\n\ncodex> ");
+    const record = makeServerAgentRecord({
+      agent_id: "managed-stable-sibling",
+      surface_id: "surface:managed",
+      surface_uuid: stableUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    const registry = testLifecycleEngine(server).getRegistry();
+    const repair = vi.spyOn(registry, "repairFromDiscovery");
+
+    await registeredTestTool(server, "list_agents").handler({}, {});
+
+    expect(repair).toHaveBeenCalledTimes(1);
   });
 
   it("list_agents publishes a tracked ready agent fallen back to shell as an unhealthy error", async () => {
@@ -6326,7 +6353,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.skipped_agents).toBeUndefined();
   });
 
-  it("send_to keeps registry repo ownership when a title contains a surface suffix", async () => {
+  it("send_to keeps repaired registry repo ownership when a title contains a surface suffix", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
       {
@@ -6354,16 +6381,25 @@ describe("agent lifecycle tool handlers", () => {
       {},
       {} as any,
     );
-    expect(parseToolResult(listResult)).toMatchObject({
+    const listed = parseToolResult(listResult) as {
+      ok: boolean;
+      agents: Array<{ agent_id: string; repo: string }>;
+    };
+    expect(listed).toMatchObject({
       ok: true,
-      agents: [expect.objectContaining({ repo: "brainlayer" })],
+      agents: [
+        expect.objectContaining({
+          agent_id: "brainClaude",
+          repo: "brainlayer",
+        }),
+      ],
     });
     routeClient.client.send.mockClear();
     routeClient.sendCalls.length = 0;
 
     const result = await registeredTestTool(server, "send_to").handler(
       {
-        agent_id: record.agent_id,
+        agent_id: "brainClaude",
         text: "keep going",
         press_enter: false,
       },
@@ -6374,7 +6410,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(routeClient.sendCalls).toEqual([
       { surface: "surface:199", text: "keep going" },
     ]);
-    expect(testLifecycleEngine(server).getAgentState(record.agent_id)?.repo).toBe(
+    expect(testLifecycleEngine(server).getAgentState("brainClaude")?.repo).toBe(
       "brainlayer",
     );
   });

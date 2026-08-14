@@ -12753,13 +12753,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             discovery.invalidate();
             const discovered = await discovery.scan(true);
             const observedAtMs = Date.now();
-            if (
-              registry
-                .list()
-                .some((record) => record.agent_id.includes("-pending-"))
-            ) {
-              registry.repairFromDiscovery(discovered, { seatRegistry });
-            }
+            registry.repairFromDiscovery(discovered, {
+              seatRegistry,
+              orphansOnly: true,
+            });
             const merged = await registry.listMerged(discovery, {
               filter,
               force: true,

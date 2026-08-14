@@ -2230,6 +2230,138 @@ describe("AgentRegistry", () => {
       });
     });
 
+    it("repairs an orphan from its cwd without dropping managed lineage metadata", async () => {
+      const autoId = "auto-claude-11111111-2222-4333-8444-555555555555";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: autoId,
+          surface_id: "surface:416",
+          surface_uuid: "11111111-2222-4333-8444-555555555555",
+          workspace_id: "workspace:cmuxlayer",
+          repo: "zsh",
+          cli: "claude",
+          cli_session_id: "managed-session-416",
+          cli_session_path: "/durable/claude/managed-session-416.jsonl",
+          task_summary: "Fix stable agent identity",
+          parent_agent_id: "cmuxlayerCodex-parent",
+          spawn_depth: 2,
+          role: "worker",
+          auto_revive: true,
+          halt_escalation: true,
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        {
+          ...makeSurface("surface:416"),
+          id: "11111111-2222-4333-8444-555555555555",
+          current_directory:
+            "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+        },
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:416",
+            surface_uuid: "11111111-2222-4333-8444-555555555555",
+            surface_title: "zsh",
+            current_directory:
+              "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.repaired).toEqual([
+        expect.objectContaining({
+          agent_id: "cmuxlayerLead",
+          repo: "cmuxlayer",
+          action: "created",
+        }),
+      ]);
+      expect(result.evicted).toEqual([autoId]);
+      expect(stateMgr.readState("cmuxlayerLead")).toMatchObject({
+        agent_id: "cmuxlayerLead",
+        repo: "cmuxlayer",
+        cli_session_id: "managed-session-416",
+        cli_session_path: "/durable/claude/managed-session-416.jsonl",
+        task_summary: "Fix stable agent identity",
+        parent_agent_id: "cmuxlayerCodex-parent",
+        spawn_depth: 2,
+        role: "worker",
+        auto_revive: true,
+        halt_escalation: true,
+      });
+    });
+
+    it("removes an auto duplicate when the same live surface still has its managed id", async () => {
+      const surfaceUuid = "21111111-2222-4333-8444-555555555555";
+      const managedId = "cmuxlayerClaude-managed";
+      const autoId = `auto-claude-${surfaceUuid}`;
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: managedId,
+          surface_id: "surface:duplicate",
+          surface_uuid: surfaceUuid,
+          repo: "cmuxlayer",
+          cli: "claude",
+          launcher_name: "cmuxlayerClaude",
+          surface_provenance: "cmuxlayer_spawn",
+          state: "working",
+          cli_session_id: "managed-session",
+          parent_agent_id: "cmuxlayerCodex-parent",
+          role: "worker",
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: autoId,
+          surface_id: "surface:duplicate",
+          surface_uuid: surfaceUuid,
+          repo: "cmuxlayerClaude [surface:duplicate]",
+          cli: "claude",
+          state: "working",
+          cli_session_id: null,
+          parent_agent_id: null,
+          role: "orchestrator",
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        { ...makeSurface("surface:duplicate"), id: surfaceUuid },
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:duplicate",
+            surface_uuid: surfaceUuid,
+            surface_title: "cmuxlayerClaude",
+            cli: "claude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+
+      expect(result.evicted).toEqual([autoId]);
+      expect(stateMgr.readState(autoId)).toBeNull();
+      expect(stateMgr.readState(managedId)).toMatchObject({
+        agent_id: managedId,
+        cli_session_id: "managed-session",
+        parent_agent_id: "cmuxlayerCodex-parent",
+        role: "worker",
+      });
+      expect(
+        registry
+          .list()
+          .filter((record) => record.surface_uuid === surfaceUuid)
+          .map((record) => record.agent_id),
+      ).toEqual([managedId]);
+    });
+
     it("keeps duplicate launcher-title surfaces on one canonical repaired registration", async () => {
       stateMgr.writeState(
         makeRecord({
