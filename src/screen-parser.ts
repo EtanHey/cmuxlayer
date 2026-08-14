@@ -186,8 +186,14 @@ const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
 const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
 const BINARY_CONFIRM_FOOTER_RE = /^\s*\[(?:y\/n|yes\/no)\]\s*$/i;
 const MODEL_COMMAND_RE = /^\s*[>❯›]\s*\/model(?:\s+\S+)?\s*$/i;
-const CODEX_MODEL_OPTION_RE =
-  /^\s*(?:[>❯›]\s*)?\d+\.\s+gpt-[0-9][0-9a-z.-]*(?:\s|$)/i;
+const MODEL_OPTION_TEXT_RE =
+  /^(?:gpt-[0-9][0-9a-z.-]*|(?:Opus|Sonnet|Haiku)(?:\s|$))/i;
+const POSITIVE_CONSENT_OPTION_TEXT_RE =
+  /^(?:yes\b|run it\b|allow\b|approve\b|proceed\b)/i;
+const NEGATIVE_CONSENT_OPTION_TEXT_RE =
+  /^(?:no\b|do not\b|don't\b|deny\b|reject\b|cancel\b|skip\b)/i;
+const CODEX_UPDATE_OPTION_TEXT_RE =
+  /^(?:Release notes|Update now(?:\s|$)|Skip until next version)/i;
 const ACTION_BLOCK_LINE_RE = /^\s*[⏺●⬢⬡]\s+\S/;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
@@ -670,15 +676,27 @@ function hasPermissionPromptBlock(text: string): boolean {
 
 interface ActiveChooserRegion {
   lines: string[];
+  chooserLines: string[];
+  optionStartIndex: number;
   selectorIndex: number;
-  footerIndex: number | null;
+  endIndex: number;
+  source: "standard" | "codex_tail_choices";
+}
+
+function normalizeChooserLine(line: string): string {
+  if (/^\s*[┌┐└┘─━═╭╮╰╯]+\s*$/.test(line)) return "";
+  const bordered = line.match(/^\s*[│┃║]\s?(.*?)(?:\s*[│┃║])?\s*$/);
+  return bordered ? (bordered[1] ?? "").replace(/\s+$/, "") : line;
 }
 
 function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
   const lines = text.split("\n");
+  const chooserLines = lines.map(normalizeChooserLine);
   for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
-    if (!PICKER_NAVIGATION_FOOTER_RE.test(lines[footerIndex] ?? "")) continue;
-    const afterFooter = lines.slice(footerIndex + 1);
+    if (!PICKER_NAVIGATION_FOOTER_RE.test(chooserLines[footerIndex] ?? "")) {
+      continue;
+    }
+    const afterFooter = chooserLines.slice(footerIndex + 1);
     if (
       afterFooter.some(
         (line) =>
@@ -692,40 +710,260 @@ function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
       selectorIndex >= Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES);
       selectorIndex -= 1
     ) {
-      if (MENU_SELECTOR_RE.test(lines[selectorIndex] ?? "")) {
-        return { lines, selectorIndex, footerIndex };
+      if (MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) {
+        const isQueuedMessageFooter = /Press up to edit queued messages/i.test(
+          chooserLines[footerIndex] ?? "",
+        );
+        if (isQueuedMessageFooter) {
+          const block = chooserLines.slice(
+            Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES),
+            footerIndex + 1,
+          );
+          const hasStructuredClaudePicker =
+            block.some((line) => CLAUDE_PICKER_HEADER_RE.test(line)) &&
+            block.some((line) => PICKER_SELECTED_NUMBERED_OPTION_RE.test(line));
+          if (!hasStructuredClaudePicker) continue;
+        }
+        return {
+          lines,
+          chooserLines,
+          optionStartIndex: selectorIndex,
+          selectorIndex,
+          endIndex: footerIndex - 1,
+          source: "standard",
+        };
       }
     }
   }
 
-  const lastMeaningfulIndex = lines.reduce(
+  const lastMeaningfulIndex = chooserLines.reduce(
     (last, line, index) => (line.trim() ? index : last),
     -1,
   );
   for (let selectorIndex = lines.length - 1; selectorIndex >= 0; selectorIndex -= 1) {
-    if (!MENU_SELECTOR_RE.test(lines[selectorIndex] ?? "")) continue;
-    const optionBlock = lines
+    if (!MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) continue;
+    const afterSelector = chooserLines.slice(selectorIndex + 1);
+    if (
+      afterSelector.some(
+        (line) =>
+          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+      ) ||
+      hasShellPrompt(afterSelector.join("\n"))
+    ) {
+      continue;
+    }
+    const optionBlock = chooserLines
       .slice(selectorIndex + 1, selectorIndex + PROMPT_BLOCK_WINDOW_LINES + 1)
       .join("\n");
     if (
       MENU_OPTION_RE.test(optionBlock) &&
       lastMeaningfulIndex <= selectorIndex + PROMPT_BLOCK_WINDOW_LINES
     ) {
-      return { lines, selectorIndex, footerIndex: null };
+      return {
+        lines,
+        chooserLines,
+        optionStartIndex: selectorIndex,
+        selectorIndex,
+        endIndex: lastMeaningfulIndex,
+        source: "standard",
+      };
+    }
+  }
+
+  const hasCodexReleaseContext =
+    CODEX_BOOT_PANEL_RE.test(text) &&
+    /https:\/\/github\.com\/openai\/codex\/releases(?:\/latest)?/i.test(text);
+  if (hasCodexReleaseContext) {
+    for (
+      let selectorIndex = chooserLines.length - 1;
+      selectorIndex >= 0;
+      selectorIndex -= 1
+    ) {
+      if (!MENU_SELECTOR_RE.test(chooserLines[selectorIndex] ?? "")) continue;
+      const siblingChoices = chooserLines
+        .slice(selectorIndex + 1, selectorIndex + 5)
+        .filter((line) => /^\s{2,}\S/.test(line));
+      if (
+        siblingChoices.length > 0 &&
+        lastMeaningfulIndex <= selectorIndex + 4
+      ) {
+        return {
+          lines,
+          chooserLines,
+          optionStartIndex: selectorIndex,
+          selectorIndex,
+          endIndex: lastMeaningfulIndex,
+          source: "codex_tail_choices",
+        };
+      }
     }
   }
   return null;
 }
 
-function hasApprovalPromptBlock(text: string): boolean {
+interface ActiveChooserAnalysis {
+  region: ActiveChooserRegion;
+  optionTexts: string[];
+  selectedOptionText: string;
+  hasConsentOptionPair: boolean;
+  hasAttachedModelCommand: boolean;
+  hasUnexplainedHeader: boolean;
+}
+
+function structuredOptionText(line: string): string | null {
+  let candidate = normalizeChooserLine(line);
+  const selected = /^\s*[>❯›]\s+/.test(candidate);
+  candidate = candidate.replace(/^\s*[>❯›]\s+/, "");
+  candidate = candidate.replace(/^\s*[☐☑◉○●◯✓✔]\s*/, "");
+  const marked = candidate.match(
+    /^\s*(?:\d+[.)]?|\([a-z]\)|[a-z][.)])\s+(.+?)\s*$/i,
+  );
+  if (marked) return marked[1]?.trim() || null;
+  return selected ? candidate.trim() || null : null;
+}
+
+function isChooserChromeLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    !trimmed ||
+    MODEL_COMMAND_RE.test(line) ||
+    CODEX_HEADER_RE.test(line) ||
+    CODEX_BOOT_PANEL_RE.test(line) ||
+    /^\s*Select Model and Effort\s*$/i.test(line) ||
+    /^\s*Access legacy models by running codex\b/i.test(line) ||
+    /^\s*Claude Code(?:\s|$)/i.test(line)
+  );
+}
+
+function isCodexModelChooserHeader(line: string): boolean {
+  return /^\s*Select Model and Effort\s*$/i.test(line);
+}
+
+function analyzeActiveChooser(text: string): ActiveChooserAnalysis | null {
+  const region = findActiveChooserRegion(text);
+  if (!region) return null;
+  for (
+    let index = region.selectorIndex - 1;
+    index >= Math.max(0, region.selectorIndex - PICKER_BLOCK_WINDOW_LINES);
+    index -= 1
+  ) {
+    const line = region.chooserLines[index] ?? "";
+    if (structuredOptionText(line)) {
+      region.optionStartIndex = index;
+      continue;
+    }
+    if (/^\s{4,}\S/.test(line)) continue;
+    break;
+  }
+  const optionTexts: string[] = [];
+  for (
+    let index = region.optionStartIndex;
+    index <= region.endIndex;
+    index += 1
+  ) {
+    const line = region.chooserLines[index] ?? "";
+    const structured = structuredOptionText(line);
+    if (structured) {
+      optionTexts.push(structured);
+    } else if (
+      region.source === "codex_tail_choices" &&
+      index > region.selectorIndex &&
+      /^\s{2,}\S/.test(line)
+    ) {
+      optionTexts.push(line.trim());
+    }
+  }
+  const selectedOptionText =
+    structuredOptionText(region.chooserLines[region.selectorIndex] ?? "") ?? "";
+  const provenanceWindow = region.chooserLines.slice(
+    Math.max(0, region.optionStartIndex - PROMPT_BLOCK_WINDOW_LINES),
+    region.optionStartIndex,
+  );
+  let modelCommandIndex = -1;
+  let codexModelHeaderIndex = -1;
+  for (let index = provenanceWindow.length - 1; index >= 0; index -= 1) {
+    if (MODEL_COMMAND_RE.test(provenanceWindow[index] ?? "")) {
+      modelCommandIndex = index;
+      break;
+    }
+    if (
+      codexModelHeaderIndex < 0 &&
+      isCodexModelChooserHeader(provenanceWindow[index] ?? "")
+    ) {
+      codexModelHeaderIndex = index;
+    }
+  }
+  const provenanceAnchorIndex = Math.max(
+    modelCommandIndex,
+    codexModelHeaderIndex,
+  );
+  const decisionHeaderLines = provenanceWindow
+    .slice(provenanceAnchorIndex + 1)
+    .filter((line) => !isChooserChromeLine(line));
+  return {
+    region,
+    optionTexts,
+    selectedOptionText,
+    hasConsentOptionPair:
+      optionTexts.some((option) =>
+        POSITIVE_CONSENT_OPTION_TEXT_RE.test(option),
+      ) &&
+      optionTexts.some((option) =>
+        NEGATIVE_CONSENT_OPTION_TEXT_RE.test(option),
+    ),
+    hasAttachedModelCommand: modelCommandIndex >= 0,
+    hasUnexplainedHeader: decisionHeaderLines.length > 0,
+  };
+}
+
+function hasApprovalPromptBlock(
+  text: string,
+  chooser = analyzeActiveChooser(text),
+): boolean {
   if (hasPermissionPromptBlock(text)) return true;
-  const chooser = findActiveChooserRegion(text);
   if (!chooser) return false;
-  const actionWindow = chooser.lines.slice(
-    Math.max(0, chooser.selectorIndex - PROMPT_BLOCK_WINDOW_LINES),
-    chooser.selectorIndex,
+  if (chooser.hasConsentOptionPair) return true;
+  const actionWindow = chooser.region.lines.slice(
+    Math.max(0, chooser.region.optionStartIndex - PROMPT_BLOCK_WINDOW_LINES),
+    chooser.region.optionStartIndex,
   );
   return actionWindow.some((line) => ACTION_BLOCK_LINE_RE.test(line));
+}
+
+/**
+ * Independent fail-closed check for the mutation/audit boundary. This scans the
+ * raw chooser rows again and deliberately does not consume PromptDisposition or
+ * safePromptResolutionType, so a future resolve-classification regression
+ * cannot launder a consent chooser into a resolved_prompt event.
+ */
+function hasRawApprovalChooser(text: string): boolean {
+  const normalized = normalizeText(text);
+  if (hasPermissionPromptBlock(normalized)) return true;
+  const lines = normalized.split("\n").map(normalizeChooserLine);
+  let selectedIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (MENU_SELECTOR_RE.test(lines[index] ?? "")) {
+      selectedIndex = index;
+      break;
+    }
+  }
+  if (selectedIndex < 0) return false;
+  const optionTexts = lines
+    .slice(selectedIndex, selectedIndex + PROMPT_BLOCK_WINDOW_LINES + 1)
+    .map(structuredOptionText)
+    .filter((option): option is string => option !== null);
+  return (
+    optionTexts.some((option) =>
+      POSITIVE_CONSENT_OPTION_TEXT_RE.test(option),
+    ) &&
+    optionTexts.some((option) =>
+      NEGATIVE_CONSENT_OPTION_TEXT_RE.test(option),
+    )
+  );
+}
+
+export function containsPromptApprovalChooser(text: string): boolean {
+  return hasRawApprovalChooser(text);
 }
 
 function hasInteractivePromptBlock(text: string): boolean {
@@ -787,6 +1025,7 @@ export function isBlockingPromptChooserScreen(text: string): boolean {
   const normalized = normalizeText(text);
   return (
     hasApprovalPromptBlock(normalized) ||
+    analyzeActiveChooser(normalized) !== null ||
     hasInteractivePromptBlock(normalized) ||
     hasPickerNavigationBlock(normalized) ||
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -806,40 +1045,46 @@ export type PromptDisposition =
       prompt_type: "permission_prompt" | "human_or_unknown_chooser";
     };
 
-function hasCodexModelPickerStructure(text: string): boolean {
-  const chooser = findActiveChooserRegion(text);
-  if (chooser?.footerIndex == null) return false;
-  const activeOptions = chooser.lines.slice(
-    chooser.selectorIndex,
-    chooser.footerIndex,
-  );
-  return activeOptions.filter((line) => CODEX_MODEL_OPTION_RE.test(line)).length >= 2;
+type SafePromptResolutionType = "model_menu" | "codex_update_menu";
+
+function safePromptResolutionType(
+  text: string,
+  cli: CliType | undefined,
+  chooser: ActiveChooserAnalysis,
+): SafePromptResolutionType | null {
+  if (hasApprovalPromptBlock(text, chooser)) {
+    return null;
+  }
+  const updateOptionCount = chooser.optionTexts.filter((option) =>
+    CODEX_UPDATE_OPTION_TEXT_RE.test(option),
+  ).length;
+  if (
+    (cli === undefined || cli === "codex") &&
+    isCodexUpdateMenuScreenNormalized(text, { tailOnly: true }) &&
+    updateOptionCount >= 2 &&
+    CODEX_UPDATE_OPTION_TEXT_RE.test(chooser.selectedOptionText)
+  ) {
+    return "codex_update_menu";
+  }
+
+  const modelOptionCount = chooser.optionTexts.filter((option) =>
+    MODEL_OPTION_TEXT_RE.test(option),
+  ).length;
+  if (modelOptionCount < 2) return null;
+  if (chooser.hasAttachedModelCommand) return "model_menu";
+  if (cli === "codex" && !chooser.hasUnexplainedHeader) return "model_menu";
+  return null;
 }
 
-function hasModelMenuProvenance(text: string, cli?: CliType): boolean {
-  const chooser = findActiveChooserRegion(text);
-  if (chooser) {
-    const provenanceWindow = chooser.lines.slice(
-      Math.max(0, chooser.selectorIndex - PROMPT_BLOCK_WINDOW_LINES),
-      chooser.selectorIndex,
-    );
-    let commandIndex = -1;
-    for (let index = provenanceWindow.length - 1; index >= 0; index -= 1) {
-      if (MODEL_COMMAND_RE.test(provenanceWindow[index] ?? "")) {
-        commandIndex = index;
-        break;
-      }
-    }
-    if (
-      commandIndex >= 0 &&
-      !provenanceWindow
-        .slice(commandIndex + 1)
-        .some((line) => ACTION_BLOCK_LINE_RE.test(line))
-    ) {
-      return true;
-    }
-  }
-  return cli === "codex" && hasCodexModelPickerStructure(text);
+export function isPromptResolutionAuditSafe(
+  text: string,
+  cli?: CliType,
+): boolean {
+  const normalized = normalizeText(text);
+  if (hasRawApprovalChooser(normalized)) return false;
+  const chooser = analyzeActiveChooser(normalized);
+  if (!chooser) return false;
+  return safePromptResolutionType(normalized, cli, chooser) !== null;
 }
 
 export function hasVisibleAgentProgress(
@@ -895,26 +1140,15 @@ export function classifyPromptDisposition(
 ): PromptDisposition {
   const normalized = normalizeText(text);
   const agentType = detectAgentType(normalized);
-  if (hasApprovalPromptBlock(normalized)) {
+  const chooser = analyzeActiveChooser(normalized);
+  if (hasApprovalPromptBlock(normalized, chooser)) {
     return { kind: "escalate", prompt_type: "permission_prompt" };
   }
-  if (
-    (cli === undefined || cli === "codex") &&
-    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
-  ) {
-    return {
-      kind: "resolve",
-      prompt_type: "codex_update_menu",
-      key: "escape",
-    };
-  }
-  if (hasModelMenuProvenance(normalized, cli)) {
-    return { kind: "resolve", prompt_type: "model_menu", key: "escape" };
-  }
-  if (
-    hasInteractivePromptBlock(normalized) ||
-    hasPickerNavigationBlock(normalized)
-  ) {
+  if (chooser) {
+    const safeResolution = safePromptResolutionType(normalized, cli, chooser);
+    if (safeResolution) {
+      return { kind: "resolve", prompt_type: safeResolution, key: "escape" };
+    }
     return {
       kind: "escalate",
       prompt_type: "human_or_unknown_chooser",
@@ -930,6 +1164,7 @@ export function classifyPromptDisposition(
  */
 export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   const normalized = normalizeText(text);
+  if (analyzeActiveChooser(normalized)) return true;
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -949,7 +1184,10 @@ function parseErrors(text: string): string[] {
     errors.push("permission_prompt");
   }
 
-  if (!errors.includes("permission_prompt") && isPickerOrMenuScreen(text)) {
+  if (
+    !errors.includes("permission_prompt") &&
+    (analyzeActiveChooser(text) || isPickerOrMenuScreen(text))
+  ) {
     errors.push("interactive_prompt");
   }
 

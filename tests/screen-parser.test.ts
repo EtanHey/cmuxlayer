@@ -284,6 +284,97 @@ Claude Code
       "❯ 1. Yes",
       "  2. No, and tell Claude what to do differently (esc)",
     ].join("\n");
+    const codexApprovalWithModelEcho = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "› /model",
+      "",
+      "Codex wants to run:",
+      "  rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "",
+      "❯ 1. Yes, run it",
+      "  2. No",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const claudeApprovalWithDistantAction = [
+      "Claude Code",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer)",
+      "  ⎿ line1",
+      "  ⎿ line2",
+      "  ⎿ line3",
+      "  ⎿ line4",
+      "  ⎿ line5",
+      "  ⎿ line6",
+      "  ⎿ line7",
+      "  ⎿ line8",
+      "> /model opus",
+      "",
+      "Do you want to run this command?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\n");
+    const destructiveApprovalBelowUpdateMenu = [
+      ">_ OpenAI Codex",
+      "Update available!",
+      "See full release notes:",
+      "https://github.com/openai/codex/releases/latest",
+      "> Release notes",
+      "  Skip until next version",
+      "",
+      "Codex wants to run: rm -rf /Users/etanheyman/Gits",
+      "❯ 1. Yes, run it",
+      "  2. No",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const humanQuestionWithModelOptions = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "Which model should the new worker run?",
+      "",
+      "❯ 1. gpt-5.6-sol",
+      "  2. gpt-5.6-terra",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const imperativeHumanModelChoice = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "Choose the model for the new worker.",
+      "",
+      "❯ 1. gpt-5.6-sol",
+      "  2. gpt-5.6-terra",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const approvalImmediatelyBelowModelEcho = [
+      "Claude Code",
+      "",
+      "> /model opus",
+      "Do you want to run this command?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\n");
+    const rewordedCodexUpdateChooser = [
+      ">_ OpenAI Codex",
+      "",
+      "A newer build is ready to install.",
+      "Read what changed:",
+      "https://github.com/openai/codex/releases/latest",
+      "",
+      "> What changed",
+      "  Not this time",
+    ].join("\n");
+    const boxDrawnChooser = [
+      "Claude Code",
+      "",
+      "┌──────────────────────────────┐",
+      "│ Which branch should I merge? │",
+      "│ ❯ 1. main                    │",
+      "│   2. release                 │",
+      "└──────────────────────────────┘",
+    ].join("\n");
 
     expect(classifyPromptDisposition(modelMenu, "codex")).toEqual({
       kind: "resolve",
@@ -317,6 +408,14 @@ Claude Code
       codexApprovalUnderStaleModelList,
       codexApprovalUnderCanonContent,
       permissionWithQuotedActivityText,
+      codexApprovalWithModelEcho,
+      claudeApprovalWithDistantAction,
+      destructiveApprovalBelowUpdateMenu,
+      humanQuestionWithModelOptions,
+      imperativeHumanModelChoice,
+      approvalImmediatelyBelowModelEcho,
+      rewordedCodexUpdateChooser,
+      boxDrawnChooser,
     ]) {
       expect(classifyPromptDisposition(approval, "codex")).toMatchObject({
         kind: "escalate",

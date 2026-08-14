@@ -80,8 +80,10 @@ import {
 import {
   classifyPromptDisposition,
   cleanScreenText,
+  containsPromptApprovalChooser,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
+  isPromptResolutionAuditSafe,
   parseScreen,
   type PromptDisposition,
 } from "./screen-parser.js";
@@ -3455,8 +3457,15 @@ export class AgentEngine {
     outcome: "recovered" | "failed";
     error: string | null;
     nowIso: string;
-  }): void {
-    const excerpt = cleanScreenText(input.screenText, 8)
+  }): boolean {
+    const excerptSource = cleanScreenText(input.screenText, 8);
+    if (
+      !isPromptResolutionAuditSafe(input.screenText, input.agent.cli) ||
+      containsPromptApprovalChooser(excerptSource)
+    ) {
+      return false;
+    }
+    const excerpt = excerptSource
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 240);
@@ -3475,6 +3484,7 @@ export class AgentEngine {
       screen_excerpt: excerpt,
       error: input.error,
     });
+    return true;
   }
 
   private async maybeResolvePrompt(
@@ -3485,6 +3495,13 @@ export class AgentEngine {
   ): Promise<{ agent: AgentRecord; recovered: boolean }> {
     const signature = screenTextSignature(screenText);
     if (this.promptResolutionFailures.get(agent.agent_id) === signature) {
+      return { agent, recovered: false };
+    }
+    if (
+      !isPromptResolutionAuditSafe(screenText, agent.cli) ||
+      containsPromptApprovalChooser(cleanScreenText(screenText, 8))
+    ) {
+      this.promptResolutionFailures.set(agent.agent_id, signature);
       return { agent, recovered: false };
     }
 
@@ -3521,7 +3538,7 @@ export class AgentEngine {
       } else {
         this.promptResolutionFailures.delete(agent.agent_id);
       }
-      this.appendResolvedPromptEvent({
+      const auditWritten = this.appendResolvedPromptEvent({
         agent,
         disposition,
         beforeControlState: before.control_state,
@@ -3531,6 +3548,10 @@ export class AgentEngine {
         error,
         nowIso,
       });
+      if (!auditWritten) {
+        this.promptResolutionFailures.set(agent.agent_id, signature);
+        return { agent, recovered: false };
+      }
       if (!recovered) return { agent, recovered: false };
 
       agent = this.persistPromptBlockedState(agent, false, nowIso);
