@@ -1944,6 +1944,167 @@ describe("Sidebar Sync", () => {
     ]);
   });
 
+  it("classifies four captured prompt freezes and rejects four proceed-prose shapes in one production sweep", async () => {
+    const capturedFreezes = [
+      {
+        name: "claude-real-ask-user-question",
+        cli: "claude" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/claude-ask-user-question-picker-2026-07-13.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+      {
+        name: "claude-synthetic-ask-user-question",
+        cli: "claude" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/claude-ask-user-question-overlay.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+      {
+        name: "claude-permission-confirmation",
+        cli: "claude" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/claude-permission-confirmation.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+      {
+        name: "codex-update-menu",
+        cli: "codex" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/codex-update-menu.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+    ];
+    const healthyProse = [
+      {
+        name: "ready-composer",
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ This also deletes their branches. Do you want to proceed?",
+          "",
+          "❯",
+          "? for shortcuts",
+        ].join("\n"),
+      },
+      {
+        name: "full-composer-box",
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ I can apply either approach. Do you want to proceed?",
+          "────────────────────────────────────────────────────────",
+          "❯",
+          "────────────────────────────────────────────────────────",
+          "? for shortcuts",
+        ].join("\n"),
+      },
+      {
+        name: "while-working",
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ I am comparing both implementations. Do you want to proceed?",
+          "",
+          "✶ Comparing the tradeoffs… (12s · esc to interrupt)",
+        ].join("\n"),
+      },
+      {
+        name: "non-yes-no-numbered-list",
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ The report asks: Do you want to proceed?",
+          "1. Compare the implementations",
+          "2. Review the risks",
+          "",
+          "❯",
+        ].join("\n"),
+      },
+    ];
+    const cases = [
+      ...capturedFreezes.map((entry) => ({ ...entry, shouldBlock: true })),
+      ...healthyProse.map((entry) => ({
+        ...entry,
+        cli: "claude" as const,
+        shouldBlock: false,
+      })),
+    ].map((entry) => ({
+      ...entry,
+      agentId: `prompt-matrix-${entry.name}`,
+      surfaceRef: `surface:prompt-matrix-${entry.name}`,
+    }));
+    const screensBySurface = new Map(
+      cases.map((entry) => [entry.surfaceRef, entry.screen]),
+    );
+
+    for (const entry of cases) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: entry.agentId,
+          surface_id: entry.surfaceRef,
+          workspace_id: "workspace:cmuxlayer",
+          cli: entry.cli,
+          state: entry.name === "while-working" ? "working" : "idle",
+          blocked_on_prompt: false,
+          blocked_on_prompt_since: null,
+        }),
+      );
+    }
+    liveSurfaces = cases.map((entry) => ({
+      ...makeSurface(entry.surfaceRef),
+      title: entry.cli === "codex" ? "cmuxlayerCodex" : "cmuxlayerClaude",
+      workspace_ref: "workspace:cmuxlayer",
+    }));
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      const text = screensBySurface.get(surface);
+      if (text === undefined) {
+        throw new Error(`missing prompt matrix screen for ${surface}`);
+      }
+      return {
+        surface,
+        text,
+        lines: text.split("\n").length,
+        scrollback_used: false,
+      };
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    const blockedIds = engine
+      .listAgents({ blocked_on_prompt: true })
+      .map((agent) => agent.agent_id)
+      .sort();
+    const expectedBlockedIds = cases
+      .filter((entry) => entry.shouldBlock)
+      .map((entry) => entry.agentId)
+      .sort();
+    expect(blockedIds).toEqual(expectedBlockedIds);
+    for (const entry of cases.filter((candidate) => !candidate.shouldBlock)) {
+      expect(engine.getAgentState(entry.agentId)).toMatchObject({
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      });
+    }
+  });
+
   it("clears stale workspace-scoped sidebar rows during startup purge after restart", async () => {
     stateMgr.writeState(
       makeRecord({

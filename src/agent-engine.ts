@@ -76,7 +76,11 @@ import {
   type WatchRecord,
   type WatchSpec,
 } from "./watch-spec.js";
-import { cleanScreenText, parseScreen } from "./screen-parser.js";
+import {
+  cleanScreenText,
+  isBlockingPromptChooserScreen,
+  parseScreen,
+} from "./screen-parser.js";
 import {
   canonicalRoleColumn,
   chooseAgentSpawnPlacement,
@@ -3423,14 +3427,9 @@ export class AgentEngine {
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
     const parsed = parseScreen(screenText);
-    const hasStructuredClaudeQuestionPicker =
-      /(?:^|\n)\s*\d+\.\s+Type something\.?\s*(?:\n|$)/i.test(screenText) &&
-      /(?:^|\n)\s*\d+\.\s+Chat about this\s*(?:\n|$)/i.test(screenText);
     const hasAgentClarificationPrompt =
       parsed.control_state === "interactive_overlay" &&
-      (/(?:^|\n)\s*(?:AskUserQuestion|ask-tool)\s*(?:\n|$)|agent is asking for clarification/i.test(
-        screenText,
-      ) || hasStructuredClaudeQuestionPicker);
+      isBlockingPromptChooserScreen(screenText);
     agent = this.persistPromptBlockedState(
       agent,
       parsed.control_state === "permission_prompt" ||

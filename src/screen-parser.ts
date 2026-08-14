@@ -766,6 +766,30 @@ function hasPickerNavigationBlock(text: string): boolean {
   return false;
 }
 
+function hasQuestionChooserBlock(text: string): boolean {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/\?\s*$/.test(lines[index])) {
+      continue;
+    }
+    const block = lines
+      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    if (MENU_SELECTOR_RE.test(block) && MENU_OPTION_RE.test(block)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isBlockingPromptChooserScreen(text: string): boolean {
+  const normalized = normalizeText(text);
+  return (
+    hasQuestionChooserBlock(normalized) ||
+    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
+  );
+}
+
 /**
  * Detect an active terminal picker/menu whose next text bytes would be
  * interpreted as navigation or selection keystrokes instead of composer text.
