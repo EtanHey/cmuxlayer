@@ -1873,11 +1873,98 @@ describe("Sidebar Sync", () => {
         ].join("\n"),
       },
       {
+        name: "modern-destructive-permission",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+          "",
+          "Do you want to run this command?",
+          "",
+          "❯ 1. Yes",
+          "  2. Yes, and don't ask again this session",
+          "  3. No, and tell Claude what to do differently (esc)",
+        ].join("\n"),
+      },
+      {
+        name: "codex-approval-under-stale-model-list",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 64% left",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "",
+          "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "",
+          "❯ 1. Run it",
+          "  2. Skip",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "codex-approval-under-canon-content",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 58% left",
+          "",
+          "⏺ Read(golems/standards/fleet-canon.md)",
+          "  1. gpt-5.6-sol — default codex pin",
+          "  2. gpt-5.6-terra — opt-in only",
+          "",
+          "⏺ Codex wants to run: git push --force origin main",
+          "",
+          "❯ 1. Run it",
+          "  2. Skip",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "permission-with-quoted-activity-text",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "> review src/screen-parser.ts",
+          "",
+          "⏺ Read(src/screen-parser.ts)",
+          '  ⎿   const workingMarkers = [" /loop", "esc to interrupt"];',
+          "",
+          "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+          "",
+          "Do you want to run this command?",
+          "",
+          "❯ 1. Yes",
+          "  2. No, and tell Claude what to do differently (esc)",
+        ].join("\n"),
+      },
+      {
         name: "healthy-ready",
         cli: "claude" as const,
         kind: "ignore" as const,
         screen:
           "Claude Code\n\n⏺ Compared both approaches.\n\n❯\n? for shortcuts",
+      },
+      {
+        name: "static-spinner-over-picker",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "",
+          "✶ Comparing environments… (12s · esc to interrupt)",
+        ].join("\n"),
       },
       {
         name: "active-over-picker",
@@ -1913,6 +2000,8 @@ describe("Sidebar Sync", () => {
         sessionIdentityResolver: () => null,
         inboxOpts,
         haltAwaitingInputDwellMs: 0,
+        haltWedgedDwellMs: 0,
+        haltWedgedSweeps: 1,
         fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
       },
     );
@@ -1924,6 +2013,7 @@ describe("Sidebar Sync", () => {
         cli: "claude",
         role: "orchestrator",
         state: "working",
+        halt_escalation: false,
       }),
     );
     for (const entry of cases) {
@@ -1936,7 +2026,7 @@ describe("Sidebar Sync", () => {
           role: "worker",
           parent_agent_id: parentId,
           spawn_depth: 1,
-          state: entry.name === "active-over-picker" ? "working" : "idle",
+          state: entry.name.includes("spinner-over-picker") ? "working" : "idle",
           blocked_on_prompt: false,
           blocked_on_prompt_since: null,
         }),
@@ -1987,6 +2077,10 @@ describe("Sidebar Sync", () => {
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
+    expect(engine.getAgentState("prompt-redirect-active-over-picker")).toMatchObject({
+      halt_last_progress_signature: expect.any(String),
+    });
+    await engine.runSweep();
     await engine.runSweep();
 
     const keyTargets = mockClient.sendKey.mock.calls.map(([surface, key]) => ({
@@ -1998,6 +2092,13 @@ describe("Sidebar Sync", () => {
         .filter((entry) => entry.kind === "resolve")
         .map((entry) => ({ surface: entry.surfaceRef, key: "escape" })),
     );
+    for (const entry of cases.filter(
+      (candidate) => candidate.kind === "escalate",
+    )) {
+      expect(
+        keyTargets.filter(({ surface }) => surface === entry.surfaceRef),
+      ).toEqual([]);
+    }
     const resolvedEvents = stateMgr
       .getEventLog()
       .readEntries()

@@ -231,6 +231,59 @@ Claude Code
       chooserWithoutQuestionPunctuation,
       "✶ Comparing environments… (12s · esc to interrupt)",
     ].join("\n");
+    const modernClaudePermission = [
+      "Claude Code",
+      "",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+      "",
+      "Do you want to run this command?",
+      "",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again this session",
+      "  3. No, and tell Claude what to do differently (esc)",
+    ].join("\n");
+    const codexApprovalUnderStaleModelList = [
+      "gpt-5.6-sol high · 64% left",
+      "",
+      "› 1. gpt-5.6-sol (current)",
+      "  2. gpt-5.6-terra",
+      "",
+      "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "",
+      "❯ 1. Run it",
+      "  2. Skip",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const codexApprovalUnderCanonContent = [
+      "gpt-5.6-sol high · 58% left",
+      "",
+      "⏺ Read(golems/standards/fleet-canon.md)",
+      "  1. gpt-5.6-sol — default codex pin",
+      "  2. gpt-5.6-terra — opt-in only",
+      "",
+      "⏺ Codex wants to run: git push --force origin main",
+      "",
+      "❯ 1. Run it",
+      "  2. Skip",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const permissionWithQuotedActivityText = [
+      "Claude Code",
+      "",
+      "> review src/screen-parser.ts",
+      "",
+      "⏺ Read(src/screen-parser.ts)",
+      '  ⎿   const workingMarkers = [" /loop", "esc to interrupt"];',
+      "",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+      "",
+      "Do you want to run this command?",
+      "",
+      "❯ 1. Yes",
+      "  2. No, and tell Claude what to do differently (esc)",
+    ].join("\n");
 
     expect(classifyPromptDisposition(modelMenu, "codex")).toEqual({
       kind: "resolve",
@@ -259,8 +312,34 @@ Claude Code
         "claude",
       ),
     ).toEqual({ kind: "escalate", prompt_type: "permission_prompt" });
+    for (const approval of [
+      modernClaudePermission,
+      codexApprovalUnderStaleModelList,
+      codexApprovalUnderCanonContent,
+      permissionWithQuotedActivityText,
+    ]) {
+      expect(classifyPromptDisposition(approval, "codex")).toMatchObject({
+        kind: "escalate",
+      });
+      expect(classifyPromptDisposition(approval, "claude")).toMatchObject({
+        kind: "escalate",
+      });
+    }
+    expect(parseScreen(modernClaudePermission)).toMatchObject({
+      status: "frozen",
+      control_state: expect.stringMatching(
+        /^(?:permission_prompt|interactive_overlay)$/,
+      ),
+    });
+    expect(parseScreen(permissionWithQuotedActivityText)).toMatchObject({
+      status: "frozen",
+      control_state: expect.stringMatching(
+        /^(?:permission_prompt|interactive_overlay)$/,
+      ),
+    });
     expect(classifyPromptDisposition(activeOverChooser, "claude")).toEqual({
-      kind: "active",
+      kind: "escalate",
+      prompt_type: "human_or_unknown_chooser",
     });
     expect(parseScreen(activeOverChooser)).toMatchObject({
       status: "working",

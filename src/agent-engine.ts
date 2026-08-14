@@ -80,6 +80,7 @@ import {
 import {
   classifyPromptDisposition,
   cleanScreenText,
+  hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
   parseScreen,
   type PromptDisposition,
@@ -595,6 +596,7 @@ const DEFAULT_HALT_AWAITING_INPUT_DWELL_MS = 120_000;
 const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 15 * 60_000;
 const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
 const DEFAULT_HALT_WEDGED_SWEEPS = 3;
+const PROMPT_MOTION_GRACE_MS = 30_000;
 const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
@@ -1140,6 +1142,10 @@ export class AgentEngine {
   private cliExitShellMatches = new Map<string, number>();
   /** One failed safe-resolution attempt per unchanged prompt screen. */
   private promptResolutionFailures = new Map<string, string>();
+  /** Last time changing output proved that chooser chrome belonged to live work. */
+  private promptMotionObservedAtMs = new Map<string, number>();
+  /** Last raw chooser screen used only to prove visible cross-sweep motion. */
+  private promptMotionScreenSignatures = new Map<string, string>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
@@ -2638,6 +2644,16 @@ export class AgentEngine {
       previousAgentId,
       nextAgentId,
     );
+    this.rekeyAgentMapEntry(
+      this.promptMotionObservedAtMs,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentMapEntry(
+      this.promptMotionScreenSignatures,
+      previousAgentId,
+      nextAgentId,
+    );
     this.rekeyAgentEventSet(this.loggedEvents, previousAgentId, nextAgentId);
     this.rekeyAgentEventSet(this.notifiedEvents, previousAgentId, nextAgentId);
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
@@ -3560,12 +3576,52 @@ export class AgentEngine {
     } else {
       this.promptResolutionFailures.delete(agent.agent_id);
     }
-    if (
-      disposition.kind === "active" &&
-      isBlockingPromptChooserScreen(screenText)
-    ) {
+    const progressSignature = this.observableHaltProgressSignature(
+      agent,
+      screenText,
+    );
+    const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
+    const canObservePromptMotion =
+      disposition.kind === "escalate" &&
+      disposition.prompt_type === "human_or_unknown_chooser" &&
+      isBlockingPromptChooserScreen(screenText) &&
+      hasVisibleProgress;
+    const promptScreenSignature = screenTextSignature(screenText);
+    const previousPromptScreenSignature = this.promptMotionScreenSignatures.get(
+      agent.agent_id,
+    );
+    const promptScreenChanged =
+      canObservePromptMotion &&
+      previousPromptScreenSignature !== undefined &&
+      previousPromptScreenSignature !== promptScreenSignature;
+    if (canObservePromptMotion) {
+      this.promptMotionScreenSignatures.set(
+        agent.agent_id,
+        promptScreenSignature,
+      );
+    } else {
+      this.promptMotionScreenSignatures.delete(agent.agent_id);
+    }
+    if (promptScreenChanged) {
+      this.promptMotionObservedAtMs.set(agent.agent_id, nowMs);
+    } else if (!canObservePromptMotion) {
+      this.promptMotionObservedAtMs.delete(agent.agent_id);
+    }
+    const motionObservedAt = this.promptMotionObservedAtMs.get(agent.agent_id);
+    const hasObservedPromptMotion =
+      disposition.kind === "escalate" &&
+      disposition.prompt_type === "human_or_unknown_chooser" &&
+      isBlockingPromptChooserScreen(screenText) &&
+      hasVisibleProgress &&
+      motionObservedAt !== undefined &&
+      nowMs - motionObservedAt < PROMPT_MOTION_GRACE_MS;
+    if (hasObservedPromptMotion) {
       agent = this.persistPromptBlockedState(agent, false, nowIso);
-      return this.clearHaltEpisode(agent);
+      return this.clearHaltEpisode(agent, {
+        halt_last_active_at: nowIso,
+        halt_last_progress_at_ms: nowMs,
+        halt_last_progress_signature: progressSignature,
+      });
     }
     agent = this.persistPromptBlockedState(
       agent,
@@ -3601,10 +3657,6 @@ export class AgentEngine {
       );
     }
 
-    const progressSignature = this.observableHaltProgressSignature(
-      agent,
-      screenText,
-    );
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
     const blockingBackgroundWaitMs = this.blockingBackgroundWaitElapsedMs(
@@ -4560,6 +4612,8 @@ export class AgentEngine {
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
     this.fleetScreenProgress.delete(agentId);
     this.cliExitShellMatches.delete(agentId);
+    this.promptMotionObservedAtMs.delete(agentId);
+    this.promptMotionScreenSignatures.delete(agentId);
   }
 
   private isLeadWatchBlind(

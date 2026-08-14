@@ -188,6 +188,7 @@ const BINARY_CONFIRM_FOOTER_RE = /^\s*\[(?:y\/n|yes\/no)\]\s*$/i;
 const MODEL_COMMAND_RE = /^\s*[>❯›]\s*\/model(?:\s+\S+)?\s*$/i;
 const CODEX_MODEL_OPTION_RE =
   /^\s*(?:[>❯›]\s*)?\d+\.\s+gpt-[0-9][0-9a-z.-]*(?:\s|$)/i;
+const ACTION_BLOCK_LINE_RE = /^\s*[⏺●⬢⬡]\s+\S/;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
@@ -197,6 +198,8 @@ const CODEX_CONTEXT_LEFT_RE =
   /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
+const TERMINAL_ACTIVITY_LINE_RE =
+  /^\s*(?:[•·]\s*)?(?:Working|Waiting for background terminal)\s*\((?:[0-9]+(?:\.[0-9]+)?[hms]\s*)+\s*[•·-]\s*esc to interrupt\)(?:\s*[•·].*)?\s*$/im;
 const CODEX_RESUME_RE = /To continue this session,\s*run\s+codex\s+resume/i;
 const CODEX_ACTION_RE = /^\s*[•·]\s+(.+)$/gm;
 const CODEX_CURRENT_ACTION_RE =
@@ -665,6 +668,66 @@ function hasPermissionPromptBlock(text: string): boolean {
   return false;
 }
 
+interface ActiveChooserRegion {
+  lines: string[];
+  selectorIndex: number;
+  footerIndex: number | null;
+}
+
+function findActiveChooserRegion(text: string): ActiveChooserRegion | null {
+  const lines = text.split("\n");
+  for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
+    if (!PICKER_NAVIGATION_FOOTER_RE.test(lines[footerIndex] ?? "")) continue;
+    const afterFooter = lines.slice(footerIndex + 1);
+    if (
+      afterFooter.some(
+        (line) =>
+          BARE_READY_PROMPT_RE.test(line) || CURSOR_FOLLOWUP_RE.test(line),
+      ) || hasShellPrompt(afterFooter.join("\n"))
+    ) {
+      continue;
+    }
+    for (
+      let selectorIndex = footerIndex - 1;
+      selectorIndex >= Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES);
+      selectorIndex -= 1
+    ) {
+      if (MENU_SELECTOR_RE.test(lines[selectorIndex] ?? "")) {
+        return { lines, selectorIndex, footerIndex };
+      }
+    }
+  }
+
+  const lastMeaningfulIndex = lines.reduce(
+    (last, line, index) => (line.trim() ? index : last),
+    -1,
+  );
+  for (let selectorIndex = lines.length - 1; selectorIndex >= 0; selectorIndex -= 1) {
+    if (!MENU_SELECTOR_RE.test(lines[selectorIndex] ?? "")) continue;
+    const optionBlock = lines
+      .slice(selectorIndex + 1, selectorIndex + PROMPT_BLOCK_WINDOW_LINES + 1)
+      .join("\n");
+    if (
+      MENU_OPTION_RE.test(optionBlock) &&
+      lastMeaningfulIndex <= selectorIndex + PROMPT_BLOCK_WINDOW_LINES
+    ) {
+      return { lines, selectorIndex, footerIndex: null };
+    }
+  }
+  return null;
+}
+
+function hasApprovalPromptBlock(text: string): boolean {
+  if (hasPermissionPromptBlock(text)) return true;
+  const chooser = findActiveChooserRegion(text);
+  if (!chooser) return false;
+  const actionWindow = chooser.lines.slice(
+    Math.max(0, chooser.selectorIndex - PROMPT_BLOCK_WINDOW_LINES),
+    chooser.selectorIndex,
+  );
+  return actionWindow.some((line) => ACTION_BLOCK_LINE_RE.test(line));
+}
+
 function hasInteractivePromptBlock(text: string): boolean {
   return hasMenuBlock(text, { tailOnly: true });
 }
@@ -723,7 +786,7 @@ function hasPickerNavigationBlock(text: string): boolean {
 export function isBlockingPromptChooserScreen(text: string): boolean {
   const normalized = normalizeText(text);
   return (
-    hasPermissionPromptBlock(normalized) ||
+    hasApprovalPromptBlock(normalized) ||
     hasInteractivePromptBlock(normalized) ||
     hasPickerNavigationBlock(normalized) ||
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -744,58 +807,85 @@ export type PromptDisposition =
     };
 
 function hasCodexModelPickerStructure(text: string): boolean {
-  const lines = text.split("\n");
-  for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
-    if (!PICKER_NAVIGATION_FOOTER_RE.test(lines[footerIndex] ?? "")) continue;
-    const block = lines.slice(
-      Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES),
-      footerIndex,
-    );
-    if (block.filter((line) => CODEX_MODEL_OPTION_RE.test(line)).length >= 2) {
-      return true;
-    }
-  }
-  return false;
+  const chooser = findActiveChooserRegion(text);
+  if (chooser?.footerIndex == null) return false;
+  const activeOptions = chooser.lines.slice(
+    chooser.selectorIndex,
+    chooser.footerIndex,
+  );
+  return activeOptions.filter((line) => CODEX_MODEL_OPTION_RE.test(line)).length >= 2;
 }
 
 function hasModelMenuProvenance(text: string, cli?: CliType): boolean {
-  const hasPicker =
-    hasInteractivePromptBlock(text) || hasPickerNavigationBlock(text);
+  const chooser = findActiveChooserRegion(text);
+  if (chooser) {
+    const provenanceWindow = chooser.lines.slice(
+      Math.max(0, chooser.selectorIndex - PROMPT_BLOCK_WINDOW_LINES),
+      chooser.selectorIndex,
+    );
+    let commandIndex = -1;
+    for (let index = provenanceWindow.length - 1; index >= 0; index -= 1) {
+      if (MODEL_COMMAND_RE.test(provenanceWindow[index] ?? "")) {
+        commandIndex = index;
+        break;
+      }
+    }
+    if (
+      commandIndex >= 0 &&
+      !provenanceWindow
+        .slice(commandIndex + 1)
+        .some((line) => ACTION_BLOCK_LINE_RE.test(line))
+    ) {
+      return true;
+    }
+  }
+  return cli === "codex" && hasCodexModelPickerStructure(text);
+}
+
+export function hasVisibleAgentProgress(
+  text: string,
+  cli?: CliType,
+): boolean {
+  const normalized = normalizeText(text);
   if (
-    hasPicker &&
-    text.split("\n").some((line) => MODEL_COMMAND_RE.test(line))
+    CONTEXT_LIMIT_BANNER_RE.test(normalized) ||
+    hasApprovalPromptBlock(normalized)
+  ) {
+    return false;
+  }
+  if (TERMINAL_ACTIVITY_LINE_RE.test(normalized)) return true;
+  const agentType = cli ?? detectAgentType(normalized);
+  if (THINKING_RE.test(normalized)) return true;
+  if (agentType === "codex" && CODEX_WORKING_RE.test(normalized)) return true;
+  if (
+    agentType === "cursor" &&
+    (CURSOR_HEX_RUNNING_RE.test(normalized) ||
+      CURSOR_BRAILLE_WORKING_RE.test(normalized))
   ) {
     return true;
   }
-  return cli === "codex" && hasCodexModelPickerStructure(text);
+  if (
+    agentType === "claude" &&
+    (CLAUDE_WORKING_LINE_RE.test(normalized) ||
+      latestClaudeSpinnerAction(normalized) !== null)
+  ) {
+    return true;
+  }
+  return (
+    agentType === "gemini" &&
+    ((/Gemini CLI/i.test(normalized) && /Thinking/i.test(normalized)) ||
+      GEMINI_WORKING_RE.test(normalized))
+  );
 }
 
 function hasActiveAgentWork(
   text: string,
   agentType: ParsedScreenAgentType,
 ): boolean {
-  if (CONTEXT_LIMIT_BANNER_RE.test(text)) return false;
-  if (THINKING_RE.test(text)) return true;
-  if (agentType === "codex" && CODEX_WORKING_RE.test(text)) return true;
-  if (
-    agentType === "cursor" &&
-    (CURSOR_HEX_RUNNING_RE.test(text) || CURSOR_BRAILLE_WORKING_RE.test(text))
-  ) {
-    return true;
-  }
-  if (
-    agentType === "claude" &&
-    (CLAUDE_WORKING_LINE_RE.test(text) ||
-      latestClaudeSpinnerAction(text) !== null ||
-      hasInFlightClaudeTool(text))
-  ) {
-    return true;
-  }
-  if (/esc to interrupt/i.test(text)) return true;
+  if (hasApprovalPromptBlock(text)) return false;
   return (
-    agentType === "gemini" &&
-    ((/Gemini CLI/i.test(text) && /Thinking/i.test(text)) ||
-      GEMINI_WORKING_RE.test(text))
+    hasVisibleAgentProgress(text, agentType === "unknown" ? undefined : agentType) ||
+    (agentType === "claude" && hasInFlightClaudeTool(text))
   );
 }
 
@@ -805,7 +895,9 @@ export function classifyPromptDisposition(
 ): PromptDisposition {
   const normalized = normalizeText(text);
   const agentType = detectAgentType(normalized);
-  if (hasActiveAgentWork(normalized, agentType)) return { kind: "active" };
+  if (hasApprovalPromptBlock(normalized)) {
+    return { kind: "escalate", prompt_type: "permission_prompt" };
+  }
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -819,9 +911,6 @@ export function classifyPromptDisposition(
   if (hasModelMenuProvenance(normalized, cli)) {
     return { kind: "resolve", prompt_type: "model_menu", key: "escape" };
   }
-  if (hasPermissionPromptBlock(normalized)) {
-    return { kind: "escalate", prompt_type: "permission_prompt" };
-  }
   if (
     hasInteractivePromptBlock(normalized) ||
     hasPickerNavigationBlock(normalized)
@@ -831,6 +920,7 @@ export function classifyPromptDisposition(
       prompt_type: "human_or_unknown_chooser",
     };
   }
+  if (hasActiveAgentWork(normalized, agentType)) return { kind: "active" };
   return { kind: "none" };
 }
 
@@ -855,7 +945,7 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
 
-  if (hasPermissionPromptBlock(text)) {
+  if (hasApprovalPromptBlock(text)) {
     errors.push("permission_prompt");
   }
 
