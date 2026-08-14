@@ -1737,6 +1737,213 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("keeps a prompt-blocked agent discoverable through startup purge after restart", async () => {
+    const agentId = "auto-claude-frozen-across-restart";
+    const surfaceRef = "surface:frozen-across-restart";
+    const frozenPrompt = [
+      "Bash command",
+      "  cat /etc/shells",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, allow reading from etc/ from this project",
+      "  3. No",
+    ].join("\n");
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceRef,
+        workspace_id: "workspace:cmuxlayer",
+        state: "error",
+        error: "Auto-discovered agent reported a frozen state",
+        blocked_on_prompt: true,
+        blocked_on_prompt_since: "2026-08-14T13:00:00.000Z",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface(surfaceRef),
+        title: "",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.readScreen.mockResolvedValue({
+      surface: surfaceRef,
+      text: frozenPrompt,
+      lines: frozenPrompt.split("\n").length,
+      scrollback_used: false,
+    });
+
+    engine.dispose();
+    const restartedRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, restartedRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+    await engine.runSweep();
+
+    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([
+      expect.objectContaining({
+        agent_id: agentId,
+        blocked_on_prompt: true,
+      }),
+    ]);
+    expect(mockClient.clearStatus).not.toHaveBeenCalledWith(
+      agentId,
+      expect.anything(),
+    );
+  });
+
+  it("keeps a healthy agent with a benign picker out of the prompt-blocked filter", async () => {
+    const agentId = "healthy-claude-model-picker";
+    const surfaceRef = "surface:healthy-model-picker";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceRef,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        state: "idle",
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface(surfaceRef),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    const benignPicker = [
+      "Claude Code",
+      "Select a model for the next worker:",
+      "> 1. Opus",
+      "  2. Sonnet",
+      "  3. Haiku",
+    ].join("\n");
+    mockClient.readScreen.mockResolvedValue({
+      surface: surfaceRef,
+      text: benignPicker,
+      lines: benignPicker.split("\n").length,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([]);
+    expect(engine.getAgentState(agentId)).toMatchObject({
+      blocked_on_prompt: false,
+      blocked_on_prompt_since: null,
+    });
+  });
+
+  it("keeps Claude prose asking whether to proceed out of the prompt-blocked filter", async () => {
+    const agentId = "healthy-claude-proceed-prose";
+    const surfaceRef = "surface:healthy-proceed-prose";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceRef,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        state: "idle",
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface(surfaceRef),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    const readyComposer = [
+      "Claude Code",
+      "",
+      "⏺ This also deletes their branches. Do you want to proceed?",
+      "",
+      "❯",
+      "? for shortcuts",
+    ].join("\n");
+    mockClient.readScreen.mockResolvedValue({
+      surface: surfaceRef,
+      text: readyComposer,
+      lines: readyComposer.split("\n").length,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([]);
+    expect(engine.getAgentState(agentId)).toMatchObject({
+      blocked_on_prompt: false,
+      blocked_on_prompt_since: null,
+    });
+  });
+
+  it("keeps a real Claude AskUserQuestion picker in the prompt-blocked filter", async () => {
+    const agentId = "claude-real-ask-user-question";
+    const surfaceRef = "surface:real-ask-user-question";
+    const picker = readFileSync(
+      new URL(
+        "./fixtures/painpoints/claude-ask-user-question-picker-2026-07-13.txt",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceRef,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        state: "idle",
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface(surfaceRef),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.readScreen.mockResolvedValue({
+      surface: surfaceRef,
+      text: picker,
+      lines: picker.split("\n").length,
+      scrollback_used: false,
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+
+    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([
+      expect.objectContaining({
+        agent_id: agentId,
+        blocked_on_prompt: true,
+      }),
+    ]);
+  });
+
   it("clears stale workspace-scoped sidebar rows during startup purge after restart", async () => {
     stateMgr.writeState(
       makeRecord({

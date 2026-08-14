@@ -2311,6 +2311,9 @@ export class AgentRegistry {
     const purgedAgents: AgentRecord[] = [];
 
     for (const [id, agent] of this.agents) {
+      if (agent.blocked_on_prompt === true) {
+        continue;
+      }
       if (
         shouldRetainCrashRecoveryError(agent) &&
         this.canControlSurface(agent)

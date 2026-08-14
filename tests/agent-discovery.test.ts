@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDiscovery } from "../src/agent-discovery.js";
+import {
+  AgentDiscovery,
+  discoveredStatusToAgentState,
+} from "../src/agent-discovery.js";
 
 const deadCodexShellFixture = JSON.parse(
   readFileSync(
@@ -13,6 +16,10 @@ const deadCodexShellFixture = JSON.parse(
 ) as { lines_80: string };
 
 describe("AgentDiscovery", () => {
+  it("keeps a frozen discovered agent non-terminal while it waits for input", () => {
+    expect(discoveredStatusToAgentState("frozen")).toBe("idle");
+  });
+
   it("keeps dead Codex identity while exposing the active shell control state", async () => {
     const discovery = new AgentDiscovery({
       listSurfaces: async () => [

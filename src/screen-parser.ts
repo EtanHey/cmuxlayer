@@ -191,9 +191,13 @@ const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
 const CLAUDE_PICKER_AUX_OPTION_RE =
   /^\s*\d+\.\s+(?:Type something\.?|Chat about this)\s*$/i;
 const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
-const PERMISSION_PROMPT_PRIMARY_RE = /approve command\?|do you want to allow/i;
+const PERMISSION_PROMPT_PRIMARY_RE =
+  /approve command\?|do you want to allow/i;
 const PERMISSION_PROMPT_MARKER_RE =
   /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
+const PERMISSION_PROCEED_PROMPT_RE = /do you want to proceed\?/i;
+const PERMISSION_PROCEED_OPTION_RE =
+  /^\s*(?:[>❯›]\s*)?\d+\.\s+(?:Yes(?:\b|,)|No\b)/i;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
@@ -660,6 +664,22 @@ function hasPermissionPromptBlock(text: string): boolean {
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+    if (PERMISSION_PROCEED_PROMPT_RE.test(line)) {
+      const blockLines = lines.slice(
+        index,
+        index + PROMPT_BLOCK_WINDOW_LINES + 1,
+      );
+      const decisionOptions = blockLines.filter((candidate) =>
+        PERMISSION_PROCEED_OPTION_RE.test(candidate),
+      ).length;
+      if (
+        decisionOptions >= 2 &&
+        MENU_SELECTOR_RE.test(blockLines.join("\n"))
+      ) {
+        return true;
+      }
+      continue;
+    }
     if (!PERMISSION_PROMPT_MARKER_RE.test(line)) {
       continue;
     }

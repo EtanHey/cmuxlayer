@@ -3423,10 +3423,18 @@ export class AgentEngine {
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
     const parsed = parseScreen(screenText);
+    const hasStructuredClaudeQuestionPicker =
+      /(?:^|\n)\s*\d+\.\s+Type something\.?\s*(?:\n|$)/i.test(screenText) &&
+      /(?:^|\n)\s*\d+\.\s+Chat about this\s*(?:\n|$)/i.test(screenText);
+    const hasAgentClarificationPrompt =
+      parsed.control_state === "interactive_overlay" &&
+      (/(?:^|\n)\s*(?:AskUserQuestion|ask-tool)\s*(?:\n|$)|agent is asking for clarification/i.test(
+        screenText,
+      ) || hasStructuredClaudeQuestionPicker);
     agent = this.persistPromptBlockedState(
       agent,
       parsed.control_state === "permission_prompt" ||
-        parsed.control_state === "interactive_overlay",
+        hasAgentClarificationPrompt,
       nowIso,
     );
     if (agent.halt_escalation === false) return agent;

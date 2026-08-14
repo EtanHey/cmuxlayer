@@ -60,7 +60,7 @@ export function discoveredStatusToAgentState(
     case "done":
       return "done";
     case "frozen":
-      return "error";
+      return "idle";
     default:
       return "ready";
   }

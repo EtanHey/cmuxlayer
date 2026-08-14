@@ -531,6 +531,37 @@ Do you want to allow this command?
     expect(parsed.control_state).toBe("permission_prompt");
   });
 
+  it("recognizes the live Claude proceed picker as a permission prompt without relying on chrome", () => {
+    const parsed = parseScreen(`
+Bash command
+  cat /etc/shells
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, allow reading from etc/ from this project
+  3. No
+`);
+
+    expect(parsed.agent_type).toBe("unknown");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.errors).toContain("permission_prompt");
+    expect(parsed.control_state).toBe("permission_prompt");
+  });
+
+  it("does not freeze Claude prose that merely asks whether to proceed", () => {
+    const parsed = parseScreen(`
+Claude Code
+
+⏺ The review identified two possible implementations.
+Do you want to proceed?
+
+✶ Comparing the tradeoffs… (12s · esc to interrupt)
+`);
+
+    expect(parsed.agent_type).toBe("claude");
+    expect(parsed.errors).not.toContain("permission_prompt");
+    expect(parsed.control_state).not.toBe("permission_prompt");
+  });
+
   it("does not treat prose mentioning AskUserQuestion as an interactive overlay", () => {
     const parsed = parseScreen(`
 Claude Code
