@@ -686,6 +686,45 @@ describe("AgentRegistry", () => {
       const codex = registry.list({ model: "codex" });
       expect(codex).toHaveLength(1);
     });
+
+    it("filters by persisted prompt blockage", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "blocked",
+          surface_id: "s:blocked",
+          blocked_on_prompt: true,
+        }),
+      );
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "healthy",
+          surface_id: "s:healthy",
+          blocked_on_prompt: false,
+        }),
+      );
+
+      const registry = new AgentRegistry(stateMgr, async () => [
+        makeSurface("s:blocked"),
+        makeSurface("s:healthy"),
+      ]);
+      await registry.reconstitute();
+
+      expect(
+        registry.list({ blocked_on_prompt: true }).map((agent) => agent.agent_id),
+      ).toEqual(["blocked"]);
+      expect(
+        registry.list({ blocked_on_prompt: false }).map((agent) => agent.agent_id),
+      ).toEqual(["healthy"]);
+
+      const merged = await registry.listMerged(
+        { scan: vi.fn().mockResolvedValue([]) } as any,
+        {
+          filter: { blocked_on_prompt: true },
+          nonDestructive: true,
+        },
+      );
+      expect(merged.map((agent) => agent.agent_id)).toEqual(["blocked"]);
+    });
   });
 
   describe("reconcile", () => {
@@ -1227,6 +1266,54 @@ describe("AgentRegistry", () => {
       );
     });
 
+    it.each([false, true])(
+      "does not evict an auto row when prompt truth precedes registry persistence (persisted=%s)",
+      async (persistedBlocked) => {
+        const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+        const agentId = `auto-codex-${surfaceUuid}`;
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            surface_id: "surface:prompt",
+            surface_uuid: surfaceUuid,
+            state: "idle",
+            blocked_on_prompt: persistedBlocked,
+            blocked_on_prompt_since: persistedBlocked
+              ? "2026-08-14T00:00:00.000Z"
+              : null,
+          }),
+        );
+        const registry = new AgentRegistry(stateMgr, async () => [
+          { ...makeSurface("surface:prompt"), id: surfaceUuid },
+        ]);
+        await registry.reconstitute();
+
+        const merged = await registry.listMerged(
+          { scan: vi.fn() } as any,
+          {
+            discovered: [
+              makeDiscovered({
+                surface_id: "surface:prompt",
+                surface_uuid: surfaceUuid,
+                cli: "codex",
+                control_state: "interactive_overlay",
+                parsed_status: "frozen",
+                has_agent: false,
+              }),
+            ],
+          },
+        );
+
+        expect(stateMgr.readState(agentId)?.blocked_on_prompt).toBe(
+          persistedBlocked,
+        );
+        expect(registry.get(agentId)?.agent_id).toBe(agentId);
+        expect(merged).toEqual(
+          expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+        );
+      },
+    );
+
     it.each([
       {
         label: "booting",
@@ -1741,6 +1828,62 @@ describe("AgentRegistry", () => {
       ]);
     });
 
+    it.each([false, true])(
+      "preserves a prompt-blocked auto record during discovery repair (persisted=%s)",
+      async (persistedBlocked) => {
+        const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+        const agentId = `auto-codex-${surfaceUuid}`;
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: agentId,
+            surface_id: "surface:prompt",
+            surface_uuid: surfaceUuid,
+            repo: "cmuxlayer",
+            cli: "codex",
+            task_summary: "(auto-discovered)",
+            parent_agent_id: null,
+            halt_escalation: true,
+            blocked_on_prompt: persistedBlocked,
+            blocked_on_prompt_since: persistedBlocked
+              ? "2026-08-14T00:00:00.000Z"
+              : null,
+          }),
+        );
+        const registry = new AgentRegistry(stateMgr, async () => [
+          { ...makeSurface("surface:prompt"), id: surfaceUuid },
+        ]);
+        await registry.reconstitute();
+
+        const result = registry.repairFromDiscovery(
+          [
+            makeDiscovered({
+              surface_id: "surface:prompt",
+              surface_uuid: surfaceUuid,
+              surface_title: "cmuxlayerCodex",
+              workspace_id: "workspace:prompt",
+              cli: "codex",
+              parsed_status: "frozen",
+              control_state: "interactive_overlay",
+            }),
+          ],
+          { seatRegistry: REPAIR_SEATS },
+        );
+
+        expect(result).toEqual({ repaired: [], evicted: [], skipped: [] });
+        expect(registry.get(agentId)).toMatchObject({
+          agent_id: agentId,
+          surface_id: "surface:prompt",
+          surface_uuid: surfaceUuid,
+          parent_agent_id: null,
+          halt_escalation: true,
+          blocked_on_prompt: persistedBlocked,
+        });
+        expect(stateMgr.readState(agentId)?.blocked_on_prompt).toBe(
+          persistedBlocked,
+        );
+      },
+    );
+
     it("does not rebind a managed record when its ref is recycled to a different UUID", async () => {
       const persistedUuid = "11111111-2222-4333-8444-555555555555";
       const recycledOccupantUuid = "66666666-7777-4888-8999-aaaaaaaaaaaa";
@@ -2227,6 +2370,12 @@ describe("AgentRegistry", () => {
         seat_lane: "driverBuddy",
         seat_role: "lead",
         role: "orchestrator",
+        parent_agent_id: null,
+        halt_escalation: true,
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+        halt_missing_ancestor_count: 0,
+        halt_delivery_failure_count: 0,
       });
     });
 

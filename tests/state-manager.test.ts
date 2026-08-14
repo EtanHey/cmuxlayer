@@ -364,6 +364,14 @@ describe("StateManager", () => {
       expect(record.surface_uuid).toBe(
         "11111111-2222-4333-8444-555555555555",
       );
+      expect(record).toMatchObject({
+        parent_agent_id: null,
+        halt_escalation: true,
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+        halt_missing_ancestor_count: 0,
+        halt_delivery_failure_count: 0,
+      });
     });
 
     it("assigns orchestrator role for auto-discovered Claude agents", () => {

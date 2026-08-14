@@ -18,6 +18,7 @@ import {
 import { join } from "node:path";
 import type {
   AgentCliExitEvent,
+  AgentHaltEscalationEvent,
   CloseForensicsEvent,
   CloseTelemetryEvent,
   ControlHealthTelemetryEvent,
@@ -75,6 +76,10 @@ export class EventLog {
   }
 
   appendAgentCliExit(event: AgentCliExitEvent): void {
+    this.appendEntry(event);
+  }
+
+  appendAgentHaltEscalation(event: AgentHaltEscalationEvent): void {
     this.appendEntry(event);
   }
 

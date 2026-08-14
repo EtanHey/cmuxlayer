@@ -119,6 +119,16 @@ export interface AgentRecord {
   halt_episode_observations?: number;
   halt_notification_sent_at?: string | null;
   halt_notified_ancestor_id?: string | null;
+  /** Screen-authoritative prompt blocker, persisted independently of inbox delivery. */
+  blocked_on_prompt?: boolean;
+  blocked_on_prompt_since?: string | null;
+  /** Number of mature halt attempts whose hierarchy had no healthy ancestor. */
+  halt_missing_ancestor_count?: number;
+  /** Best-effort sink selected after hierarchy delivery was unavailable. */
+  halt_fallback_sink_id?: string | null;
+  /** Failed dispatch attempts; notification remains retryable while nonzero. */
+  halt_delivery_failure_count?: number;
+  halt_last_delivery_error?: string | null;
   halt_last_observable_action?: string | null;
   halt_last_active_at?: string | null;
   halt_last_progress_at_ms?: number | null;
@@ -172,6 +182,7 @@ export interface ObservedPublicAgent {
   resume_command?: string;
   submit_verified: Observed<boolean | null>;
   model_mismatch: Observed<boolean | null>;
+  blocked_on_prompt: Observed<boolean>;
 }
 
 export interface AgentRoute {
@@ -300,6 +311,24 @@ export interface AgentCliExitEvent {
   manual_resume_command?: string | null;
 }
 
+export interface AgentHaltEscalationEvent {
+  ts: string;
+  event_type: "agent_halt_escalation";
+  agent_id: string;
+  surface_id: string;
+  parent_agent_id: string | null;
+  halt_type: AgentHaltType;
+  outcome:
+    | "ancestor_dispatched"
+    | "fallback_dispatched"
+    | "undeliverable"
+    | "dispatch_failed";
+  sink_agent_id: string | null;
+  missing_ancestor_count: number;
+  delivery_failure_count: number;
+  error: string | null;
+}
+
 /** Which close/kill path emitted the event. */
 export type CloseEventPath =
   | "close_surface"
@@ -395,6 +424,7 @@ export type EventLogEntry =
   | DeliveryTelemetryEvent
   | ControlHealthTelemetryEvent
   | AgentCliExitEvent
+  | AgentHaltEscalationEvent
   | CloseTelemetryEvent
   | CloseForensicsEvent;
 

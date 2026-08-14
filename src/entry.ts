@@ -154,10 +154,12 @@ export async function startInProcessRuntime(
   ensureNodeMaxOldSpaceEnv();
   installHeapGuard();
   const client = await createCmuxClient();
+  const runtimeEnv = opts.env ?? process.env;
+  const explicitStateDir = runtimeEnv.CMUXLAYER_STATE_DIR?.trim();
   const serverOpts: CreateServerOptions = {
     client,
     safetyCallerContextProvider: () =>
-      callerContextFromEnv(opts.env ?? process.env),
+      callerContextFromEnv(runtimeEnv),
     outboxDrain: () => drainOutbox({ deliver: httpDeliver }),
     monitorRegistryPath: defaultMonitorRegistryPath(),
     monitorRegistryNotify: httpNotifyMonitorDeadman,
@@ -167,6 +169,7 @@ export async function startInProcessRuntime(
     selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver(),
     fleetSidebarPublisher: new FleetSidebarPublisher(),
     defaultPalette: opts.env?.CMUXLAYER_DEFAULT_PALETTE,
+    ...(explicitStateDir ? { stateDir: explicitStateDir } : {}),
     ...(opts.fallbackWarnings
       ? { controlHealthWarnings: opts.fallbackWarnings }
       : {}),

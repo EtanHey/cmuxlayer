@@ -10025,6 +10025,436 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it("persists prompt blockage even when escalation is opted out and clears it from healthy screen truth", async () => {
+      const nowMs = Date.parse("2026-08-14T13:00:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 60_000,
+        },
+      );
+      const child = makeRecord({
+        agent_id: "prompt-opted-out",
+        surface_id: "surface:prompt-opted-out",
+        state: "working",
+        halt_escalation: false,
+      });
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(child.surface_id)];
+      await engine.getRegistry().reconstitute();
+
+      await (engine as any).maybeEscalateLiveHalt(
+        child,
+        "OpenAI Codex\nDo you want to allow this command?\n[y/n]",
+      );
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        blocked_on_prompt: true,
+        blocked_on_prompt_since: new Date(nowMs).toISOString(),
+      });
+      expect(readInbox(child.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        "OpenAI Codex\nProcessed item 2\nWorking (2s • esc to interrupt)",
+      );
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      });
+    });
+
+    it("routes a parentless prompt halt to a same-workspace top-level sink and records the hierarchy miss", async () => {
+      const nowMs = Date.parse("2026-08-14T13:10:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const fallback = makeRecord({
+        agent_id: "fleet-top-level",
+        surface_id: "surface:fleet-top-level",
+        workspace_id: "workspace:prompt-probe",
+        state: "working",
+        role: "orchestrator",
+        parent_agent_id: null,
+        spawn_depth: 0,
+      });
+      const child = makeRecord({
+        agent_id: "auto-codex-parentless",
+        surface_id: "surface:auto-parentless",
+        workspace_id: "workspace:prompt-probe",
+        state: "working",
+        role: "worker",
+        parent_agent_id: null,
+        spawn_depth: 0,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(fallback);
+      stateMgr.writeState(child);
+      liveSurfaces = [fallback, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => ({
+          surface,
+          text:
+            surface === fallback.surface_id
+              ? "Claude Code\nWorking (2s • esc to interrupt)"
+              : "OpenAI Codex\nDo you want to allow this command?\n[y/n]",
+          lines: 80,
+          scrollback_used: false,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      const prompt = "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+      await (engine as any).maybeEscalateLiveHalt(child, prompt);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(readInbox(fallback.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          to: fallback.agent_id,
+          tag: "agent_halt_awaiting_input",
+          task: expect.stringContaining(child.agent_id),
+        }),
+      ]);
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        blocked_on_prompt: true,
+        halt_notification_sent_at: expect.any(String),
+        halt_notified_ancestor_id: fallback.agent_id,
+        halt_fallback_sink_id: fallback.agent_id,
+        halt_missing_ancestor_count: 1,
+      });
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(
+        expect.objectContaining({
+          event_type: "agent_halt_escalation",
+          agent_id: child.agent_id,
+          outcome: "fallback_dispatched",
+          sink_agent_id: fallback.agent_id,
+        }),
+      );
+    });
+
+    it("keeps fleet fallback inside the blocked agent workspace when another workspace has a healthy root", async () => {
+      const nowMs = Date.parse("2026-08-14T13:15:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const sameWorkspaceBlocked = makeRecord({
+        agent_id: "same-workspace-blocked-root",
+        surface_id: "surface:same-workspace-blocked-root",
+        workspace_id: "workspace:scoped-fallback",
+        state: "working",
+        role: "orchestrator",
+        parent_agent_id: null,
+      });
+      const otherWorkspaceHealthy = makeRecord({
+        agent_id: "other-workspace-healthy-root",
+        surface_id: "surface:other-workspace-healthy-root",
+        workspace_id: "workspace:other",
+        state: "working",
+        role: "orchestrator",
+        parent_agent_id: null,
+      });
+      const child = makeRecord({
+        agent_id: "scoped-parentless-child",
+        surface_id: "surface:scoped-parentless-child",
+        workspace_id: sameWorkspaceBlocked.workspace_id,
+        state: "working",
+        parent_agent_id: null,
+      });
+      for (const record of [
+        sameWorkspaceBlocked,
+        otherWorkspaceHealthy,
+        child,
+      ]) {
+        stateMgr.writeState(record);
+      }
+      liveSurfaces = [sameWorkspaceBlocked, otherWorkspaceHealthy, child].map(
+        (record) => makeSurface(record.surface_id),
+      );
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => ({
+          surface,
+          text:
+            surface === otherWorkspaceHealthy.surface_id
+              ? "Claude Code\nWorking (2s • esc to interrupt)"
+              : "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n2. No",
+          lines: 80,
+          scrollback_used: false,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+      const prompt = "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+
+      await (engine as any).maybeEscalateLiveHalt(child, prompt);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(
+        readInbox(sameWorkspaceBlocked.agent_id, { baseDir: TEST_DIR }),
+      ).toHaveLength(1);
+      expect(
+        readInbox(otherWorkspaceHealthy.agent_id, { baseDir: TEST_DIR }),
+      ).toEqual([]);
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_fallback_sink_id: sameWorkspaceBlocked.agent_id,
+      });
+    });
+
+    it("does not let a prompt-blocked parent silence its child when no higher ancestor exists", async () => {
+      const nowMs = Date.parse("2026-08-14T13:20:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "prompt-blocked-parent",
+        surface_id: "surface:prompt-blocked-parent",
+        workspace_id: "workspace:blocked-chain",
+        state: "working",
+        role: "orchestrator",
+        parent_agent_id: null,
+        spawn_depth: 0,
+      });
+      const child = makeRecord({
+        agent_id: "prompt-blocked-child",
+        surface_id: "surface:prompt-blocked-child",
+        workspace_id: "workspace:blocked-chain",
+        state: "working",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nDo you want to proceed?\n❯ 1. Yes\n2. No",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      const prompt = "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+      await (engine as any).maybeEscalateLiveHalt(child, prompt);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          to: parent.agent_id,
+          tag: "agent_halt_awaiting_input",
+          task: expect.stringContaining(child.agent_id),
+        }),
+      ]);
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        blocked_on_prompt: true,
+        halt_notification_sent_at: expect.any(String),
+        halt_notified_ancestor_id: parent.agent_id,
+      });
+    });
+
+    it("records an undeliverable parentless halt and retries when a fallback sink later appears", async () => {
+      const nowMs = Date.parse("2026-08-14T13:25:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const child = makeRecord({
+        agent_id: "parentless-retry-child",
+        surface_id: "surface:parentless-retry-child",
+        workspace_id: "workspace:retry",
+        state: "working",
+        parent_agent_id: null,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(child);
+      liveSurfaces = [makeSurface(child.surface_id)];
+      await engine.getRegistry().reconstitute();
+      const prompt = "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+
+      await (engine as any).maybeEscalateLiveHalt(child, prompt);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        blocked_on_prompt: true,
+        halt_notification_sent_at: null,
+        halt_missing_ancestor_count: 1,
+        halt_last_delivery_error: "no halt escalation sink available",
+      });
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(
+        expect.objectContaining({
+          event_type: "agent_halt_escalation",
+          agent_id: child.agent_id,
+          outcome: "undeliverable",
+          sink_agent_id: null,
+        }),
+      );
+
+      const fallback = makeRecord({
+        agent_id: "late-fleet-sink",
+        surface_id: "surface:late-fleet-sink",
+        workspace_id: child.workspace_id,
+        state: "working",
+        role: "orchestrator",
+        parent_agent_id: null,
+      });
+      stateMgr.writeState(fallback);
+      engine.getRegistry().set(fallback.agent_id, fallback);
+      liveSurfaces.push(makeSurface(fallback.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: fallback.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(readInbox(fallback.agent_id, { baseDir: TEST_DIR })).toHaveLength(1);
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_notification_sent_at: expect.any(String),
+        halt_notified_ancestor_id: fallback.agent_id,
+        halt_missing_ancestor_count: 2,
+      });
+    });
+
+    it("records dispatch failure without handling the episode and retries later", async () => {
+      const nowMs = Date.parse("2026-08-14T13:27:00.000Z");
+      const failedInboxBase = join(TEST_DIR, "inbox-base-is-a-file");
+      writeFileSync(failedInboxBase, "not a directory", "utf8");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: failedInboxBase },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "dispatch-retry-parent",
+        surface_id: "surface:dispatch-retry-parent",
+        state: "working",
+        role: "orchestrator",
+      });
+      const child = makeRecord({
+        agent_id: "dispatch-retry-child",
+        surface_id: "surface:dispatch-retry-child",
+        state: "working",
+        parent_agent_id: parent.agent_id,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) => makeSurface(record.surface_id));
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: parent.surface_id,
+        text: "Claude Code\nWorking (2s • esc to interrupt)",
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      const prompt = "OpenAI Codex\nDo you want to allow this command?\n[y/n]";
+
+      await (engine as any).maybeEscalateLiveHalt(child, prompt);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_notification_sent_at: null,
+        halt_delivery_failure_count: 1,
+        halt_last_delivery_error: expect.stringMatching(/not a directory|ENOTDIR/i),
+      });
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(
+        expect.objectContaining({
+          event_type: "agent_halt_escalation",
+          agent_id: child.agent_id,
+          outcome: "dispatch_failed",
+          sink_agent_id: parent.agent_id,
+        }),
+      );
+
+      rmSync(failedInboxBase, { force: true });
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        prompt,
+      );
+
+      expect(readInbox(parent.agent_id, { baseDir: failedInboxBase })).toHaveLength(1);
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        halt_notification_sent_at: expect.any(String),
+        halt_delivery_failure_count: 1,
+        halt_last_delivery_error: null,
+      });
+    });
+
     it("dispatches one actionable awaiting-input episode after dwell", async () => {
       let nowMs = Date.parse("2026-08-13T08:00:00.000Z");
       engine.dispose();

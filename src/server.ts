@@ -12515,7 +12515,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents; filter to children with mine/parent_agent_id and request full diagnostics with detail=full.",
+      "List live-derived agents, including registry-persisted prompt blockage; filter to blocked agents or children with mine/parent_agent_id and request full diagnostics with detail=full.",
       {
         state: z
           .enum([
@@ -12531,6 +12531,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe("Filter by state"),
         repo: z.string().optional().describe("Filter by repository"),
         model: z.string().optional().describe("Filter by model"),
+        blocked_on_prompt: z
+          .boolean()
+          .optional()
+          .describe("Return only agents whose registry records show a live prompt blocker"),
         mine: z
           .boolean()
           .optional()
@@ -12580,12 +12584,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const filter = {
           repo: args.repo,
           model: args.model,
+          blocked_on_prompt: args.blocked_on_prompt,
         };
         const requestedState = args.state;
         const cacheKey = JSON.stringify({
           state: args.state ?? null,
           repo: args.repo ?? null,
           model: args.model ?? null,
+          blocked_on_prompt: args.blocked_on_prompt ?? null,
           parent_agent_id: parentAgentId ?? null,
           agent_ids: args.agent_ids ?? null,
           detail: args.detail,

@@ -672,6 +672,11 @@ interface FleetScreenProgressSnapshot {
   lastProgressAtMs: number;
 }
 
+interface HaltSinkResolution {
+  sink: AgentRecord | null;
+  fallback: boolean;
+}
+
 export interface SweepTimingOptions {
   activeIntervalMs: number;
   idleIntervalMs: number;
@@ -3256,37 +3261,159 @@ export class AgentEngine {
     return updated;
   }
 
+  private persistPromptBlockedState(
+    agent: AgentRecord,
+    blocked: boolean,
+    nowIso: string,
+  ): AgentRecord {
+    if (blocked && agent.blocked_on_prompt === true) {
+      return agent;
+    }
+    if (
+      !blocked &&
+      agent.blocked_on_prompt !== true &&
+      agent.blocked_on_prompt_since == null
+    ) {
+      return agent;
+    }
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      blocked_on_prompt: blocked,
+      blocked_on_prompt_since: blocked
+        ? (agent.blocked_on_prompt_since ?? nowIso)
+        : null,
+    });
+    this.registry.set(agent.agent_id, updated);
+    return updated;
+  }
+
+  private async haltSinkQuality(
+    candidate: AgentRecord,
+    nowMs: number,
+  ): Promise<"healthy" | "fallback" | "dead"> {
+    try {
+      const screen = await this.readAgentScreen(candidate, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      const parsed = parseScreen(screen.text);
+      if (
+        parsed.control_state === "shell" ||
+        parsed.control_state === "dead" ||
+        parsed.control_state === "stale_surface"
+      ) {
+        return "dead";
+      }
+      if (
+        parsed.agent_type === "unknown" ||
+        parsed.control_state === "permission_prompt" ||
+        parsed.control_state === "interactive_overlay" ||
+        this.isMatureHaltEpisode(candidate, nowMs)
+      ) {
+        return "fallback";
+      }
+      return "healthy";
+    } catch {
+      // A known agent inbox remains a best-effort sink even when screen proof
+      // is unavailable. Registry observability does not depend on this write.
+      return "fallback";
+    }
+  }
+
+  private async fleetHaltSink(
+    agent: AgentRecord,
+    nowMs: number,
+    visited: ReadonlySet<string>,
+  ): Promise<AgentRecord | null> {
+    const candidates = this.registry
+      .list()
+      .filter(
+        (candidate) =>
+          candidate.agent_id !== agent.agent_id &&
+          !visited.has(candidate.agent_id) &&
+          !candidate.parent_agent_id,
+      )
+      .sort((left, right) => {
+        const leftScore =
+          (left.role === "orchestrator" ? 2 : 0) +
+          (left.surface_provenance === "cmuxlayer_spawn" ? 1 : 0);
+        const rightScore =
+          (right.role === "orchestrator" ? 2 : 0) +
+          (right.surface_provenance === "cmuxlayer_spawn" ? 1 : 0);
+        return rightScore - leftScore || left.agent_id.localeCompare(right.agent_id);
+      });
+    const bestSink = async (
+      scoped: AgentRecord[],
+    ): Promise<AgentRecord | null> => {
+      let fallback: AgentRecord | null = null;
+      for (const candidate of scoped) {
+        const quality = await this.haltSinkQuality(candidate, nowMs);
+        if (quality === "healthy") return candidate;
+        if (quality === "fallback" && !fallback) fallback = candidate;
+      }
+      return fallback;
+    };
+    const sameWorkspace = candidates.filter(
+      (candidate) => candidate.workspace_id === agent.workspace_id,
+    );
+    const scopedSink = await bestSink(sameWorkspace);
+    if (scopedSink) return scopedSink;
+    return bestSink(
+      candidates.filter((candidate) => candidate.workspace_id !== agent.workspace_id),
+    );
+  }
+
   private async nearestLiveHaltAncestor(
     agent: AgentRecord,
     nowMs: number,
-  ): Promise<AgentRecord | null> {
+  ): Promise<HaltSinkResolution> {
     const visited = new Set<string>([agent.agent_id]);
+    let fallback: AgentRecord | null = null;
     let ancestorId = agent.parent_agent_id;
     while (ancestorId && !visited.has(ancestorId)) {
       visited.add(ancestorId);
       const ancestor =
         this.registry.get(ancestorId) ?? this.stateMgr.readState(ancestorId);
-      if (!ancestor) return null;
-      try {
-        const screen = await this.readAgentScreen(ancestor, {
-          lines: BOOT_SESSION_CAPTURE_LINES,
-        });
-        const parsed = parseScreen(screen.text);
-        const live =
-          parsed.agent_type !== "unknown" &&
-          parsed.control_state !== "shell" &&
-          parsed.control_state !== "dead" &&
-          parsed.control_state !== "stale_surface" &&
-          parsed.control_state !== "permission_prompt" &&
-          parsed.control_state !== "interactive_overlay" &&
-          !this.isMatureHaltEpisode(ancestor, nowMs);
-        if (live) return ancestor;
-      } catch {
-        // A parent whose live screen cannot be proven is not an escalation sink.
-      }
+      if (!ancestor) break;
+      const quality = await this.haltSinkQuality(ancestor, nowMs);
+      if (quality === "healthy") return { sink: ancestor, fallback: false };
+      if (quality === "fallback") fallback = ancestor;
       ancestorId = ancestor.parent_agent_id;
     }
-    return null;
+    if (fallback) return { sink: fallback, fallback: true };
+    return {
+      sink: await this.fleetHaltSink(agent, nowMs, visited),
+      fallback: true,
+    };
+  }
+
+  private appendHaltEscalationEvent(
+    agent: AgentRecord,
+    haltType: AgentHaltType,
+    outcome:
+      | "ancestor_dispatched"
+      | "fallback_dispatched"
+      | "undeliverable"
+      | "dispatch_failed",
+    sinkAgentId: string | null,
+    error: string | null,
+    nowIso: string,
+  ): void {
+    try {
+      this.stateMgr.getEventLog().appendAgentHaltEscalation({
+        ts: nowIso,
+        event_type: "agent_halt_escalation",
+        agent_id: agent.agent_id,
+        surface_id: agent.surface_id,
+        parent_agent_id: agent.parent_agent_id,
+        halt_type: haltType,
+        outcome,
+        sink_agent_id: sinkAgentId,
+        missing_ancestor_count: agent.halt_missing_ancestor_count ?? 0,
+        delivery_failure_count: agent.halt_delivery_failure_count ?? 0,
+        error,
+      });
+    } catch (eventError) {
+      console.error("[cmuxlayer] failed to log halt escalation outcome:", eventError);
+    }
   }
 
   private async maybeEscalateLiveHalt(
@@ -3295,8 +3422,14 @@ export class AgentEngine {
   ): Promise<AgentRecord> {
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
-    if (agent.halt_escalation === false) return agent;
     const parsed = parseScreen(screenText);
+    agent = this.persistPromptBlockedState(
+      agent,
+      parsed.control_state === "permission_prompt" ||
+        parsed.control_state === "interactive_overlay",
+      nowIso,
+    );
+    if (agent.halt_escalation === false) return agent;
     if (
       parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -3377,6 +3510,8 @@ export class AgentEngine {
             : 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
+        halt_fallback_sink_id: null,
+        halt_last_delivery_error: null,
         halt_last_observable_action: parsed.current_action ?? haltType,
       });
       this.registry.set(agent.agent_id, episode);
@@ -3389,6 +3524,8 @@ export class AgentEngine {
         halt_episode_observations: 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
+        halt_fallback_sink_id: null,
+        halt_last_delivery_error: null,
         halt_last_observable_action: parsed.current_action ?? haltType,
       });
       this.registry.set(agent.agent_id, episode);
@@ -3412,8 +3549,30 @@ export class AgentEngine {
     ) {
       return episode;
     }
-    const ancestor = await this.nearestLiveHaltAncestor(episode, nowMs);
-    if (!ancestor) return episode;
+    const resolution = await this.nearestLiveHaltAncestor(episode, nowMs);
+    if (resolution.fallback) {
+      episode = this.stateMgr.updateRecord(episode.agent_id, {
+        halt_missing_ancestor_count:
+          (episode.halt_missing_ancestor_count ?? 0) + 1,
+        halt_fallback_sink_id: resolution.sink?.agent_id ?? null,
+        halt_last_delivery_error: resolution.sink
+          ? null
+          : "no halt escalation sink available",
+      });
+      this.registry.set(episode.agent_id, episode);
+    }
+    const ancestor = resolution.sink;
+    if (!ancestor) {
+      this.appendHaltEscalationEvent(
+        episode,
+        haltType,
+        "undeliverable",
+        null,
+        episode.halt_last_delivery_error ?? "no halt escalation sink available",
+        nowIso,
+      );
+      return episode;
+    }
     let resumeCommand = "no captured session; inspect the live surface";
     if (episode.cli_session_id) {
       try {
@@ -3451,11 +3610,35 @@ export class AgentEngine {
       const notified = this.stateMgr.updateRecord(episode.agent_id, {
         halt_notification_sent_at: nowIso,
         halt_notified_ancestor_id: ancestor.agent_id,
+        halt_last_delivery_error: null,
       });
       this.registry.set(episode.agent_id, notified);
+      this.appendHaltEscalationEvent(
+        notified,
+        haltType,
+        resolution.fallback ? "fallback_dispatched" : "ancestor_dispatched",
+        ancestor.agent_id,
+        null,
+        nowIso,
+      );
       return notified;
-    } catch {
-      return episode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = this.stateMgr.updateRecord(episode.agent_id, {
+        halt_delivery_failure_count:
+          (episode.halt_delivery_failure_count ?? 0) + 1,
+        halt_last_delivery_error: message,
+      });
+      this.registry.set(episode.agent_id, failed);
+      this.appendHaltEscalationEvent(
+        failed,
+        haltType,
+        "dispatch_failed",
+        ancestor.agent_id,
+        message,
+        nowIso,
+      );
+      return failed;
     }
   }
 
