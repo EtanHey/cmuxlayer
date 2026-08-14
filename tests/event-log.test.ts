@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { EventLog } from "../src/event-log.js";
 import type {
   CloseTelemetryEvent,
+  ResolvedPromptEvent,
   StateTransition,
 } from "../src/agent-types.js";
 
@@ -168,6 +169,29 @@ describe("EventLog", () => {
     });
     // Close entries carry no agent_id, so they are not mistaken for transitions.
     expect(log.readAll()).toHaveLength(0);
+  });
+
+  it("appendResolvedPrompt records the observed prompt, sent key, and recovery verdict", () => {
+    const log = new EventLog(TEST_DIR);
+    const event: ResolvedPromptEvent = {
+      ts: "2026-08-14T16:00:00.000Z",
+      event_type: "resolved_prompt",
+      agent_id: "prompt-worker",
+      surface_id: "surface:prompt-worker",
+      workspace_id: "workspace:cmuxlayer",
+      prompt_type: "model_menu",
+      key_sent: "escape",
+      outcome: "recovered",
+      before_control_state: "interactive_overlay",
+      after_control_state: "ready",
+      screen_signature: "abc123",
+      screen_excerpt: "› /model | › 1. gpt-5.6-sol",
+      error: null,
+    };
+
+    log.appendResolvedPrompt(event);
+
+    expect(log.readEntries()).toEqual([event]);
   });
 
   it("reads only a bounded tail window while preserving recent entries", () => {

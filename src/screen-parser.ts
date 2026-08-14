@@ -171,12 +171,7 @@ const MODEL_EMOJI_RE =
 // Last resort: 🤖 + bare model family name (for narrow panes where version is cut off)
 const MODEL_KEYWORD_RE = /🤖\s*(Opus|Sonnet|Haiku)\b/i;
 const EXIT_CODE_RE = /(?:exit(?:ed)?\s+with\s+code|code)\s+(\d+)/gi;
-const CLAUDE_PERMISSION_APPROVAL_RE =
-  /allow for this session|do you want to allow|\[y\/n\]/i;
 const PROMPT_BLOCK_WINDOW_LINES = 8;
-const INTERACTIVE_PROMPT_TOOL_RE = /^\s*(AskUserQuestion|ask-tool)\s*$/i;
-const INTERACTIVE_PROMPT_CLARIFICATION_RE =
-  /agent is asking for clarification/i;
 const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
@@ -188,16 +183,11 @@ const PICKER_SELECTED_NUMBERED_OPTION_RE =
 const PICKER_NAVIGATION_FOOTER_RE =
   /(?:Enter to (?:select|confirm).{0,60}(?:↑\/↓|↑↓).{0,30}navigate|(?:↑\/↓|↑↓)\s+to navigate|Press enter to confirm or esc to go back|Press up to edit queued messages)/i;
 const CLAUDE_PICKER_HEADER_RE = /^\s*[☐☑]\s+\S.+$/;
-const CLAUDE_PICKER_AUX_OPTION_RE =
-  /^\s*\d+\.\s+(?:Type something\.?|Chat about this)\s*$/i;
 const CODEX_UPDATE_MENU_WINDOW_LINES = 12;
-const PERMISSION_PROMPT_PRIMARY_RE =
-  /approve command\?|do you want to allow/i;
-const PERMISSION_PROMPT_MARKER_RE =
-  /approve command\?|do you want to allow|allow for this session|\[y\/n\]/i;
-const PERMISSION_PROCEED_PROMPT_RE = /do you want to proceed\?/i;
-const PERMISSION_PROCEED_OPTION_RE =
-  /^\s*(?:[>❯›]\s*)?\d+\.\s+(?:Yes(?:\b|,)|No\b)/i;
+const BINARY_CONFIRM_FOOTER_RE = /^\s*\[(?:y\/n|yes\/no)\]\s*$/i;
+const MODEL_COMMAND_RE = /^\s*[>❯›]\s*\/model(?:\s+\S+)?\s*$/i;
+const CODEX_MODEL_OPTION_RE =
+  /^\s*(?:[>❯›]\s*)?\d+\.\s+gpt-[0-9][0-9a-z.-]*(?:\s|$)/i;
 const CODEX_HEADER_RE =
   /^\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)(?:\s*[·•]\s*[^\n]*)?\s*$/m;
 const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
@@ -403,8 +393,7 @@ function detectAgentType(text: string): ParsedScreenAgentType {
     "Claude Code",
   ];
   if (
-    claudeMarkers.some((marker) => text.includes(marker)) ||
-    CLAUDE_PERMISSION_APPROVAL_RE.test(text)
+    claudeMarkers.some((marker) => text.includes(marker))
   ) {
     return "claude";
   }
@@ -662,52 +651,21 @@ function hasMenuBlock(text: string, opts?: { tailOnly?: boolean }): boolean {
 
 function hasPermissionPromptBlock(text: string): boolean {
   const lines = text.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (PERMISSION_PROCEED_PROMPT_RE.test(line)) {
-      const blockLines = lines.slice(
-        index,
-        index + PROMPT_BLOCK_WINDOW_LINES + 1,
-      );
-      const decisionOptions = blockLines.filter((candidate) =>
-        PERMISSION_PROCEED_OPTION_RE.test(candidate),
-      ).length;
-      if (
-        decisionOptions >= 2 &&
-        MENU_SELECTOR_RE.test(blockLines.join("\n"))
-      ) {
-        return true;
-      }
+  for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
+    if (!BINARY_CONFIRM_FOOTER_RE.test(lines[footerIndex] ?? "")) continue;
+    if (
+      lines
+        .slice(footerIndex + 1)
+        .some((line) => BARE_READY_PROMPT_RE.test(line))
+    ) {
       continue;
     }
-    if (!PERMISSION_PROMPT_MARKER_RE.test(line)) {
-      continue;
-    }
-    const block = lines
-      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
-      .join("\n");
-    if (PERMISSION_PROMPT_PRIMARY_RE.test(block)) {
-      return true;
-    }
+    return true;
   }
   return false;
 }
 
 function hasInteractivePromptBlock(text: string): boolean {
-  const lines = text.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!INTERACTIVE_PROMPT_TOOL_RE.test(lines[index])) {
-      continue;
-    }
-    const block = lines
-      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
-      .join("\n");
-    const hasClarification =
-      INTERACTIVE_PROMPT_CLARIFICATION_RE.test(block);
-    if (hasClarification && hasMenuBlock(block)) {
-      return true;
-    }
-  }
   return hasMenuBlock(text, { tailOnly: true });
 }
 
@@ -745,15 +703,11 @@ function hasPickerNavigationBlock(text: string): boolean {
     const hasClaudePickerHeader = block.some((line) =>
       CLAUDE_PICKER_HEADER_RE.test(line),
     );
-    const claudePickerAuxOptions = block.filter((line) =>
-      CLAUDE_PICKER_AUX_OPTION_RE.test(line),
-    ).length;
     const hasSelectedNumberedOption = block.some((line) =>
       PICKER_SELECTED_NUMBERED_OPTION_RE.test(line),
     );
     const hasStructuredClaudePicker =
-      (hasClaudePickerHeader && hasSelectedNumberedOption) ||
-      claudePickerAuxOptions >= 2;
+      hasClaudePickerHeader && hasSelectedNumberedOption;
 
     if (
       (numberedOptions >= 2 ||
@@ -766,28 +720,118 @@ function hasPickerNavigationBlock(text: string): boolean {
   return false;
 }
 
-function hasQuestionChooserBlock(text: string): boolean {
-  const lines = text.split("\n");
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!/\?\s*$/.test(lines[index])) {
-      continue;
+export function isBlockingPromptChooserScreen(text: string): boolean {
+  const normalized = normalizeText(text);
+  return (
+    hasPermissionPromptBlock(normalized) ||
+    hasInteractivePromptBlock(normalized) ||
+    hasPickerNavigationBlock(normalized) ||
+    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
+  );
+}
+
+export type PromptDisposition =
+  | { kind: "none" }
+  | { kind: "active" }
+  | {
+      kind: "resolve";
+      prompt_type: "model_menu" | "codex_update_menu";
+      key: "escape";
     }
-    const block = lines
-      .slice(index, index + PROMPT_BLOCK_WINDOW_LINES + 1)
-      .join("\n");
-    if (MENU_SELECTOR_RE.test(block) && MENU_OPTION_RE.test(block)) {
+  | {
+      kind: "escalate";
+      prompt_type: "permission_prompt" | "human_or_unknown_chooser";
+    };
+
+function hasCodexModelPickerStructure(text: string): boolean {
+  const lines = text.split("\n");
+  for (let footerIndex = lines.length - 1; footerIndex >= 0; footerIndex -= 1) {
+    if (!PICKER_NAVIGATION_FOOTER_RE.test(lines[footerIndex] ?? "")) continue;
+    const block = lines.slice(
+      Math.max(0, footerIndex - PICKER_BLOCK_WINDOW_LINES),
+      footerIndex,
+    );
+    if (block.filter((line) => CODEX_MODEL_OPTION_RE.test(line)).length >= 2) {
       return true;
     }
   }
   return false;
 }
 
-export function isBlockingPromptChooserScreen(text: string): boolean {
-  const normalized = normalizeText(text);
+function hasModelMenuProvenance(text: string, cli?: CliType): boolean {
+  const hasPicker =
+    hasInteractivePromptBlock(text) || hasPickerNavigationBlock(text);
+  if (
+    hasPicker &&
+    text.split("\n").some((line) => MODEL_COMMAND_RE.test(line))
+  ) {
+    return true;
+  }
+  return cli === "codex" && hasCodexModelPickerStructure(text);
+}
+
+function hasActiveAgentWork(
+  text: string,
+  agentType: ParsedScreenAgentType,
+): boolean {
+  if (CONTEXT_LIMIT_BANNER_RE.test(text)) return false;
+  if (THINKING_RE.test(text)) return true;
+  if (agentType === "codex" && CODEX_WORKING_RE.test(text)) return true;
+  if (
+    agentType === "cursor" &&
+    (CURSOR_HEX_RUNNING_RE.test(text) || CURSOR_BRAILLE_WORKING_RE.test(text))
+  ) {
+    return true;
+  }
+  if (
+    agentType === "claude" &&
+    (CLAUDE_WORKING_LINE_RE.test(text) ||
+      latestClaudeSpinnerAction(text) !== null ||
+      hasInFlightClaudeTool(text))
+  ) {
+    return true;
+  }
+  if (/esc to interrupt/i.test(text)) return true;
   return (
-    hasQuestionChooserBlock(normalized) ||
-    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
+    agentType === "gemini" &&
+    ((/Gemini CLI/i.test(text) && /Thinking/i.test(text)) ||
+      GEMINI_WORKING_RE.test(text))
   );
+}
+
+export function classifyPromptDisposition(
+  text: string,
+  cli?: CliType,
+): PromptDisposition {
+  const normalized = normalizeText(text);
+  const agentType = detectAgentType(normalized);
+  if (hasActiveAgentWork(normalized, agentType)) return { kind: "active" };
+  if (
+    (cli === undefined || cli === "codex") &&
+    isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
+  ) {
+    return {
+      kind: "resolve",
+      prompt_type: "codex_update_menu",
+      key: "escape",
+    };
+  }
+  if (hasModelMenuProvenance(normalized, cli)) {
+    return { kind: "resolve", prompt_type: "model_menu", key: "escape" };
+  }
+  if (hasPermissionPromptBlock(normalized)) {
+    return { kind: "escalate", prompt_type: "permission_prompt" };
+  }
+  if (
+    hasInteractivePromptBlock(normalized) ||
+    hasPickerNavigationBlock(normalized)
+  ) {
+    return {
+      kind: "escalate",
+      prompt_type: "human_or_unknown_chooser",
+    };
+  }
+  return { kind: "none" };
 }
 
 /**
@@ -839,17 +883,17 @@ function inferControlState(
   agentType: ParsedScreenAgentType,
   text: string,
 ): ParsedScreenResult["control_state"] {
-  if (errors.includes("permission_prompt")) {
-    return "permission_prompt";
-  }
-  if (errors.includes("interactive_prompt")) {
-    return "interactive_overlay";
-  }
   if (hasOsShellPrompt(text)) {
     return "shell";
   }
   if (status === "thinking" || status === "working") {
     return "busy";
+  }
+  if (errors.includes("permission_prompt")) {
+    return "permission_prompt";
+  }
+  if (errors.includes("interactive_prompt")) {
+    return "interactive_overlay";
   }
   if (status === "idle" && agentType !== "unknown") {
     return "ready";
@@ -1211,20 +1255,16 @@ function inferStatus(
     return "done";
   }
 
-  if (errors.length > 0) {
-    return "frozen";
-  }
-
   if (CONTEXT_LIMIT_BANNER_RE.test(joined)) {
     return "idle";
   }
 
-  if (THINKING_RE.test(text)) {
-    return "thinking";
+  if (hasActiveAgentWork(text, agentType)) {
+    return THINKING_RE.test(text) ? "thinking" : "working";
   }
 
-  if (agentType === "codex" && CODEX_WORKING_RE.test(joined)) {
-    return "working";
+  if (errors.length > 0) {
+    return "frozen";
   }
 
   if (agentType === "codex" && CODEX_RESUME_RE.test(text)) {
@@ -1248,24 +1288,12 @@ function inferStatus(
     return "done";
   }
 
-  if (agentType === "claude" && CLAUDE_WORKING_LINE_RE.test(text)) {
-    return "working";
-  }
-
-  if (agentType === "claude" && latestClaudeSpinnerAction(text) !== null) {
-    return "working";
-  }
-
-  if (agentType === "claude" && hasInFlightClaudeTool(text)) {
-    return "working";
-  }
-
   // AIDEV-NOTE: do NOT add "bypass permissions on" here — it is a PERSISTENT
   // status-bar footer shown in both ready AND working states, so it made a
   // ready claude composer parse as "working", wedging spawn_agent at "booting"
   // until wait_for(ready) timed out (~15s). "esc to interrupt" + the
   // CLAUDE_WORKING_LINE_RE above are the real working signals.
-  const workingMarkers = [" /loop", "esc to interrupt"];
+  const workingMarkers = [" /loop"];
   if (
     workingMarkers.some((marker) =>
       joined.toLowerCase().includes(marker.toLowerCase()),

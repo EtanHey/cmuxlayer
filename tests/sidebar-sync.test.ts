@@ -1807,253 +1807,125 @@ describe("Sidebar Sync", () => {
     );
   });
 
-  it("keeps a healthy agent with a benign picker out of the prompt-blocked filter", async () => {
-    const agentId = "healthy-claude-model-picker";
-    const surfaceRef = "surface:healthy-model-picker";
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        surface_id: surfaceRef,
-        workspace_id: "workspace:cmuxlayer",
-        cli: "claude",
-        state: "idle",
-        blocked_on_prompt: false,
-        blocked_on_prompt_since: null,
-      }),
-    );
-    liveSurfaces = [
-      {
-        ...makeSurface(surfaceRef),
-        title: "cmuxlayerClaude",
-        workspace_ref: "workspace:cmuxlayer",
-      },
-    ];
-    const benignPicker = [
-      "Claude Code",
-      "Select a model for the next worker:",
-      "> 1. Opus",
-      "  2. Sonnet",
-      "  3. Haiku",
-    ].join("\n");
-    mockClient.readScreen.mockResolvedValue({
-      surface: surfaceRef,
-      text: benignPicker,
-      lines: benignPicker.split("\n").length,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([]);
-    expect(engine.getAgentState(agentId)).toMatchObject({
-      blocked_on_prompt: false,
-      blocked_on_prompt_since: null,
-    });
-  });
-
-  it("keeps Claude prose asking whether to proceed out of the prompt-blocked filter", async () => {
-    const agentId = "healthy-claude-proceed-prose";
-    const surfaceRef = "surface:healthy-proceed-prose";
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        surface_id: surfaceRef,
-        workspace_id: "workspace:cmuxlayer",
-        cli: "claude",
-        state: "idle",
-        blocked_on_prompt: false,
-        blocked_on_prompt_since: null,
-      }),
-    );
-    liveSurfaces = [
-      {
-        ...makeSurface(surfaceRef),
-        title: "cmuxlayerClaude",
-        workspace_ref: "workspace:cmuxlayer",
-      },
-    ];
-    const readyComposer = [
-      "Claude Code",
-      "",
-      "⏺ This also deletes their branches. Do you want to proceed?",
-      "",
-      "❯",
-      "? for shortcuts",
-    ].join("\n");
-    mockClient.readScreen.mockResolvedValue({
-      surface: surfaceRef,
-      text: readyComposer,
-      lines: readyComposer.split("\n").length,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([]);
-    expect(engine.getAgentState(agentId)).toMatchObject({
-      blocked_on_prompt: false,
-      blocked_on_prompt_since: null,
-    });
-  });
-
-  it("keeps a real Claude AskUserQuestion picker in the prompt-blocked filter", async () => {
-    const agentId = "claude-real-ask-user-question";
-    const surfaceRef = "surface:real-ask-user-question";
-    const picker = readFileSync(
-      new URL(
-        "./fixtures/painpoints/claude-ask-user-question-picker-2026-07-13.txt",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    stateMgr.writeState(
-      makeRecord({
-        agent_id: agentId,
-        surface_id: surfaceRef,
-        workspace_id: "workspace:cmuxlayer",
-        cli: "claude",
-        state: "idle",
-        blocked_on_prompt: false,
-        blocked_on_prompt_since: null,
-      }),
-    );
-    liveSurfaces = [
-      {
-        ...makeSurface(surfaceRef),
-        title: "cmuxlayerClaude",
-        workspace_ref: "workspace:cmuxlayer",
-      },
-    ];
-    mockClient.readScreen.mockResolvedValue({
-      surface: surfaceRef,
-      text: picker,
-      lines: picker.split("\n").length,
-      scrollback_used: false,
-    });
-    await engine.getRegistry().reconstitute();
-
-    await engine.runSweep();
-
-    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([
-      expect.objectContaining({
-        agent_id: agentId,
-        blocked_on_prompt: true,
-      }),
-    ]);
-  });
-
-  it("classifies four captured prompt freezes and rejects four proceed-prose shapes in one production sweep", async () => {
-    const capturedFreezes = [
-      {
-        name: "claude-real-ask-user-question",
-        cli: "claude" as const,
-        screen: readFileSync(
-          new URL(
-            "./fixtures/painpoints/claude-ask-user-question-picker-2026-07-13.txt",
-            import.meta.url,
-          ),
-          "utf8",
-        ),
-      },
-      {
-        name: "claude-synthetic-ask-user-question",
-        cli: "claude" as const,
-        screen: readFileSync(
-          new URL(
-            "./fixtures/painpoints/claude-ask-user-question-overlay.txt",
-            import.meta.url,
-          ),
-          "utf8",
-        ),
-      },
-      {
-        name: "claude-permission-confirmation",
-        cli: "claude" as const,
-        screen: readFileSync(
-          new URL(
-            "./fixtures/painpoints/claude-permission-confirmation.txt",
-            import.meta.url,
-          ),
-          "utf8",
-        ),
-      },
-      {
-        name: "codex-update-menu",
-        cli: "codex" as const,
-        screen: readFileSync(
-          new URL(
-            "./fixtures/painpoints/codex-update-menu.txt",
-            import.meta.url,
-          ),
-          "utf8",
-        ),
-      },
-    ];
-    const healthyProse = [
-      {
-        name: "ready-composer",
-        screen: [
-          "Claude Code",
-          "",
-          "⏺ This also deletes their branches. Do you want to proceed?",
-          "",
-          "❯",
-          "? for shortcuts",
-        ].join("\n"),
-      },
-      {
-        name: "full-composer-box",
-        screen: [
-          "Claude Code",
-          "",
-          "⏺ I can apply either approach. Do you want to proceed?",
-          "────────────────────────────────────────────────────────",
-          "❯",
-          "────────────────────────────────────────────────────────",
-          "? for shortcuts",
-        ].join("\n"),
-      },
-      {
-        name: "while-working",
-        screen: [
-          "Claude Code",
-          "",
-          "⏺ I am comparing both implementations. Do you want to proceed?",
-          "",
-          "✶ Comparing the tradeoffs… (12s · esc to interrupt)",
-        ].join("\n"),
-      },
-      {
-        name: "non-yes-no-numbered-list",
-        screen: [
-          "Claude Code",
-          "",
-          "⏺ The report asks: Do you want to proceed?",
-          "1. Compare the implementations",
-          "2. Review the risks",
-          "",
-          "❯",
-        ].join("\n"),
-      },
-    ];
+  it("resolves safe prompt menus, escalates decisions untouched, and ignores activity in one production run", async () => {
+    const parentId = "prompt-redirect-parent";
+    const parentSurface = "surface:prompt-redirect-parent";
+    const fixture = (name: string) =>
+      readFileSync(
+        new URL(`./fixtures/painpoints/${name}.txt`, import.meta.url),
+        "utf8",
+      );
     const cases = [
-      ...capturedFreezes.map((entry) => ({ ...entry, shouldBlock: true })),
-      ...healthyProse.map((entry) => ({
-        ...entry,
+      {
+        name: "model-menu",
+        cli: "codex" as const,
+        kind: "resolve" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "",
+          "› /model",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "  3. gpt-5.6-luna",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+        recovered:
+          "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+      },
+      {
+        name: "update-menu",
+        cli: "codex" as const,
+        kind: "resolve" as const,
+        screen: fixture("codex-update-menu"),
+        recovered: "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+      },
+      {
+        name: "real-human-question",
         cli: "claude" as const,
-        shouldBlock: false,
-      })),
+        kind: "escalate" as const,
+        screen: fixture("claude-ask-user-question-picker-2026-07-13"),
+      },
+      {
+        name: "synthetic-human-question",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: fixture("claude-ask-user-question-overlay"),
+      },
+      {
+        name: "destructive-permission",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: fixture("claude-permission-confirmation"),
+      },
+      {
+        name: "unknown-chooser",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "  3. Cancel",
+        ].join("\n"),
+      },
+      {
+        name: "healthy-ready",
+        cli: "claude" as const,
+        kind: "ignore" as const,
+        screen:
+          "Claude Code\n\n⏺ Compared both approaches.\n\n❯\n? for shortcuts",
+      },
+      {
+        name: "active-over-picker",
+        cli: "claude" as const,
+        kind: "ignore" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "",
+          "✶ Comparing environments… (12s · esc to interrupt)",
+        ].join("\n"),
+      },
     ].map((entry) => ({
       ...entry,
-      agentId: `prompt-matrix-${entry.name}`,
-      surfaceRef: `surface:prompt-matrix-${entry.name}`,
+      agentId: `prompt-redirect-${entry.name}`,
+      surfaceRef: `surface:prompt-redirect-${entry.name}`,
     }));
-    const screensBySurface = new Map(
-      cases.map((entry) => [entry.surfaceRef, entry.screen]),
-    );
+    const screensBySurface = new Map<string, string>([
+      [parentSurface, "Claude Code\n✶ Coordinating… (4s · esc to interrupt)"],
+      ...cases.map((entry) => [entry.surfaceRef, entry.screen] as const),
+    ]);
 
+    engine.dispose();
+    engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => liveSurfaces),
+      mockClient,
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts,
+        haltAwaitingInputDwellMs: 0,
+        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: parentId,
+        surface_id: parentSurface,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        role: "orchestrator",
+        state: "working",
+      }),
+    );
     for (const entry of cases) {
       stateMgr.writeState(
         makeRecord({
@@ -2061,21 +1933,35 @@ describe("Sidebar Sync", () => {
           surface_id: entry.surfaceRef,
           workspace_id: "workspace:cmuxlayer",
           cli: entry.cli,
-          state: entry.name === "while-working" ? "working" : "idle",
+          role: "worker",
+          parent_agent_id: parentId,
+          spawn_depth: 1,
+          state: entry.name === "active-over-picker" ? "working" : "idle",
           blocked_on_prompt: false,
           blocked_on_prompt_since: null,
         }),
       );
     }
-    liveSurfaces = cases.map((entry) => ({
-      ...makeSurface(entry.surfaceRef),
-      title: entry.cli === "codex" ? "cmuxlayerCodex" : "cmuxlayerClaude",
-      workspace_ref: "workspace:cmuxlayer",
-    }));
+    liveSurfaces = [
+      {
+        ...makeSurface(parentSurface),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+      ...cases.map((entry) => ({
+        ...makeSurface(entry.surfaceRef),
+        title: entry.cli === "codex" ? "cmuxlayerCodex" : "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      })),
+    ];
+    let activityTick = 12;
     mockClient.readScreen.mockImplementation(async (surface: string) => {
-      const text = screensBySurface.get(surface);
+      let text = screensBySurface.get(surface);
       if (text === undefined) {
-        throw new Error(`missing prompt matrix screen for ${surface}`);
+        throw new Error(`missing redirect screen for ${surface}`);
+      }
+      if (surface === cases.at(-1)?.surfaceRef) {
+        text = text.replace(/\(\d+s ·/, `(${activityTick++}s ·`);
       }
       return {
         surface,
@@ -2084,24 +1970,94 @@ describe("Sidebar Sync", () => {
         scrollback_used: false,
       };
     });
+    mockClient.sendKey.mockImplementation(
+      async (surface: string, key: string) => {
+        const entry = cases.find(
+          (candidate) => candidate.surfaceRef === surface,
+        );
+        if (
+          key === "escape" &&
+          entry?.kind === "resolve" &&
+          entry.recovered
+        ) {
+          screensBySurface.set(surface, entry.recovered);
+        }
+      },
+    );
     await engine.getRegistry().reconstitute();
 
     await engine.runSweep();
+    await engine.runSweep();
 
-    const blockedIds = engine
-      .listAgents({ blocked_on_prompt: true })
-      .map((agent) => agent.agent_id)
+    const keyTargets = mockClient.sendKey.mock.calls.map(([surface, key]) => ({
+      surface,
+      key,
+    }));
+    expect(keyTargets).toEqual(
+      cases
+        .filter((entry) => entry.kind === "resolve")
+        .map((entry) => ({ surface: entry.surfaceRef, key: "escape" })),
+    );
+    const resolvedEvents = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (event) =>
+          (event as { event_type?: string }).event_type === "resolved_prompt",
+      );
+    expect(resolvedEvents).toEqual(
+      expect.arrayContaining(
+        cases
+          .filter((entry) => entry.kind === "resolve")
+          .map((entry) =>
+            expect.objectContaining({
+              event_type: "resolved_prompt",
+              agent_id: entry.agentId,
+              key_sent: "escape",
+              outcome: "recovered",
+            }),
+          ),
+      ),
+    );
+    expect(resolvedEvents).toHaveLength(2);
+
+    const escalatedIds = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (event) =>
+          (event as { event_type?: string }).event_type ===
+          "agent_halt_escalation",
+      )
+      .map((event) => (event as { agent_id: string }).agent_id)
       .sort();
-    const expectedBlockedIds = cases
-      .filter((entry) => entry.shouldBlock)
-      .map((entry) => entry.agentId)
-      .sort();
-    expect(blockedIds).toEqual(expectedBlockedIds);
-    for (const entry of cases.filter((candidate) => !candidate.shouldBlock)) {
+    expect(escalatedIds).toEqual(
+      cases
+        .filter((entry) => entry.kind === "escalate")
+        .map((entry) => entry.agentId)
+        .sort(),
+    );
+    expect(
+      engine
+        .listAgents({ blocked_on_prompt: true })
+        .map((agent) => agent.agent_id)
+        .sort(),
+    ).toEqual(
+      cases
+        .filter((entry) => entry.kind === "escalate")
+        .map((entry) => entry.agentId)
+        .sort(),
+    );
+    for (const entry of cases.filter(
+      (candidate) => candidate.kind !== "escalate",
+    )) {
       expect(engine.getAgentState(entry.agentId)).toMatchObject({
         blocked_on_prompt: false,
         blocked_on_prompt_since: null,
       });
+      expect(
+        engine.getAgentState(entry.agentId)?.halt_episode_type ?? null,
+      ).toBeNull();
     }
   });
 

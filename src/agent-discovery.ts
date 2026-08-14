@@ -48,6 +48,12 @@ export function inferRepoFromTitle(title: string): string {
   return stripped.replace(/^[A-Z]/, (match) => match.toLowerCase());
 }
 
+function inferCliFromLauncherTitle(title: string): CliType | "unknown" {
+  const launcherTitle = title.trim().split(":", 1)[0] ?? "";
+  const match = launcherTitle.match(/(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
+  return (match?.[0]?.toLowerCase() as CliType | undefined) ?? "unknown";
+}
+
 export function discoveredStatusToAgentState(
   status: ParsedScreenStatus | null,
 ): AgentState {
@@ -108,9 +114,14 @@ export class AgentDiscovery {
         workspace: workspaceId ?? undefined,
       });
       const parsed = parseScreen(screen.text);
+      const titleCli = inferCliFromLauncherTitle(surface.title);
       const cli =
         parsed.agent_type === "unknown"
-          ? "unknown"
+          ? (parsed.control_state === "permission_prompt" ||
+              parsed.control_state === "interactive_overlay") &&
+            titleCli !== "unknown"
+            ? titleCli
+            : "unknown"
           : (parsed.agent_type as CliType);
 
       return {

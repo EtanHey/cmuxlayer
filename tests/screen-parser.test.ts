@@ -6,6 +6,7 @@ import {
   resolveModelMax,
   inferContextWindow,
   isPickerOrMenuScreen,
+  classifyPromptDisposition,
 } from "../src/screen-parser.js";
 
 const readFixture = (name: string) =>
@@ -212,6 +213,61 @@ Claude Code
     expect(parsed.control_state).toBe("permission_prompt");
   });
 
+  it("classifies prompt handling from structure and lets activity veto overlays", () => {
+    const modelMenu = [
+      ">_ OpenAI Codex",
+      "› /model",
+      "› 1. gpt-5.6-sol (current)",
+      "  2. gpt-5.6-terra",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const chooserWithoutQuestionPunctuation = [
+      "Claude Code",
+      "Deployment target",
+      "❯ 1. Production",
+      "  2. Staging",
+    ].join("\n");
+    const activeOverChooser = [
+      chooserWithoutQuestionPunctuation,
+      "✶ Comparing environments… (12s · esc to interrupt)",
+    ].join("\n");
+
+    expect(classifyPromptDisposition(modelMenu, "codex")).toEqual({
+      kind: "resolve",
+      prompt_type: "model_menu",
+      key: "escape",
+    });
+    expect(
+      classifyPromptDisposition(
+        readFixture("painpoints/codex-update-menu.txt"),
+        "codex",
+      ),
+    ).toEqual({
+      kind: "resolve",
+      prompt_type: "codex_update_menu",
+      key: "escape",
+    });
+    expect(
+      classifyPromptDisposition(chooserWithoutQuestionPunctuation, "claude"),
+    ).toEqual({
+      kind: "escalate",
+      prompt_type: "human_or_unknown_chooser",
+    });
+    expect(
+      classifyPromptDisposition(
+        readFixture("painpoints/claude-permission-confirmation.txt"),
+        "claude",
+      ),
+    ).toEqual({ kind: "escalate", prompt_type: "permission_prompt" });
+    expect(classifyPromptDisposition(activeOverChooser, "claude")).toEqual({
+      kind: "active",
+    });
+    expect(parseScreen(activeOverChooser)).toMatchObject({
+      status: "working",
+      control_state: "busy",
+    });
+  });
+
   it("recognizes Claude AskUserQuestion overlays as interactive overlays", () => {
     const parsed = parseScreen(
       readFixture("painpoints/claude-ask-user-question-overlay.txt"),
@@ -343,7 +399,7 @@ Select a model for the next worker:
   });
 
   it("recognizes the long Codex model picker after stale done scrollback", () => {
-    const parsed = parseScreen(`
+    const screen = `
 TASK_DONE
 
 ─ Worked for 1m 26s ──────────────────────────────────────────────────────────
@@ -362,10 +418,16 @@ TASK_DONE
   7. gpt-5.3-codex-spark    Ultra-fast coding model.
 
   Press enter to confirm or esc to go back
-`);
+`;
+    const parsed = parseScreen(screen);
 
     expect(parsed.errors).toContain("interactive_prompt");
     expect(parsed.control_state).toBe("interactive_overlay");
+    expect(classifyPromptDisposition(screen, "codex")).toEqual({
+      kind: "resolve",
+      prompt_type: "model_menu",
+      key: "escape",
+    });
   });
 
   it("recognizes the Codex update menu as an interactive overlay", () => {
@@ -529,37 +591,6 @@ Do you want to allow this command?
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.errors).toContain("permission_prompt");
     expect(parsed.control_state).toBe("permission_prompt");
-  });
-
-  it("recognizes the live Claude proceed picker as a permission prompt without relying on chrome", () => {
-    const parsed = parseScreen(`
-Bash command
-  cat /etc/shells
-Do you want to proceed?
-❯ 1. Yes
-  2. Yes, allow reading from etc/ from this project
-  3. No
-`);
-
-    expect(parsed.agent_type).toBe("unknown");
-    expect(parsed.status).toBe("frozen");
-    expect(parsed.errors).toContain("permission_prompt");
-    expect(parsed.control_state).toBe("permission_prompt");
-  });
-
-  it("does not freeze Claude prose that merely asks whether to proceed", () => {
-    const parsed = parseScreen(`
-Claude Code
-
-⏺ The review identified two possible implementations.
-Do you want to proceed?
-
-✶ Comparing the tradeoffs… (12s · esc to interrupt)
-`);
-
-    expect(parsed.agent_type).toBe("claude");
-    expect(parsed.errors).not.toContain("permission_prompt");
-    expect(parsed.control_state).not.toBe("permission_prompt");
   });
 
   it("does not treat prose mentioning AskUserQuestion as an interactive overlay", () => {

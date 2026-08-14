@@ -24,6 +24,7 @@ import type {
   ControlHealthTelemetryEvent,
   DeliveryTelemetryEvent,
   EventLogEntry,
+  ResolvedPromptEvent,
   StateTransition,
 } from "./agent-types.js";
 
@@ -80,6 +81,10 @@ export class EventLog {
   }
 
   appendAgentHaltEscalation(event: AgentHaltEscalationEvent): void {
+    this.appendEntry(event);
+  }
+
+  appendResolvedPrompt(event: ResolvedPromptEvent): void {
     this.appendEntry(event);
   }
 

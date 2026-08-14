@@ -3,6 +3,7 @@
  * Every field is a primitive (string | number | null).
  */
 import { randomUUID } from "node:crypto";
+import type { ParsedControlPlaneState } from "./types.js";
 
 export type AgentState =
   | "creating"
@@ -329,6 +330,22 @@ export interface AgentHaltEscalationEvent {
   error: string | null;
 }
 
+export interface ResolvedPromptEvent {
+  ts: string;
+  event_type: "resolved_prompt";
+  agent_id: string;
+  surface_id: string;
+  workspace_id: string | null;
+  prompt_type: "model_menu" | "codex_update_menu";
+  key_sent: "escape";
+  outcome: "recovered" | "failed";
+  before_control_state: ParsedControlPlaneState;
+  after_control_state: ParsedControlPlaneState | null;
+  screen_signature: string;
+  screen_excerpt: string;
+  error: string | null;
+}
+
 /** Which close/kill path emitted the event. */
 export type CloseEventPath =
   | "close_surface"
@@ -425,6 +442,7 @@ export type EventLogEntry =
   | ControlHealthTelemetryEvent
   | AgentCliExitEvent
   | AgentHaltEscalationEvent
+  | ResolvedPromptEvent
   | CloseTelemetryEvent
   | CloseForensicsEvent;
 

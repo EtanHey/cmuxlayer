@@ -43,6 +43,7 @@ import type {
   CmuxSendOptions,
   CmuxStatusUpdate,
   CmuxWorkspace,
+  ParsedScreenResult,
   ParsedScreenStatus,
 } from "./types.js";
 import {
@@ -77,9 +78,11 @@ import {
   type WatchSpec,
 } from "./watch-spec.js";
 import {
+  classifyPromptDisposition,
   cleanScreenText,
   isBlockingPromptChooserScreen,
   parseScreen,
+  type PromptDisposition,
 } from "./screen-parser.js";
 import {
   canonicalRoleColumn,
@@ -1135,6 +1138,8 @@ export class AgentEngine {
   private readyPatternMatches = new Map<string, number>();
   /** agentId → consecutive bound-screen observations at a bare shell. */
   private cliExitShellMatches = new Map<string, number>();
+  /** One failed safe-resolution attempt per unchanged prompt screen. */
+  private promptResolutionFailures = new Map<string, string>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
@@ -2628,6 +2633,11 @@ export class AgentEngine {
       previousAgentId,
       nextAgentId,
     );
+    this.rekeyAgentMapEntry(
+      this.promptResolutionFailures,
+      previousAgentId,
+      nextAgentId,
+    );
     this.rekeyAgentEventSet(this.loggedEvents, previousAgentId, nextAgentId);
     this.rekeyAgentEventSet(this.notifiedEvents, previousAgentId, nextAgentId);
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
@@ -3420,6 +3430,112 @@ export class AgentEngine {
     }
   }
 
+  private appendResolvedPromptEvent(input: {
+    agent: AgentRecord;
+    disposition: Extract<PromptDisposition, { kind: "resolve" }>;
+    beforeControlState: ParsedScreenResult["control_state"];
+    afterControlState: ParsedScreenResult["control_state"] | null;
+    screenText: string;
+    outcome: "recovered" | "failed";
+    error: string | null;
+    nowIso: string;
+  }): void {
+    const excerpt = cleanScreenText(input.screenText, 8)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240);
+    this.stateMgr.getEventLog().appendResolvedPrompt({
+      ts: input.nowIso,
+      event_type: "resolved_prompt",
+      agent_id: input.agent.agent_id,
+      surface_id: input.agent.surface_id,
+      workspace_id: input.agent.workspace_id ?? null,
+      prompt_type: input.disposition.prompt_type,
+      key_sent: input.disposition.key,
+      outcome: input.outcome,
+      before_control_state: input.beforeControlState,
+      after_control_state: input.afterControlState,
+      screen_signature: screenTextSignature(input.screenText),
+      screen_excerpt: excerpt,
+      error: input.error,
+    });
+  }
+
+  private async maybeResolvePrompt(
+    agent: AgentRecord,
+    screenText: string,
+    disposition: Extract<PromptDisposition, { kind: "resolve" }>,
+    nowIso: string,
+  ): Promise<{ agent: AgentRecord; recovered: boolean }> {
+    const signature = screenTextSignature(screenText);
+    if (this.promptResolutionFailures.get(agent.agent_id) === signature) {
+      return { agent, recovered: false };
+    }
+
+    const before = parseScreen(screenText);
+    let afterControlState: ParsedScreenResult["control_state"] | null = null;
+    let error: string | null = null;
+    try {
+      const route = await this.resolveAgentIoRoute(agent.agent_id);
+      const assertSurfaceBindingCurrent = async (): Promise<void> => {
+        await this.resolveUnchangedAgentIoRoute(
+          agent.agent_id,
+          route,
+          "prompt resolution",
+        );
+      };
+      await this.client.sendKey(route.surface_id, disposition.key, {
+        workspace: route.workspace_id ?? undefined,
+        ...this.stableSurfaceWriteOptions(route.surface_uuid),
+        beforeMutation: assertSurfaceBindingCurrent,
+      });
+      await assertSurfaceBindingCurrent();
+      const afterScreen = await this.client.readScreen(route.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+        workspace: route.workspace_id ?? undefined,
+      });
+      await assertSurfaceBindingCurrent();
+      const after = parseScreen(afterScreen.text);
+      afterControlState = after.control_state;
+      const recovered =
+        after.control_state === "ready" || after.control_state === "busy";
+      if (!recovered) {
+        error = `prompt remained ${after.control_state} after Escape`;
+        this.promptResolutionFailures.set(agent.agent_id, signature);
+      } else {
+        this.promptResolutionFailures.delete(agent.agent_id);
+      }
+      this.appendResolvedPromptEvent({
+        agent,
+        disposition,
+        beforeControlState: before.control_state,
+        afterControlState,
+        screenText,
+        outcome: recovered ? "recovered" : "failed",
+        error,
+        nowIso,
+      });
+      if (!recovered) return { agent, recovered: false };
+
+      agent = this.persistPromptBlockedState(agent, false, nowIso);
+      return { agent: this.clearHaltEpisode(agent), recovered: true };
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      this.promptResolutionFailures.set(agent.agent_id, signature);
+      this.appendResolvedPromptEvent({
+        agent,
+        disposition,
+        beforeControlState: before.control_state,
+        afterControlState,
+        screenText,
+        outcome: "failed",
+        error,
+        nowIso,
+      });
+      return { agent, recovered: false };
+    }
+  }
+
   private async maybeEscalateLiveHalt(
     agent: AgentRecord,
     screenText: string,
@@ -3427,13 +3543,33 @@ export class AgentEngine {
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
     const parsed = parseScreen(screenText);
-    const hasAgentClarificationPrompt =
-      parsed.control_state === "interactive_overlay" &&
-      isBlockingPromptChooserScreen(screenText);
+    let disposition = classifyPromptDisposition(screenText, agent.cli);
+    if (disposition.kind === "resolve") {
+      const resolution = await this.maybeResolvePrompt(
+        agent,
+        screenText,
+        disposition,
+        nowIso,
+      );
+      agent = resolution.agent;
+      if (resolution.recovered) return agent;
+      disposition = {
+        kind: "escalate",
+        prompt_type: "human_or_unknown_chooser",
+      };
+    } else {
+      this.promptResolutionFailures.delete(agent.agent_id);
+    }
+    if (
+      disposition.kind === "active" &&
+      isBlockingPromptChooserScreen(screenText)
+    ) {
+      agent = this.persistPromptBlockedState(agent, false, nowIso);
+      return this.clearHaltEpisode(agent);
+    }
     agent = this.persistPromptBlockedState(
       agent,
-      parsed.control_state === "permission_prompt" ||
-        hasAgentClarificationPrompt,
+      disposition.kind === "escalate",
       nowIso,
     );
     if (agent.halt_escalation === false) return agent;
