@@ -5,6 +5,7 @@ import type {
   CmuxSurface,
   ParsedControlPlaneState,
   ParsedScreenStatus,
+  SurfaceWorkingDirectorySource,
 } from "./types.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 
@@ -15,6 +16,7 @@ export interface DiscoveredAgent {
   surface_title: string;
   workspace_id?: string | null;
   current_directory?: string | null;
+  working_directory_source?: SurfaceWorkingDirectorySource;
   cli: CliType | "unknown";
   control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
@@ -51,12 +53,19 @@ export function inferRepoFromTitle(title: string): string {
 }
 
 export function inferRepoFromDiscovery(
-  discovered: Pick<DiscoveredAgent, "current_directory" | "surface_title">,
+  discovered: Pick<
+    DiscoveredAgent,
+    "current_directory" | "working_directory_source" | "surface_title"
+  >,
 ): string {
+  const titleRepo = inferRepoFromTitle(discovered.surface_title);
+  const trustedCwd =
+    discovered.working_directory_source === "terminal_metadata" ||
+    discovered.working_directory_source === "surface";
   const cwd = discovered.current_directory?.trim();
-  return cwd
-    ? inferRepoFromDirectory(cwd)
-    : inferRepoFromTitle(discovered.surface_title);
+  return trustedCwd && cwd
+    ? inferRepoFromDirectory(cwd, titleRepo)
+    : titleRepo;
 }
 
 export function discoveredStatusToAgentState(
@@ -135,6 +144,7 @@ export class AgentDiscovery {
           surface.working_directory ??
           surface.requested_working_directory ??
           null,
+        working_directory_source: surface.working_directory_source,
         cli,
         control_state: parsed.control_state,
         parsed_status: parsed.status,
@@ -161,6 +171,7 @@ export class AgentDiscovery {
           surface.working_directory ??
           surface.requested_working_directory ??
           null,
+        working_directory_source: surface.working_directory_source,
         cli: "unknown",
         control_state: "unknown",
         parsed_status: null,

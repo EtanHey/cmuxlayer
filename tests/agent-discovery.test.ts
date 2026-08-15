@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { AgentDiscovery } from "../src/agent-discovery.js";
+import {
+  AgentDiscovery,
+  inferRepoFromDiscovery,
+} from "../src/agent-discovery.js";
 
 const deadCodexShellFixture = JSON.parse(
   readFileSync(
@@ -13,6 +16,62 @@ const deadCodexShellFixture = JSON.parse(
 ) as { lines_80: string };
 
 describe("AgentDiscovery", () => {
+  it("derives a repo root instead of a nested cwd basename", () => {
+    expect(
+      inferRepoFromDiscovery({
+        current_directory: "/Users/example/Gits/cmuxlayer/src",
+        working_directory_source: "surface",
+        surface_title: "cmuxlayerClaude",
+      }),
+    ).toBe("cmuxlayer");
+  });
+
+  it("ignores workspace fallback cwd when the title carries repo identity", () => {
+    expect(
+      inferRepoFromDiscovery({
+        current_directory: "/Users/example/Gits/unrelated-workspace",
+        working_directory_source: "workspace_fallback",
+        surface_title: "cmuxlayerClaude",
+      }),
+    ).toBe("cmuxlayer");
+  });
+
+  it("falls back to title when a trusted cwd has no recognizable repo root", () => {
+    expect(
+      inferRepoFromDiscovery({
+        current_directory: "/Users/example/scratch/misc",
+        working_directory_source: "surface",
+        surface_title: "cmuxlayerClaude",
+      }),
+    ).toBe("cmuxlayer");
+  });
+
+  it("retains the working-directory evidence source in discovery", async () => {
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => [
+        {
+          ref: "surface:cwd-source",
+          title: "cmuxlayerCodex",
+          type: "terminal",
+          index: 0,
+          selected: true,
+          current_directory: "/Users/example/Gits/cmuxlayer/src",
+          working_directory_source: "terminal_metadata",
+        },
+      ],
+      readScreen: async (surface) => ({
+        surface,
+        text: "codex> ",
+        lines: 1,
+        scrollback_used: false,
+      }),
+    });
+
+    await expect(discovery.scan(true)).resolves.toMatchObject([
+      { working_directory_source: "terminal_metadata" },
+    ]);
+  });
+
   it("keeps dead Codex identity while exposing the active shell control state", async () => {
     const discovery = new AgentDiscovery({
       listSurfaces: async () => [

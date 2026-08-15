@@ -2257,6 +2257,7 @@ describe("AgentRegistry", () => {
           id: "11111111-2222-4333-8444-555555555555",
           current_directory:
             "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+          working_directory_source: "surface",
         },
       ]);
       await registry.reconstitute();
@@ -2269,6 +2270,7 @@ describe("AgentRegistry", () => {
             surface_title: "zsh",
             current_directory:
               "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+            working_directory_source: "surface",
             cli: "claude",
           }),
         ],
@@ -2294,6 +2296,136 @@ describe("AgentRegistry", () => {
         role: "worker",
         auto_revive: true,
         halt_escalation: true,
+      });
+    });
+
+    it("does not resurrect completed, killed, dead, or stale managed records", async () => {
+      const cases = [
+        {
+          name: "completed",
+          state: "done" as const,
+          error: null,
+          user_killed: false,
+          control_state: "ready" as const,
+          parsed_status: "idle" as const,
+        },
+        {
+          name: "killed",
+          state: "error" as const,
+          error: "Killed by user",
+          user_killed: true,
+          control_state: "ready" as const,
+          parsed_status: "working" as const,
+        },
+        {
+          name: "dead",
+          state: "error" as const,
+          error: "agent crashed",
+          user_killed: false,
+          control_state: "dead" as const,
+          parsed_status: "idle" as const,
+        },
+        {
+          name: "stale",
+          state: "error" as const,
+          error: "stale surface",
+          user_killed: false,
+          control_state: "stale_surface" as const,
+          parsed_status: "idle" as const,
+        },
+      ];
+      const discoveries: DiscoveredAgent[] = [];
+      const surfaces: CmuxSurface[] = [];
+
+      for (const [index, testCase] of cases.entries()) {
+        const surfaceId = `surface:terminal-${testCase.name}`;
+        const surfaceUuid = `42100000-0000-4000-8000-00000000000${index}`;
+        stateMgr.writeState(
+          makeRecord({
+            agent_id: `cmuxlayerClaude-${testCase.name}`,
+            surface_id: surfaceId,
+            surface_uuid: surfaceUuid,
+            state: testCase.state,
+            error: testCase.error,
+            user_killed: testCase.user_killed,
+            task_done_detected_at:
+              testCase.state === "done"
+                ? "2026-08-14T18:00:00.000Z"
+                : undefined,
+          }),
+        );
+        surfaces.push({ ...makeSurface(surfaceId), id: surfaceUuid });
+        discoveries.push(
+          makeDiscovered({
+            surface_id: surfaceId,
+            surface_uuid: surfaceUuid,
+            control_state: testCase.control_state,
+            parsed_status: testCase.parsed_status,
+          }),
+        );
+      }
+
+      const registry = new AgentRegistry(stateMgr, async () => surfaces);
+      await registry.reconstitute();
+      await registry.listMerged(
+        {
+          scan: vi.fn().mockResolvedValue(discoveries),
+        } as unknown as AgentDiscovery,
+        { force: true },
+      );
+
+      for (const testCase of cases) {
+        expect(
+          stateMgr.readState(`cmuxlayerClaude-${testCase.name}`),
+        ).toMatchObject({
+          state: testCase.state,
+          error: testCase.error,
+          user_killed: testCase.user_killed,
+        });
+      }
+    });
+
+    it("repairs auto-discovery metadata without resetting lifecycle age", async () => {
+      const autoId = "auto-claude-42111111-2222-4333-8444-555555555555";
+      const createdAt = "2026-08-14T09:00:00.000Z";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: autoId,
+          surface_id: "surface:repair-metadata",
+          surface_uuid: "42111111-2222-4333-8444-555555555555",
+          repo: "cmuxlayer",
+          cli: "claude",
+          task_summary: "(auto-discovered)",
+          created_at: createdAt,
+          parent_agent_id: null,
+          halt_escalation: true,
+        }),
+      );
+      const registry = new AgentRegistry(stateMgr, async () => [
+        {
+          ...makeSurface("surface:repair-metadata"),
+          id: "42111111-2222-4333-8444-555555555555",
+        },
+      ]);
+      await registry.reconstitute();
+
+      const result = registry.repairFromDiscovery(
+        [
+          makeDiscovered({
+            surface_id: "surface:repair-metadata",
+            surface_uuid: "42111111-2222-4333-8444-555555555555",
+            surface_title: "cmuxlayerClaude",
+          }),
+        ],
+        { seatRegistry: REPAIR_SEATS },
+      );
+      const repaired = stateMgr.readState(result.repaired[0]!.agent_id);
+
+      expect(repaired).toMatchObject({
+        task_summary: "(resync-repaired)",
+        created_at: createdAt,
+        parent_agent_id: null,
+        halt_escalation: false,
       });
     });
 

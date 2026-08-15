@@ -1769,7 +1769,7 @@ describe("Sidebar Sync", () => {
     stateMgr.writeState(
       makeRecord({
         agent_id: agentId,
-        state: "done",
+        state: "error",
         surface_id: "surface:1025",
         surface_uuid: surfaceUuid,
         surface_provenance: "cmuxlayer_spawn",
@@ -1782,7 +1782,7 @@ describe("Sidebar Sync", () => {
         parent_agent_id: "cmuxlayerCodex-parent",
         spawn_depth: 1,
         role: "worker",
-        task_done_detected_at: "2026-08-14T18:00:00.000Z",
+        error: "interactive_prompt",
       }),
     );
     liveSurfaces = [
@@ -1793,6 +1793,7 @@ describe("Sidebar Sync", () => {
         workspace_ref: "workspace:cmuxlayer",
         current_directory:
           "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+        working_directory_source: "surface",
       },
     ];
     const overlay = readFileSync(

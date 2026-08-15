@@ -278,8 +278,14 @@ function inferRepairLauncher(
   if (titleLauncher) return titleLauncher;
 
   if (discovered.cli === "unknown") return null;
-  const repo = discovered.current_directory?.trim()
-    ? inferRepoFromDirectory(discovered.current_directory)
+  const trustedCwd =
+    discovered.working_directory_source === "terminal_metadata" ||
+    discovered.working_directory_source === "surface";
+  const repo = trustedCwd && discovered.current_directory?.trim()
+    ? inferRepoFromDirectory(
+        discovered.current_directory,
+        repairRepoFromTitle(discovered.surface_title),
+      )
     : repairRepoFromTitle(discovered.surface_title);
   const suffix = suffixForCli(discovered.cli);
   if (!repo || !suffix) return null;
@@ -1096,8 +1102,12 @@ export class AgentRegistry {
         if (
           exactStableBinding &&
           TERMINAL_STATES.has(liveRecord.state) &&
+          liveRecord.state !== "done" &&
+          liveRecord.user_killed !== true &&
           discoveredEntry.has_agent &&
-          discoveredEntry.control_state !== "shell"
+          discoveredEntry.control_state !== "shell" &&
+          discoveredEntry.control_state !== "dead" &&
+          discoveredEntry.control_state !== "stale_surface"
         ) {
           liveRecord = this.syncManagedRecordLifecycleFromDiscovery(
             liveRecord,
@@ -2185,10 +2195,12 @@ export class AgentRegistry {
       seat_identity_status: candidate.seat.seat_identity_status,
       seat_identity_error: candidate.seat.seat_identity_error,
       task_summary:
-        continuityRecord?.task_summary ?? "(resync-repaired)",
+        continuityRecord?.task_summary === "(auto-discovered)"
+          ? "(resync-repaired)"
+          : (continuityRecord?.task_summary ?? "(resync-repaired)"),
       pid: null,
       version: 1,
-      created_at: now,
+      created_at: continuityRecord?.created_at ?? now,
       updated_at: now,
       error:
         state === "error"
@@ -2223,7 +2235,9 @@ export class AgentRegistry {
       revive_previous_state: null,
       revive_consecutive_observations: 0,
       revive_notification_sent_at: null,
-      halt_escalation: continuityRecord?.halt_escalation ?? true,
+      halt_escalation:
+        continuityRecord?.parent_agent_id != null &&
+        (continuityRecord.halt_escalation ?? true),
       halt_episode_type: null,
       halt_episode_started_at: null,
       halt_episode_observations: 0,

@@ -18,6 +18,13 @@ export interface CmuxWorkspace {
   current_directory?: string | null;
 }
 
+export type SurfaceWorkingDirectorySource =
+  | "terminal_metadata"
+  | "surface"
+  | "pane"
+  | "workspace_fallback"
+  | "unavailable";
+
 export interface CmuxSurface {
   id?: string;
   ref: string;
@@ -32,6 +39,8 @@ export interface CmuxSurface {
   cwd?: string | null;
   working_directory?: string | null;
   requested_working_directory?: string | null;
+  working_directory_source?: SurfaceWorkingDirectorySource;
+  working_directory_fallback?: boolean;
 }
 
 export interface CmuxPane {
