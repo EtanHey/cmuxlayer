@@ -35,6 +35,7 @@ import {
 } from "./seat-identity.js";
 import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
+import { inferRepoFromDirectory } from "./repo-workspace.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -277,7 +278,15 @@ function inferRepairLauncher(
   if (titleLauncher) return titleLauncher;
 
   if (discovered.cli === "unknown") return null;
-  const repo = repairRepoFromTitle(discovered.surface_title);
+  const trustedCwd =
+    discovered.working_directory_source === "terminal_metadata" ||
+    discovered.working_directory_source === "surface";
+  const repo = trustedCwd && discovered.current_directory?.trim()
+    ? inferRepoFromDirectory(
+        discovered.current_directory,
+        repairRepoFromTitle(discovered.surface_title),
+      )
+    : repairRepoFromTitle(discovered.surface_title);
   const suffix = suffixForCli(discovered.cli);
   if (!repo || !suffix) return null;
   return {
@@ -399,7 +408,10 @@ function patchForRepairCandidate(
     seat_role: candidate.seat.seat_role,
     seat_identity_status: candidate.seat.seat_identity_status,
     seat_identity_error: candidate.seat.seat_identity_error,
-    role: candidate.role,
+    role:
+      record.surface_provenance === "cmuxlayer_spawn" && record.role
+        ? record.role
+        : candidate.role,
   };
 
   for (const [key, value] of Object.entries(fields) as Array<
@@ -1083,18 +1095,37 @@ export class AgentRegistry {
         if (!liveRecord) {
           continue;
         }
+        const exactStableBinding = Boolean(
+          recordUuid &&
+            surfaceUuidKey(discoveredEntry.surface_uuid) === recordUuid,
+        );
+        if (
+          exactStableBinding &&
+          TERMINAL_STATES.has(liveRecord.state) &&
+          liveRecord.state !== "done" &&
+          liveRecord.user_killed !== true &&
+          discoveredEntry.has_agent &&
+          discoveredEntry.control_state !== "shell" &&
+          discoveredEntry.control_state !== "dead" &&
+          discoveredEntry.control_state !== "stale_surface"
+        ) {
+          liveRecord = this.syncManagedRecordLifecycleFromDiscovery(
+            liveRecord,
+            discoveredEntry,
+          );
+        }
       }
 
-      const discoveredReplacesStaleManagedRecord =
+      const discoveredReplacesUnprovenTerminalRecord =
         opts?.nonDestructive === true &&
         !isAutoRecord &&
         TERMINAL_STATES.has(record.state) &&
         discoveredEntry?.has_agent === true &&
-        discoveredEntry.read_error === false;
-      if (!discoveredReplacesStaleManagedRecord) {
-        if (discoveredEntry) {
-          seenSurfaces.add(discoveredEntry.surface_id);
-        }
+        discoveredEntry.read_error === false &&
+        (!recordUuid ||
+          surfaceUuidKey(discoveredEntry.surface_uuid) !== recordUuid);
+      if (discoveredEntry && !discoveredReplacesUnprovenTerminalRecord) {
+        seenSurfaces.add(discoveredEntry.surface_id);
       }
       merged.push({
         ...liveRecord,
@@ -1860,7 +1891,10 @@ export class AgentRegistry {
 
   repairFromDiscovery(
     discovered: DiscoveredAgent[],
-    opts?: { seatRegistry?: SeatRegistry | null },
+    opts?: {
+      seatRegistry?: SeatRegistry | null;
+      orphansOnly?: boolean;
+    },
   ): RegistryRepairSummary {
     if (
       !hasBijectiveDiscoveryIdentity(discovered) ||
@@ -1882,6 +1916,19 @@ export class AgentRegistry {
 
     for (const entry of discovered) {
       if (entry.read_error) continue;
+      if (opts?.orphansOnly) {
+        const surfaceRecords = [...this.agents.values()].filter(
+          (record) => record.surface_id === entry.surface_id,
+        );
+        const needsRepair =
+          surfaceRecords.length === 0 ||
+          surfaceRecords.some(
+            (record) =>
+              isAutoAgentId(record.agent_id) ||
+              isPendingAgentId(record.agent_id),
+          );
+        if (!needsRepair) continue;
+      }
       const candidate = this.repairCandidateForDiscovery(
         entry,
         opts?.seatRegistry,
@@ -1989,6 +2036,21 @@ export class AgentRegistry {
     );
 
     if (managedRecord) {
+      for (const duplicate of recordsForSurface) {
+        if (
+          !isAutoAgentId(duplicate.agent_id) ||
+          hasSurfaceUuidConflict(duplicate, discovered) ||
+          !this.canUseObservedBinding(duplicate, discovered.surface_uuid)
+        ) {
+          continue;
+        }
+        // This is positive identity evidence, not an absence inference: both
+        // rows carry the exact stable UUID observed on the live surface.
+        const removedAgentId = this.evictExplicit(duplicate.agent_id);
+        if (removedAgentId) {
+          evicted.add(removedAgentId);
+        }
+      }
       const updated = this.updateManagedSurfaceRegistration(
         managedRecord,
         discovered,
@@ -2007,12 +2069,21 @@ export class AgentRegistry {
     );
 
     for (const record of recordsForSurface) {
+      const isObservedAutoDuplicate =
+        isAutoAgentId(record.agent_id) &&
+        !hasSurfaceUuidConflict(record, discovered) &&
+        (this.canUseObservedBinding(record, discovered.surface_uuid) ||
+          (surfaceUuidKey(record.surface_uuid) === null &&
+            record.surface_id === discovered.surface_id &&
+            this.canMutateForObservedAbsence(record)));
       if (
-        isAutoAgentId(record.agent_id) ||
+        isObservedAutoDuplicate ||
         (isPendingAgentId(record.agent_id) &&
           !seatIsManagedOnAnotherLiveSurface)
       ) {
-        const removedAgentId = this.evict(record.agent_id);
+        const removedAgentId = isObservedAutoDuplicate
+          ? this.evictExplicit(record.agent_id)
+          : this.evict(record.agent_id);
         if (removedAgentId) {
           evicted.add(removedAgentId);
         }
@@ -2043,7 +2114,14 @@ export class AgentRegistry {
         : this.repairEntry(existingSeatRecord, discovered, candidate, "updated");
     }
 
-    const created = this.createRepairedRecord(discovered, candidate);
+    const continuityRecord = recordsForSurface.find((record) =>
+      isAutoAgentId(record.agent_id),
+    );
+    const created = this.createRepairedRecord(
+      discovered,
+      candidate,
+      continuityRecord,
+    );
     this.stateMgr.writeState(created);
     this.agents.set(created.agent_id, created);
     return this.repairEntry(created, discovered, candidate, "created");
@@ -2087,9 +2165,15 @@ export class AgentRegistry {
   private createRepairedRecord(
     discovered: DiscoveredAgent,
     candidate: RegistryRepairCandidate,
+    continuityRecord?: AgentRecord,
   ): AgentRecord {
     const now = new Date().toISOString();
     const state = discoveredStatusToAgentState(discovered.parsed_status);
+    const hasManagedContinuity = Boolean(
+      continuityRecord?.cli_session_id ||
+        continuityRecord?.parent_agent_id ||
+        continuityRecord?.surface_provenance === "cmuxlayer_spawn",
+    );
     return {
       agent_id: candidate.agentId,
       surface_id: discovered.surface_id,
@@ -2100,34 +2184,46 @@ export class AgentRegistry {
       repo: candidate.repo,
       model: discovered.model ?? "unknown",
       cli: candidate.cli,
-      cli_session_id: null,
-      cli_session_path: null,
+      cli_session_id: continuityRecord?.cli_session_id ?? null,
+      cli_session_path: continuityRecord?.cli_session_path ?? null,
+      surface_provenance:
+        continuityRecord?.surface_provenance ?? "unknown",
       launcher_name: candidate.launcherName,
       seat_id: candidate.seat.seat_id,
       seat_lane: candidate.seat.seat_lane,
       seat_role: candidate.seat.seat_role,
       seat_identity_status: candidate.seat.seat_identity_status,
       seat_identity_error: candidate.seat.seat_identity_error,
-      task_summary: "(resync-repaired)",
+      task_summary:
+        continuityRecord?.task_summary === "(auto-discovered)"
+          ? "(resync-repaired)"
+          : (continuityRecord?.task_summary ?? "(resync-repaired)"),
       pid: null,
       version: 1,
-      created_at: now,
+      created_at: continuityRecord?.created_at ?? now,
       updated_at: now,
       error:
         state === "error"
           ? "Repaired agent surface reported a frozen state"
           : null,
-      parent_agent_id: null,
-      spawn_depth: 0,
-      role: candidate.role,
-      auto_archive_on_done: false,
+      parent_agent_id: continuityRecord?.parent_agent_id ?? null,
+      spawn_depth: continuityRecord?.spawn_depth ?? 0,
+      role:
+        hasManagedContinuity && continuityRecord?.role
+          ? continuityRecord.role
+          : candidate.role,
+      authority: continuityRecord?.authority,
+      function: continuityRecord?.function,
+      placement: continuityRecord?.placement,
+      auto_archive_on_done:
+        continuityRecord?.auto_archive_on_done ?? false,
       deletion_intent: false,
       quality: "unknown",
       max_cost_per_agent: null,
       crash_recover: candidate.role === "orchestrator",
       respawn_attempts: 0,
       user_killed: false,
-      auto_revive: false,
+      auto_revive: continuityRecord?.auto_revive ?? false,
       revive_attempts: 0,
       revive_last_attempt_at: null,
       revive_next_attempt_at: null,
@@ -2139,7 +2235,9 @@ export class AgentRegistry {
       revive_previous_state: null,
       revive_consecutive_observations: 0,
       revive_notification_sent_at: null,
-      halt_escalation: true,
+      halt_escalation:
+        continuityRecord?.parent_agent_id != null &&
+        (continuityRecord.halt_escalation ?? true),
       halt_episode_type: null,
       halt_episode_started_at: null,
       halt_episode_observations: 0,

@@ -57,6 +57,7 @@
     "pre-pr:harness": "vitest run tests/live-agent-harness.test.ts tests/live-agent-harness-ci.test.ts tests/live-agent-harness-replay.test.ts tests/pre-pr-scripts.test.ts",
     "pre-pr:live": "bun run live:harness",
     "live:worker-placement": "tsx scripts/run-live-worker-placement-repro.ts",
+    "live:id-churn": "tsx scripts/run-live-id-churn-probe.ts",
     "install:fleet-sidebar": "node scripts/install-fleet-sidebar.mjs",
     "install:fleet-sidebar:dev": "node scripts/install-fleet-sidebar-dev.mjs",
     "bench:daemon": "node scripts/bench-daemon.mjs",

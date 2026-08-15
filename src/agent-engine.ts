@@ -5342,13 +5342,31 @@ export class AgentEngine {
         newlySurfacelessAgentIds.add(finalized.agent_id);
       }
     }
-    this.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
     const discovered = await discovery.scan(true);
     await this.registry.listMerged(discovery, {
       force: true,
       discovered,
       nonDestructive: true,
     });
+    for (const record of this.registry.list()) {
+      if (record.agent_id.startsWith("auto-")) continue;
+      const persistedUuid = record.surface_uuid?.trim().toLowerCase() ?? null;
+      const liveManagedSurface = discovered.some((entry) => {
+        if (!entry.has_agent || entry.read_error) return false;
+        const observedUuid = entry.surface_uuid?.trim().toLowerCase() ?? null;
+        const sameSurface = Boolean(
+          persistedUuid && observedUuid === persistedUuid,
+        );
+        return (
+          sameSurface &&
+          this.registry.canUseObservedBinding(record, entry.surface_uuid)
+        );
+      });
+      if (liveManagedSurface) {
+        newlySurfacelessAgentIds.add(record.agent_id);
+      }
+    }
+    this.enableStartupPurge({ retainAgentIds: newlySurfacelessAgentIds });
     // Missing legacy provenance is intentionally equivalent to "unknown".
     // Do not rewrite those records at boot: changing updated_at would distort
     // lifecycle age and ghost-eviction evidence.

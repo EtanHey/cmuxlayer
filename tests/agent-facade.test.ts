@@ -51,6 +51,15 @@ describe("agent facade projections", () => {
     });
   });
 
+  it("exposes whether a listed agent was spawned or adopted", () => {
+    const projected = toObservedPublicAgent(
+      makeRecord({ surface_provenance: "cmuxlayer_spawn" }),
+      { derivedAtMs: 2_000 },
+    );
+
+    expect(projected.surface_provenance).toBe("cmuxlayer_spawn");
+  });
+
   it("projects a PublicAgent without leaking surface topology", () => {
     const projected = toPublicAgent(makeRecord());
 

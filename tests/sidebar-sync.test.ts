@@ -1763,6 +1763,103 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("keeps a managed id and its lineage when restart observes a live interactive overlay", async () => {
+    const agentId = "cmuxlayerClaude-cfc87803";
+    const surfaceUuid = "845F3804-D185-4C7D-90EC-48E78A6A65B3";
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        state: "error",
+        surface_id: "surface:1025",
+        surface_uuid: surfaceUuid,
+        surface_provenance: "cmuxlayer_spawn",
+        workspace_id: "workspace:cmuxlayer",
+        repo: "cmuxlayer",
+        cli: "claude",
+        cli_session_id: "cfc87803-1111-4222-8333-444444444444",
+        cli_session_path: "/durable/claude/cfc87803.jsonl",
+        launcher_name: "cmuxlayerClaude",
+        parent_agent_id: "cmuxlayerCodex-parent",
+        spawn_depth: 1,
+        role: "worker",
+        error: "interactive_prompt",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:1025"),
+        id: surfaceUuid,
+        title: "cmuxlayerClaude [surface:1025]",
+        workspace_ref: "workspace:cmuxlayer",
+        current_directory:
+          "/Users/example/Gits/cmuxlayer/.worktrees/id-churn",
+        working_directory_source: "surface",
+      },
+    ];
+    const overlay = readFileSync(
+      new URL(
+        "./fixtures/painpoints/claude-ask-user-question-overlay.txt",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:1025",
+      text: overlay,
+      lines: 30,
+      scrollback_used: false,
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+    expect(
+      engine
+        .getRegistry()
+        .list()
+        .map((record) => ({ id: record.agent_id, state: record.state })),
+    ).toEqual([{ id: agentId, state: "error" }]);
+    await engine.runSweep();
+
+    expect(engine.getAgentState(agentId)).toMatchObject({
+      agent_id: agentId,
+      state: "error",
+      surface_uuid: surfaceUuid,
+      cli_session_id: "cfc87803-1111-4222-8333-444444444444",
+      cli_session_path: "/durable/claude/cfc87803.jsonl",
+      parent_agent_id: "cmuxlayerCodex-parent",
+      spawn_depth: 1,
+      role: "worker",
+    });
+    expect(
+      engine
+        .getRegistry()
+        .list()
+        .filter((record) => record.surface_uuid === surfaceUuid)
+        .map((record) => record.agent_id),
+    ).toEqual([agentId]);
+
+    mockClient.readScreen.mockResolvedValue({
+      surface: "surface:1025",
+      text:
+        "Claude Code\nWorking (1s)\nImplementing the requested follow-up after the overlay.",
+      lines: 30,
+      scrollback_used: false,
+    });
+    discovery.invalidate();
+    await engine.getRegistry().listMerged(discovery, { force: true });
+
+    expect(engine.getAgentState(agentId)).toMatchObject({
+      agent_id: agentId,
+      state: "idle",
+      cli_session_id: "cfc87803-1111-4222-8333-444444444444",
+      parent_agent_id: "cmuxlayerCodex-parent",
+      role: "worker",
+    });
+  });
+
   it("purges a preexisting surfaceless error when its ref is recycled at startup", async () => {
     stateMgr.writeState(
       makeRecord({
