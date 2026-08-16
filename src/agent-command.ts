@@ -92,8 +92,10 @@ export function buildRawResumeCommand(
       return `${AGENT_ENV} claude --resume ${sessionId}`;
     case "codex":
       return `codex resume ${sessionId}`;
+    // `cursor agent` exposes `--resume [chatId]`; it has no `--session` flag
+    // (`error: unknown option '--session'`). Verified against `cursor agent --help`.
     case "cursor":
-      return `cursor agent --session ${sessionId}`;
+      return `cursor agent --resume ${sessionId}`;
     case "gemini":
       return `${AGENT_ENV} gemini --resume ${sessionId}`;
     case "kiro": {
