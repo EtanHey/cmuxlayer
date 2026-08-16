@@ -52,6 +52,8 @@ import {
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   MAX_RESPAWN_ATTEMPTS,
+  resolveBootPromptText,
+  summarizeTaskSummary,
   type AgentRoute,
   type AgentRecord,
   type AgentAuthority,
@@ -212,9 +214,7 @@ export class RetryableDeliveryError extends Error {
   }
 }
 
-type DeliverySubmitter = (
-  receipt: AgentDeliveryReceipt,
-) => Promise<{
+type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
   delivery?: "submitted" | "queued";
@@ -226,6 +226,7 @@ export interface SpawnAgentParams {
   effort?: string;
   cli: CliType;
   prompt: string;
+  boot_prompt_path?: string | null;
   boot_prompt_timeout_ms?: number;
   boot_prompt_pending?: boolean;
   workspace?: string;
@@ -276,7 +277,10 @@ export class AgentLaunchError extends Error {
     readonly launch_cause?: unknown,
     readonly launch_phase: "focus" | "launch" = "launch",
   ) {
-    super(message, launch_cause === undefined ? undefined : { cause: launch_cause });
+    super(
+      message,
+      launch_cause === undefined ? undefined : { cause: launch_cause },
+    );
     this.name = "AgentLaunchError";
   }
 }
@@ -1676,7 +1680,12 @@ export class AgentEngine {
     goalText: string | null,
     reportText: string | null,
   ): boolean {
-    return [agent.task_summary, goalText, reportText]
+    return [
+      resolveBootPromptText(agent),
+      agent.task_summary,
+      goalText,
+      reportText,
+    ]
       .filter(Boolean)
       .join("\n")
       .split(/\r?\n/)
@@ -2239,9 +2248,7 @@ export class AgentEngine {
     if (!requestedWorkspace || !surface.workspace) {
       return surface;
     }
-    if (
-      surface.workspace === requestedWorkspace
-    ) {
+    if (surface.workspace === requestedWorkspace) {
       return surface;
     }
     return {
@@ -2347,7 +2354,7 @@ export class AgentEngine {
       agent.launch_cwd?.trim() ||
       agent.worktree_path?.trim(),
     );
-    if (agent.task_summary.trim().length === 0 && !hasManagedLaunchContext) {
+    if (resolveBootPromptText(agent).length === 0 && !hasManagedLaunchContext) {
       return false;
     }
     return this.hasCustomSessionIdentityResolver || hasManagedLaunchContext;
@@ -2360,7 +2367,7 @@ export class AgentEngine {
     if (!agent.boot_prompt_pending) {
       return false;
     }
-    const prompt = agent.task_summary.trim();
+    const prompt = resolveBootPromptText(agent);
     if (!prompt) {
       return !this.isBootPromptPendingStale(agent);
     }
@@ -2535,7 +2542,7 @@ export class AgentEngine {
       this.harnessCwdForAgent(agent),
       {
         sinceMs,
-        expectedText: agent.task_summary,
+        expectedText: resolveBootPromptText(agent),
         ...(process.env.CMUXLAYER_HARNESS_HOME
           ? { home: process.env.CMUXLAYER_HARNESS_HOME }
           : {}),
@@ -2874,10 +2881,7 @@ export class AgentEngine {
       }
       if (resolvedSession) {
         try {
-          return this.finalizeCapturedSession(
-            captureAgent,
-            resolvedSession,
-          );
+          return this.finalizeCapturedSession(captureAgent, resolvedSession);
         } catch {
           return captureAgent;
         }
@@ -2886,9 +2890,8 @@ export class AgentEngine {
         !resolvingFirstConnect &&
         captureAgent.transcript_session_capture_deferred === true
       ) {
-        captureAgent = this.recordDeferredTranscriptCaptureFailure(
-          captureAgent,
-        );
+        captureAgent =
+          this.recordDeferredTranscriptCaptureFailure(captureAgent);
       }
     }
 
@@ -2921,10 +2924,7 @@ export class AgentEngine {
     const previousAttempts = Number.isFinite(
       agent.transcript_session_capture_attempts,
     )
-      ? Math.max(
-          0,
-          Math.trunc(agent.transcript_session_capture_attempts ?? 0),
-        )
+      ? Math.max(0, Math.trunc(agent.transcript_session_capture_attempts ?? 0))
       : 0;
     const attempts = Math.min(
       MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS,
@@ -3238,9 +3238,9 @@ export class AgentEngine {
   ): AgentRecord {
     const hasEpisodeState = Boolean(
       agent.halt_episode_type ||
-        agent.halt_episode_started_at ||
-        agent.halt_notification_sent_at ||
-        agent.halt_notified_ancestor_id,
+      agent.halt_episode_started_at ||
+      agent.halt_notification_sent_at ||
+      agent.halt_notified_ancestor_id,
     );
     if (!hasEpisodeState && Object.keys(patch).length === 0) return agent;
     const updated = this.stateMgr.updateRecord(agent.agent_id, {
@@ -3310,8 +3310,8 @@ export class AgentEngine {
     ) {
       const hasProgressMemory = Boolean(
         agent.halt_last_active_at ||
-          agent.halt_last_progress_at_ms ||
-          agent.halt_last_progress_signature,
+        agent.halt_last_progress_at_ms ||
+        agent.halt_last_progress_signature,
       );
       return this.clearHaltEpisode(
         agent,
@@ -3331,9 +3331,8 @@ export class AgentEngine {
     );
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
-    const blockingBackgroundWaitMs = this.blockingBackgroundWaitElapsedMs(
-      screenText,
-    );
+    const blockingBackgroundWaitMs =
+      this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
     if (
@@ -3546,7 +3545,8 @@ export class AgentEngine {
       auto_revive: true,
       revive_attempts: agent.revive_attempts ?? 0,
       revive_outcome: outcome,
-      verified_model: outcome === "revived" ? agent.parsed_model ?? null : null,
+      verified_model:
+        outcome === "revived" ? (agent.parsed_model ?? null) : null,
       manual_resume_command:
         outcome === "unrecoverable" && agent.cli_session_id
           ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
@@ -3619,11 +3619,15 @@ export class AgentEngine {
         workspace: attempted.workspace_id ?? undefined,
       });
       const observerEpoch = this.captureSurfaceObserverEpoch();
-      const creating = this.stateMgr.transition(attempted.agent_id, "creating", {
-        error: null,
-        pid: null,
-        cli_session_id: sessionId,
-      });
+      const creating = this.stateMgr.transition(
+        attempted.agent_id,
+        "creating",
+        {
+          error: null,
+          pid: null,
+          cli_session_id: sessionId,
+        },
+      );
       this.registry.set(agent.agent_id, creating);
       const booting = this.stateMgr.transition(attempted.agent_id, "booting", {
         error: null,
@@ -3687,7 +3691,10 @@ export class AgentEngine {
       error: null,
     });
     this.registry.set(agent.agent_id, completed);
-    const notification = await this.dispatchCliExitOutcome(completed, "revived");
+    const notification = await this.dispatchCliExitOutcome(
+      completed,
+      "revived",
+    );
     completed = notification.record;
     this.appendAutoReviveCliExitEvent(
       completed,
@@ -3719,7 +3726,9 @@ export class AgentEngine {
       if ((agent.revive_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS) {
         await this.markAutoReviveUnrecoverable(
           agent,
-          agent.revive_last_error ?? agent.error ?? "readiness verification failed",
+          agent.revive_last_error ??
+            agent.error ??
+            "readiness verification failed",
         );
         continue;
       }
@@ -4166,7 +4175,7 @@ export class AgentEngine {
   }
 
   private extractNamedBlocker(agent: AgentRecord): string | null {
-    const text = [agent.error, agent.task_summary]
+    const text = [agent.error, resolveBootPromptText(agent), agent.task_summary]
       .filter((value): value is string => Boolean(value?.trim()))
       .join(" ");
     const match = text.match(
@@ -6159,9 +6168,10 @@ export class AgentEngine {
     // Job role is authoritative. The versioned tool rejects missing agent
     // axes; direct legacy engine callers default to worker without consulting
     // the selected harness.
-    const role = spawnParams.role !== undefined
-      ? inferAgentRole({ role: spawnParams.role })
-      : "worker";
+    const role =
+      spawnParams.role !== undefined
+        ? inferAgentRole({ role: spawnParams.role })
+        : "worker";
 
     this.spawnGuard.check(spawnParams.workspace);
 
@@ -6252,8 +6262,7 @@ export class AgentEngine {
       state: "booting",
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
-      effort:
-        spawnParams.cli === "codex" ? (effort ?? "high") : null,
+      effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
       cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
@@ -6263,7 +6272,11 @@ export class AgentEngine {
       seat_role: seatIdentity.seat_role,
       seat_identity_status: seatIdentity.seat_identity_status,
       seat_identity_error: seatIdentity.seat_identity_error,
-      task_summary: spawnParams.prompt,
+      task_summary: summarizeTaskSummary(
+        spawnParams.prompt,
+        spawnParams.boot_prompt_path,
+      ),
+      boot_prompt_text: spawnParams.prompt.trim() ? spawnParams.prompt : null,
       pid: null,
       version: 1,
       created_at: now,
@@ -6452,9 +6465,7 @@ export class AgentEngine {
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
-      warnings: [
-        ...modelPolicy.warnings,
-      ],
+      warnings: [...modelPolicy.warnings],
       model_policy: modelPolicy,
       cwd: launchCwd ?? undefined,
       mcp_env: spawnParams.mcp_env,
@@ -6488,7 +6499,8 @@ export class AgentEngine {
       agent.cli_session_id,
       agent.launcher_name,
     );
-    const requestedWorkspace = opts?.workspace ?? agent.workspace_id ?? undefined;
+    const requestedWorkspace =
+      opts?.workspace ?? agent.workspace_id ?? undefined;
     this.spawnGuard.check(requestedWorkspace);
 
     let surface: CreatedAgentSurface | null = null;

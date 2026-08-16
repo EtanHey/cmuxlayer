@@ -5,13 +5,7 @@
 import { randomUUID } from "node:crypto";
 
 export type AgentState =
-  | "creating"
-  | "booting"
-  | "ready"
-  | "working"
-  | "idle"
-  | "done"
-  | "error";
+  "creating" | "booting" | "ready" | "working" | "idle" | "done" | "error";
 
 export type CliType = "claude" | "codex" | "gemini" | "kiro" | "cursor";
 
@@ -24,14 +18,8 @@ export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 export type ObservationSource = "screen" | "registry" | "process";
 export type AgentReviveOutcome =
-  | "pending"
-  | "failed"
-  | "revived"
-  | "unrecoverable";
-export type AgentHaltType =
-  | "awaiting_input"
-  | "idle_without_done"
-  | "wedged";
+  "pending" | "failed" | "revived" | "unrecoverable";
+export type AgentHaltType = "awaiting_input" | "idle_without_done" | "wedged";
 
 export interface Observed<T> {
   value: T;
@@ -69,7 +57,17 @@ export interface AgentRecord {
   seat_role?: string | null;
   seat_identity_status?: SeatIdentityStatus;
   seat_identity_error?: string | null;
+  /**
+   * Short label for role inference, sidebar, and registry echoes.
+   * Never store the full boot brief here — that lives in `boot_prompt_text`.
+   */
   task_summary: string;
+  /**
+   * Full boot-prompt payload typed/verified on spawn. Delivery and session
+   * matching read this; legacy records may still have the full text only in
+   * `task_summary` until rewritten.
+   */
+  boot_prompt_text?: string | null;
   pid: number | null;
   version: number;
   created_at: string;
@@ -303,10 +301,7 @@ export interface AgentCliExitEvent {
 
 /** Which close/kill path emitted the event. */
 export type CloseEventPath =
-  | "close_surface"
-  | "stop_agent"
-  | "kill"
-  | "internal";
+  "close_surface" | "stop_agent" | "kill" | "internal";
 
 /**
  * Durable, attributed record of a surface close or agent kill/stop. Answers
@@ -501,4 +496,49 @@ export function generateAgentId(
     return `${golemName}-${sessionIdPrefix(sessionId)}`;
   }
   return `${golemName}-${randomUUID().slice(0, SESSION_ID_PREFIX_LENGTH)}`;
+}
+
+const TASK_SUMMARY_MAX_CHARS = 80;
+
+/**
+ * Build the short registry label for an agent. Prefer a boot-prompt filename
+ * when spawn used `boot_prompt_path`; otherwise the first non-empty line,
+ * capped. Never used as a response `title` — that is the live surface title.
+ */
+export function summarizeTaskSummary(
+  prompt: string,
+  bootPromptPath?: string | null,
+): string {
+  const pathLabel = bootPromptPath?.trim();
+  if (pathLabel) {
+    const base = pathLabel.split(/[\\/]/).pop()?.trim();
+    if (base) return base;
+  }
+  const firstLine =
+    prompt
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? "";
+  if (firstLine.length <= TASK_SUMMARY_MAX_CHARS) return firstLine;
+  return `${firstLine.slice(0, TASK_SUMMARY_MAX_CHARS - 1)}…`;
+}
+
+/** Full boot-prompt text for delivery/verification; falls back for legacy rows. */
+export function resolveBootPromptText(
+  agent: Pick<AgentRecord, "boot_prompt_text" | "task_summary">,
+): string {
+  const dedicated = agent.boot_prompt_text?.trim();
+  if (dedicated) return dedicated;
+  return agent.task_summary?.trim() ?? "";
+}
+
+/** Persist both fields when a boot prompt (or replacement mission) is known. */
+export function bootPromptRegistryFields(
+  promptText: string,
+  bootPromptPath?: string | null,
+): Pick<AgentRecord, "task_summary" | "boot_prompt_text"> {
+  return {
+    boot_prompt_text: promptText,
+    task_summary: summarizeTaskSummary(promptText, bootPromptPath),
+  };
 }
