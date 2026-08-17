@@ -25,7 +25,7 @@ import {
 } from "./agent-types.js";
 import {
   discoveredStatusToAgentState,
-  inferRepoFromTitle,
+  inferRepoFromDiscovery,
   type DiscoveredAgent,
 } from "./agent-discovery.js";
 
@@ -642,7 +642,7 @@ export class StateManager {
       surface_provenance: "unknown",
       workspace_id: discovered.workspace_id ?? null,
       state: discoveredStatusToAgentState(discovered.parsed_status),
-      repo: inferRepoFromTitle(discovered.surface_title),
+      repo: inferRepoFromDiscovery(discovered),
       model: discovered.model ?? "unknown",
       cli: discovered.cli === "unknown" ? "claude" : discovered.cli,
       cli_session_id: null,

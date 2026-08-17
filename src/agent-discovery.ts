@@ -5,7 +5,9 @@ import type {
   CmuxSurface,
   ParsedControlPlaneState,
   ParsedScreenStatus,
+  SurfaceWorkingDirectorySource,
 } from "./types.js";
+import { inferRepoFromDirectory } from "./repo-workspace.js";
 
 export interface DiscoveredAgent {
   surface_id: string;
@@ -13,6 +15,8 @@ export interface DiscoveredAgent {
   surface_uuid?: string | null;
   surface_title: string;
   workspace_id?: string | null;
+  current_directory?: string | null;
+  working_directory_source?: SurfaceWorkingDirectorySource;
   cli: CliType | "unknown";
   control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
@@ -52,6 +56,20 @@ function inferCliFromLauncherTitle(title: string): CliType | "unknown" {
   const launcherTitle = title.trim().split(":", 1)[0] ?? "";
   const match = launcherTitle.match(/(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
   return (match?.[0]?.toLowerCase() as CliType | undefined) ?? "unknown";
+}
+
+export function inferRepoFromDiscovery(
+  discovered: Pick<
+    DiscoveredAgent,
+    "current_directory" | "working_directory_source" | "surface_title"
+  >,
+): string {
+  const titleRepo = inferRepoFromTitle(discovered.surface_title);
+  const trustedCwd =
+    discovered.working_directory_source === "terminal_metadata" ||
+    discovered.working_directory_source === "surface";
+  const cwd = discovered.current_directory?.trim();
+  return trustedCwd && cwd ? inferRepoFromDirectory(cwd, titleRepo) : titleRepo;
 }
 
 export function discoveredStatusToAgentState(
@@ -129,6 +147,13 @@ export class AgentDiscovery {
         surface_uuid: surface.id ?? null,
         surface_title: surface.title,
         workspace_id: workspaceId,
+        current_directory:
+          surface.current_directory ??
+          surface.cwd ??
+          surface.working_directory ??
+          surface.requested_working_directory ??
+          null,
+        working_directory_source: surface.working_directory_source,
         cli,
         control_state: parsed.control_state,
         parsed_status: parsed.status,
@@ -149,6 +174,13 @@ export class AgentDiscovery {
         surface_uuid: surface.id ?? null,
         surface_title: surface.title,
         workspace_id: workspaceId,
+        current_directory:
+          surface.current_directory ??
+          surface.cwd ??
+          surface.working_directory ??
+          surface.requested_working_directory ??
+          null,
+        working_directory_source: surface.working_directory_source,
         cli: "unknown",
         control_state: "unknown",
         parsed_status: null,
@@ -213,8 +245,7 @@ export class AgentDiscovery {
   }
 
   async scan(force = false): Promise<DiscoveredAgent[]> {
-    const observerScoped =
-      typeof this.deps.observerIdProvider === "function";
+    const observerScoped = typeof this.deps.observerIdProvider === "function";
     const observerId = this.getObserverId();
     const canCache = !observerScoped || observerId !== null;
     if (!canCache || (this.cache && this.cache.observerId !== observerId)) {

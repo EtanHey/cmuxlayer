@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
 export function pathBaseName(path: string): string {
   const normalized = path.trim().replace(/\/+$/, "");
   const index = normalized.lastIndexOf("/");
@@ -38,6 +41,51 @@ function repoIdentityToken(input: string): string {
     }
   }
   return baseName;
+}
+
+function nearestGitRoot(path: string): string | null {
+  let cursor = resolve(path);
+  while (true) {
+    if (existsSync(join(cursor, ".git"))) return cursor;
+    const parent = dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+}
+
+function pathContainsRepoToken(path: string, repo: string): boolean {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => tokenMatchesRepo(segment, repo));
+}
+
+function worktreeRepoToken(path: string): string | null {
+  const segments = path.split("/").filter(Boolean);
+  const worktreesIndex = segments.findIndex(
+    (segment) => segment.toLowerCase() === ".worktrees",
+  );
+  if (worktreesIndex > 0) return segments[worktreesIndex - 1] ?? null;
+  const dotWtSegment = segments.find((segment) =>
+    segment.toLowerCase().endsWith(".wt"),
+  );
+  return dotWtSegment ? dotWtSegment.slice(0, -3) : null;
+}
+
+/** Derive a repository identity from a repo root or supported worktree path. */
+export function inferRepoFromDirectory(
+  path: string,
+  expectedRepo?: string,
+): string {
+  const gitRoot = nearestGitRoot(path);
+  if (gitRoot) return repoIdentityToken(gitRoot);
+  if (expectedRepo) {
+    if (pathContainsRepoToken(path, expectedRepo)) {
+      return repoIdentityToken(expectedRepo);
+    }
+    return worktreeRepoToken(path) ?? repoIdentityToken(expectedRepo);
+  }
+  return repoIdentityToken(path);
 }
 
 function tokenMatchesRepo(token: string, repo: string): boolean {

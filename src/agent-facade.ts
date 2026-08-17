@@ -77,6 +77,7 @@ export function toObservedPublicAgent(
   return {
     agent_id: record.agent_id,
     repo: record.repo,
+    surface_provenance: record.surface_provenance ?? "unknown",
     model: observed(
       model,
       hasScreenModelObservation ? "screen" : "registry",

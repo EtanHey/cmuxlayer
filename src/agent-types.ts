@@ -176,6 +176,7 @@ export interface PublicAgent {
 export interface ObservedPublicAgent {
   agent_id: string;
   repo: string;
+  surface_provenance: SurfaceProvenance;
   model: Observed<string | null>;
   state: Observed<AgentState | null>;
   session_id: Observed<string | null>;
