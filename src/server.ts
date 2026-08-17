@@ -2506,10 +2506,10 @@ function screenShowsQueuedAgentInput(
 
 export type PendingLauncherLineKind = "exact" | "corrupted" | "empty" | "other";
 
-function readPendingShellInput(
+function inspectPendingShellInput(
   screenText: string,
   submittedText: string,
-): string | null {
+): { pending: string; outputBelowPrompt: boolean } | null {
   const trimmed = submittedText.trim();
   if (!trimmed) {
     return null;
@@ -2552,23 +2552,25 @@ function readPendingShellInput(
     lines[activePromptIndex] ?? "",
     promptOptions,
   );
-  return [prompt?.input ?? "", ...lines.slice(activePromptIndex + 1, end)]
-    .join("")
-    .trimEnd();
+  const below = lines.slice(activePromptIndex + 1, end);
+  return {
+    pending: [prompt?.input ?? "", ...below].join("").trimEnd(),
+    outputBelowPrompt: below.some((line) => line.trim().length > 0),
+  };
 }
 
 export function screenShowsPendingShellInput(
   screenText: string,
   submittedText: string,
 ): boolean {
-  const pending = readPendingShellInput(screenText, submittedText);
-  if (pending === null) {
+  const inspected = inspectPendingShellInput(screenText, submittedText);
+  if (inspected === null) {
     return false;
   }
   const trimmed = submittedText.trim();
   return (
-    pending === trimmed ||
-    pending.replace(/\s+/g, "") === trimmed.replace(/\s+/g, "")
+    inspected.pending === trimmed ||
+    inspected.pending.replace(/\s+/g, "") === trimmed.replace(/\s+/g, "")
   );
 }
 
@@ -2576,11 +2578,11 @@ export function classifyPendingLauncherLine(
   screenText: string,
   submittedText: string,
 ): PendingLauncherLineKind {
-  const pending = readPendingShellInput(screenText, submittedText);
-  if (pending === null) {
+  const inspected = inspectPendingShellInput(screenText, submittedText);
+  if (inspected === null) {
     return "other";
   }
-  const compactPending = pending.replace(/\s+/g, "");
+  const compactPending = inspected.pending.replace(/\s+/g, "");
   const compactSubmitted = submittedText.trim().replace(/\s+/g, "");
   if (!compactPending) {
     return "empty";
@@ -2588,10 +2590,12 @@ export function classifyPendingLauncherLine(
   if (compactPending === compactSubmitted) {
     return "exact";
   }
-  if (compactSubmitted && compactPending.includes(compactSubmitted)) {
-    return "corrupted";
+  // Output below the prompt is boot/history, not pending input. Only a
+  // single non-exact prompt line is recoverable corruption.
+  if (inspected.outputBelowPrompt) {
+    return "other";
   }
-  return "other";
+  return "corrupted";
 }
 
 function parseRawSubmitEvidenceMetrics(
@@ -5621,41 +5625,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           await clearAndVerifyFreshShellPrompt();
           await typeLauncherCommand(false);
         };
-        try {
-          const delivery = await typeLauncherCommand(true);
-          if (delivery.submit_verified !== true) {
-            // The command can clear from the shell without proving the launcher
-            // accepted it. Probe once to consume transient ready evidence, then
-            // let boot-prompt readiness own update/relaunch monitoring.
-            await probeAgentLaunchReadyOnce({
-              surface: opts.surface,
-              workspace: opts.workspace,
-            });
-          }
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          if (!/Enter submit could not be verified/.test(message)) {
-            throw error;
-          }
-          let pendingKind: PendingLauncherLineKind = "other";
-          try {
-            const pendingScreen = await readLauncherScreen();
-            pendingKind = classifyPendingLauncherLine(
-              pendingScreen.text,
-              sanitizedCommand,
-            );
-          } catch (readError) {
-            if (isSurfaceGoneReadFailure(readError, opts.surface)) {
-              throw new SurfaceGoneError(opts.surface, readError);
-            }
-          }
-          if (pendingKind === "corrupted") {
-            await recoverCorruptedLauncherLine();
-          }
-          // The command can remain visible in shell history while the launcher is
-          // already booting. Readiness detection is the authoritative launch check.
-          // An empty prompt after human Enter is treated as already submitted.
+        const confirmReadyThenRecoverIfCorrupted = async (): Promise<void> => {
+          // Readiness is the authoritative launch check. Only recover a
+          // corrupted pending line after that check fails — otherwise ctrl-u
+          // can land in a healthy booting pane.
           try {
             await waitForAgentLaunchReady({
               surface: opts.surface,
@@ -5666,11 +5639,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch (readinessError) {
             let pendingScreen;
             try {
-              pendingScreen = await client.readScreen(opts.surface, {
-                workspace: opts.workspace,
-                lines: 80,
-                scrollback: false,
-              });
+              pendingScreen = await readLauncherScreen();
             } catch (readError) {
               if (isSurfaceGoneReadFailure(readError, opts.surface)) {
                 throw new SurfaceGoneError(opts.surface, readError);
@@ -5683,10 +5652,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 sanitizedCommand,
               ) === "corrupted"
             ) {
-              throw new LauncherReadinessError(
-                LAUNCHER_LINE_CORRUPTION_ERROR,
-                tailLines(pendingScreen.text, 10),
-              );
+              await recoverCorruptedLauncherLine();
+              await waitForAgentLaunchReady({
+                surface: opts.surface,
+                workspace: opts.workspace,
+                timeout_ms: opts.timeout_ms,
+                onUpdateShellRelaunch: relaunchOriginalCommand,
+              });
+              return;
             }
             if (
               screenShowsPendingShellInput(pendingScreen.text, sanitizedCommand)
@@ -5698,6 +5671,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             throw readinessError;
           }
+        };
+        try {
+          const delivery = await typeLauncherCommand(true);
+          if (delivery.submit_verified === true) {
+            return;
+          }
+          // The command can clear from the shell without proving the launcher
+          // accepted it. Probe once to consume transient ready evidence, then
+          // let boot-prompt readiness own update/relaunch monitoring.
+          await probeAgentLaunchReadyOnce({
+            surface: opts.surface,
+            workspace: opts.workspace,
+          });
+          // Interleaved corruption never throws: the exact command is gone, so
+          // verify is advisory. Recover only that single-line case here; other
+          // screens (Codex update menus, boot output) belong to boot-prompt wait.
+          let pendingScreen;
+          try {
+            pendingScreen = await readLauncherScreen();
+          } catch (readError) {
+            if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, readError);
+            }
+            return;
+          }
+          if (
+            classifyPendingLauncherLine(
+              pendingScreen.text,
+              sanitizedCommand,
+            ) === "corrupted"
+          ) {
+            await confirmReadyThenRecoverIfCorrupted();
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (!/Enter submit could not be verified/.test(message)) {
+            throw error;
+          }
+          await confirmReadyThenRecoverIfCorrupted();
         }
       },
       {

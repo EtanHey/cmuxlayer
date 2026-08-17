@@ -752,6 +752,35 @@ describe("input delivery batching helpers", () => {
       ).toBe(expected);
     },
   );
+
+  it.each([
+    {
+      label: "boot output below an echoed launcher",
+      screen:
+        "etanheyman ~  $ brainlayerCursor -s\n[4] 55084\nStarting Cursor Agent...",
+      expected: "other",
+    },
+    {
+      label: "interleaved human characters inside the command",
+      screen: "etanheyman ~  $ brainlayerCurng sor -s",
+      expected: "corrupted",
+    },
+    {
+      label: "truncated pending launcher line",
+      screen: "etanheyman ~  $ brainlayerCursor -",
+      expected: "corrupted",
+    },
+  ])(
+    "classifies a $label as $expected",
+    async ({ screen, expected }) => {
+      const { classifyPendingLauncherLine } =
+        await loadInputDeliveryTestModule();
+
+      expect(
+        classifyPendingLauncherLine(screen, "brainlayerCursor -s"),
+      ).toBe(expected);
+    },
+  );
 });
 
 describe("tool registration", () => {
