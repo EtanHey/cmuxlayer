@@ -279,7 +279,12 @@ export interface DeliveryTelemetryEvent {
   delivery_id?: string;
   /** Nonterminal acceptance or terminal resolution. */
   delivery_state?:
-    "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
+    | "submitted"
+    | "queued"
+    | "queued_followup"
+    | "failed"
+    | "pending_verify"
+    | "failed_confirmed";
   target_agent?: string;
 }
 

@@ -201,7 +201,12 @@ import {
 type ProcessLiveness = "alive" | "gone" | "unknown";
 
 export type AgentDeliveryState =
-  "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
+  | "submitted"
+  | "queued"
+  | "queued_followup"
+  | "failed"
+  | "pending_verify"
+  | "failed_confirmed";
 
 export interface AgentDeliveryReceipt {
   delivery_id: string;
@@ -254,7 +259,7 @@ export class RetryableDeliveryError extends Error {
 type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
-  delivery?: "submitted" | "queued" | "pending_verify";
+  delivery?: "submitted" | "queued" | "queued_followup" | "pending_verify";
 }>;
 
 export interface SpawnAgentParams {
@@ -6225,11 +6230,12 @@ export class AgentEngine {
     press_enter: boolean;
     source_event: DeliveryEventType;
     retry_count: number;
+    delivery_state?: "queued" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
     const receipt: AgentDeliveryReceipt = {
       ...input,
-      delivery_state: "queued",
+      delivery_state: input.delivery_state ?? "queued",
       terminal: false,
       created_at: acceptedAt,
       resolved_at: null,
@@ -6294,7 +6300,8 @@ export class AgentEngine {
     for (const receipt of this.deliveryReceipts.values()) {
       if (
         (receipt.delivery_state === "pending_verify" ||
-          receipt.delivery_state === "queued") &&
+          receipt.delivery_state === "queued" ||
+          receipt.delivery_state === "queued_followup") &&
         receipt.agent_id === input.agent_id &&
         receipt.text === input.text &&
         receipt.press_enter === input.press_enter
@@ -6383,6 +6390,7 @@ export class AgentEngine {
       for (const receipt of this.deliveryReceipts.values()) {
         const watching =
           receipt.delivery_state === "pending_verify" ||
+          receipt.delivery_state === "queued_followup" ||
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
@@ -6449,7 +6457,7 @@ export class AgentEngine {
       cli: agent?.cli ?? null,
       what_happened: `Delivery ${receipt.delivery_id} to ${receipt.agent_id} reached failed_confirmed (${reason}) after background verify.`,
       what_fixed_it:
-        "Do not blind-retry. Identical send_to while pending_verify/queued returns duplicate_of. Query wait_for({delivery_id}) or list_agents detail=full.",
+        "Do not blind-retry. Identical send_to while pending_verify/queued/queued_followup returns duplicate_of. Query wait_for({delivery_id}) or list_agents detail=full.",
       evidence: {
         receipt,
         observation,
@@ -6524,8 +6532,11 @@ export class AgentEngine {
           receipt.retry_count += result.retry_count;
           receipt.error = null;
           receipt.next_attempt_at = null;
-          if (result.delivery === "queued") {
-            receipt.delivery_state = "queued";
+          if (
+            result.delivery === "queued" ||
+            result.delivery === "queued_followup"
+          ) {
+            receipt.delivery_state = result.delivery;
             receipt.terminal = false;
             receipt.resolved_at = null;
             receipt.submit_verified = null;

@@ -447,6 +447,9 @@ const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 // recovery so fleet fan-out does not inherit the general 5s timeout.
 const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 1_000;
 const CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS = 250;
+const CURSOR_FOLLOWUP_RETRY_OBSERVE_MS = 250;
+const CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE = /follow-ups?\s*·\s*enter send now/i;
+const CURSOR_FOLLOWUP_PLACEHOLDER_RE = /^Add a follow-up$/i;
 const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
 const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
@@ -554,6 +557,7 @@ const DeliveryOutputShape = {
     .enum([
       "submitted",
       "queued",
+      "queued_followup",
       "failed",
       "pending_verify",
       "failed_confirmed",
@@ -563,6 +567,7 @@ const DeliveryOutputShape = {
     .enum([
       "submitted",
       "queued",
+      "queued_followup",
       "failed",
       "pending_verify",
       "failed_confirmed",
@@ -855,7 +860,12 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
 ] as const;
 
 type PublicDeliveryState =
-  "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
+  | "submitted"
+  | "queued"
+  | "queued_followup"
+  | "failed"
+  | "pending_verify"
+  | "failed_confirmed";
 
 export interface PublicDeliveryReceipt {
   delivered: boolean;
@@ -885,6 +895,7 @@ export function buildPublicDeliveryReceipt(input: {
 }): PublicDeliveryReceipt {
   const evidencedState =
     input.delivery_state === "queued" ||
+    input.delivery_state === "queued_followup" ||
     input.delivery_state === "failed" ||
     input.delivery_state === "pending_verify" ||
     input.delivery_state === "failed_confirmed"
@@ -2192,6 +2203,7 @@ function isComposerFooterOrChromeLine(line: string): boolean {
     /^\/ commands\b/i.test(trimmed) ||
     /^(?:Auto|Agent)(?:\s*·|$)/i.test(trimmed) ||
     /^ctrl\+c to stop\b/i.test(trimmed) ||
+    CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE.test(trimmed) ||
     /^bypass permissions on\b/i.test(trimmed) ||
     /^⬡\s+Idle\b/i.test(trimmed) ||
     /^v20\d{2}\.\d{2}\.\d{2}-[a-f0-9]+$/i.test(trimmed)
@@ -2232,7 +2244,8 @@ function normalizeKnownPlaceholderComposerInput(
   if (
     (cli === "codex" && withoutCursorBorders === "Implement {feature}") ||
     (cli === "cursor" &&
-      withoutCursorBorders === "Plan, search, build anything")
+      (withoutCursorBorders === "Plan, search, build anything" ||
+        CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(withoutCursorBorders)))
   ) {
     if (withoutCursorBorders === submittedText?.trim()) {
       return input;
@@ -2527,6 +2540,41 @@ function screenShowsQueuedAgentInput(
   );
   const submitted = compactQueueCorrelationText(submittedText.trim());
   return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
+}
+
+function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {
+  return (
+    inferComposerCli(screenText) === "cursor" &&
+    CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE.test(normalizeTerminalText(screenText))
+  );
+}
+
+function screenShowsQueuedCursorFollowup(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  if (inferComposerCli(screenText) !== "cursor") {
+    return false;
+  }
+  if (screenShowsPendingInput(screenText, submittedText)) {
+    return false;
+  }
+  const trimmed = submittedText.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const tail = trimmed.slice(-Math.min(80, trimmed.length));
+  const composer = extractComposerInputRegion(screenText, submittedText);
+  if (composer === null || composer.trim() !== "") {
+    return false;
+  }
+  if (!normalizeTerminalText(screenText).includes(tail)) {
+    return false;
+  }
+  return (
+    /→\s*Add a follow-up/i.test(screenText) ||
+    /ctrl\+c to stop/i.test(screenText)
+  );
 }
 
 export type PendingLauncherLineKind = "exact" | "corrupted" | "empty" | "other";
@@ -4546,7 +4594,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
-    delivery: "submitted" | "queued" | "pending_verify";
+    delivery: "submitted" | "queued" | "queued_followup" | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -4626,6 +4674,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery: "queued",
         };
       }
+      if (
+        (opts.source_event === "send_to" ||
+          opts.source_event === "dispatch_nudge") &&
+        screenShowsQueuedCursorFollowup(snapshot.text, opts.text)
+      ) {
+        return {
+          submit_verified: null,
+          submit_verification_reason: null,
+          retry_count: retryCount,
+          delivery: "queued_followup",
+        };
+      }
       const screenCli = inferComposerCli(snapshot.text, snapshot.parsed);
       const cursorShowsSubmittedResponse =
         screenCli === "cursor" &&
@@ -4687,20 +4747,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           opts.source_event === "dispatch_nudge") &&
         hasPendingSubmitEvidence &&
         screenCli === "codex";
+      const cursorFollowupRetryEligiblePendingInput =
+        opts.allow_recovery_enter_retry !== false &&
+        (opts.source_event === "send_to" ||
+          opts.source_event === "dispatch_nudge") &&
+        hasPendingSubmitEvidence &&
+        screenCli === "cursor" &&
+        screenShowsCursorFollowupNeedsEnter(snapshot.text);
       const retryEligiblePendingInput =
-        spawnRetryEligiblePendingInput || codexRetryEligiblePendingInput;
+        spawnRetryEligiblePendingInput ||
+        codexRetryEligiblePendingInput ||
+        cursorFollowupRetryEligiblePendingInput;
       lastRetryEligiblePendingInput = retryEligiblePendingInput;
       if (retryEligiblePendingInput) {
         retryEligiblePendingSince ??= Date.now();
       } else {
         retryEligiblePendingSince = null;
       }
-      const retryObserveMs = codexRetryEligiblePendingInput
-        ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
-        : opts.source_event === "spawn_agent" &&
-            !hasParsedAgentIdentity(snapshot.parsed)
-          ? 0
-          : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
+      const retryObserveMs = cursorFollowupRetryEligiblePendingInput
+        ? Math.min(timeoutMs, CURSOR_FOLLOWUP_RETRY_OBSERVE_MS)
+        : codexRetryEligiblePendingInput
+          ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
+          : opts.source_event === "spawn_agent" &&
+              !hasParsedAgentIdentity(snapshot.parsed)
+            ? 0
+            : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
       // Pending input is ambiguous: the first Return may have been missed, or
       // it may have landed while a slow agent has not repainted the composer
@@ -4890,7 +4961,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
-    let deliveryOutcome: "submitted" | "queued" | "pending_verify" =
+    let deliveryOutcome:
+      "submitted" | "queued" | "queued_followup" | "pending_verify" =
       "submitted";
 
     if (opts.press_enter) {
@@ -4951,7 +5023,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verification_reason = verification.submit_verification_reason;
       retry_count = verification.retry_count;
       deliveryOutcome = verification.delivery;
-      if (deliveryOutcome === "pending_verify") {
+      if (
+        deliveryOutcome === "pending_verify" ||
+        deliveryOutcome === "queued_followup"
+      ) {
         submit_verified = null;
         submit_verification_reason = null;
       }
@@ -4980,11 +5055,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               delivery_state:
                 deliveryOutcome === "queued"
                   ? ("queued" as const)
-                  : deliveryOutcome === "pending_verify"
-                    ? ("pending_verify" as const)
-                    : submit_verified === false
-                      ? ("failed" as const)
-                      : ("submitted" as const),
+                  : deliveryOutcome === "queued_followup"
+                    ? ("queued_followup" as const)
+                    : deliveryOutcome === "pending_verify"
+                      ? ("pending_verify" as const)
+                      : submit_verified === false
+                        ? ("failed" as const)
+                        : ("submitted" as const),
             }
           : {}),
       });
@@ -4994,11 +5071,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery_state:
         deliveryOutcome === "queued"
           ? "queued"
-          : deliveryOutcome === "pending_verify"
-            ? "pending_verify"
-            : submit_verified === true
-              ? "submitted"
-              : undefined,
+          : deliveryOutcome === "queued_followup"
+            ? "queued_followup"
+            : deliveryOutcome === "pending_verify"
+              ? "pending_verify"
+              : submit_verified === true
+                ? "submitted"
+                : undefined,
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
@@ -5009,6 +5088,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     if (
       submit_verified === false &&
       deliveryOutcome !== "queued" &&
+      deliveryOutcome !== "queued_followup" &&
       deliveryOutcome !== "pending_verify"
     ) {
       const timeoutMs =
@@ -10786,6 +10866,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         submit_verified: delivery.submit_verified,
         ...(delivery.delivery === "submitted" ||
         delivery.delivery === "queued" ||
+        delivery.delivery === "queued_followup" ||
         delivery.delivery === "pending_verify"
           ? { delivery: delivery.delivery }
           : {}),
@@ -10808,9 +10889,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       const pending = screenShowsPendingInput(snapshot.text, receipt.text);
       const queued = screenShowsQueuedAgentInput(snapshot.text, receipt.text);
+      const cursorQueuedFollowup = screenShowsQueuedCursorFollowup(
+        snapshot.text,
+        receipt.text,
+      );
       const composer = extractComposerInputRegion(snapshot.text, receipt.text);
       const cli = inferComposerCli(snapshot.text, snapshot.parsed);
-      if (queued || (cli === "cursor" && pending)) {
+      if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
         return { outcome: "pending" as const };
       }
       const composerCleared = composer !== null && composer.trim() === "";
@@ -14434,7 +14519,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   delivery_id: deliveryId,
                 });
                 const accepted =
-                  delivery.delivery === "queued"
+                  delivery.delivery === "queued" ||
+                  delivery.delivery === "queued_followup"
                     ? engine.acceptComposerQueue({
                         delivery_id: deliveryId,
                         agent_id: agent.agent_id,
@@ -14442,6 +14528,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         press_enter: args.press_enter,
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
+                        delivery_state: delivery.delivery,
                       })
                     : delivery.delivery === "pending_verify"
                       ? engine.acceptPendingVerify({
@@ -14680,7 +14767,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw error;
           }
           const receipt =
-            delivery.delivery === "queued"
+            delivery.delivery === "queued" ||
+            delivery.delivery === "queued_followup"
               ? engine.acceptComposerQueue({
                   delivery_id: deliveryId,
                   agent_id: agentId,
@@ -14688,6 +14776,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   press_enter: args.press_enter,
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
+                  delivery_state: delivery.delivery,
                 })
               : delivery.delivery === "pending_verify"
                 ? engine.acceptPendingVerify({

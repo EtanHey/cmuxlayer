@@ -37,9 +37,13 @@ class FakeAgentSurfaceClient {
   readonly sendKeyCalls: string[] = [];
   cli: "claude" | "cursor" = "claude";
   requiredReturns = 99;
+  /** Model Cursor's follow-ups box that needs a second Return ("enter send now"). */
+  cursorFollowUpBox = false;
   private pendingText = "";
   private returnCount = 0;
   private transcriptTail: string | null = null;
+  private followUps: string[] = [];
+  private followUpNeedsEnter = false;
 
   async log() {}
   async setStatus() {}
@@ -62,6 +66,11 @@ class FakeAgentSurfaceClient {
 
   clearComposer(transcriptText?: string): void {
     this.pendingText = "";
+    this.followUpNeedsEnter = false;
+    if (this.followUps.length > 0) {
+      this.transcriptTail = this.followUps.join("\n");
+      this.followUps = [];
+    }
     this.transcriptTail = transcriptText ?? this.transcriptTail;
   }
 
@@ -69,6 +78,8 @@ class FakeAgentSurfaceClient {
     this.pendingText = "";
     this.returnCount = 0;
     this.transcriptTail = null;
+    this.followUps = [];
+    this.followUpNeedsEnter = false;
   }
 
   async listWorkspaces() {
@@ -140,6 +151,16 @@ class FakeAgentSurfaceClient {
       return;
     }
     this.returnCount += 1;
+    if (this.cursorFollowUpBox && this.cli === "cursor") {
+      if (this.returnCount === 1) {
+        this.followUpNeedsEnter = true;
+        return;
+      }
+      this.followUps.push(this.pendingText);
+      this.pendingText = "";
+      this.followUpNeedsEnter = false;
+      return;
+    }
     if (this.returnCount >= this.requiredReturns) {
       this.transcriptTail = this.pendingText;
       this.pendingText = "";
@@ -155,10 +176,21 @@ class FakeAgentSurfaceClient {
       this.cli === "cursor"
         ? [
             "Cursor Agent",
-            "Auto",
+            this.followUpNeedsEnter || this.followUps.length > 0
+              ? "Working"
+              : "Auto",
             "~/Gits/cmuxlayer · main",
             this.transcriptTail ? `  ${this.transcriptTail}` : "",
-            `→ ${tail}`,
+            ...this.followUps.map((item) => `  ${item}`),
+            this.followUpNeedsEnter ? "follow-ups · enter send now" : "",
+            this.pendingText
+              ? `→ ${tail}`
+              : this.followUps.length > 0 || this.followUpNeedsEnter
+                ? "→ Add a follow-up"
+                : `→ ${tail}`,
+            this.followUps.length > 0 || this.followUpNeedsEnter
+              ? "ctrl+c to stop"
+              : "",
           ]
             .filter((line) => line !== "")
             .join("\n")
@@ -279,10 +311,11 @@ describe("send_to v2 background verify", () => {
     });
   });
 
-  it("treats cursor composer text as queued-as-followup, not a terminal fail", async () => {
+  it("presses Cursor's follow-up Return and receipts queued_followup once the composer is consumed", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";
     client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
     server = createVerifyServer(client);
     registerAgent(server, { cli: "cursor" });
 
@@ -292,11 +325,104 @@ describe("send_to v2 background verify", () => {
       press_enter: true,
     });
     const parsed = parseResult(result);
+    const finalScreen = await client.readScreen(client.surface);
 
     expect(result.isError).not.toBe(true);
-    expect(parsed.delivery_state).toBe("pending_verify");
-    expect(parsed.terminal).toBe(false);
-    expect(parsed.submit_verified).toBeNull();
+    expect(parsed).toMatchObject({
+      ok: true,
+      delivery_id: expect.any(String),
+      delivery_state: "queued_followup",
+      delivery: "queued_followup",
+      terminal: false,
+      delivered: false,
+      submit_verified: null,
+    });
+    expect(
+      client.sendKeyCalls.filter((key) => key === "return").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(finalScreen.text).toContain("→ Add a follow-up");
+    expect(finalScreen.text).toContain("busy cursor follow-up");
+    expect(finalScreen.text).not.toContain("enter send now");
+    expect(finalScreen.text).not.toMatch(/^→ busy cursor follow-up$/m);
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(parsed.delivery_id)).toMatchObject({
+      delivery_id: parsed.delivery_id,
+      delivery_state: "queued_followup",
+      terminal: false,
+      composer_accepted: true,
+    });
+  });
+
+  it("returns duplicate_of for an identical send while queued_followup is in flight", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "cursor" });
+
+    const first = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "do not double-queue",
+        press_enter: true,
+      }),
+    );
+    expect(first.delivery_state).toBe("queued_followup");
+    const typedAfterFirst = client.sendCalls.length;
+    const returnsAfterFirst = client.sendKeyCalls.filter(
+      (key) => key === "return",
+    ).length;
+
+    const second = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "do not double-queue",
+        press_enter: true,
+      }),
+    );
+
+    expect(second.delivery_id).toBe(first.delivery_id);
+    expect(second.duplicate_of).toBe(first.delivery_id);
+    expect(second.delivery_state).toBe("queued_followup");
+    expect(client.sendCalls.length).toBe(typedAfterFirst);
+    expect(client.sendKeyCalls.filter((key) => key === "return").length).toBe(
+      returnsAfterFirst,
+    );
+  });
+
+  it("promotes queued_followup to submitted when the follow-up flushes at turn end", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "cursor" });
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "delivers at turn end",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("queued_followup");
+
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "queued_followup",
+      terminal: false,
+    });
+
+    client.clearComposer("delivers at turn end");
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "submitted",
+      terminal: true,
+      submit_verified: true,
+    });
   });
 
   it("promotes a pending_verify delivery to submitted once the composer clears", async () => {
