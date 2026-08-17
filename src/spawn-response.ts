@@ -24,6 +24,8 @@ const ESSENTIAL_FIELDS = [
   "boot_prompt_delivered",
   "boot_prompt_receipt",
   "boot_prompt_submit_verified",
+  "readiness_recovered",
+  "readiness_cleared",
 ] as const;
 
 type JsonObject = Record<string, unknown>;
@@ -56,8 +58,9 @@ function leanHealth(value: unknown): JsonObject | undefined {
   const severities = record(health.issue_severities) ?? {};
   const realIndexes = codeEntries
     .map(({ code, index }) => ({ code, index, severity: severities[code] }))
-    .filter(({ code, severity }) =>
-      !(FRESH_SPAWN_INFO_CODES.has(code) && severity === "info"),
+    .filter(
+      ({ code, severity }) =>
+        !(FRESH_SPAWN_INFO_CODES.has(code) && severity === "info"),
     );
 
   if (

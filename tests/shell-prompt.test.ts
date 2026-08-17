@@ -3,6 +3,7 @@ import {
   launcherFailureFromShell,
   matchShellPromptLine,
   matchesShellPrompt,
+  pendingShellPromptInput,
 } from "../src/shell-prompt.js";
 
 describe("shell prompt recognition", () => {
@@ -44,7 +45,9 @@ describe("shell prompt recognition", () => {
     expect(
       launcherFailureFromShell("zsh: command not found: cmuxlayerCodex\n$ "),
     ).toBe("zsh: command not found: cmuxlayerCodex");
-    expect(launcherFailureFromShell("build failed earlier\nsummary\n$ ")).toBeNull();
+    expect(
+      launcherFailureFromShell("build failed earlier\nsummary\n$ "),
+    ).toBeNull();
     expect(launcherFailureFromShell("error: cached warning\n$ ")).toBeNull();
   });
 
@@ -54,11 +57,14 @@ describe("shell prompt recognition", () => {
     "Context left: 12%",
     "Total cost: $",
     "issue #",
-  ])("does not treat a loose readiness suffix as launcher-exit evidence: %s", (line) => {
-    expect(
-      launcherFailureFromShell(`zsh: command not found: pyenv\n${line}`),
-    ).toBeNull();
-  });
+  ])(
+    "does not treat a loose readiness suffix as launcher-exit evidence: %s",
+    (line) => {
+      expect(
+        launcherFailureFromShell(`zsh: command not found: pyenv\n${line}`),
+      ).toBeNull();
+    },
+  );
 
   it.each([
     ["➜  cmuxlayer git:(main) $ ralphCodex -s", "ralphCodex -s"],
@@ -67,4 +73,34 @@ describe("shell prompt recognition", () => {
   ])("captures pending input from decorated prompt %s", (line, input) => {
     expect(matchShellPromptLine(line)).toEqual({ input });
   });
+
+  it.each([
+    [" ngff%\netanheyman ~  $ wenfnng", "wenfnng"],
+    [
+      "rbgjrbgjrbgjrb%\netanheyman ~  $ gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb",
+      "gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb",
+    ],
+    ["etanheyman ~  $ sjnfjdnsf", "sjnfjdnsf"],
+  ])("exposes pending junk on live-probe prompt %j", (screen, junk) => {
+    expect(matchesShellPrompt(screen)).toBe(false);
+    expect(matchShellPromptLine(screen.split("\n").at(-1) ?? "")).toEqual({
+      input: junk,
+    });
+    expect(pendingShellPromptInput(screen)).toBe(junk);
+  });
+
+  it.each([
+    ["[oh-my-zsh] 50% of plugins loaded", "of plugins loaded"],
+    ["Downloading nvm... 45% complete", "complete"],
+    [
+      "receiving objects:  72% (720/1000), 1.2 MiB | 400 KiB/s",
+      "(720/1000), 1.2 MiB | 400 KiB/s",
+    ],
+  ])(
+    "does not treat digit-prefixed progress %j as pending shell input",
+    (line, decoratedTrap) => {
+      expect(matchShellPromptLine(line)?.input.trim()).toBe(decoratedTrap);
+      expect(pendingShellPromptInput(line)).toBeNull();
+    },
+  );
 });

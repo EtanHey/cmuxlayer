@@ -5403,6 +5403,487 @@ describe("agent lifecycle tool handlers", () => {
     expect(launched).toBe(true);
   }, 10_000);
 
+  it("spawn_agent clears junk on the shell-readiness prompt before typing the launcher", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "wenfnng";
+    let launched = false;
+    let ctrlUCount = 0;
+    let typedLaunches = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        typedLaunches += 1;
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `etanheyman ~  $ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(ctrlUCount).toBeLessThanOrEqual(3);
+    expect(typedLaunches).toBe(1);
+    expect(launched).toBe(true);
+    expect(parsed.readiness_recovered).toBe(true);
+    expect(parsed.readiness_cleared).toEqual(
+      expect.arrayContaining(["wenfnng"]),
+    );
+  }, 10_000);
+
+  it("spawn_agent ctrl-u during readiness prevents human Enter from executing typed garbage", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "sjnfjdnsf";
+    let launched = false;
+    let ctrlUCount = 0;
+    let reads = 0;
+    const executed: string[] = [];
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() && composer.trim() !== command) {
+          executed.push(composer.trim());
+          composer = "";
+        } else if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        reads += 1;
+        if (
+          reads > 4 &&
+          composer.trim() &&
+          composer.trim() !== command &&
+          !executed.includes(composer.trim())
+        ) {
+          executed.push(composer.trim());
+          composer = "";
+        }
+        const screen = launched
+          ? "cursor> \nWorking (1s • esc to interrupt)"
+          : executed.length > 0 && composer.trim() === ""
+            ? `zsh: command not found: ${executed[0]}\netanheyman ~  $ `
+            : `etanheyman ~  $ ${composer}`;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(executed).toEqual([]);
+    expect(launched).toBe(true);
+    expect(parsed.readiness_recovered).toBe(true);
+    expect(parsed.readiness_cleared).toEqual(
+      expect.arrayContaining(["sjnfjdnsf"]),
+    );
+  }, 10_000);
+
+  it("spawn_agent does not claim a clean boot after clearing readiness junk", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "";
+    let launched = false;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `$ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(launched).toBe(true);
+    expect(parsed.readiness_recovered).toBeUndefined();
+    expect(parsed.readiness_cleared).toBeUndefined();
+  }, 10_000);
+
+  it("spawn_agent recovers junk in both the readiness window and the typed launcher line", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "wenfnng";
+    let launched = false;
+    let ctrlUCount = 0;
+    let typedLaunches = 0;
+    let humanPrefix = "ng ";
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        typedLaunches += 1;
+        composer = `${humanPrefix}${command}`;
+        humanPrefix = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `etanheyman ~  $ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBeGreaterThanOrEqual(2);
+    expect(typedLaunches).toBeGreaterThanOrEqual(2);
+    expect(launched).toBe(true);
+    expect(parsed.readiness_recovered).toBe(true);
+    expect(parsed.readiness_cleared).toEqual(
+      expect.arrayContaining(["wenfnng"]),
+    );
+  }, 10_000);
+
+  it("spawn_agent falls back to ctrl-c when readiness junk survives ctrl-u", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb";
+    let launched = false;
+    let ctrlUCount = 0;
+    let ctrlCCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-c")) {
+        ctrlCCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `etanheyman ~  $ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(ctrlCCount).toBeGreaterThanOrEqual(1);
+    expect(launched).toBe(true);
+    expect(parsed.readiness_recovered).toBe(true);
+  }, 10_000);
+
+  it("spawn_agent closes a junk shell that never becomes ready after bounded clears", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec({ surfaceUuid: "surface-uuid:new" });
+      let ctrlUCount = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        if (args.includes("send-key") && args.includes("ctrl-u")) {
+          ctrlUCount += 1;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (args.includes("read-screen")) {
+          return {
+            stdout: JSON.stringify({
+              surface: "surface:new",
+              text: "etanheyman ~  $ wenfnng",
+              lines: 20,
+              scrollback_used: false,
+            }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const resultPromise = spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 8_000,
+        },
+        {} as any,
+      );
+      await vi.advanceTimersByTimeAsync(9_000);
+      const parsed = parseToolResult(await resultPromise);
+
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toContain("waiting for shell readiness");
+      expect(parsed.last_10_lines).toEqual(
+        expect.arrayContaining(["etanheyman ~  $ wenfnng"]),
+      );
+      expect(ctrlUCount).toBe(3);
+      expect(exec).toHaveBeenCalledWith(
+        "cmux",
+        expect.arrayContaining(["close-surface", "surface-uuid:new"]),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it("spawn_agent does not reuse a failed spawn's readiness_recovered on a recycled surface id", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let spawnCount = 0;
+    let composer = "";
+    let sentLauncher = false;
+    let launched = false;
+    let ctrlUCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("new-split")) {
+        spawnCount += 1;
+        composer = spawnCount === 1 ? "wenfnng" : "";
+        sentLauncher = false;
+        launched = false;
+      }
+      if (args.includes("send") && text === command) {
+        sentLauncher = true;
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (spawnCount > 1 && composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        const screen =
+          spawnCount === 1 && sentLauncher
+            ? "zsh: command not found: voicelayerCursor\n$ "
+            : launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `etanheyman ~  $ ${composer}`;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      const result = await baseExec(cmd, args);
+      if (
+        typeof result.stdout === "string" &&
+        result.stdout.includes("surface:")
+      ) {
+        return {
+          ...result,
+          stdout: result.stdout.replace(/surface:new-\d+/g, "surface:new"),
+        };
+      }
+      return result;
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const failed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+    expect(failed.ok).toBe(false);
+    expect(failed.surface_id).toBe("surface:new");
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(String(failed.error)).toMatch(
+      /Launcher exited before reaching readiness/,
+    );
+    const context = serverContexts.at(-1)!;
+    expect(context.launchShellRecoveryBySurface.size).toBe(0);
+    expect(context.originalLaunchCommandsBySurface.size).toBe(0);
+
+    const reused = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(reused.ok).toBe(true);
+    expect(reused.surface_id).toBe("surface:new");
+    expect(launched).toBe(true);
+    expect(reused.readiness_recovered).toBeUndefined();
+    expect(reused.readiness_cleared).toBeUndefined();
+  }, 15_000);
+
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");

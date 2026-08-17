@@ -29,7 +29,12 @@ describe("spawn response shaping", () => {
           "inbox_monitor_not_alive",
           "registry_screen_disagreement",
         ],
-        issues: ["missing session", "cannot resume", "monitor booting", "screen ahead"],
+        issues: [
+          "missing session",
+          "cannot resume",
+          "monitor booting",
+          "screen ahead",
+        ],
         issue_severities: {
           missing_cli_session_id: "info",
           non_resumable: "info",
@@ -48,7 +53,10 @@ describe("spawn response shaping", () => {
       ...base,
       health: {
         status: "degraded",
-        issue_codes: ["missing_cli_session_id", "missing_managed_lead_agent_id"],
+        issue_codes: [
+          "missing_cli_session_id",
+          "missing_managed_lead_agent_id",
+        ],
         issues: ["missing session", "lead is missing"],
         issue_severities: {
           missing_cli_session_id: "info",
@@ -134,10 +142,23 @@ describe("spawn response shaping", () => {
     expect(shapeSpawnResponse(full, true)).toBe(full);
   });
 
+  it("keeps readiness recovery evidence in the lean spawn receipt", () => {
+    const shaped = shapeSpawnResponse({
+      ...base,
+      readiness_recovered: true,
+      readiness_cleared: ["wenfnng"],
+    });
+
+    expect(shaped.readiness_recovered).toBe(true);
+    expect(shaped.readiness_cleared).toEqual(["wenfnng"]);
+  });
+
   it("uses the same lean payload for text and structured content", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
 
-    expect(JSON.parse(result.content[0]!.text)).toEqual(result.structuredContent);
+    expect(JSON.parse(result.content[0]!.text)).toEqual(
+      result.structuredContent,
+    );
     expect(result.structuredContent.retry_count).toBe(0);
   });
 });
