@@ -35,6 +35,10 @@ const CLAUDE_ACTIVE_RE =
 
 const CURSOR_ACTIVE_RE =
   /(?:^|\n)[^\S\r\n]*(?:(?:[⠀-⣿]+|⬢|⬡|•)[^\S\r\n]*)?(?:Calling|Editing|Reading|Writing|Searching|Planning|Running|Generating|Thinking|Waiting)\b(?:\.\.\.|…)?(?:[^\S\r\n]+[0-9][0-9,]*(?:\.[0-9]+)?[km]?[^\S\r\n]+tokens\b|[^\S\r\n]*(?=\r?(?:\n|$)))/i;
+export const CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE =
+  /follow-ups?(?:\s*·\s*enter send now|\s*─[\s\S]{0,300}?enter send now)/i;
+export const CURSOR_FOLLOWUP_PLACEHOLDER_RE =
+  /^\s*(?:→\s*)?Add a follow-up(?:\s|$)/im;
 const CURSOR_READY_RE = new RegExp(
   [
     String.raw`cursor>`,
@@ -55,11 +59,11 @@ const CODEX_READY_RE = new RegExp(
   ].join("|"),
   "im",
 );
-const CODEX_ACTIVE_RE = /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b|Working\s*\(/i;
+const CODEX_ACTIVE_RE =
+  /(?:^|\n)\s*(?:•\s*)?(?:Working|Waiting|Thinking)\b|Working\s*\(/i;
 const GEMINI_ACTIVE_RE =
   /(?:^|\n)\s*(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?\s*$/im;
-const GEMINI_ACTIVE_LINE_RE =
-  /^(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?$/i;
+const GEMINI_ACTIVE_LINE_RE = /^(?:✦\s*)?(?:Working|Thinking)(?:\.\.\.|…)?$/i;
 const GEMINI_READY_PROMPT_LINE_RE = /^>\s*$/;
 
 export const CLI_READY_PATTERNS: Record<CliType, ReadyPattern> = {

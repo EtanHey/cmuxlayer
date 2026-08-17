@@ -9,6 +9,10 @@ import type { AgentRoute } from "./agent-types.js";
 import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { drainOutbox, httpDeliver } from "./outbox-drainer.js";
 import {
+  defaultDeliveryTicketDir,
+  fileDeliveryFailureGithubIssue,
+} from "./delivery-failure-tickets.js";
+import {
   defaultMonitorRegistryPath,
   httpNotifyMonitorDeadman,
 } from "./monitor-registry.js";
@@ -400,6 +404,16 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         }),
         fleetSidebarPublisher:
           opts.fleetSidebarPublisher ?? new FleetSidebarPublisher(),
+        deliveryTicketDir:
+          process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+            ? undefined
+            : defaultDeliveryTicketDir(),
+        deliveryIssueFiler:
+          process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+            ? undefined
+            : async (ticket) => {
+                await fileDeliveryFailureGithubIssue(ticket);
+              },
       },
     );
   }
@@ -451,7 +465,10 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         ...(workspace ? { workspace } : {}),
         ...(priorFocus
           ? {
-              on_surface_created: ({ surface, workspace: createdWorkspace }) => {
+              on_surface_created: ({
+                surface,
+                workspace: createdWorkspace,
+              }) => {
                 createdFocus = createdWorkspace
                   ? { workspace: createdWorkspace, surface }
                   : null;
@@ -675,9 +692,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     }
   }
 
-  private async currentFocusTargetBestEffort(): Promise<
-    AppServerFocusTarget | null
-  > {
+  private async currentFocusTargetBestEffort(): Promise<AppServerFocusTarget | null> {
     try {
       const focused = (await this.client.identify()).focused;
       const workspace = focused?.workspace_ref?.trim();
