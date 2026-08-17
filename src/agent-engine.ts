@@ -6404,7 +6404,7 @@ export class AgentEngine {
   }
 
   async verifyPendingDeliveries(): Promise<void> {
-    if (this.deliveryVerifyInFlight) return;
+    if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
     this.deliveryVerifyInFlight = true;
     try {
       for (const receipt of this.deliveryReceipts.values()) {

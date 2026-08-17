@@ -10,8 +10,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { AgentRegistry } from "../src/agent-registry.js";
+import { StateManager } from "../src/state-manager.js";
 import { defaultDeliveryTicketDir } from "../src/delivery-failure-tickets.js";
-import { DELIVERY_TARGET_GONE_CONFIRM_MISSES } from "../src/agent-engine.js";
+import {
+  AgentEngine,
+  DELIVERY_TARGET_GONE_CONFIRM_MISSES,
+} from "../src/agent-engine.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-send-to-v2-verify-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-send-to-v2-verify-test.sock";
@@ -835,5 +840,63 @@ describe("send_to v2 background verify", () => {
     });
     expect(existsSync(ticketDir)).toBe(false);
     expect(filed).toHaveLength(0);
+  });
+
+  it("does not advance or deadline-fail watched receipts when deliveryVerifier is null", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    writeFileSync(
+      join(TEST_DIR, "delivery-receipts.json"),
+      `${JSON.stringify([
+        {
+          delivery_id: "orphan-1",
+          agent_id: "agent-1",
+          text: "app-server has no verifier",
+          press_enter: true,
+          source_event: "send_to",
+          delivery_state: "pending_verify",
+          terminal: false,
+          created_at: "2026-08-17T19:00:00.000Z",
+          resolved_at: null,
+          retry_count: 0,
+          submit_verified: null,
+          error: null,
+          verify_deadline_at: "2026-08-17T19:50:00.000Z",
+        },
+      ])}\n`,
+    );
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryTicketDir: ticketDir,
+        deliveryIssueFiler: async (ticket) => {
+          filed.push(ticket);
+        },
+      },
+    );
+    try {
+      expect(engine.getDeliveryReceipt("orphan-1")).toMatchObject({
+        delivery_state: "pending_verify",
+        terminal: false,
+        verify_deadline_at: "2026-08-17T19:50:00.000Z",
+      });
+
+      await engine.verifyPendingDeliveries();
+
+      expect(engine.getDeliveryReceipt("orphan-1")).toMatchObject({
+        delivery_id: "orphan-1",
+        delivery_state: "pending_verify",
+        terminal: false,
+        error: null,
+      });
+      expect(existsSync(ticketDir)).toBe(false);
+      expect(filed).toHaveLength(0);
+    } finally {
+      engine.dispose();
+    }
   });
 });
