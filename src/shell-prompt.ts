@@ -48,7 +48,16 @@ export function pendingShellPromptInput(text: string): string | null {
     return null;
   }
   const input = matchShellPromptLine(lines[end - 1] ?? "")?.input.trim() ?? "";
-  return input.length > 0 ? input : null;
+  if (input.length === 0) {
+    return null;
+  }
+  const decorated = (lines[end - 1] ?? "")
+    .trimEnd()
+    .match(/^(.+?)([$%#])(?:\s+(.*))?$/u);
+  if (decorated && /\d$/.test(decorated[1] ?? "")) {
+    return null;
+  }
+  return input;
 }
 
 export function matchesShellPromptStrict(text: string): boolean {

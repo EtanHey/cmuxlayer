@@ -2973,6 +2973,10 @@ export interface CmuxServerContext {
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
   originalLaunchCommandsBySurface: Map<string, string>;
+  launchShellRecoveryBySurface: Map<
+    string,
+    { recovered: true; cleared: string[] }
+  >;
   surfaceWriteLivenessCandidates: Set<string>;
   surfacePtyDeadSince: Map<string, number>;
   readScreenInflight: Map<string, Promise<ReadScreenSnapshot>>;
@@ -3114,6 +3118,7 @@ export function createServerContext(
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
     originalLaunchCommandsBySurface: new Map(),
+    launchShellRecoveryBySurface: new Map(),
     surfaceWriteLivenessCandidates: new Set(),
     surfacePtyDeadSince: new Map(),
     readScreenInflight: new Map(),
@@ -3166,6 +3171,7 @@ export function createServerContext(
       context.lifecycleAgentInputDeliverer = null;
       context.lifecycleAgentInputDelivererReadyListeners.clear();
       context.originalLaunchCommandsBySurface.clear();
+      context.launchShellRecoveryBySurface.clear();
       context.capturedSurfaceUuidByRef.clear();
       context.ambiguousCapturedSurfaceRefs.clear();
       context.capturedSurfaceObserverEpoch = null;
@@ -3287,10 +3293,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const activeSurfaceWrites = context.activeSurfaceWrites;
   const originalLaunchCommandsBySurface =
     context.originalLaunchCommandsBySurface;
-  const launchShellRecoveryBySurface = new Map<
-    string,
-    { recovered: true; cleared: string[] }
-  >();
+  const launchShellRecoveryBySurface = context.launchShellRecoveryBySurface;
   const surfaceWriteLiveness = context.surfaceWriteLiveness;
   const surfaceWriteLivenessCandidates = context.surfaceWriteLivenessCandidates;
   const surfacePtyDeadSince = context.surfacePtyDeadSince;
@@ -10261,6 +10264,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               });
             } catch (error) {
               originalLaunchCommandsBySurface.delete(surface);
+              launchShellRecoveryBySurface.delete(surface);
               throw error;
             }
           },

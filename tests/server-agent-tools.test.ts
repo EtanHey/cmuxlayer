@@ -5781,6 +5781,109 @@ describe("agent lifecycle tool handlers", () => {
     }
   }, 10_000);
 
+  it("spawn_agent does not reuse a failed spawn's readiness_recovered on a recycled surface id", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let spawnCount = 0;
+    let composer = "";
+    let sentLauncher = false;
+    let launched = false;
+    let ctrlUCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("new-split")) {
+        spawnCount += 1;
+        composer = spawnCount === 1 ? "wenfnng" : "";
+        sentLauncher = false;
+        launched = false;
+      }
+      if (args.includes("send") && text === command) {
+        sentLauncher = true;
+        composer = command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (spawnCount > 1 && composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        const screen =
+          spawnCount === 1 && sentLauncher
+            ? "zsh: command not found: voicelayerCursor\n$ "
+            : launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `etanheyman ~  $ ${composer}`;
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: screen,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      const result = await baseExec(cmd, args);
+      if (
+        typeof result.stdout === "string" &&
+        result.stdout.includes("surface:")
+      ) {
+        return {
+          ...result,
+          stdout: result.stdout.replace(/surface:new-\d+/g, "surface:new"),
+        };
+      }
+      return result;
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const failed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+    expect(failed.ok).toBe(false);
+    expect(failed.surface_id).toBe("surface:new");
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(String(failed.error)).toMatch(
+      /Launcher exited before reaching readiness/,
+    );
+    const context = serverContexts.at(-1)!;
+    expect(context.launchShellRecoveryBySurface.size).toBe(0);
+    expect(context.originalLaunchCommandsBySurface.size).toBe(0);
+
+    const reused = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 2_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(reused.ok).toBe(true);
+    expect(reused.surface_id).toBe("surface:new");
+    expect(launched).toBe(true);
+    expect(reused.readiness_recovered).toBeUndefined();
+    expect(reused.readiness_cleared).toBeUndefined();
+  }, 15_000);
+
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");

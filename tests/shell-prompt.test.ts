@@ -3,6 +3,7 @@ import {
   launcherFailureFromShell,
   matchShellPromptLine,
   matchesShellPrompt,
+  pendingShellPromptInput,
 } from "../src/shell-prompt.js";
 
 describe("shell prompt recognition", () => {
@@ -85,5 +86,21 @@ describe("shell prompt recognition", () => {
     expect(matchShellPromptLine(screen.split("\n").at(-1) ?? "")).toEqual({
       input: junk,
     });
+    expect(pendingShellPromptInput(screen)).toBe(junk);
   });
+
+  it.each([
+    ["[oh-my-zsh] 50% of plugins loaded", "of plugins loaded"],
+    ["Downloading nvm... 45% complete", "complete"],
+    [
+      "receiving objects:  72% (720/1000), 1.2 MiB | 400 KiB/s",
+      "(720/1000), 1.2 MiB | 400 KiB/s",
+    ],
+  ])(
+    "does not treat digit-prefixed progress %j as pending shell input",
+    (line, decoratedTrap) => {
+      expect(matchShellPromptLine(line)?.input.trim()).toBe(decoratedTrap);
+      expect(pendingShellPromptInput(line)).toBeNull();
+    },
+  );
 });
