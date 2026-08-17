@@ -54,7 +54,11 @@ import {
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
-import type { DeliveryFailureTicket } from "./delivery-failure-tickets.js";
+import {
+  defaultDeliveryTicketDir,
+  fileDeliveryFailureGithubIssue,
+  type DeliveryFailureTicket,
+} from "./delivery-failure-tickets.js";
 import {
   deregisterMonitor,
   queryMonitorRegistryForGates,
@@ -189,6 +193,8 @@ import { normalizeKeyName } from "./key-names.js";
 import { currentCallerContext, type CallerContext } from "./caller-context.js";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
+  CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE,
+  CURSOR_FOLLOWUP_PLACEHOLDER_RE,
   matchReadyPattern,
   screenHasActiveAgentMarker,
   screenHasReadyAgentIdentity,
@@ -448,8 +454,6 @@ const SEND_INPUT_SUBMIT_VERIFY_POLL_MS = 100;
 const BUSY_AGENT_SUBMIT_VERIFY_TIMEOUT_MS = 1_000;
 const CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS = 250;
 const CURSOR_FOLLOWUP_RETRY_OBSERVE_MS = 250;
-const CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE = /follow-ups?\s*·\s*enter send now/i;
-const CURSOR_FOLLOWUP_PLACEHOLDER_RE = /^Add a follow-up$/i;
 const SEND_INPUT_SAFE_RETRY_OBSERVE_MS = 2500;
 const SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS = 300;
 const BOOT_PROMPT_TIMEOUT_MS = 60_000;
@@ -2572,7 +2576,7 @@ function screenShowsQueuedCursorFollowup(
     return false;
   }
   return (
-    /→\s*Add a follow-up/i.test(screenText) ||
+    CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(screenText) ||
     /ctrl\+c to stop/i.test(screenText)
   );
 }
@@ -3008,9 +3012,12 @@ export interface CreateServerOptions {
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
   /** Background send_to verify deadline; defaults to 10 minutes. */
   deliveryVerifyDeadlineMs?: number;
-  /** Local evidence tickets for failed_confirmed deliveries. */
+  /**
+   * Local evidence tickets for failed_confirmed deliveries. Omitted in tests;
+   * production createServer injects ~/.cmuxlayer/tickets when not VITEST/NODE_ENV=test.
+   */
   deliveryTicketDir?: string;
-  /** Optional GitHub/local ticket sink (tests inject a recorder). */
+  /** Optional GitHub/local ticket sink (tests inject a recorder; production injects gh). */
   deliveryIssueFiler?: (ticket: DeliveryFailureTicket) => Promise<void>;
 }
 
@@ -10145,6 +10152,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       });
     };
+    const testProcess =
+      process.env.VITEST === "true" || process.env.NODE_ENV === "test";
     const engine =
       context.lifecycleSweepEngine ??
       new AgentEngine(
@@ -10375,8 +10384,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           seatRegistryPath: opts?.seatRegistryPath,
           fleetSidebarPublisher: opts?.fleetSidebarPublisher,
           deliveryVerifyDeadlineMs: opts?.deliveryVerifyDeadlineMs,
-          deliveryTicketDir: opts?.deliveryTicketDir,
-          deliveryIssueFiler: opts?.deliveryIssueFiler,
+          deliveryTicketDir:
+            opts?.deliveryTicketDir ??
+            (testProcess ? undefined : defaultDeliveryTicketDir()),
+          deliveryIssueFiler:
+            opts?.deliveryIssueFiler ??
+            (testProcess
+              ? undefined
+              : async (ticket) => {
+                  await fileDeliveryFailureGithubIssue(ticket);
+                }),
         },
       );
     lifecycleSeatManifestPublisher = async (input) => {
@@ -10875,7 +10892,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     engine.setDeliveryVerifier(async (receipt: AgentDeliveryReceipt) => {
       const agent = engine.getAgentState(receipt.agent_id);
       if (!agent) {
-        return { outcome: "failed_confirmed" as const, reason: "target_gone" };
+        return { outcome: "pending" as const, reason: "target_gone" };
       }
       const snapshot = await readParsedSurface(
         agent.surface_id,
@@ -10906,11 +10923,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         correlationTail.length > 0 &&
         normalizeTerminalText(snapshot.text).includes(correlationTail) &&
         !pending;
-      if (
-        composerCleared ||
-        inTranscript ||
-        (!pending && isSubmitVerifiedStatus(snapshot.parsed.status))
-      ) {
+      if (composerCleared || inTranscript) {
         return { outcome: "delivered" as const, submit_verified: true };
       }
       return { outcome: "pending" as const };

@@ -3,6 +3,8 @@ import { describe, it, expect } from "vitest";
 import {
   CLI_INPUT_PROMPT_PREFIXES,
   CLI_READY_PATTERNS,
+  CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE,
+  CURSOR_FOLLOWUP_PLACEHOLDER_RE,
   lineStartsWithCliInputPrompt,
   matchReadyPattern,
   screenHasActiveAgentMarker,
@@ -75,6 +77,33 @@ describe("CLI_INPUT_PROMPT_PREFIXES", () => {
     expect(Object.keys(CLI_INPUT_PROMPT_PREFIXES).sort()).toEqual(
       Object.keys(CLI_READY_PATTERNS).sort(),
     );
+  });
+
+  it("matches Cursor follow-up placeholder with or without the arrow prefix", () => {
+    expect(CURSOR_FOLLOWUP_PLACEHOLDER_RE.test("Add a follow-up")).toBe(true);
+    expect(CURSOR_FOLLOWUP_PLACEHOLDER_RE.test("→ Add a follow-up")).toBe(true);
+    expect(CURSOR_FOLLOWUP_PLACEHOLDER_RE.test("→Add a follow-up")).toBe(true);
+    expect(
+      CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(
+        "Cursor Agent\nWorking\n→ Add a follow-up\nctrl+c to stop",
+      ),
+    ).toBe(true);
+    expect(
+      CURSOR_FOLLOWUP_PLACEHOLDER_RE.test(
+        "  → Add a follow-up                                                         ctrl+c to stop ",
+      ),
+    ).toBe(true);
+    expect(
+      CURSOR_FOLLOWUP_PLACEHOLDER_RE.test("please Add a follow-up later"),
+    ).toBe(false);
+    expect(
+      CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE.test("follow-ups · enter send now"),
+    ).toBe(true);
+    expect(
+      CURSOR_FOLLOWUP_ENTER_SEND_NOW_RE.test(
+        "┌─ follow-ups ─────────────────────────────────────────┐\n │ +5 more lines · enter send now · ↑ select/edit · esc cancel",
+      ),
+    ).toBe(true);
   });
 
   it("does not treat an empty ready prompt as typed composer text", () => {
@@ -232,7 +261,11 @@ gpt-5.5 xhigh · ~/Gits/brainlayer
   });
 
   it("does not treat bare active Codex status lines as ready", () => {
-    for (const marker of ["Working", "Waiting for command approval", "Thinking"]) {
+    for (const marker of [
+      "Working",
+      "Waiting for command approval",
+      "Thinking",
+    ]) {
       const screen = [
         "gpt-5.5 xhigh · 70% left · ~/Gits/cmuxlayer",
         marker,

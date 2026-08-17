@@ -47,9 +47,7 @@ import type {
   ParsedScreenStatus,
 } from "./types.js";
 import {
-  defaultDeliveryTicketDir,
   deliveryFailureSignature,
-  fileDeliveryFailureGithubIssue,
   writeDeliveryFailureTicket,
   type DeliveryFailureTicket,
 } from "./delivery-failure-tickets.js";
@@ -230,9 +228,12 @@ export interface AgentDeliveryReceipt {
   /** Hard deadline for background verify; ISO timestamp. */
   verify_deadline_at?: string | null;
   ticket_filed?: boolean;
+  /** Consecutive verifier observations that the target agent is missing. */
+  verify_miss_count?: number;
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
+export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
 
 export type DeliveryVerifyObservation = {
@@ -583,7 +584,11 @@ export interface AgentEngineOptions {
   deliverySubmitTimeoutMs?: number;
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
-  /** Local evidence-ticket directory; defaults to ~/.cmuxlayer/tickets. */
+  /**
+   * Local evidence-ticket directory. Omitted/null disables tickets so bare
+   * construction never writes ~/.cmuxlayer/tickets or calls gh. Production
+   * entrypoints inject the directory and filer.
+   */
   deliveryTicketDir?: string;
   /** Optional GitHub/local ticket sink invoked once per failure signature. */
   deliveryIssueFiler?: DeliveryIssueFiler;
@@ -1228,7 +1233,7 @@ export class AgentEngine {
   private deliveryVerifyInFlight = false;
   private deliverySubmitTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
-  private deliveryTicketDir: string;
+  private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
   private autoReviveBackoffBaseMs: number;
   private haltNow: () => number;
@@ -1256,8 +1261,7 @@ export class AgentEngine {
       1,
       opts?.deliveryVerifyDeadlineMs ?? DEFAULT_DELIVERY_VERIFY_DEADLINE_MS,
     );
-    this.deliveryTicketDir =
-      opts?.deliveryTicketDir ?? defaultDeliveryTicketDir();
+    this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
     this.deliveryVerifier = opts?.deliveryVerifier ?? null;
     this.autoReviveBackoffBaseMs = Math.max(
@@ -6138,7 +6142,7 @@ export class AgentEngine {
         readFileSync(this.deliveryReceiptsPath, "utf8"),
       );
       if (!Array.isArray(parsed)) return;
-      let repairedUncertainReceipt = false;
+      let repairedReceipts = false;
       for (const candidate of parsed) {
         if (
           candidate &&
@@ -6160,12 +6164,27 @@ export class AgentEngine {
             receipt.resolved_at = new Date().toISOString();
             receipt.error =
               "Delivery outcome uncertain after process restart; refusing automatic replay";
-            repairedUncertainReceipt = true;
+            repairedReceipts = true;
+          }
+          const deadlineWatched =
+            receipt.delivery_state === "pending_verify" ||
+            (receipt.delivery_state === "queued" &&
+              receipt.composer_accepted === true);
+          if (
+            deadlineWatched &&
+            !receipt.terminal &&
+            (receipt.verify_deadline_at == null ||
+              receipt.verify_deadline_at === "")
+          ) {
+            receipt.verify_deadline_at = new Date(
+              Date.now() + this.deliveryVerifyDeadlineMs,
+            ).toISOString();
+            repairedReceipts = true;
           }
           this.deliveryReceipts.set(receipt.delivery_id, receipt);
         }
       }
-      if (repairedUncertainReceipt) {
+      if (repairedReceipts) {
         try {
           this.persistDeliveryReceipts();
         } catch {
@@ -6244,9 +6263,10 @@ export class AgentEngine {
       submission_started_at: acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
-      verify_deadline_at: new Date(
-        Date.now() + this.deliveryVerifyDeadlineMs,
-      ).toISOString(),
+      verify_deadline_at:
+        (input.delivery_state ?? "queued") === "queued_followup"
+          ? null
+          : new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString(),
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -6394,6 +6414,7 @@ export class AgentEngine {
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
+        const deadlineApplies = receipt.delivery_state !== "queued_followup";
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
@@ -6408,18 +6429,34 @@ export class AgentEngine {
             };
           }
         }
-        const timedOut = Date.now() >= deadlineMs;
         if (observation.outcome === "delivered") {
           receipt.delivery_state = "submitted";
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = observation.submit_verified ?? true;
           receipt.error = null;
+          receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
           this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
         }
-        if (observation.outcome === "failed_confirmed" || timedOut) {
+        if (observation.reason === "target_gone") {
+          receipt.verify_miss_count = (receipt.verify_miss_count ?? 0) + 1;
+          this.persistDeliveryReceipts();
+        } else if ((receipt.verify_miss_count ?? 0) > 0) {
+          receipt.verify_miss_count = 0;
+          this.persistDeliveryReceipts();
+        }
+        const confirmedGone =
+          observation.reason === "target_gone" &&
+          (receipt.verify_miss_count ?? 0) >=
+            DELIVERY_TARGET_GONE_CONFIRM_MISSES;
+        const timedOut = deadlineApplies && Date.now() >= deadlineMs;
+        if (
+          observation.outcome === "failed_confirmed" ||
+          confirmedGone ||
+          timedOut
+        ) {
           const reason =
             observation.reason ??
             (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
@@ -6444,6 +6481,8 @@ export class AgentEngine {
     observation: DeliveryVerifyObservation,
   ): Promise<void> {
     if (receipt.ticket_filed) return;
+    const ticketDir = this.deliveryTicketDir;
+    if (!ticketDir) return;
     const agent = this.getAgentState(receipt.agent_id);
     const signature = deliveryFailureSignature({
       reason,
@@ -6467,18 +6506,14 @@ export class AgentEngine {
       observed_at: new Date().toISOString(),
     };
     const written = writeDeliveryFailureTicket(ticket, {
-      dir: this.deliveryTicketDir,
+      dir: ticketDir,
     });
     receipt.ticket_filed = true;
     this.persistDeliveryReceipts();
     if (!written.created) return;
-    const filer =
-      this.deliveryIssueFiler ??
-      (async (nextTicket) => {
-        await fileDeliveryFailureGithubIssue(nextTicket);
-      });
+    if (!this.deliveryIssueFiler) return;
     try {
-      await filer(ticket);
+      await this.deliveryIssueFiler(ticket);
     } catch {
       // Local ticket is authoritative; GitHub is best-effort.
     }
@@ -6541,9 +6576,13 @@ export class AgentEngine {
             receipt.resolved_at = null;
             receipt.submit_verified = null;
             receipt.composer_accepted = true;
-            receipt.verify_deadline_at ??= new Date(
-              Date.now() + this.deliveryVerifyDeadlineMs,
-            ).toISOString();
+            if (result.delivery === "queued") {
+              receipt.verify_deadline_at ??= new Date(
+                Date.now() + this.deliveryVerifyDeadlineMs,
+              ).toISOString();
+            } else {
+              receipt.verify_deadline_at = null;
+            }
           } else if (result.delivery === "pending_verify") {
             receipt.delivery_state = "pending_verify";
             receipt.terminal = false;

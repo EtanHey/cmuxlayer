@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../src/server.js";
 import type { AgentRecord } from "../src/agent-types.js";
+import { defaultDeliveryTicketDir } from "../src/delivery-failure-tickets.js";
+import { DELIVERY_TARGET_GONE_CONFIRM_MISSES } from "../src/agent-engine.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-send-to-v2-verify-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-send-to-v2-verify-test.sock";
@@ -39,6 +47,7 @@ class FakeAgentSurfaceClient {
   requiredReturns = 99;
   /** Model Cursor's follow-ups box that needs a second Return ("enter send now"). */
   cursorFollowUpBox = false;
+  screenOverride: string | null = null;
   private pendingText = "";
   private returnCount = 0;
   private transcriptTail: string | null = null;
@@ -173,7 +182,8 @@ class FakeAgentSurfaceClient {
     }
     const tail = this.pendingText.slice(-160);
     const text =
-      this.cli === "cursor"
+      this.screenOverride ??
+      (this.cli === "cursor"
         ? [
             "Cursor Agent",
             this.followUpNeedsEnter || this.followUps.length > 0
@@ -194,7 +204,7 @@ class FakeAgentSurfaceClient {
           ]
             .filter((line) => line !== "")
             .join("\n")
-        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`;
+        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`);
     return {
       surface,
       text,
@@ -636,5 +646,194 @@ describe("send_to v2 background verify", () => {
         }),
       ]),
     );
+  });
+
+  it("does not fail queued_followup after the verify deadline or file a ticket", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    client.cursorFollowUpBox = true;
+    server = createVerifyServer(client, {
+      deliveryVerifyDeadlineMs: 1_000,
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server, { cli: "cursor" });
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "composer already consumed",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("queued_followup");
+
+    await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "queued_followup",
+      terminal: false,
+    });
+    expect(existsSync(ticketDir)).toBe(false);
+    expect(filed).toHaveLength(0);
+  });
+
+  it("does not promote pending_verify to submitted on working status without composer or transcript evidence", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.title = "cmuxlayerCursor";
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "cursor" });
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "do not promote on working status",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("pending_verify");
+
+    client.screenOverride = [
+      "Cursor Agent",
+      "⬡ Running...",
+      "~/Gits/cmuxlayer · main",
+      "→ leftover truncated follow-up",
+    ].join("\n");
+
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_id: sent.delivery_id,
+      delivery_state: "pending_verify",
+      terminal: false,
+    });
+  });
+
+  it("does not write home tickets or call gh from a bare createServer failure", async () => {
+    const homeTickets = defaultDeliveryTicketDir();
+    const before = existsSync(homeTickets) ? readdirSync(homeTickets) : null;
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryVerifyDeadlineMs: 1_000,
+    });
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "no default tickets",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("pending_verify");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const engine = server._registeredTools.interact._engine;
+    await engine.verifyPendingDeliveries();
+
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "failed_confirmed",
+      terminal: true,
+    });
+    const after = existsSync(homeTickets) ? readdirSync(homeTickets) : null;
+    expect(after).toEqual(before);
+  });
+
+  it("waits for consecutive target_gone misses before failed_confirmed", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client, {
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async () => {},
+    });
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "target may flicker",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("pending_verify");
+
+    const engine = server._registeredTools.interact._engine;
+    engine.getRegistry().remove("agent-1");
+
+    for (let miss = 1; miss < DELIVERY_TARGET_GONE_CONFIRM_MISSES; miss += 1) {
+      await engine.verifyPendingDeliveries();
+      expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+        delivery_state: "pending_verify",
+        terminal: false,
+        verify_miss_count: miss,
+      });
+    }
+
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      delivery_state: "failed_confirmed",
+      terminal: true,
+      error: "target_gone",
+    });
+  });
+
+  it("backfills verify_deadline_at from load time so historical queued receipts do not immediately fail", async () => {
+    const ticketDir = join(TEST_DIR, "tickets");
+    const filed: unknown[] = [];
+    writeFileSync(
+      join(TEST_DIR, "delivery-receipts.json"),
+      `${JSON.stringify([
+        {
+          delivery_id: "hist-1",
+          agent_id: "agent-1",
+          text: "historical queued payload",
+          press_enter: true,
+          source_event: "send_to",
+          delivery_state: "queued",
+          terminal: false,
+          created_at: "2026-08-17T19:00:00.000Z",
+          resolved_at: null,
+          retry_count: 0,
+          submit_verified: null,
+          error: null,
+          composer_accepted: true,
+        },
+      ])}\n`,
+    );
+    const client = new FakeAgentSurfaceClient();
+    client.screenOverride = [
+      "Claude Code",
+      "> leftover that is not the payload",
+    ].join("\n");
+    server = createVerifyServer(client, {
+      deliveryTicketDir: ticketDir,
+      deliveryIssueFiler: async (ticket) => {
+        filed.push(ticket);
+      },
+    });
+    registerAgent(server);
+
+    const engine = server._registeredTools.interact._engine;
+    const loaded = engine.getDeliveryReceipt("hist-1");
+    expect(loaded.verify_deadline_at).toBe("2026-08-17T20:10:00.000Z");
+
+    await engine.verifyPendingDeliveries();
+    expect(engine.getDeliveryReceipt("hist-1")).toMatchObject({
+      delivery_id: "hist-1",
+      delivery_state: "queued",
+      terminal: false,
+    });
+    expect(existsSync(ticketDir)).toBe(false);
+    expect(filed).toHaveLength(0);
   });
 });
