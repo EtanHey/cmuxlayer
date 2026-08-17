@@ -22,6 +22,8 @@ import {
 } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
+const ORIGINAL_PROMPT_AUTO_RESOLVE =
+  process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
 
 type MockClient = CmuxClient & {
   notify: ReturnType<typeof vi.fn>;
@@ -168,6 +170,7 @@ describe("Sidebar Sync", () => {
   let publishedFleetPublications: FleetSidebarPublication[];
 
   beforeEach(() => {
+    delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     stateMgr = new StateManager(TEST_DIR);
@@ -1588,6 +1591,12 @@ describe("Sidebar Sync", () => {
     engine.dispose();
     vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
+    if (ORIGINAL_PROMPT_AUTO_RESOLVE === undefined) {
+      delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
+    } else {
+      process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE =
+        ORIGINAL_PROMPT_AUTO_RESOLVE;
+    }
   });
 
   it("calls setStatus with compact sidebar truth for an active agent", async () => {
@@ -1807,7 +1816,159 @@ describe("Sidebar Sync", () => {
     );
   });
 
+  it("keeps the default-off prompt resolver key ledger empty for resolvable and hostile choosers", async () => {
+    const parentId = "prompt-freeze-parent";
+    const parentSurface = "surface:prompt-freeze-parent";
+    const cases = [
+      {
+        name: "codex-model-menu",
+        cli: "codex" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "",
+          "› /model",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "codex-update-menu",
+        cli: "codex" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/codex-update-menu.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+      {
+        name: "reviewer-p1-apply-abort",
+        cli: "codex" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "› /model",
+          "❯ 1. gpt-5.6-sol",
+          "  2. gpt-5.6-terra",
+          "",
+          "Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "  1. Apply",
+          "  2. Abort",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+    ].map((entry) => ({
+      ...entry,
+      agentId: `prompt-freeze-${entry.name}`,
+      surfaceRef: `surface:prompt-freeze-${entry.name}`,
+    }));
+    const screens = new Map<string, string>([
+      [parentSurface, "Claude Code\n✶ Coordinating… (4s · esc to interrupt)"],
+      ...cases.map((entry) => [entry.surfaceRef, entry.screen] as const),
+    ]);
+
+    engine.dispose();
+    engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => liveSurfaces),
+      mockClient,
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts,
+        haltAwaitingInputDwellMs: 0,
+        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: parentId,
+        surface_id: parentSurface,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        role: "orchestrator",
+        state: "working",
+        halt_escalation: false,
+      }),
+    );
+    for (const entry of cases) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: entry.agentId,
+          surface_id: entry.surfaceRef,
+          workspace_id: "workspace:cmuxlayer",
+          cli: entry.cli,
+          role: "worker",
+          parent_agent_id: parentId,
+          spawn_depth: 1,
+          state: "idle",
+          blocked_on_prompt: false,
+          blocked_on_prompt_since: null,
+        }),
+      );
+    }
+    liveSurfaces = [
+      {
+        ...makeSurface(parentSurface),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+      ...cases.map((entry) => ({
+        ...makeSurface(entry.surfaceRef),
+        title: "cmuxlayerCodex",
+        workspace_ref: "workspace:cmuxlayer",
+      })),
+    ];
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      const text = screens.get(surface);
+      if (text === undefined) throw new Error(`missing prompt-freeze screen for ${surface}`);
+      return {
+        surface,
+        text,
+        lines: text.split("\n").length,
+        scrollback_used: false,
+      };
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    await engine.runSweep();
+
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
+    expect(
+      stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter(
+          (event) =>
+            (event as { event_type?: string }).event_type === "resolved_prompt",
+        ),
+    ).toEqual([]);
+    expect(
+      engine
+        .listAgents({ blocked_on_prompt: true })
+        .map((agent) => agent.agent_id)
+        .sort(),
+    ).toEqual(cases.map((entry) => entry.agentId).sort());
+    expect(
+      stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter(
+          (event) =>
+            (event as { event_type?: string }).event_type ===
+            "agent_halt_escalation",
+        )
+        .map((event) => (event as { agent_id: string }).agent_id)
+        .sort(),
+    ).toEqual(cases.map((entry) => entry.agentId).sort());
+  });
+
   it("resolves safe prompt menus, escalates decisions untouched, and ignores activity in one production run", async () => {
+    process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE = "1";
     const parentId = "prompt-redirect-parent";
     const parentSurface = "surface:prompt-redirect-parent";
     const fixture = (name: string) =>

@@ -1180,6 +1180,7 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
+  private autoResolvePrompts: boolean;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -1232,6 +1233,8 @@ export class AgentEngine {
           DEFAULT_HALT_WEDGED_SWEEPS,
         ),
     );
+    this.autoResolvePrompts =
+      process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.loadDeliveryReceipts();
     this.registry = registry;
     this.client = client;
@@ -3581,7 +3584,7 @@ export class AgentEngine {
     const nowIso = new Date(nowMs).toISOString();
     const parsed = parseScreen(screenText);
     let disposition = classifyPromptDisposition(screenText, agent.cli);
-    if (disposition.kind === "resolve") {
+    if (disposition.kind === "resolve" && this.autoResolvePrompts) {
       const resolution = await this.maybeResolvePrompt(
         agent,
         screenText,
@@ -3590,6 +3593,11 @@ export class AgentEngine {
       );
       agent = resolution.agent;
       if (resolution.recovered) return agent;
+      disposition = {
+        kind: "escalate",
+        prompt_type: "human_or_unknown_chooser",
+      };
+    } else if (disposition.kind === "resolve") {
       disposition = {
         kind: "escalate",
         prompt_type: "human_or_unknown_chooser",
