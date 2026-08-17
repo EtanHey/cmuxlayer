@@ -5024,6 +5024,242 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
+  it("spawn_agent recovers a human-prefixed launcher line with ctrl-u then retypes", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "";
+    let humanPrefix = "ng ";
+    let launched = false;
+    let ctrlUCount = 0;
+    let typedLaunches = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        typedLaunches += 1;
+        composer += `${humanPrefix}${command}`;
+        humanPrefix = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `$ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 5_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBeGreaterThanOrEqual(1);
+    expect(ctrlUCount).toBeLessThanOrEqual(2);
+    expect(typedLaunches).toBeGreaterThanOrEqual(2);
+    expect(launched).toBe(true);
+  }, 10_000);
+
+  it("spawn_agent does not ctrl-u a clean pending launcher line", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "";
+    let launched = false;
+    let ctrlUCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        composer += command;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("return")) {
+        if (composer.trim() === command) {
+          launched = true;
+          composer = "";
+        }
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched
+              ? "cursor> \nWorking (1s • esc to interrupt)"
+              : `$ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 5_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBe(0);
+    expect(launched).toBe(true);
+  }, 10_000);
+
+  it("spawn_agent treats an empty prompt after human Enter as already submitted", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let launched = false;
+    let ctrlUCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        launched = true;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: launched ? "cursor> \nWorking (1s • esc to interrupt)" : "$ ",
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 5_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(true);
+    expect(ctrlUCount).toBe(0);
+  }, 10_000);
+
+  it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
+    const command = "voicelayerCursor -s";
+    const baseExec = makeLifecycleExec();
+    let composer = "";
+    let ctrlUCount = 0;
+    const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      const text = String(args.at(-1) ?? "");
+      if (args.includes("send") && text === command) {
+        composer = `ng ${command}`;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("send-key") && args.includes("ctrl-u")) {
+        ctrlUCount += 1;
+        composer = "";
+        return { stdout: "{}", stderr: "" };
+      }
+      if (args.includes("read-screen")) {
+        return {
+          stdout: JSON.stringify({
+            surface: "surface:new",
+            text: `$ ${composer}`,
+            lines: 20,
+            scrollback_used: false,
+          }),
+          stderr: "",
+        };
+      }
+      return baseExec(cmd, args);
+    });
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const parsed = parseToolResult(
+      await spawn.handler(
+        {
+          repo: "voicelayer",
+          cli: "cursor",
+          boot_prompt_timeout_ms: 5_000,
+        },
+        {} as any,
+      ),
+    );
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain(
+      "launcher line corrupted by external input; manual Enter may have executed a modified command",
+    );
+    expect(ctrlUCount).toBe(2);
+    const getState = (server as any)._registeredTools["get_agent_state"];
+    const state = parseToolResult(
+      await getState.handler({ agent_id: parsed.agent_id }, {} as any),
+    );
+    expect(state.state).toBe("error");
+    expect(String(state.error)).toContain(
+      "launcher line corrupted by external input",
+    );
+    const list = (server as any)._registeredTools["list_agents"];
+    const listed = parseToolResult(
+      await list.handler({ state: "error" }, {} as any),
+    );
+    const listedAgent = (
+      listed.agents as Array<{
+        agent_id?: string;
+        state?: { value?: string };
+      }>
+    ).find((agent) => agent.agent_id === parsed.agent_id);
+    expect(listedAgent?.state?.value).toBe("error");
+  }, 10_000);
+
   it("spawn_agent treats launch submit verification as advisory when readiness appears with shell history", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
