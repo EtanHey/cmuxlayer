@@ -37,6 +37,10 @@ type InputDeliveryTestModule = typeof import("../src/server.js") & {
     screenText: string,
     submittedText: string,
   ) => boolean;
+  classifyPendingLauncherLine: (
+    screenText: string,
+    submittedText: string,
+  ) => "exact" | "corrupted" | "empty" | "other";
 };
 
 const openServers = new Set<ReturnType<typeof createServerImpl>>();
@@ -713,6 +717,68 @@ describe("input delivery batching helpers", () => {
         await loadInputDeliveryTestModule();
 
       expect(screenShowsPendingShellInput(screen, submittedText)).toBe(false);
+    },
+  );
+
+  it.each([
+    {
+      label: "prefix",
+      screen: "$ ng brainlayerCursor -s",
+      expected: "corrupted",
+    },
+    {
+      label: "suffix",
+      screen: "$ brainlayerCursor -s xx",
+      expected: "corrupted",
+    },
+    {
+      label: "clean line",
+      screen: "$ brainlayerCursor -s",
+      expected: "exact",
+    },
+    {
+      label: "empty line after human Enter already submitted",
+      screen: "$ brainlayerCursor -s\n$ ",
+      expected: "empty",
+    },
+  ])(
+    "classifies a $label pending launcher line",
+    async ({ screen, expected }) => {
+      const { classifyPendingLauncherLine } =
+        await loadInputDeliveryTestModule();
+
+      expect(
+        classifyPendingLauncherLine(screen, "brainlayerCursor -s"),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    {
+      label: "boot output below an echoed launcher",
+      screen:
+        "etanheyman ~  $ brainlayerCursor -s\n[4] 55084\nStarting Cursor Agent...",
+      expected: "other",
+    },
+    {
+      label: "interleaved human characters inside the command",
+      screen: "etanheyman ~  $ brainlayerCurng sor -s",
+      expected: "corrupted",
+    },
+    {
+      label: "truncated pending launcher line",
+      screen: "etanheyman ~  $ brainlayerCursor -",
+      expected: "corrupted",
+    },
+  ])(
+    "classifies a $label as $expected",
+    async ({ screen, expected }) => {
+      const { classifyPendingLauncherLine } =
+        await loadInputDeliveryTestModule();
+
+      expect(
+        classifyPendingLauncherLine(screen, "brainlayerCursor -s"),
+      ).toBe(expected);
     },
   );
 });

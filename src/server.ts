@@ -463,6 +463,9 @@ function bootPromptUpdateMaxMs(): number {
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
+const LAUNCHER_LINE_CORRUPTION_RECOVERY_ATTEMPTS = 2;
+const LAUNCHER_LINE_CORRUPTION_ERROR =
+  "launcher line corrupted by external input; manual Enter may have executed a modified command";
 /** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
 const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = AGENT_HEALTH_MONITOR_MAX_AGE_MS;
 const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
@@ -2501,13 +2504,15 @@ function screenShowsQueuedAgentInput(
   return visiblePrefix.length > 0 && submitted.startsWith(visiblePrefix);
 }
 
-export function screenShowsPendingShellInput(
+export type PendingLauncherLineKind = "exact" | "corrupted" | "empty" | "other";
+
+function inspectPendingShellInput(
   screenText: string,
   submittedText: string,
-): boolean {
+): { pending: string; outputBelowPrompt: boolean } | null {
   const trimmed = submittedText.trim();
   if (!trimmed) {
-    return false;
+    return null;
   }
 
   const lines = normalizeTerminalText(screenText).split("\n");
@@ -2516,7 +2521,6 @@ export function screenShowsPendingShellInput(
     end -= 1;
   }
 
-  const compactSubmitted = trimmed.replace(/\s+/g, "");
   const promptOptions = {
     allowRootInput: isLauncherShellCommand(trimmed),
   };
@@ -2534,29 +2538,64 @@ export function screenShowsPendingShellInput(
       // launcher command; ordinary output such as "Building... 62%" is not a
       // trustworthy prompt anchor.
       if (!strictPrompt && !promptOptions.allowRootInput) {
-        return false;
+        return null;
       }
       activePromptIndex = index;
       break;
     }
   }
   if (activePromptIndex < 0) {
-    return false;
+    return null;
   }
 
   const prompt = matchShellPromptLine(
     lines[activePromptIndex] ?? "",
     promptOptions,
   );
-  const pending = [
-    prompt?.input ?? "",
-    ...lines.slice(activePromptIndex + 1, end),
-  ]
-    .join("")
-    .trimEnd();
+  const below = lines.slice(activePromptIndex + 1, end);
+  return {
+    pending: [prompt?.input ?? "", ...below].join("").trimEnd(),
+    outputBelowPrompt: below.some((line) => line.trim().length > 0),
+  };
+}
+
+export function screenShowsPendingShellInput(
+  screenText: string,
+  submittedText: string,
+): boolean {
+  const inspected = inspectPendingShellInput(screenText, submittedText);
+  if (inspected === null) {
+    return false;
+  }
+  const trimmed = submittedText.trim();
   return (
-    pending === trimmed || pending.replace(/\s+/g, "") === compactSubmitted
+    inspected.pending === trimmed ||
+    inspected.pending.replace(/\s+/g, "") === trimmed.replace(/\s+/g, "")
   );
+}
+
+export function classifyPendingLauncherLine(
+  screenText: string,
+  submittedText: string,
+): PendingLauncherLineKind {
+  const inspected = inspectPendingShellInput(screenText, submittedText);
+  if (inspected === null) {
+    return "other";
+  }
+  const compactPending = inspected.pending.replace(/\s+/g, "");
+  const compactSubmitted = submittedText.trim().replace(/\s+/g, "");
+  if (!compactPending) {
+    return "empty";
+  }
+  if (compactPending === compactSubmitted) {
+    return "exact";
+  }
+  // Output below the prompt is boot/history, not pending input. Only a
+  // single non-exact prompt line is recoverable corruption.
+  if (inspected.outputBelowPrompt) {
+    return "other";
+  }
+  return "corrupted";
 }
 
 function parseRawSubmitEvidenceMetrics(
@@ -5430,14 +5469,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     await withSurfaceWrite(
       opts.surface,
       async () => {
+        const readLauncherScreen = () =>
+          client.readScreen(opts.surface, {
+            workspace: opts.workspace,
+            lines: 80,
+            scrollback: false,
+          });
         const submitPendingLauncherCommand = async (): Promise<boolean> => {
-          const readLauncherScreen = () =>
-            client.readScreen(opts.surface, {
-              workspace: opts.workspace,
-              lines: 80,
-              scrollback: false,
-            });
-
           let screen;
           try {
             screen = await readLauncherScreen();
@@ -5485,13 +5523,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
           }
         };
-        const clearAndVerifyFreshShellPrompt = async (): Promise<void> => {
+        const clearAndVerifyFreshShellPrompt = async (
+          key: "ctrl-c" | "ctrl-u" = "ctrl-c",
+        ): Promise<void> => {
           await opts.assertSurfaceBindingCurrent?.();
           await executeDeliveryEngine({
             surface: opts.surface,
             workspace: opts.workspace,
             chunks: [],
-            key: "ctrl-c",
+            key,
             chunk_size: 0,
             chunk_delay_ms: 0,
             press_enter: false,
@@ -5505,6 +5545,76 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             require_fresh_shell_prompt: true,
           });
         };
+        const typeLauncherCommand = async (verifySubmit: boolean) =>
+          executeDeliveryEngine({
+            surface: opts.surface,
+            workspace: opts.workspace,
+            chunks,
+            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
+            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
+            press_enter: true,
+            source_event: "spawn_agent",
+            verify_submit: verifySubmit,
+            submit_verify_timeout_ms: verifySubmit
+              ? SEND_INPUT_RECOVERY_ENTER_DELAY_MS
+              : undefined,
+            beforeMutation: opts.assertSurfaceBindingCurrent,
+          });
+        const recoverCorruptedLauncherLine = async (): Promise<void> => {
+          for (
+            let attempt = 0;
+            attempt < LAUNCHER_LINE_CORRUPTION_RECOVERY_ATTEMPTS;
+            attempt += 1
+          ) {
+            await clearAndVerifyFreshShellPrompt("ctrl-u");
+            try {
+              const recovered = await typeLauncherCommand(true);
+              if (recovered.submit_verified === true) {
+                return;
+              }
+            } catch (recoveryError) {
+              const recoveryMessage =
+                recoveryError instanceof Error
+                  ? recoveryError.message
+                  : String(recoveryError);
+              if (!/Enter submit could not be verified/.test(recoveryMessage)) {
+                throw recoveryError;
+              }
+            }
+            let recoveredScreen;
+            try {
+              recoveredScreen = await readLauncherScreen();
+            } catch (readError) {
+              if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+                throw new SurfaceGoneError(opts.surface, readError);
+              }
+              throw readError;
+            }
+            const recoveredKind = classifyPendingLauncherLine(
+              recoveredScreen.text,
+              sanitizedCommand,
+            );
+            if (recoveredKind !== "corrupted") {
+              return;
+            }
+          }
+          let failedScreen;
+          try {
+            failedScreen = await readLauncherScreen();
+          } catch (readError) {
+            if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, readError);
+            }
+            throw new LauncherReadinessError(
+              LAUNCHER_LINE_CORRUPTION_ERROR,
+              [],
+            );
+          }
+          throw new LauncherReadinessError(
+            LAUNCHER_LINE_CORRUPTION_ERROR,
+            tailLines(failedScreen.text, 10),
+          );
+        };
         if (opts.relaunch) {
           if (await submitPendingLauncherCommand()) {
             return;
@@ -5513,48 +5623,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         const relaunchOriginalCommand = async (): Promise<void> => {
           await clearAndVerifyFreshShellPrompt();
-          await executeDeliveryEngine({
-            surface: opts.surface,
-            workspace: opts.workspace,
-            chunks,
-            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-            press_enter: true,
-            source_event: "spawn_agent",
-            verify_submit: false,
-            beforeMutation: opts.assertSurfaceBindingCurrent,
-          });
+          await typeLauncherCommand(false);
         };
-        try {
-          const delivery = await executeDeliveryEngine({
-            surface: opts.surface,
-            workspace: opts.workspace,
-            chunks,
-            chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
-            chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
-            press_enter: true,
-            source_event: "spawn_agent",
-            verify_submit: true,
-            submit_verify_timeout_ms: SEND_INPUT_RECOVERY_ENTER_DELAY_MS,
-            beforeMutation: opts.assertSurfaceBindingCurrent,
-          });
-          if (delivery.submit_verified !== true) {
-            // The command can clear from the shell without proving the launcher
-            // accepted it. Probe once to consume transient ready evidence, then
-            // let boot-prompt readiness own update/relaunch monitoring.
-            await probeAgentLaunchReadyOnce({
-              surface: opts.surface,
-              workspace: opts.workspace,
-            });
-          }
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          if (!/Enter submit could not be verified/.test(message)) {
-            throw error;
-          }
-          // The command can remain visible in shell history while the launcher is
-          // already booting. Readiness detection is the authoritative launch check.
+        const confirmReadyThenRecoverIfCorrupted = async (): Promise<void> => {
+          // Readiness is the authoritative launch check. Only recover a
+          // corrupted pending line after that check fails — otherwise ctrl-u
+          // can land in a healthy booting pane.
           try {
             await waitForAgentLaunchReady({
               surface: opts.surface,
@@ -5565,16 +5639,27 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           } catch (readinessError) {
             let pendingScreen;
             try {
-              pendingScreen = await client.readScreen(opts.surface, {
-                workspace: opts.workspace,
-                lines: 80,
-                scrollback: false,
-              });
+              pendingScreen = await readLauncherScreen();
             } catch (readError) {
               if (isSurfaceGoneReadFailure(readError, opts.surface)) {
                 throw new SurfaceGoneError(opts.surface, readError);
               }
               throw readinessError;
+            }
+            if (
+              classifyPendingLauncherLine(
+                pendingScreen.text,
+                sanitizedCommand,
+              ) === "corrupted"
+            ) {
+              await recoverCorruptedLauncherLine();
+              await waitForAgentLaunchReady({
+                surface: opts.surface,
+                workspace: opts.workspace,
+                timeout_ms: opts.timeout_ms,
+                onUpdateShellRelaunch: relaunchOriginalCommand,
+              });
+              return;
             }
             if (
               screenShowsPendingShellInput(pendingScreen.text, sanitizedCommand)
@@ -5586,6 +5671,46 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             }
             throw readinessError;
           }
+        };
+        try {
+          const delivery = await typeLauncherCommand(true);
+          if (delivery.submit_verified === true) {
+            return;
+          }
+          // The command can clear from the shell without proving the launcher
+          // accepted it. Probe once to consume transient ready evidence, then
+          // let boot-prompt readiness own update/relaunch monitoring.
+          await probeAgentLaunchReadyOnce({
+            surface: opts.surface,
+            workspace: opts.workspace,
+          });
+          // Interleaved corruption never throws: the exact command is gone, so
+          // verify is advisory. Recover only that single-line case here; other
+          // screens (Codex update menus, boot output) belong to boot-prompt wait.
+          let pendingScreen;
+          try {
+            pendingScreen = await readLauncherScreen();
+          } catch (readError) {
+            if (isSurfaceGoneReadFailure(readError, opts.surface)) {
+              throw new SurfaceGoneError(opts.surface, readError);
+            }
+            return;
+          }
+          if (
+            classifyPendingLauncherLine(
+              pendingScreen.text,
+              sanitizedCommand,
+            ) === "corrupted"
+          ) {
+            await confirmReadyThenRecoverIfCorrupted();
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (!/Enter submit could not be verified/.test(message)) {
+            throw error;
+          }
+          await confirmReadyThenRecoverIfCorrupted();
         }
       },
       {
