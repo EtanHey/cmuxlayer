@@ -6426,6 +6426,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : route;
     const throwStaleSurfaceRef = (
       snapshot: SurfaceTopologySnapshot | null,
+      diagnostic?: string,
     ): never => {
       const liveAgents: Array<{ agent_id: string; surface_id: string }> = [];
       const seen = new Set<string>();
@@ -6442,22 +6443,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         seen.add(record.agent_id);
         liveAgents.push({ agent_id: record.agent_id, surface_id: liveRef });
       }
-      if (liveAgents.length === 1) {
-        throw new Error(
-          `${requestedSurface} is stale; agent ${liveAgents[0].agent_id} is alive at ${liveAgents[0].surface_id} — use agent_id`,
-        );
-      }
-      if (liveAgents.length > 1) {
-        const listed = liveAgents
-          .map((agent) => `${agent.agent_id} at ${agent.surface_id}`)
-          .join(", ");
-        throw new Error(
-          `${requestedSurface} is stale; live managed agents: ${listed} — use agent_id`,
-        );
-      }
-      throw new Error(
-        `${requestedSurface} is stale; no live managed agent maps this ref`,
-      );
+      const occupancy =
+        liveAgents.length === 1
+          ? `${requestedSurface} is stale; agent ${liveAgents[0].agent_id} is alive at ${liveAgents[0].surface_id} — use agent_id`
+          : liveAgents.length > 1
+            ? `${requestedSurface} is stale; live managed agents: ${liveAgents
+                .map((agent) => `${agent.agent_id} at ${agent.surface_id}`)
+                .join(", ")} — use agent_id`
+            : `${requestedSurface} is stale; no live managed agent maps this ref`;
+      throw new Error(diagnostic ? `${occupancy} (${diagnostic})` : occupancy);
     };
 
     if (topology?.complete === true) {
@@ -6486,7 +6480,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (stableUuid) {
         const currentRef = findSurfaceRefByUuid(topology, stableUuid);
         if (!currentRef) {
-          throw new Error(
+          return throwStaleSurfaceRef(
+            topology,
             `Stable surface UUID ${stableUuid} captured for ${requestedSurface} ` +
               `is no longer live; refusing ${operation} rather than using a recycled ref.`,
           );
@@ -8626,6 +8621,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             surface: route.surface,
             workspace: route.workspace ?? args.workspace,
           }));
+          if (hasCodexRolloutCandidate) {
+            codexAgentBeforeRead = resolveCodexAgentForSurface(
+              route.surface,
+              topology,
+            );
+          }
         }
         const requestedIsLive =
           topology?.workspaceBySurface.has(args.surface) === true ||
