@@ -9365,12 +9365,17 @@ Session ID: ${sessionId}`,
       await engine.runSweep();
       await engine.runSweep();
 
+      // The harness refused the resume, so this is a recorded FAILURE with a
+      // backoff -- never a revival, and never a silent hold that burns the boot
+      // timeout before retrying the identical command.
       expect(
         engine.getAgentState("cmuxlayerCodex-auto-revive-failed-shell"),
       ).toMatchObject({
-        state: "booting",
+        state: "error",
         revive_attempts: 1,
-        revive_last_outcome: "pending",
+        revive_last_outcome: "failed",
+        revive_last_error: expect.stringContaining("Failed to resume session"),
+        revive_next_attempt_at: expect.any(String),
       });
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
     });
@@ -9417,9 +9422,10 @@ Session ID: ${sessionId}`,
         expect(
           engine.getAgentState("cmuxlayerCodex-auto-revive-failed-before-shell"),
         ).toMatchObject({
-          state: "booting",
+          state: "error",
           revive_attempts: 1,
-          revive_last_outcome: "pending",
+          revive_last_outcome: "failed",
+          revive_last_error: expect.stringContaining("Failed to resume session"),
         });
         expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
       },
@@ -9521,7 +9527,7 @@ Session ID: ${sessionId}`,
         cli: "cursor" as const,
         id: "019faccc-4848-7555-8666-777788889999",
         command:
-          "cursor agent --session 019faccc-4848-7555-8666-777788889999",
+          "cursor agent --resume 019faccc-4848-7555-8666-777788889999",
         staleReady: "Cursor Agent\ncursor>",
       },
       {
@@ -9881,6 +9887,236 @@ Session ID: ${sessionId}`,
           (message) => message.tag === "agent_cli_exit_revived",
         ),
       ).toEqual([]);
+    });
+
+    it("revives a dead cursor pane with the real --resume flag and verifies it from the post-resume screen", async () => {
+      const sessionId = "019faccc-6060-7555-8666-777788889999";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCursor-auto-revive",
+          state: "working",
+          surface_id: "surface:cursor-auto-revive",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli: "cursor",
+          cli_session_id: sessionId,
+          auto_revive: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cursor-auto-revive")];
+      const deadShell = "% cursor agent exited\n%";
+      const readScreen = mockClient.readScreen as ReturnType<typeof vi.fn>;
+      readScreen
+        .mockResolvedValueOnce({
+          surface: "surface:cursor-auto-revive",
+          text: deadShell,
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValueOnce({
+          surface: "surface:cursor-auto-revive",
+          text: deadShell,
+          lines: 80,
+          scrollback_used: false,
+        })
+        .mockResolvedValue({
+          surface: "surface:cursor-auto-revive",
+          text:
+            `% cursor agent --resume ${sessionId}\n` +
+            "Cursor Agent\n→ Plan, search, build anything\nAuto\ncursor>",
+          lines: 80,
+          scrollback_used: false,
+        });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:cursor-auto-revive",
+        `cursor agent --resume ${sessionId}`,
+        expect.objectContaining({ workspace: undefined }),
+      );
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("cmuxlayerCursor-auto-revive")).toMatchObject(
+        {
+          state: "ready",
+          revive_attempts: 1,
+          revive_last_outcome: "revived",
+          revive_completed_at: expect.any(String),
+        },
+      );
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({ tag: "agent_cli_exit_revived" }),
+      ]);
+    });
+
+    it("never types a pending resume into a surface that already recovered a live agent", async () => {
+      const sessionId = "019faccc-6161-7555-8666-777788889999";
+      engine.dispose();
+      const launchCommandSender = vi.fn().mockResolvedValue(undefined);
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        launchCommandSender,
+        autoReviveBackoffBaseMs: 0,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCursor-auto-revive-recovered",
+          state: "error",
+          surface_id: "surface:cursor-auto-revive-recovered",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli: "cursor",
+          cli_session_id: sessionId,
+          auto_revive: true,
+          revive_attempts: 1,
+          revive_last_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_next_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_last_outcome: "failed",
+          revive_last_error: "readiness timed out",
+          revive_previous_state: "working",
+          error: "Auto-revive attempt 1 failed",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cursor-auto-revive-recovered")];
+      // Etan resumed this pane by hand: it is no longer a bare shell.
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cursor-auto-revive-recovered",
+        text: [
+          "Cursor Agent",
+          "→ Plan, search, build anything",
+          "Auto",
+          "cursor>",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(launchCommandSender).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      const recovered = engine.getAgentState(
+        "cmuxlayerCursor-auto-revive-recovered",
+      );
+      expect(recovered).toMatchObject({ revive_last_outcome: "revived" });
+      expect(recovered?.revive_attempts).toBe(1);
+    });
+
+    it("records a rejected cursor resume as a failure instead of waiting out the boot timeout", async () => {
+      const sessionId = "019faccc-6262-7555-8666-777788889999";
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        autoReviveBackoffBaseMs: 60_000,
+      });
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCursor-auto-revive-rejected",
+          state: "booting",
+          surface_id: "surface:cursor-auto-revive-rejected",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli: "cursor",
+          cli_session_id: sessionId,
+          auto_revive: true,
+          revive_attempts: 1,
+          revive_last_outcome: "pending",
+          revive_previous_state: "working",
+          updated_at: new Date().toISOString(),
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cursor-auto-revive-rejected")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cursor-auto-revive-rejected",
+        text: [
+          `% cursor agent --resume ${sessionId}`,
+          "error: unknown option '--resume'",
+          "(Did you mean --version?)",
+          "%",
+        ].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(
+        engine.getAgentState("cmuxlayerCursor-auto-revive-rejected"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: 1,
+        revive_last_outcome: "failed",
+        revive_last_error: expect.stringContaining("unknown option"),
+        revive_next_attempt_at: expect.any(String),
+      });
+      // Backed off, not retried in the same breath.
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([]);
+    });
+
+    it("escalates a repeatedly rejected cursor resume once with the real manual command", async () => {
+      const sessionId = "019faccc-6363-7555-8666-777788889999";
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "cmuxlayerCursor-auto-revive-exhausted",
+          state: "error",
+          surface_id: "surface:cursor-auto-revive-exhausted",
+          surface_provenance: "cmuxlayer_spawn",
+          parent_agent_id: "cmuxlayerClaude",
+          spawn_depth: 1,
+          cli: "cursor",
+          cli_session_id: sessionId,
+          auto_revive: true,
+          revive_attempts: MAX_RESPAWN_ATTEMPTS,
+          revive_last_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_next_attempt_at: "2026-08-13T07:00:00.000Z",
+          revive_last_outcome: "failed",
+          revive_last_error: "error: unknown option",
+          revive_previous_state: "working",
+          error: "Auto-revive attempt failed",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:cursor-auto-revive-exhausted")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:cursor-auto-revive-exhausted",
+        text: [`% cursor agent --resume ${sessionId}`, "%"].join("\n"),
+        lines: 80,
+        scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+      await engine.runSweep();
+
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(
+        engine.getAgentState("cmuxlayerCursor-auto-revive-exhausted"),
+      ).toMatchObject({
+        state: "error",
+        revive_attempts: MAX_RESPAWN_ATTEMPTS,
+        revive_last_outcome: "unrecoverable",
+      });
+      expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          tag: "agent_cli_exit_unrecoverable",
+          task: expect.stringContaining(
+            `Manual fallback: cursor agent --resume ${sessionId}`,
+          ),
+        }),
+      ]);
     });
 
     it("does not retry a failed auto-revive after the agent is intentionally stopped", async () => {
@@ -13506,8 +13742,11 @@ describe("buildResumeCommand", () => {
     expect(buildRawResumeCommand("claude", "brainlayer", sessionId)).toBe(
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume ${sessionId}`,
     );
+    // `cursor agent` has no `--session`; the real flag is `--resume [chatId]`.
+    // Verified against `cursor agent --help` -- `--session` exits with
+    // "error: unknown option '--session'".
     expect(buildRawResumeCommand("cursor", "brainlayer", sessionId)).toBe(
-      `cursor agent --session ${sessionId}`,
+      `cursor agent --resume ${sessionId}`,
     );
     expect(buildRawResumeCommand("gemini", "brainlayer", sessionId)).toBe(
       `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume ${sessionId}`,
