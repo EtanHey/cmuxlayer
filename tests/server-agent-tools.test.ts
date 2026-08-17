@@ -588,6 +588,29 @@ describe("lean spawn tool responses", () => {
     },
   );
 
+  it("rejects a spawn missing repo, cli, and role in one error that names all three", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    const result = await spawn.handler(
+      { version: 1, type: "agent" },
+      {} as any,
+    );
+    const parsed = result.structuredContent as Record<string, unknown>;
+
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toMatch(/repo/i);
+    expect(parsed.error).toMatch(/cli/i);
+    expect(parsed.error).toMatch(/role/i);
+    expect(
+      exec.mock.calls.some(
+        ([, args]) =>
+          args.includes("new-split") || args.includes("new-surface"),
+      ),
+    ).toBe(false);
+  });
+
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();
     const server = createLifecycleServer(exec);
@@ -9328,6 +9351,367 @@ codex>
     expect(routeClient.sendCalls).toEqual([]);
   });
 
+  it("raw send_to forwards a stale ref to a live managed agent and reports remap fields", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: surfaceUuid,
+        workspace_ref: "workspace:1",
+        title: "skillcreatorClaude",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "skillcreatorClaude",
+      surface_id: "surface:524",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "skill-creator",
+      cli: "claude",
+      task_summary: "live peer",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:524",
+        text: "are you alive",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      surface: "surface:89",
+      remapped_from: "surface:524",
+      remapped_to: "surface:89",
+    });
+    expect(routeClient.sendCalls).toEqual([
+      { surface: "surface:89", text: "are you alive" },
+    ]);
+  });
+
+  it("read_screen forwards a stale ref to a live managed agent and reports remap fields", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: surfaceUuid,
+        workspace_ref: "workspace:1",
+        title: "skillcreatorClaude",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "skillcreatorClaude",
+      surface_id: "surface:524",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "skill-creator",
+      cli: "claude",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const result = await registeredTestTool(server, "read_screen").handler(
+      { surface: "surface:524" },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      surface: "surface:89",
+      remapped_from: "surface:524",
+      remapped_to: "surface:89",
+    });
+  });
+
+  it("raw send_to on a stale ref with no mapped agent names that no live agent occupies it", async () => {
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:524",
+        text: "anyone there",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toMatch(/surface:524 is stale/i);
+    expect(parsed.error).toMatch(/no live managed agent/i);
+    expect(parsed.error).not.toMatch(
+      /Fresh topology did not provide a stable surface UUID/i,
+    );
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("raw send_to on a stale ref names a live agent that already moved off that ref", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: surfaceUuid,
+        workspace_ref: "workspace:1",
+        title: "skillcreatorClaude",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "skillcreatorClaude",
+      surface_id: "surface:89",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "skill-creator",
+      cli: "claude",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:524",
+        text: "are you dead",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toMatch(
+      /surface:524 is stale; agent skillcreatorClaude is alive at surface:89 — use agent_id/i,
+    );
+    expect(parsed.error).not.toMatch(
+      /Fresh topology did not provide a stable surface UUID/i,
+    );
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("raw send_to to an exact live ref is unchanged and has no remap fields", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: surfaceUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:89",
+        text: "exact ref",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed.ok).toBe(true);
+    expect(parsed.surface).toBe("surface:89");
+    expect(parsed).not.toHaveProperty("remapped_from");
+    expect(parsed).not.toHaveProperty("remapped_to");
+    expect(routeClient.sendCalls).toEqual([
+      { surface: "surface:89", text: "exact ref" },
+    ]);
+  });
+
+  it("raw send_to names a live agent when a captured UUID is no longer live", async () => {
+    const deadUuid = "11111111-2222-4333-8444-555555555555";
+    const liveUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:524",
+        id: deadUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const record = makeServerAgentRecord({
+      agent_id: "skillcreatorClaude",
+      surface_id: "surface:89",
+      surface_uuid: liveUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      repo: "skill-creator",
+      cli: "claude",
+    });
+    const server = await createUuidRouteServer(routeClient, record);
+    await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:89",
+        id: liveUuid,
+        workspace_ref: "workspace:1",
+        title: "skillcreatorClaude",
+      },
+    ]);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:524",
+        text: "are you dead",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toMatch(
+      /surface:524 is stale; agent skillcreatorClaude is alive at surface:89 — use agent_id/i,
+    );
+    expect(parsed.error).not.toMatch(
+      /^Stable surface UUID .* is no longer live; refusing/i,
+    );
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("raw send_to says no live agent when a captured UUID is gone and none remain", async () => {
+    const deadUuid = "11111111-2222-4333-8444-555555555555";
+    const otherUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:524",
+        id: deadUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    const server = createTrackedServer({
+      client: routeClient.client as any,
+      stateDir: TEST_DIR,
+      lifecycleInitializer: async () => {},
+    });
+    await registeredTestTool(server, "list_surfaces").handler({}, {} as any);
+    routeClient.setLiveSurfaces([
+      {
+        ref: "surface:other",
+        id: otherUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.client.send.mockClear();
+    routeClient.sendCalls.length = 0;
+
+    const result = await registeredTestTool(server, "send_to").handler(
+      {
+        mode: "surface",
+        target: "surface:524",
+        text: "anyone there",
+        press_enter: false,
+      },
+      {} as any,
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.error).toMatch(/surface:524 is stale/i);
+    expect(parsed.error).toMatch(/no live managed agent/i);
+    expect(parsed.error).not.toMatch(
+      /^Stable surface UUID .* is no longer live; refusing/i,
+    );
+    expect(routeClient.sendCalls).toEqual([]);
+  });
+
+  it("read_screen catch-path forward keeps Codex rollout enrichment", async () => {
+    const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const path = "/fixtures/codex/catch-path-forward.jsonl";
+    const routeClient = makeUuidRouteClient([
+      {
+        ref: "surface:89",
+        id: surfaceUuid,
+        workspace_ref: "workspace:1",
+      },
+    ]);
+    routeClient.setScreenText(
+      "gpt-5.4 high · 75% left · ~/Gits/cmuxlayer\nWorking (2s • esc to interrupt)",
+    );
+    const record = makeServerAgentRecord({
+      agent_id: "codex-catch-path-forward",
+      surface_id: "surface:524",
+      surface_uuid: surfaceUuid,
+      workspace_id: "workspace:1",
+      state: "ready",
+      cli: "codex",
+      cli_session_id: "session-catch",
+      cli_session_path: path,
+    });
+    const get = vi.fn().mockResolvedValue({
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+      observed_model_context_window: 258_400,
+    });
+    const server = await createUuidRouteServer(routeClient, record, {
+      codexRolloutFillProvider: { get },
+    });
+    const originalRead = routeClient.client.readScreen.getMockImplementation();
+    routeClient.client.readScreen.mockImplementation(
+      async (surface: string, opts?: { lines?: number }) => {
+        if (surface === "surface:524") {
+          throw new Error("surface:524 is gone");
+        }
+        if (!originalRead) {
+          throw new Error("missing readScreen implementation");
+        }
+        return originalRead(surface, opts);
+      },
+    );
+
+    const result = await registeredTestTool(server, "read_screen").handler(
+      { surface: "surface:524", parsed_only: true },
+      {},
+    );
+    const parsed = parseToolResult(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(parsed).toMatchObject({
+      ok: true,
+      surface: "surface:89",
+      remapped_from: "surface:524",
+      remapped_to: "surface:89",
+    });
+    expect(get).toHaveBeenCalledWith(path);
+    expect(parsed.parsed).toMatchObject({
+      agent_type: "codex",
+      token_count: 100_000,
+      context_window: 400_000,
+      context_pct: 25,
+    });
+  });
+
   it("raw send_to follows the captured UUID when the old ref is vacated", async () => {
     const originalUuid = "11111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([
@@ -9484,7 +9868,9 @@ codex>
     );
 
     expect(result.isError).toBe(true);
-    expect(parseToolResult(result).error).toMatch(/fresh topology|not live/i);
+    expect(parseToolResult(result).error).toMatch(
+      /surface:missing is stale; no live managed agent/i,
+    );
     expect(routeClient.sendCalls).toEqual([]);
   });
 
