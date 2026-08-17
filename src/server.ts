@@ -6357,8 +6357,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     /** Live cmux tab title for this surface when topology knows it. */
     title: string | null;
     stableSurfaceIdentity: string | null;
+    remapped_from?: string;
+    remapped_to?: string;
     assertCurrent: () => Promise<void>;
   };
+
+  const remapFields = (
+    route: RawSurfaceMutationRoute,
+  ): Pick<RawSurfaceMutationRoute, "remapped_from" | "remapped_to"> =>
+    route.remapped_from && route.remapped_to
+      ? {
+          remapped_from: route.remapped_from,
+          remapped_to: route.remapped_to,
+        }
+      : {};
 
   /**
    * Bind a caller-visible mutable ref to a stable UUID before terminal I/O.
@@ -6402,6 +6414,51 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const expectedUuid = capturedUuid ?? registryUuid;
     const topologyObserverEpoch = context.surfaceObserverEpoch;
     const topology = await collectSurfaceTopology();
+    const withSurfaceRemap = (
+      route: Omit<RawSurfaceMutationRoute, "remapped_from" | "remapped_to">,
+    ): RawSurfaceMutationRoute =>
+      route.surface !== requestedSurface
+        ? {
+            ...route,
+            remapped_from: requestedSurface,
+            remapped_to: route.surface,
+          }
+        : route;
+    const throwStaleSurfaceRef = (
+      snapshot: SurfaceTopologySnapshot | null,
+    ): never => {
+      const liveAgents: Array<{ agent_id: string; surface_id: string }> = [];
+      const seen = new Set<string>();
+      for (const record of stateMgr.listStates()) {
+        const uuid = record.surface_uuid?.trim();
+        const currentRef =
+          uuid && snapshot ? findSurfaceRefByUuid(snapshot, uuid) : null;
+        const liveRef =
+          currentRef ??
+          (snapshot?.workspaceBySurface.has(record.surface_id)
+            ? record.surface_id
+            : null);
+        if (!liveRef || seen.has(record.agent_id)) continue;
+        seen.add(record.agent_id);
+        liveAgents.push({ agent_id: record.agent_id, surface_id: liveRef });
+      }
+      if (liveAgents.length === 1) {
+        throw new Error(
+          `${requestedSurface} is stale; agent ${liveAgents[0].agent_id} is alive at ${liveAgents[0].surface_id} — use agent_id`,
+        );
+      }
+      if (liveAgents.length > 1) {
+        const listed = liveAgents
+          .map((agent) => `${agent.agent_id} at ${agent.surface_id}`)
+          .join(", ");
+        throw new Error(
+          `${requestedSurface} is stale; live managed agents: ${listed} — use agent_id`,
+        );
+      }
+      throw new Error(
+        `${requestedSurface} is stale; no live managed agent maps this ref`,
+      );
+    };
 
     if (topology?.complete === true) {
       const uuidTargetRef = findSurfaceRefByUuid(topology, requestedSurface);
@@ -6458,30 +6515,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
         };
-        return {
+        return withSurfaceRemap({
           surface: currentRef,
           workspace,
           title: topology.titleBySurface.get(currentRef) ?? null,
           stableSurfaceIdentity: stableUuid,
           assertCurrent,
-        };
+        });
       }
 
       if (
         topology.surfaceIdByRef.size > 0 ||
         topology.surfaceRefById.size > 0
       ) {
-        throw new Error(
-          `Fresh topology did not provide a stable surface UUID for ` +
-            `${requestedSurface}; refusing ${operation}.`,
-        );
+        throwStaleSurfaceRef(topology);
       }
 
       if (!topology.workspaceBySurface.has(requestedSurface)) {
-        throw new Error(
-          `Fresh topology does not contain ${requestedSurface}; refusing ${operation} ` +
-            `rather than trusting an absent mutable ref.`,
-        );
+        throwStaleSurfaceRef(topology);
       }
 
       const workspace =
@@ -8153,6 +8204,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               retry_count: record.retry_count,
             }),
             status: record.status,
+            ...remapFields(route),
           };
           return okFormatted(
             formatDelivery("send_input", {
@@ -8198,6 +8250,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         const data = {
           ...identity,
           ...delivery,
+          ...remapFields(route),
         };
         return okFormatted(
           formatDelivery("send_input", {
@@ -8375,6 +8428,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ...identity,
           command: sanitizedCommand,
           ...delivery,
+          ...remapFields(route),
           boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
           boot_prompt_receipt: bootPromptDelivery,
           boot_prompt_bytes: bootPromptDelivery?.bytes,
@@ -8476,7 +8530,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             stableSurfaceIdentity: route.stableSurfaceIdentity,
           },
         );
-        const data = { surface: route.surface, key, ...delivery };
+        const data = {
+          surface: route.surface,
+          key,
+          ...delivery,
+          ...remapFields(route),
+        };
         return okFormatted(formatOk("send_key", data), data);
       } catch (e) {
         return err(e);
@@ -8540,12 +8599,64 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             topologyBeforeRead,
           );
         }
-        const { result, topology } = await readScreenSnapshot({
+        let result: ReadScreenSnapshot["result"];
+        let topology: ReadScreenSnapshot["topology"];
+        let screenRemap: Pick<
+          RawSurfaceMutationRoute,
+          "remapped_from" | "remapped_to"
+        > = {};
+        const snapshotOpts = {
           surface: args.surface,
           workspace: args.workspace,
           lines: args.lines,
           scrollback: args.scrollback,
-        });
+        };
+        try {
+          ({ result, topology } = await readScreenSnapshot(snapshotOpts));
+        } catch (readError) {
+          const route = await resolveRawSurfaceMutationRoute(
+            args.surface,
+            args.workspace,
+            "read_screen",
+          );
+          if (route.surface === args.surface) throw readError;
+          screenRemap = remapFields(route);
+          ({ result, topology } = await readScreenSnapshot({
+            ...snapshotOpts,
+            surface: route.surface,
+            workspace: route.workspace ?? args.workspace,
+          }));
+        }
+        const requestedIsLive =
+          topology?.workspaceBySurface.has(args.surface) === true ||
+          topology?.surfaceIdByRef.has(args.surface) === true;
+        if (
+          topology?.complete === true &&
+          !requestedIsLive &&
+          !screenRemap.remapped_from
+        ) {
+          const route = await resolveRawSurfaceMutationRoute(
+            args.surface,
+            args.workspace,
+            "read_screen",
+          );
+          screenRemap = remapFields(route);
+          if (route.surface !== args.surface) {
+            const remapped = await readScreenSnapshot({
+              ...snapshotOpts,
+              surface: route.surface,
+              workspace: route.workspace ?? args.workspace,
+            });
+            result = remapped.result;
+            topology = remapped.topology;
+            if (hasCodexRolloutCandidate) {
+              codexAgentBeforeRead = resolveCodexAgentForSurface(
+                route.surface,
+                topology,
+              );
+            }
+          }
+        }
         const title = topology?.titleBySurface.get(result.surface) ?? null;
         const { column, column_count } =
           topology?.topologyBySurface.get(result.surface) ??
@@ -8579,6 +8690,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             column_count,
             parsed,
             delivery: getSurfaceDelivery(result.surface),
+            ...screenRemap,
           };
           const formatted = formatReadScreen(
             result.surface,
@@ -8605,6 +8717,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             scrollback_used: result.scrollback_used,
             parsed,
             delivery: getSurfaceDelivery(result.surface),
+            ...screenRemap,
           };
           const formatted = formatReadScreen(
             result.surface,
@@ -8633,6 +8746,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           parsed,
           ...(screenPreview ? { screen_preview: screenPreview } : {}),
           delivery: getSurfaceDelivery(result.surface),
+          ...screenRemap,
         };
         const formatted = formatReadScreen(
           result.surface,
@@ -10869,20 +10983,54 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...(cwdReceipt ? { cwd_receipt: cwdReceipt } : {}),
             });
           }
-          requireValue(args.repo, "repo is required for type=agent");
-          requireValue(args.cli, "cli is required for type=agent");
-          if (
+          const spawnProblems: string[] = [];
+          if (!args.repo) {
+            spawnProblems.push("repo is required for type=agent");
+          }
+          if (!args.cli) {
+            spawnProblems.push("cli is required for type=agent");
+          }
+          const rolelessClaude =
             args.version === 1 &&
-            args.cli === "claude" &&
-            args.role === undefined
-          ) {
-            return err(
-              new Error(
-                'Claude spawns require an explicit job role; use either authority:"lead", role:"implementor" or authority:"worker", role:"reviewer"',
-              ),
-              { error_code: "ROLE_REQUIRED" },
+            (args.cli === "claude" || args.cli === undefined) &&
+            args.role === undefined;
+          if (rolelessClaude) {
+            spawnProblems.push(
+              'Claude spawns require an explicit job role; use either authority:"lead", role:"implementor" or authority:"worker", role:"reviewer"',
             );
           }
+          if (args.cli) {
+            try {
+              resolveSpawnModelPolicy(args.cli, args.model);
+            } catch (error) {
+              spawnProblems.push(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+            try {
+              resolveSpawnEffort(args.cli, args.effort);
+            } catch (error) {
+              spawnProblems.push(
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          }
+          if (spawnProblems.length > 0) {
+            const error_code =
+              spawnProblems.length === 1 &&
+              rolelessClaude &&
+              args.cli === "claude"
+                ? "ROLE_REQUIRED"
+                : spawnProblems.length > 1
+                  ? "INVALID_SPAWN_SPEC"
+                  : undefined;
+            return err(
+              new Error(spawnProblems.join("; ")),
+              error_code ? { error_code } : {},
+            );
+          }
+          requireValue(args.repo, "repo is required for type=agent");
+          requireValue(args.cli, "cli is required for type=agent");
           const normalizedRole = normalizeSpawnAxes({
             role: args.role,
             placement: args.placement,
