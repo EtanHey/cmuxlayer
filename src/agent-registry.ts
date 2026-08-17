@@ -109,6 +109,7 @@ export interface AgentFilter {
   state?: AgentState;
   repo?: string;
   model?: string;
+  blocked_on_prompt?: boolean;
 }
 
 const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
@@ -931,6 +932,11 @@ export class AgentRegistry {
     if (filter?.model) {
       results = results.filter((a) => a.model === filter.model);
     }
+    if (filter?.blocked_on_prompt !== undefined) {
+      results = results.filter(
+        (a) => (a.blocked_on_prompt ?? false) === filter.blocked_on_prompt,
+      );
+    }
     return results;
   }
 
@@ -1068,6 +1074,9 @@ export class AgentRegistry {
         discoveredEntry &&
         !discoveredEntry.read_error &&
         !discoveredEntry.has_agent &&
+        record.blocked_on_prompt !== true &&
+        discoveredEntry.control_state !== "permission_prompt" &&
+        discoveredEntry.control_state !== "interactive_overlay" &&
         this.canMutateForObservedAbsence(record)
       ) {
         const removedAgentId = this.deleteAgentAndAliases(record.agent_id);
@@ -1190,6 +1199,13 @@ export class AgentRegistry {
             return false;
           }
           if (opts.filter?.model && agent.model !== opts.filter.model) {
+            return false;
+          }
+          if (
+            opts.filter?.blocked_on_prompt !== undefined &&
+            (agent.blocked_on_prompt ?? false) !==
+              opts.filter.blocked_on_prompt
+          ) {
             return false;
           }
           return true;
@@ -2027,6 +2043,22 @@ export class AgentRegistry {
     const recordsForSurface = [...this.agents.values()].filter(
       (agent) => agent.surface_id === discovered.surface_id,
     );
+    const discoveredPromptBlock =
+      discovered.control_state === "permission_prompt" ||
+      discovered.control_state === "interactive_overlay";
+    const promptBlockedRecord = recordsForSurface.find(
+      (agent) =>
+        (agent.blocked_on_prompt === true || discoveredPromptBlock) &&
+        !hasSurfaceUuidConflict(agent, discovered) &&
+        this.canUseObservedBinding(agent, discovered.surface_uuid),
+    );
+    if (promptBlockedRecord) {
+      // A prompt overlay can distort the launcher/title evidence used by seat
+      // repair. Keep the durable blocker record authoritative until screen
+      // truth clears it; otherwise list_agents would erase the alert while
+      // trying to make that same alert observable.
+      return null;
+    }
     const managedRecord = recordsForSurface.find(
       (agent) =>
         !isAutoAgentId(agent.agent_id) &&
@@ -2243,6 +2275,12 @@ export class AgentRegistry {
       halt_episode_observations: 0,
       halt_notification_sent_at: null,
       halt_notified_ancestor_id: null,
+      blocked_on_prompt: false,
+      blocked_on_prompt_since: null,
+      halt_missing_ancestor_count: 0,
+      halt_fallback_sink_id: null,
+      halt_delivery_failure_count: 0,
+      halt_last_delivery_error: null,
       halt_last_observable_action: null,
       halt_last_active_at: null,
       halt_last_progress_at_ms: null,
@@ -2371,6 +2409,9 @@ export class AgentRegistry {
     const purgedAgents: AgentRecord[] = [];
 
     for (const [id, agent] of this.agents) {
+      if (agent.blocked_on_prompt === true) {
+        continue;
+      }
       if (
         shouldRetainCrashRecoveryError(agent) &&
         this.canControlSurface(agent)

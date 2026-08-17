@@ -22,6 +22,8 @@ import {
 } from "../src/fleet-sidebar.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-sidebar");
+const ORIGINAL_PROMPT_AUTO_RESOLVE =
+  process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
 
 type MockClient = CmuxClient & {
   notify: ReturnType<typeof vi.fn>;
@@ -168,6 +170,7 @@ describe("Sidebar Sync", () => {
   let publishedFleetPublications: FleetSidebarPublication[];
 
   beforeEach(() => {
+    delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     stateMgr = new StateManager(TEST_DIR);
@@ -1588,6 +1591,12 @@ describe("Sidebar Sync", () => {
     engine.dispose();
     vi.useRealTimers();
     rmSync(TEST_DIR, { recursive: true, force: true });
+    if (ORIGINAL_PROMPT_AUTO_RESOLVE === undefined) {
+      delete process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE;
+    } else {
+      process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE =
+        ORIGINAL_PROMPT_AUTO_RESOLVE;
+    }
   });
 
   it("calls setStatus with compact sidebar truth for an active agent", async () => {
@@ -1735,6 +1744,732 @@ describe("Sidebar Sync", () => {
         surface: "surface:seat-mismatch",
       }),
     );
+  });
+
+  it("keeps a prompt-blocked agent discoverable through startup purge after restart", async () => {
+    const agentId = "auto-claude-frozen-across-restart";
+    const surfaceRef = "surface:frozen-across-restart";
+    const frozenPrompt = [
+      "Bash command",
+      "  cat /etc/shells",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, allow reading from etc/ from this project",
+      "  3. No",
+    ].join("\n");
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: agentId,
+        surface_id: surfaceRef,
+        workspace_id: "workspace:cmuxlayer",
+        state: "error",
+        error: "Auto-discovered agent reported a frozen state",
+        blocked_on_prompt: true,
+        blocked_on_prompt_since: "2026-08-14T13:00:00.000Z",
+      }),
+    );
+    liveSurfaces = [
+      {
+        ...makeSurface(surfaceRef),
+        title: "",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+    ];
+    mockClient.readScreen.mockResolvedValue({
+      surface: surfaceRef,
+      text: frozenPrompt,
+      lines: frozenPrompt.split("\n").length,
+      scrollback_used: false,
+    });
+
+    engine.dispose();
+    const restartedRegistry = new AgentRegistry(
+      stateMgr,
+      async () => liveSurfaces,
+    );
+    engine = new AgentEngine(stateMgr, restartedRegistry, mockClient, {
+      spawnPreflight: async () => {},
+      sessionIdentityResolver: () => null,
+      inboxOpts,
+      fleetSidebarPublisher: {
+        publish: () => {},
+        dispose: () => {},
+      },
+    });
+    const discovery = new AgentDiscovery({
+      listSurfaces: async () => liveSurfaces,
+      readScreen: (surface, opts) => mockClient.readScreen(surface, opts),
+    });
+
+    await engine.initialize(discovery);
+    await engine.runSweep();
+
+    expect(engine.listAgents({ blocked_on_prompt: true })).toEqual([
+      expect.objectContaining({
+        agent_id: agentId,
+        blocked_on_prompt: true,
+      }),
+    ]);
+    expect(mockClient.clearStatus).not.toHaveBeenCalledWith(
+      agentId,
+      expect.anything(),
+    );
+  });
+
+  it("keeps the default-off prompt resolver key ledger empty for resolvable and hostile choosers", async () => {
+    const parentId = "prompt-freeze-parent";
+    const parentSurface = "surface:prompt-freeze-parent";
+    const cases = [
+      {
+        name: "codex-model-menu",
+        cli: "codex" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "",
+          "› /model",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "codex-update-menu",
+        cli: "codex" as const,
+        screen: readFileSync(
+          new URL(
+            "./fixtures/painpoints/codex-update-menu.txt",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      },
+      {
+        name: "reviewer-p1-apply-abort",
+        cli: "codex" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "› /model",
+          "❯ 1. gpt-5.6-sol",
+          "  2. gpt-5.6-terra",
+          "",
+          "Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "  1. Apply",
+          "  2. Abort",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+    ].map((entry) => ({
+      ...entry,
+      agentId: `prompt-freeze-${entry.name}`,
+      surfaceRef: `surface:prompt-freeze-${entry.name}`,
+    }));
+    const screens = new Map<string, string>([
+      [parentSurface, "Claude Code\n✶ Coordinating… (4s · esc to interrupt)"],
+      ...cases.map((entry) => [entry.surfaceRef, entry.screen] as const),
+    ]);
+
+    engine.dispose();
+    engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => liveSurfaces),
+      mockClient,
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts,
+        haltAwaitingInputDwellMs: 0,
+        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: parentId,
+        surface_id: parentSurface,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        role: "orchestrator",
+        state: "working",
+        halt_escalation: false,
+      }),
+    );
+    for (const entry of cases) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: entry.agentId,
+          surface_id: entry.surfaceRef,
+          workspace_id: "workspace:cmuxlayer",
+          cli: entry.cli,
+          role: "worker",
+          parent_agent_id: parentId,
+          spawn_depth: 1,
+          state: "idle",
+          blocked_on_prompt: false,
+          blocked_on_prompt_since: null,
+        }),
+      );
+    }
+    liveSurfaces = [
+      {
+        ...makeSurface(parentSurface),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+      ...cases.map((entry) => ({
+        ...makeSurface(entry.surfaceRef),
+        title: "cmuxlayerCodex",
+        workspace_ref: "workspace:cmuxlayer",
+      })),
+    ];
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      const text = screens.get(surface);
+      if (text === undefined) throw new Error(`missing prompt-freeze screen for ${surface}`);
+      return {
+        surface,
+        text,
+        lines: text.split("\n").length,
+        scrollback_used: false,
+      };
+    });
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    await engine.runSweep();
+
+    expect(mockClient.sendKey).not.toHaveBeenCalled();
+    expect(
+      stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter(
+          (event) =>
+            (event as { event_type?: string }).event_type === "resolved_prompt",
+        ),
+    ).toEqual([]);
+    expect(
+      engine
+        .listAgents({ blocked_on_prompt: true })
+        .map((agent) => agent.agent_id)
+        .sort(),
+    ).toEqual(cases.map((entry) => entry.agentId).sort());
+    expect(
+      stateMgr
+        .getEventLog()
+        .readEntries()
+        .filter(
+          (event) =>
+            (event as { event_type?: string }).event_type ===
+            "agent_halt_escalation",
+        )
+        .map((event) => (event as { agent_id: string }).agent_id)
+        .sort(),
+    ).toEqual(cases.map((entry) => entry.agentId).sort());
+  });
+
+  it("resolves safe prompt menus, escalates decisions untouched, and ignores activity in one production run", async () => {
+    process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE = "1";
+    const parentId = "prompt-redirect-parent";
+    const parentSurface = "surface:prompt-redirect-parent";
+    const fixture = (name: string) =>
+      readFileSync(
+        new URL(`./fixtures/painpoints/${name}.txt`, import.meta.url),
+        "utf8",
+      );
+    const cases = [
+      {
+        name: "model-menu",
+        cli: "codex" as const,
+        kind: "resolve" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "",
+          "› /model",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "  3. gpt-5.6-luna",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+        recovered:
+          "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+      },
+      {
+        name: "update-menu",
+        cli: "codex" as const,
+        kind: "resolve" as const,
+        screen: fixture("codex-update-menu"),
+        recovered: "gpt-5.6-sol high · 83% left\n› Find and fix a bug in @filename",
+      },
+      {
+        name: "real-human-question",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: fixture("claude-ask-user-question-picker-2026-07-13"),
+      },
+      {
+        name: "synthetic-human-question",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: fixture("claude-ask-user-question-overlay"),
+      },
+      {
+        name: "destructive-permission",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: fixture("claude-permission-confirmation"),
+      },
+      {
+        name: "unknown-chooser",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "  3. Cancel",
+        ].join("\n"),
+      },
+      {
+        name: "modern-destructive-permission",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+          "",
+          "Do you want to run this command?",
+          "",
+          "❯ 1. Yes",
+          "  2. Yes, and don't ask again this session",
+          "  3. No, and tell Claude what to do differently (esc)",
+        ].join("\n"),
+      },
+      {
+        name: "codex-approval-under-stale-model-list",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 64% left",
+          "",
+          "› 1. gpt-5.6-sol (current)",
+          "  2. gpt-5.6-terra",
+          "",
+          "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "",
+          "❯ 1. Run it",
+          "  2. Skip",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "codex-approval-under-canon-content",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 58% left",
+          "",
+          "⏺ Read(golems/standards/fleet-canon.md)",
+          "  1. gpt-5.6-sol — default codex pin",
+          "  2. gpt-5.6-terra — opt-in only",
+          "",
+          "⏺ Codex wants to run: git push --force origin main",
+          "",
+          "❯ 1. Run it",
+          "  2. Skip",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "permission-with-quoted-activity-text",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "> review src/screen-parser.ts",
+          "",
+          "⏺ Read(src/screen-parser.ts)",
+          '  ⎿   const workingMarkers = [" /loop", "esc to interrupt"];',
+          "",
+          "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+          "",
+          "Do you want to run this command?",
+          "",
+          "❯ 1. Yes",
+          "  2. No, and tell Claude what to do differently (esc)",
+        ].join("\n"),
+      },
+      {
+        name: "codex-approval-no-glyph-model-echo-above",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 61% left",
+          "",
+          "› /model",
+          "",
+          "Codex wants to run:",
+          "  rm -rf /Users/etanheyman/Gits/cmuxlayer",
+          "",
+          "❯ 1. Yes, run it",
+          "  2. No",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "claude-confirm-glyph-scrolled-out-of-window",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "⏺ Bash(rm -rf ~/Gits/cmuxlayer)",
+          "  ⎿ line1",
+          "  ⎿ line2",
+          "  ⎿ line3",
+          "  ⎿ line4",
+          "  ⎿ line5",
+          "  ⎿ line6",
+          "  ⎿ line7",
+          "  ⎿ line8",
+          "> /model opus",
+          "",
+          "Do you want to run this command?",
+          "❯ 1. Yes",
+          "  2. No",
+        ].join("\n"),
+      },
+      {
+        name: "update-banner-above-destructive-confirm",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "Update available!",
+          "See full release notes:",
+          "https://github.com/openai/codex/releases/latest",
+          "> Release notes",
+          "  Skip until next version",
+          "",
+          "Codex wants to run: rm -rf /Users/etanheyman/Gits",
+          "❯ 1. Yes, run it",
+          "  2. No",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "human-question-with-model-named-options",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 61% left",
+          "",
+          "Which model should the new worker run?",
+          "",
+          "❯ 1. gpt-5.6-sol",
+          "  2. gpt-5.6-terra",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "imperative-human-model-choice",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          "gpt-5.6-sol high · 61% left",
+          "",
+          "Choose the model for the new worker.",
+          "",
+          "❯ 1. gpt-5.6-sol",
+          "  2. gpt-5.6-terra",
+          "",
+          "Press enter to confirm or esc to go back",
+        ].join("\n"),
+      },
+      {
+        name: "model-echo-one-line-above-yes-no-confirm",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "> /model opus",
+          "Do you want to run this command?",
+          "❯ 1. Yes",
+          "  2. No",
+        ].join("\n"),
+      },
+      {
+        name: "reworded-codex-update-chooser",
+        cli: "codex" as const,
+        kind: "escalate" as const,
+        screen: [
+          ">_ OpenAI Codex",
+          "",
+          "A newer build is ready to install.",
+          "Read what changed:",
+          "https://github.com/openai/codex/releases/latest",
+          "",
+          "> What changed",
+          "  Not this time",
+        ].join("\n"),
+      },
+      {
+        name: "box-drawn-picker",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "┌──────────────────────────────┐",
+          "│ Which branch should I merge? │",
+          "│ ❯ 1. main                    │",
+          "│   2. release                 │",
+          "└──────────────────────────────┘",
+        ].join("\n"),
+      },
+      {
+        name: "healthy-ready",
+        cli: "claude" as const,
+        kind: "ignore" as const,
+        screen:
+          "Claude Code\n\n⏺ Compared both approaches.\n\n❯\n? for shortcuts",
+      },
+      {
+        name: "static-spinner-over-picker",
+        cli: "claude" as const,
+        kind: "escalate" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "",
+          "✶ Comparing environments… (12s · esc to interrupt)",
+        ].join("\n"),
+      },
+      {
+        name: "active-over-picker",
+        cli: "claude" as const,
+        kind: "ignore" as const,
+        screen: [
+          "Claude Code",
+          "",
+          "Deployment target",
+          "❯ 1. Production",
+          "  2. Staging",
+          "",
+          "✶ Comparing environments… (12s · esc to interrupt)",
+        ].join("\n"),
+      },
+    ].map((entry) => ({
+      ...entry,
+      agentId: `prompt-redirect-${entry.name}`,
+      surfaceRef: `surface:prompt-redirect-${entry.name}`,
+    }));
+    const screensBySurface = new Map<string, string>([
+      [parentSurface, "Claude Code\n✶ Coordinating… (4s · esc to interrupt)"],
+      ...cases.map((entry) => [entry.surfaceRef, entry.screen] as const),
+    ]);
+
+    engine.dispose();
+    engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => liveSurfaces),
+      mockClient,
+      {
+        spawnPreflight: async () => {},
+        sessionIdentityResolver: () => null,
+        inboxOpts,
+        haltAwaitingInputDwellMs: 0,
+        haltWedgedDwellMs: 0,
+        haltWedgedSweeps: 1,
+        fleetSidebarPublisher: { publish: () => {}, dispose: () => {} },
+      },
+    );
+    stateMgr.writeState(
+      makeRecord({
+        agent_id: parentId,
+        surface_id: parentSurface,
+        workspace_id: "workspace:cmuxlayer",
+        cli: "claude",
+        role: "orchestrator",
+        state: "working",
+        halt_escalation: false,
+      }),
+    );
+    for (const entry of cases) {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: entry.agentId,
+          surface_id: entry.surfaceRef,
+          workspace_id: "workspace:cmuxlayer",
+          cli: entry.cli,
+          role: "worker",
+          parent_agent_id: parentId,
+          spawn_depth: 1,
+          state: entry.name.includes("spinner-over-picker") ? "working" : "idle",
+          blocked_on_prompt: false,
+          blocked_on_prompt_since: null,
+        }),
+      );
+    }
+    liveSurfaces = [
+      {
+        ...makeSurface(parentSurface),
+        title: "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      },
+      ...cases.map((entry) => ({
+        ...makeSurface(entry.surfaceRef),
+        title: entry.cli === "codex" ? "cmuxlayerCodex" : "cmuxlayerClaude",
+        workspace_ref: "workspace:cmuxlayer",
+      })),
+    ];
+    let activityTick = 12;
+    mockClient.readScreen.mockImplementation(async (surface: string) => {
+      let text = screensBySurface.get(surface);
+      if (text === undefined) {
+        throw new Error(`missing redirect screen for ${surface}`);
+      }
+      if (surface === cases.at(-1)?.surfaceRef) {
+        text = text.replace(/\(\d+s ·/, `(${activityTick++}s ·`);
+      }
+      return {
+        surface,
+        text,
+        lines: text.split("\n").length,
+        scrollback_used: false,
+      };
+    });
+    mockClient.sendKey.mockImplementation(
+      async (surface: string, key: string) => {
+        const entry = cases.find(
+          (candidate) => candidate.surfaceRef === surface,
+        );
+        if (
+          key === "escape" &&
+          entry?.kind === "resolve" &&
+          entry.recovered
+        ) {
+          screensBySurface.set(surface, entry.recovered);
+        }
+      },
+    );
+    await engine.getRegistry().reconstitute();
+
+    await engine.runSweep();
+    expect(engine.getAgentState("prompt-redirect-active-over-picker")).toMatchObject({
+      halt_last_progress_signature: expect.any(String),
+    });
+    await engine.runSweep();
+    await engine.runSweep();
+
+    const forgedAuditCase = cases.find(
+      (entry) => entry.name === "codex-approval-no-glyph-model-echo-above",
+    )!;
+    (engine as any).appendResolvedPromptEvent({
+      agent: engine.getAgentState(forgedAuditCase.agentId),
+      disposition: {
+        kind: "resolve",
+        prompt_type: "model_menu",
+        key: "escape",
+      },
+      beforeControlState: "interactive_overlay",
+      afterControlState: "ready",
+      screenText: forgedAuditCase.screen,
+      outcome: "recovered",
+      error: null,
+      nowIso: "2026-08-14T17:30:00.000Z",
+    });
+
+    const keyTargets = mockClient.sendKey.mock.calls.map(([surface, key]) => ({
+      surface,
+      key,
+    }));
+    expect(keyTargets).toEqual(
+      cases
+        .filter((entry) => entry.kind === "resolve")
+        .map((entry) => ({ surface: entry.surfaceRef, key: "escape" })),
+    );
+    for (const entry of cases.filter(
+      (candidate) => candidate.kind === "escalate",
+    )) {
+      expect(
+        keyTargets.filter(({ surface }) => surface === entry.surfaceRef),
+      ).toEqual([]);
+    }
+    const resolvedEvents = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (event) =>
+          (event as { event_type?: string }).event_type === "resolved_prompt",
+      );
+    expect(resolvedEvents).toEqual(
+      expect.arrayContaining(
+        cases
+          .filter((entry) => entry.kind === "resolve")
+          .map((entry) =>
+            expect.objectContaining({
+              event_type: "resolved_prompt",
+              agent_id: entry.agentId,
+              key_sent: "escape",
+              outcome: "recovered",
+            }),
+          ),
+      ),
+    );
+    expect(resolvedEvents).toHaveLength(2);
+
+    const escalatedIds = stateMgr
+      .getEventLog()
+      .readEntries()
+      .filter(
+        (event) =>
+          (event as { event_type?: string }).event_type ===
+          "agent_halt_escalation",
+      )
+      .map((event) => (event as { agent_id: string }).agent_id)
+      .sort();
+    expect(escalatedIds).toEqual(
+      cases
+        .filter((entry) => entry.kind === "escalate")
+        .map((entry) => entry.agentId)
+        .sort(),
+    );
+    expect(
+      engine
+        .listAgents({ blocked_on_prompt: true })
+        .map((agent) => agent.agent_id)
+        .sort(),
+    ).toEqual(
+      cases
+        .filter((entry) => entry.kind === "escalate")
+        .map((entry) => entry.agentId)
+        .sort(),
+    );
+    for (const entry of cases.filter(
+      (candidate) => candidate.kind !== "escalate",
+    )) {
+      expect(engine.getAgentState(entry.agentId)).toMatchObject({
+        blocked_on_prompt: false,
+        blocked_on_prompt_since: null,
+      });
+      expect(
+        engine.getAgentState(entry.agentId)?.halt_episode_type ?? null,
+      ).toBeNull();
+    }
   });
 
   it("clears stale workspace-scoped sidebar rows during startup purge after restart", async () => {

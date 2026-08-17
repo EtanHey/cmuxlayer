@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentDiscovery,
+  discoveredStatusToAgentState,
   inferRepoFromDiscovery,
 } from "../src/agent-discovery.js";
 
@@ -16,6 +17,10 @@ const deadCodexShellFixture = JSON.parse(
 ) as { lines_80: string };
 
 describe("AgentDiscovery", () => {
+  it("keeps a frozen discovered agent non-terminal while it waits for input", () => {
+    expect(discoveredStatusToAgentState("frozen")).toBe("error");
+  });
+
   it("derives a repo root instead of a nested cwd basename", () => {
     expect(
       inferRepoFromDiscovery({

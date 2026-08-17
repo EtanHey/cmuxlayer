@@ -43,6 +43,7 @@ import type {
   CmuxSendOptions,
   CmuxStatusUpdate,
   CmuxWorkspace,
+  ParsedScreenResult,
   ParsedScreenStatus,
 } from "./types.js";
 import {
@@ -78,7 +79,16 @@ import {
   type WatchRecord,
   type WatchSpec,
 } from "./watch-spec.js";
-import { cleanScreenText, parseScreen } from "./screen-parser.js";
+import {
+  classifyPromptDisposition,
+  cleanScreenText,
+  containsPromptApprovalChooser,
+  hasVisibleAgentProgress,
+  isBlockingPromptChooserScreen,
+  isPromptResolutionAuditSafe,
+  parseScreen,
+  type PromptDisposition,
+} from "./screen-parser.js";
 import {
   canonicalRoleColumn,
   chooseAgentSpawnPlacement,
@@ -592,6 +602,7 @@ const DEFAULT_HALT_AWAITING_INPUT_DWELL_MS = 120_000;
 const DEFAULT_HALT_IDLE_WITHOUT_DONE_DWELL_MS = 15 * 60_000;
 const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
 const DEFAULT_HALT_WEDGED_SWEEPS = 3;
+const PROMPT_MOTION_GRACE_MS = 30_000;
 const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
 /**
  * Harness responses that mean "I refused this resume command" -- a wrong flag,
@@ -681,6 +692,11 @@ interface SidebarStatusSnapshot {
 interface FleetScreenProgressSnapshot {
   signature: string;
   lastProgressAtMs: number;
+}
+
+interface HaltSinkResolution {
+  sink: AgentRecord | null;
+  fallback: boolean;
 }
 
 export interface SweepTimingOptions {
@@ -1137,6 +1153,12 @@ export class AgentEngine {
   private readyPatternMatches = new Map<string, number>();
   /** agentId → consecutive bound-screen observations at a bare shell. */
   private cliExitShellMatches = new Map<string, number>();
+  /** One failed safe-resolution attempt per unchanged prompt screen. */
+  private promptResolutionFailures = new Map<string, string>();
+  /** Last time changing output proved that chooser chrome belonged to live work. */
+  private promptMotionObservedAtMs = new Map<string, number>();
+  /** Last raw chooser screen used only to prove visible cross-sweep motion. */
+  private promptMotionScreenSignatures = new Map<string, string>();
   /** Best-effort outbox drainer invoked each sweep (injectable for tests). */
   private outboxDrain: () => Promise<unknown>;
   /** Guards against overlapping outbox drains if a sweep runs long. */
@@ -1169,6 +1191,7 @@ export class AgentEngine {
   private haltIdleWithoutDoneDwellMs: number;
   private haltWedgedDwellMs: number;
   private haltWedgedSweeps: number;
+  private autoResolvePrompts: boolean;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -1221,6 +1244,8 @@ export class AgentEngine {
           DEFAULT_HALT_WEDGED_SWEEPS,
         ),
     );
+    this.autoResolvePrompts =
+      process.env.CMUXLAYER_EXPERIMENTAL_PROMPT_AUTO_RESOLVE === "1";
     this.loadDeliveryReceipts();
     this.registry = registry;
     this.client = client;
@@ -2633,6 +2658,21 @@ export class AgentEngine {
       previousAgentId,
       nextAgentId,
     );
+    this.rekeyAgentMapEntry(
+      this.promptResolutionFailures,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentMapEntry(
+      this.promptMotionObservedAtMs,
+      previousAgentId,
+      nextAgentId,
+    );
+    this.rekeyAgentMapEntry(
+      this.promptMotionScreenSignatures,
+      previousAgentId,
+      nextAgentId,
+    );
     this.rekeyAgentEventSet(this.loggedEvents, previousAgentId, nextAgentId);
     this.rekeyAgentEventSet(this.notifiedEvents, previousAgentId, nextAgentId);
     if (this.deliveredLeadMonitorDeathAlerts.delete(previousAgentId)) {
@@ -3272,37 +3312,288 @@ export class AgentEngine {
     return updated;
   }
 
+  private persistPromptBlockedState(
+    agent: AgentRecord,
+    blocked: boolean,
+    nowIso: string,
+  ): AgentRecord {
+    if (blocked && agent.blocked_on_prompt === true) {
+      return agent;
+    }
+    if (
+      !blocked &&
+      agent.blocked_on_prompt !== true &&
+      agent.blocked_on_prompt_since == null
+    ) {
+      return agent;
+    }
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      blocked_on_prompt: blocked,
+      blocked_on_prompt_since: blocked
+        ? (agent.blocked_on_prompt_since ?? nowIso)
+        : null,
+    });
+    this.registry.set(agent.agent_id, updated);
+    return updated;
+  }
+
+  private async haltSinkQuality(
+    candidate: AgentRecord,
+    nowMs: number,
+  ): Promise<"healthy" | "fallback" | "dead"> {
+    try {
+      const screen = await this.readAgentScreen(candidate, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+      });
+      const parsed = parseScreen(screen.text);
+      if (
+        parsed.control_state === "shell" ||
+        parsed.control_state === "dead" ||
+        parsed.control_state === "stale_surface"
+      ) {
+        return "dead";
+      }
+      if (
+        parsed.agent_type === "unknown" ||
+        parsed.control_state === "permission_prompt" ||
+        parsed.control_state === "interactive_overlay" ||
+        this.isMatureHaltEpisode(candidate, nowMs)
+      ) {
+        return "fallback";
+      }
+      return "healthy";
+    } catch {
+      // A known agent inbox remains a best-effort sink even when screen proof
+      // is unavailable. Registry observability does not depend on this write.
+      return "fallback";
+    }
+  }
+
+  private async fleetHaltSink(
+    agent: AgentRecord,
+    nowMs: number,
+    visited: ReadonlySet<string>,
+  ): Promise<AgentRecord | null> {
+    const candidates = this.registry
+      .list()
+      .filter(
+        (candidate) =>
+          candidate.agent_id !== agent.agent_id &&
+          !visited.has(candidate.agent_id) &&
+          !candidate.parent_agent_id,
+      )
+      .sort((left, right) => {
+        const leftScore =
+          (left.role === "orchestrator" ? 2 : 0) +
+          (left.surface_provenance === "cmuxlayer_spawn" ? 1 : 0);
+        const rightScore =
+          (right.role === "orchestrator" ? 2 : 0) +
+          (right.surface_provenance === "cmuxlayer_spawn" ? 1 : 0);
+        return (
+          rightScore - leftScore || left.agent_id.localeCompare(right.agent_id)
+        );
+      });
+    const bestSink = async (
+      scoped: AgentRecord[],
+    ): Promise<AgentRecord | null> => {
+      let fallback: AgentRecord | null = null;
+      for (const candidate of scoped) {
+        const quality = await this.haltSinkQuality(candidate, nowMs);
+        if (quality === "healthy") return candidate;
+        if (quality === "fallback" && !fallback) fallback = candidate;
+      }
+      return fallback;
+    };
+    const sameWorkspace = candidates.filter(
+      (candidate) => candidate.workspace_id === agent.workspace_id,
+    );
+    const scopedSink = await bestSink(sameWorkspace);
+    if (scopedSink) return scopedSink;
+    return bestSink(
+      candidates.filter(
+        (candidate) => candidate.workspace_id !== agent.workspace_id,
+      ),
+    );
+  }
+
   private async nearestLiveHaltAncestor(
     agent: AgentRecord,
     nowMs: number,
-  ): Promise<AgentRecord | null> {
+  ): Promise<HaltSinkResolution> {
     const visited = new Set<string>([agent.agent_id]);
+    let fallback: AgentRecord | null = null;
     let ancestorId = agent.parent_agent_id;
     while (ancestorId && !visited.has(ancestorId)) {
       visited.add(ancestorId);
       const ancestor =
         this.registry.get(ancestorId) ?? this.stateMgr.readState(ancestorId);
-      if (!ancestor) return null;
-      try {
-        const screen = await this.readAgentScreen(ancestor, {
-          lines: BOOT_SESSION_CAPTURE_LINES,
-        });
-        const parsed = parseScreen(screen.text);
-        const live =
-          parsed.agent_type !== "unknown" &&
-          parsed.control_state !== "shell" &&
-          parsed.control_state !== "dead" &&
-          parsed.control_state !== "stale_surface" &&
-          parsed.control_state !== "permission_prompt" &&
-          parsed.control_state !== "interactive_overlay" &&
-          !this.isMatureHaltEpisode(ancestor, nowMs);
-        if (live) return ancestor;
-      } catch {
-        // A parent whose live screen cannot be proven is not an escalation sink.
-      }
+      if (!ancestor) break;
+      const quality = await this.haltSinkQuality(ancestor, nowMs);
+      if (quality === "healthy") return { sink: ancestor, fallback: false };
+      if (quality === "fallback") fallback = ancestor;
       ancestorId = ancestor.parent_agent_id;
     }
-    return null;
+    if (fallback) return { sink: fallback, fallback: true };
+    return {
+      sink: await this.fleetHaltSink(agent, nowMs, visited),
+      fallback: true,
+    };
+  }
+
+  private appendHaltEscalationEvent(
+    agent: AgentRecord,
+    haltType: AgentHaltType,
+    outcome:
+      | "ancestor_dispatched"
+      | "fallback_dispatched"
+      | "undeliverable"
+      | "dispatch_failed",
+    sinkAgentId: string | null,
+    error: string | null,
+    nowIso: string,
+  ): void {
+    try {
+      this.stateMgr.getEventLog().appendAgentHaltEscalation({
+        ts: nowIso,
+        event_type: "agent_halt_escalation",
+        agent_id: agent.agent_id,
+        surface_id: agent.surface_id,
+        parent_agent_id: agent.parent_agent_id,
+        halt_type: haltType,
+        outcome,
+        sink_agent_id: sinkAgentId,
+        missing_ancestor_count: agent.halt_missing_ancestor_count ?? 0,
+        delivery_failure_count: agent.halt_delivery_failure_count ?? 0,
+        error,
+      });
+    } catch (eventError) {
+      console.error(
+        "[cmuxlayer] failed to log halt escalation outcome:",
+        eventError,
+      );
+    }
+  }
+
+  private appendResolvedPromptEvent(input: {
+    agent: AgentRecord;
+    disposition: Extract<PromptDisposition, { kind: "resolve" }>;
+    beforeControlState: ParsedScreenResult["control_state"];
+    afterControlState: ParsedScreenResult["control_state"] | null;
+    screenText: string;
+    outcome: "recovered" | "failed";
+    error: string | null;
+    nowIso: string;
+  }): boolean {
+    const excerptSource = cleanScreenText(input.screenText, 8);
+    if (
+      !isPromptResolutionAuditSafe(input.screenText, input.agent.cli) ||
+      containsPromptApprovalChooser(excerptSource)
+    ) {
+      return false;
+    }
+    const excerpt = excerptSource.replace(/\s+/g, " ").trim().slice(0, 240);
+    this.stateMgr.getEventLog().appendResolvedPrompt({
+      ts: input.nowIso,
+      event_type: "resolved_prompt",
+      agent_id: input.agent.agent_id,
+      surface_id: input.agent.surface_id,
+      workspace_id: input.agent.workspace_id ?? null,
+      prompt_type: input.disposition.prompt_type,
+      key_sent: input.disposition.key,
+      outcome: input.outcome,
+      before_control_state: input.beforeControlState,
+      after_control_state: input.afterControlState,
+      screen_signature: screenTextSignature(input.screenText),
+      screen_excerpt: excerpt,
+      error: input.error,
+    });
+    return true;
+  }
+
+  private async maybeResolvePrompt(
+    agent: AgentRecord,
+    screenText: string,
+    disposition: Extract<PromptDisposition, { kind: "resolve" }>,
+    nowIso: string,
+  ): Promise<{ agent: AgentRecord; recovered: boolean }> {
+    const signature = screenTextSignature(screenText);
+    if (this.promptResolutionFailures.get(agent.agent_id) === signature) {
+      return { agent, recovered: false };
+    }
+    if (
+      !isPromptResolutionAuditSafe(screenText, agent.cli) ||
+      containsPromptApprovalChooser(cleanScreenText(screenText, 8))
+    ) {
+      this.promptResolutionFailures.set(agent.agent_id, signature);
+      return { agent, recovered: false };
+    }
+
+    const before = parseScreen(screenText);
+    let afterControlState: ParsedScreenResult["control_state"] | null = null;
+    let error: string | null = null;
+    try {
+      const route = await this.resolveAgentIoRoute(agent.agent_id);
+      const assertSurfaceBindingCurrent = async (): Promise<void> => {
+        await this.resolveUnchangedAgentIoRoute(
+          agent.agent_id,
+          route,
+          "prompt resolution",
+        );
+      };
+      await this.client.sendKey(route.surface_id, disposition.key, {
+        workspace: route.workspace_id ?? undefined,
+        ...this.stableSurfaceWriteOptions(route.surface_uuid),
+        beforeMutation: assertSurfaceBindingCurrent,
+      });
+      await assertSurfaceBindingCurrent();
+      const afterScreen = await this.client.readScreen(route.surface_id, {
+        lines: BOOT_SESSION_CAPTURE_LINES,
+        workspace: route.workspace_id ?? undefined,
+      });
+      await assertSurfaceBindingCurrent();
+      const after = parseScreen(afterScreen.text);
+      afterControlState = after.control_state;
+      const recovered =
+        after.control_state === "ready" || after.control_state === "busy";
+      if (!recovered) {
+        error = `prompt remained ${after.control_state} after Escape`;
+        this.promptResolutionFailures.set(agent.agent_id, signature);
+      } else {
+        this.promptResolutionFailures.delete(agent.agent_id);
+      }
+      const auditWritten = this.appendResolvedPromptEvent({
+        agent,
+        disposition,
+        beforeControlState: before.control_state,
+        afterControlState,
+        screenText,
+        outcome: recovered ? "recovered" : "failed",
+        error,
+        nowIso,
+      });
+      if (!auditWritten) {
+        this.promptResolutionFailures.set(agent.agent_id, signature);
+        return { agent, recovered: false };
+      }
+      if (!recovered) return { agent, recovered: false };
+
+      agent = this.persistPromptBlockedState(agent, false, nowIso);
+      return { agent: this.clearHaltEpisode(agent), recovered: true };
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      this.promptResolutionFailures.set(agent.agent_id, signature);
+      this.appendResolvedPromptEvent({
+        agent,
+        disposition,
+        beforeControlState: before.control_state,
+        afterControlState,
+        screenText,
+        outcome: "failed",
+        error,
+        nowIso,
+      });
+      return { agent, recovered: false };
+    }
   }
 
   private async maybeEscalateLiveHalt(
@@ -3311,8 +3602,82 @@ export class AgentEngine {
   ): Promise<AgentRecord> {
     const nowMs = this.haltNow();
     const nowIso = new Date(nowMs).toISOString();
-    if (agent.halt_escalation === false) return agent;
     const parsed = parseScreen(screenText);
+    let disposition = classifyPromptDisposition(screenText, agent.cli);
+    if (disposition.kind === "resolve" && this.autoResolvePrompts) {
+      const resolution = await this.maybeResolvePrompt(
+        agent,
+        screenText,
+        disposition,
+        nowIso,
+      );
+      agent = resolution.agent;
+      if (resolution.recovered) return agent;
+      disposition = {
+        kind: "escalate",
+        prompt_type: "human_or_unknown_chooser",
+      };
+    } else if (disposition.kind === "resolve") {
+      disposition = {
+        kind: "escalate",
+        prompt_type: "human_or_unknown_chooser",
+      };
+    } else {
+      this.promptResolutionFailures.delete(agent.agent_id);
+    }
+    const progressSignature = this.observableHaltProgressSignature(
+      agent,
+      screenText,
+    );
+    const hasVisibleProgress = hasVisibleAgentProgress(screenText, agent.cli);
+    const canObservePromptMotion =
+      disposition.kind === "escalate" &&
+      disposition.prompt_type === "human_or_unknown_chooser" &&
+      isBlockingPromptChooserScreen(screenText) &&
+      hasVisibleProgress;
+    const promptScreenSignature = screenTextSignature(screenText);
+    const previousPromptScreenSignature = this.promptMotionScreenSignatures.get(
+      agent.agent_id,
+    );
+    const promptScreenChanged =
+      canObservePromptMotion &&
+      previousPromptScreenSignature !== undefined &&
+      previousPromptScreenSignature !== promptScreenSignature;
+    if (canObservePromptMotion) {
+      this.promptMotionScreenSignatures.set(
+        agent.agent_id,
+        promptScreenSignature,
+      );
+    } else {
+      this.promptMotionScreenSignatures.delete(agent.agent_id);
+    }
+    if (promptScreenChanged) {
+      this.promptMotionObservedAtMs.set(agent.agent_id, nowMs);
+    } else if (!canObservePromptMotion) {
+      this.promptMotionObservedAtMs.delete(agent.agent_id);
+    }
+    const motionObservedAt = this.promptMotionObservedAtMs.get(agent.agent_id);
+    const hasObservedPromptMotion =
+      disposition.kind === "escalate" &&
+      disposition.prompt_type === "human_or_unknown_chooser" &&
+      isBlockingPromptChooserScreen(screenText) &&
+      hasVisibleProgress &&
+      motionObservedAt !== undefined &&
+      nowMs - motionObservedAt < PROMPT_MOTION_GRACE_MS;
+    if (hasObservedPromptMotion) {
+      agent = this.persistPromptBlockedState(agent, false, nowIso);
+      return this.clearHaltEpisode(agent, {
+        halt_last_active_at: nowIso,
+        halt_last_progress_at_ms: nowMs,
+        halt_last_progress_signature: progressSignature,
+      });
+    }
+    agent = this.persistPromptBlockedState(
+      agent,
+      disposition.kind === "escalate",
+      nowIso,
+    );
+    if (agent.halt_escalation === false) return agent;
     if (
       parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -3341,10 +3706,6 @@ export class AgentEngine {
       );
     }
 
-    const progressSignature = this.observableHaltProgressSignature(
-      agent,
-      screenText,
-    );
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
     const blockingBackgroundWaitMs =
@@ -3392,6 +3753,8 @@ export class AgentEngine {
             : 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
+        halt_fallback_sink_id: null,
+        halt_last_delivery_error: null,
         halt_last_observable_action: parsed.current_action ?? haltType,
       });
       this.registry.set(agent.agent_id, episode);
@@ -3404,6 +3767,8 @@ export class AgentEngine {
         halt_episode_observations: 1,
         halt_notification_sent_at: null,
         halt_notified_ancestor_id: null,
+        halt_fallback_sink_id: null,
+        halt_last_delivery_error: null,
         halt_last_observable_action: parsed.current_action ?? haltType,
       });
       this.registry.set(agent.agent_id, episode);
@@ -3427,8 +3792,30 @@ export class AgentEngine {
     ) {
       return episode;
     }
-    const ancestor = await this.nearestLiveHaltAncestor(episode, nowMs);
-    if (!ancestor) return episode;
+    const resolution = await this.nearestLiveHaltAncestor(episode, nowMs);
+    if (resolution.fallback) {
+      episode = this.stateMgr.updateRecord(episode.agent_id, {
+        halt_missing_ancestor_count:
+          (episode.halt_missing_ancestor_count ?? 0) + 1,
+        halt_fallback_sink_id: resolution.sink?.agent_id ?? null,
+        halt_last_delivery_error: resolution.sink
+          ? null
+          : "no halt escalation sink available",
+      });
+      this.registry.set(episode.agent_id, episode);
+    }
+    const ancestor = resolution.sink;
+    if (!ancestor) {
+      this.appendHaltEscalationEvent(
+        episode,
+        haltType,
+        "undeliverable",
+        null,
+        episode.halt_last_delivery_error ?? "no halt escalation sink available",
+        nowIso,
+      );
+      return episode;
+    }
     let resumeCommand = "no captured session; inspect the live surface";
     if (episode.cli_session_id) {
       try {
@@ -3466,11 +3853,35 @@ export class AgentEngine {
       const notified = this.stateMgr.updateRecord(episode.agent_id, {
         halt_notification_sent_at: nowIso,
         halt_notified_ancestor_id: ancestor.agent_id,
+        halt_last_delivery_error: null,
       });
       this.registry.set(episode.agent_id, notified);
+      this.appendHaltEscalationEvent(
+        notified,
+        haltType,
+        resolution.fallback ? "fallback_dispatched" : "ancestor_dispatched",
+        ancestor.agent_id,
+        null,
+        nowIso,
+      );
       return notified;
-    } catch {
-      return episode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = this.stateMgr.updateRecord(episode.agent_id, {
+        halt_delivery_failure_count:
+          (episode.halt_delivery_failure_count ?? 0) + 1,
+        halt_last_delivery_error: message,
+      });
+      this.registry.set(episode.agent_id, failed);
+      this.appendHaltEscalationEvent(
+        failed,
+        haltType,
+        "dispatch_failed",
+        ancestor.agent_id,
+        message,
+        nowIso,
+      );
+      return failed;
     }
   }
 
@@ -4451,6 +4862,8 @@ export class AgentEngine {
     this.deliveredLeadMonitorDeathAlerts.delete(agentId);
     this.fleetScreenProgress.delete(agentId);
     this.cliExitShellMatches.delete(agentId);
+    this.promptMotionObservedAtMs.delete(agentId);
+    this.promptMotionScreenSignatures.delete(agentId);
   }
 
   private isLeadWatchBlind(
@@ -7777,6 +8190,22 @@ export class AgentEngine {
         this.registry.set(canonicalAgentId, updated);
       } catch {
         // Preserve the post-condition error for the caller.
+      }
+      throw new Error(error);
+    }
+
+    if (force && !forceSignalAccepted) {
+      const error =
+        `Stop post-condition failed for ${agent.agent_id}: process still alive ` +
+        `(pid=${agent.pid ?? "unknown"} surface=${agent.surface_id} pane=${stopResult.paneRef ?? "unknown"})`;
+      try {
+        const updated = this.stateMgr.updateRecord(canonicalAgentId, {
+          error,
+          quality: "degraded",
+        });
+        this.registry.set(canonicalAgentId, updated);
+      } catch {
+        // Preserve explicit force-stop failure for the caller.
       }
       throw new Error(error);
     }

@@ -51,6 +51,19 @@ describe("agent facade projections", () => {
     });
   });
 
+  it("projects durable prompt blockage in the summary row", () => {
+    const projected = toObservedPublicAgent(
+      makeRecord({ blocked_on_prompt: true }),
+      { derivedAtMs: 2_000 },
+    );
+
+    expect(projected.blocked_on_prompt).toEqual({
+      value: true,
+      source: "registry",
+      observed_at_ms: 2_000,
+    });
+  });
+
   it("exposes whether a listed agent was spawned or adopted", () => {
     const projected = toObservedPublicAgent(
       makeRecord({ surface_provenance: "cmuxlayer_spawn" }),

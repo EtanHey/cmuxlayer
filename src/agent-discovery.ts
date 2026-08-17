@@ -52,6 +52,14 @@ export function inferRepoFromTitle(title: string): string {
   return stripped.replace(/^[A-Z]/, (match) => match.toLowerCase());
 }
 
+function inferCliFromLauncherTitle(
+  title: string | null | undefined,
+): CliType | "unknown" {
+  const launcherTitle = (title ?? "").trim().split(":", 1)[0] ?? "";
+  const match = launcherTitle.match(/(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
+  return (match?.[0]?.toLowerCase() as CliType | undefined) ?? "unknown";
+}
+
 export function inferRepoFromDiscovery(
   discovered: Pick<
     DiscoveredAgent,
@@ -63,9 +71,7 @@ export function inferRepoFromDiscovery(
     discovered.working_directory_source === "terminal_metadata" ||
     discovered.working_directory_source === "surface";
   const cwd = discovered.current_directory?.trim();
-  return trustedCwd && cwd
-    ? inferRepoFromDirectory(cwd, titleRepo)
-    : titleRepo;
+  return trustedCwd && cwd ? inferRepoFromDirectory(cwd, titleRepo) : titleRepo;
 }
 
 export function discoveredStatusToAgentState(
@@ -128,9 +134,14 @@ export class AgentDiscovery {
         workspace: workspaceId ?? undefined,
       });
       const parsed = parseScreen(screen.text);
+      const titleCli = inferCliFromLauncherTitle(surface.title);
       const cli =
         parsed.agent_type === "unknown"
-          ? "unknown"
+          ? (parsed.control_state === "permission_prompt" ||
+              parsed.control_state === "interactive_overlay") &&
+            titleCli !== "unknown"
+            ? titleCli
+            : "unknown"
           : (parsed.agent_type as CliType);
 
       return {
@@ -236,8 +247,7 @@ export class AgentDiscovery {
   }
 
   async scan(force = false): Promise<DiscoveredAgent[]> {
-    const observerScoped =
-      typeof this.deps.observerIdProvider === "function";
+    const observerScoped = typeof this.deps.observerIdProvider === "function";
     const observerId = this.getObserverId();
     const canCache = !observerScoped || observerId !== null;
     if (!canCache || (this.cache && this.cache.observerId !== observerId)) {

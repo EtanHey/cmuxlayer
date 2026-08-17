@@ -108,6 +108,11 @@ export function toObservedPublicAgent(
       "registry",
       registryObservedAtMs,
     ),
+    blocked_on_prompt: observed(
+      record.blocked_on_prompt ?? false,
+      "registry",
+      registryObservedAtMs,
+    ),
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }

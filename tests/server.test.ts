@@ -12511,6 +12511,93 @@ describe("tool handler integration", () => {
       await server.close();
     }
   });
+
+  it("list_agents filters and summarizes persisted prompt blockage without detail=full", async () => {
+    const stateDir = join(CHANNEL_TEST_DIR, "prompt-blocked-filter");
+    rmSync(stateDir, { recursive: true, force: true });
+    const stateMgr = new StateManager(stateDir);
+    const baseRecord = {
+      surface_id: "surface:prompt-filter",
+      workspace_id: "workspace:1",
+      state: "working" as const,
+      repo: "cmuxlayer",
+      model: "gpt-5.6-sol",
+      cli: "codex" as const,
+      cli_session_id: null,
+      task_summary: "prompt filter probe",
+      pid: null,
+      version: 1,
+      created_at: "2026-08-14T13:30:00.000Z",
+      updated_at: "2026-08-14T13:30:00.000Z",
+      error: null,
+      parent_agent_id: null,
+      spawn_depth: 0,
+      role: "worker" as const,
+      deletion_intent: false,
+      quality: "unknown" as const,
+      max_cost_per_agent: null,
+    };
+    stateMgr.writeState({
+      ...baseRecord,
+      agent_id: "prompt-blocked-agent",
+      blocked_on_prompt: true,
+      blocked_on_prompt_since: "2026-08-14T13:29:00.000Z",
+    });
+    stateMgr.writeState({
+      ...baseRecord,
+      agent_id: "healthy-agent",
+      surface_id: "surface:healthy-filter",
+      blocked_on_prompt: false,
+      blocked_on_prompt_since: null,
+    });
+    const mockClient = {
+      listWorkspaces: vi.fn().mockResolvedValue({}),
+      listPanes: vi.fn(),
+      listPaneSurfaces: vi.fn(),
+      readScreen: vi.fn(),
+      log: vi.fn(),
+      setStatus: vi.fn(),
+      clearStatus: vi.fn(),
+      setProgress: vi.fn(),
+      clearProgress: vi.fn(),
+      send: vi.fn(),
+      sendKey: vi.fn(),
+      newSplit: vi.fn(),
+      newSurface: vi.fn(),
+      closeSurface: vi.fn(),
+      selectWorkspace: vi.fn(),
+    };
+    const context = createServerContext({
+      client: mockClient as any,
+      stateDir,
+      controlHealthIntervalMs: 0,
+    });
+    const server = createServer({ context });
+    const tool = (server as any)._registeredTools["list_agents"];
+
+    try {
+      await context.lifecycleStartPromise;
+      const result = await tool.handler(
+        { blocked_on_prompt: true },
+        {} as any,
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+
+      expect(parsed.ok).toBe(true);
+      expect(parsed.count).toBe(1);
+      expect(parsed.agents[0]).toMatchObject({
+        agent_id: "prompt-blocked-agent",
+        blocked_on_prompt: {
+          value: true,
+          source: "registry",
+        },
+      });
+      expect(parsed.agents[0].detail).toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("registry reconstitution error logging", () => {

@@ -47,4 +47,14 @@ describe("in-process WatchSpec production wiring", () => {
       watchNotify: httpNotifyWatch,
     });
   });
+
+  it("passes an explicit in-process state directory into createServer", async () => {
+    await startInProcessRuntime({
+      env: { CMUXLAYER_STATE_DIR: "/tmp/cmuxlayer-prompt-freeze-probe-state" },
+    });
+
+    expect(captured.options).toMatchObject({
+      stateDir: "/tmp/cmuxlayer-prompt-freeze-probe-state",
+    });
+  });
 });

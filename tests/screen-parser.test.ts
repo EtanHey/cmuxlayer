@@ -6,6 +6,7 @@ import {
   resolveModelMax,
   inferContextWindow,
   isPickerOrMenuScreen,
+  classifyPromptDisposition,
 } from "../src/screen-parser.js";
 
 const readFixture = (name: string) =>
@@ -212,6 +213,239 @@ Claude Code
     expect(parsed.control_state).toBe("permission_prompt");
   });
 
+  it("classifies prompt handling from structure and lets activity veto overlays", () => {
+    const modelMenu = [
+      ">_ OpenAI Codex",
+      "› /model",
+      "› 1. gpt-5.6-sol (current)",
+      "  2. gpt-5.6-terra",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const chooserWithoutQuestionPunctuation = [
+      "Claude Code",
+      "Deployment target",
+      "❯ 1. Production",
+      "  2. Staging",
+    ].join("\n");
+    const activeOverChooser = [
+      chooserWithoutQuestionPunctuation,
+      "✶ Comparing environments… (12s · esc to interrupt)",
+    ].join("\n");
+    const modernClaudePermission = [
+      "Claude Code",
+      "",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+      "",
+      "Do you want to run this command?",
+      "",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again this session",
+      "  3. No, and tell Claude what to do differently (esc)",
+    ].join("\n");
+    const codexApprovalUnderStaleModelList = [
+      "gpt-5.6-sol high · 64% left",
+      "",
+      "› 1. gpt-5.6-sol (current)",
+      "  2. gpt-5.6-terra",
+      "",
+      "⏺ Codex wants to run: rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "",
+      "❯ 1. Run it",
+      "  2. Skip",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const codexApprovalUnderCanonContent = [
+      "gpt-5.6-sol high · 58% left",
+      "",
+      "⏺ Read(golems/standards/fleet-canon.md)",
+      "  1. gpt-5.6-sol — default codex pin",
+      "  2. gpt-5.6-terra — opt-in only",
+      "",
+      "⏺ Codex wants to run: git push --force origin main",
+      "",
+      "❯ 1. Run it",
+      "  2. Skip",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const permissionWithQuotedActivityText = [
+      "Claude Code",
+      "",
+      "> review src/screen-parser.ts",
+      "",
+      "⏺ Read(src/screen-parser.ts)",
+      '  ⎿   const workingMarkers = [" /loop", "esc to interrupt"];',
+      "",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer/.worktrees/prompt-freeze)",
+      "",
+      "Do you want to run this command?",
+      "",
+      "❯ 1. Yes",
+      "  2. No, and tell Claude what to do differently (esc)",
+    ].join("\n");
+    const codexApprovalWithModelEcho = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "› /model",
+      "",
+      "Codex wants to run:",
+      "  rm -rf /Users/etanheyman/Gits/cmuxlayer",
+      "",
+      "❯ 1. Yes, run it",
+      "  2. No",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const claudeApprovalWithDistantAction = [
+      "Claude Code",
+      "⏺ Bash(rm -rf ~/Gits/cmuxlayer)",
+      "  ⎿ line1",
+      "  ⎿ line2",
+      "  ⎿ line3",
+      "  ⎿ line4",
+      "  ⎿ line5",
+      "  ⎿ line6",
+      "  ⎿ line7",
+      "  ⎿ line8",
+      "> /model opus",
+      "",
+      "Do you want to run this command?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\n");
+    const destructiveApprovalBelowUpdateMenu = [
+      ">_ OpenAI Codex",
+      "Update available!",
+      "See full release notes:",
+      "https://github.com/openai/codex/releases/latest",
+      "> Release notes",
+      "  Skip until next version",
+      "",
+      "Codex wants to run: rm -rf /Users/etanheyman/Gits",
+      "❯ 1. Yes, run it",
+      "  2. No",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const humanQuestionWithModelOptions = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "Which model should the new worker run?",
+      "",
+      "❯ 1. gpt-5.6-sol",
+      "  2. gpt-5.6-terra",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const imperativeHumanModelChoice = [
+      "gpt-5.6-sol high · 61% left",
+      "",
+      "Choose the model for the new worker.",
+      "",
+      "❯ 1. gpt-5.6-sol",
+      "  2. gpt-5.6-terra",
+      "",
+      "Press enter to confirm or esc to go back",
+    ].join("\n");
+    const approvalImmediatelyBelowModelEcho = [
+      "Claude Code",
+      "",
+      "> /model opus",
+      "Do you want to run this command?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\n");
+    const rewordedCodexUpdateChooser = [
+      ">_ OpenAI Codex",
+      "",
+      "A newer build is ready to install.",
+      "Read what changed:",
+      "https://github.com/openai/codex/releases/latest",
+      "",
+      "> What changed",
+      "  Not this time",
+    ].join("\n");
+    const boxDrawnChooser = [
+      "Claude Code",
+      "",
+      "┌──────────────────────────────┐",
+      "│ Which branch should I merge? │",
+      "│ ❯ 1. main                    │",
+      "│   2. release                 │",
+      "└──────────────────────────────┘",
+    ].join("\n");
+
+    expect(classifyPromptDisposition(modelMenu, "codex")).toEqual({
+      kind: "resolve",
+      prompt_type: "model_menu",
+      key: "escape",
+    });
+    expect(
+      classifyPromptDisposition(
+        readFixture("painpoints/codex-update-menu.txt"),
+        "codex",
+      ),
+    ).toEqual({
+      kind: "resolve",
+      prompt_type: "codex_update_menu",
+      key: "escape",
+    });
+    expect(
+      classifyPromptDisposition(chooserWithoutQuestionPunctuation, "claude"),
+    ).toEqual({
+      kind: "escalate",
+      prompt_type: "human_or_unknown_chooser",
+    });
+    expect(
+      classifyPromptDisposition(
+        readFixture("painpoints/claude-permission-confirmation.txt"),
+        "claude",
+      ),
+    ).toEqual({ kind: "escalate", prompt_type: "permission_prompt" });
+    for (const approval of [
+      modernClaudePermission,
+      codexApprovalUnderStaleModelList,
+      codexApprovalUnderCanonContent,
+      permissionWithQuotedActivityText,
+      codexApprovalWithModelEcho,
+      claudeApprovalWithDistantAction,
+      destructiveApprovalBelowUpdateMenu,
+      humanQuestionWithModelOptions,
+      imperativeHumanModelChoice,
+      approvalImmediatelyBelowModelEcho,
+      rewordedCodexUpdateChooser,
+      boxDrawnChooser,
+    ]) {
+      expect(classifyPromptDisposition(approval, "codex")).toMatchObject({
+        kind: "escalate",
+      });
+      expect(classifyPromptDisposition(approval, "claude")).toMatchObject({
+        kind: "escalate",
+      });
+    }
+    expect(parseScreen(modernClaudePermission)).toMatchObject({
+      status: "frozen",
+      control_state: expect.stringMatching(
+        /^(?:permission_prompt|interactive_overlay)$/,
+      ),
+    });
+    expect(parseScreen(permissionWithQuotedActivityText)).toMatchObject({
+      status: "frozen",
+      control_state: expect.stringMatching(
+        /^(?:permission_prompt|interactive_overlay)$/,
+      ),
+    });
+    expect(classifyPromptDisposition(activeOverChooser, "claude")).toEqual({
+      kind: "escalate",
+      prompt_type: "human_or_unknown_chooser",
+    });
+    expect(parseScreen(activeOverChooser)).toMatchObject({
+      status: "working",
+      control_state: "busy",
+    });
+  });
+
   it("recognizes Claude AskUserQuestion overlays as interactive overlays", () => {
     const parsed = parseScreen(
       readFixture("painpoints/claude-ask-user-question-overlay.txt"),
@@ -343,7 +577,7 @@ Select a model for the next worker:
   });
 
   it("recognizes the long Codex model picker after stale done scrollback", () => {
-    const parsed = parseScreen(`
+    const screen = `
 TASK_DONE
 
 ─ Worked for 1m 26s ──────────────────────────────────────────────────────────
@@ -362,10 +596,16 @@ TASK_DONE
   7. gpt-5.3-codex-spark    Ultra-fast coding model.
 
   Press enter to confirm or esc to go back
-`);
+`;
+    const parsed = parseScreen(screen);
 
     expect(parsed.errors).toContain("interactive_prompt");
     expect(parsed.control_state).toBe("interactive_overlay");
+    expect(classifyPromptDisposition(screen, "codex")).toEqual({
+      kind: "resolve",
+      prompt_type: "model_menu",
+      key: "escape",
+    });
   });
 
   it("recognizes the Codex update menu as an interactive overlay", () => {
