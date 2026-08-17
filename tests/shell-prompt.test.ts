@@ -44,7 +44,9 @@ describe("shell prompt recognition", () => {
     expect(
       launcherFailureFromShell("zsh: command not found: cmuxlayerCodex\n$ "),
     ).toBe("zsh: command not found: cmuxlayerCodex");
-    expect(launcherFailureFromShell("build failed earlier\nsummary\n$ ")).toBeNull();
+    expect(
+      launcherFailureFromShell("build failed earlier\nsummary\n$ "),
+    ).toBeNull();
     expect(launcherFailureFromShell("error: cached warning\n$ ")).toBeNull();
   });
 
@@ -54,11 +56,14 @@ describe("shell prompt recognition", () => {
     "Context left: 12%",
     "Total cost: $",
     "issue #",
-  ])("does not treat a loose readiness suffix as launcher-exit evidence: %s", (line) => {
-    expect(
-      launcherFailureFromShell(`zsh: command not found: pyenv\n${line}`),
-    ).toBeNull();
-  });
+  ])(
+    "does not treat a loose readiness suffix as launcher-exit evidence: %s",
+    (line) => {
+      expect(
+        launcherFailureFromShell(`zsh: command not found: pyenv\n${line}`),
+      ).toBeNull();
+    },
+  );
 
   it.each([
     ["➜  cmuxlayer git:(main) $ ralphCodex -s", "ralphCodex -s"],
@@ -66,5 +71,19 @@ describe("shell prompt recognition", () => {
     ["[etan@mac cmuxlayer]$ ralphCodex -s", "ralphCodex -s"],
   ])("captures pending input from decorated prompt %s", (line, input) => {
     expect(matchShellPromptLine(line)).toEqual({ input });
+  });
+
+  it.each([
+    [" ngff%\netanheyman ~  $ wenfnng", "wenfnng"],
+    [
+      "rbgjrbgjrbgjrb%\netanheyman ~  $ gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb",
+      "gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb",
+    ],
+    ["etanheyman ~  $ sjnfjdnsf", "sjnfjdnsf"],
+  ])("exposes pending junk on live-probe prompt %j", (screen, junk) => {
+    expect(matchesShellPrompt(screen)).toBe(false);
+    expect(matchShellPromptLine(screen.split("\n").at(-1) ?? "")).toEqual({
+      input: junk,
+    });
   });
 });

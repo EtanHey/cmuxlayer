@@ -11,19 +11,14 @@ export function matchShellPromptLine(
   if (barePrompt && barePrompt[1] !== "#") {
     return { input: barePrompt[2] ?? "" };
   }
-  if (
-    barePrompt?.[1] === "#" &&
-    (!barePrompt[2] || opts?.allowRootInput)
-  ) {
+  if (barePrompt?.[1] === "#" && (!barePrompt[2] || opts?.allowRootInput)) {
     return { input: barePrompt[2] ?? "" };
   }
 
   if (!opts?.strict) {
     // Preserve the app-server's established readiness contract while still
     // exposing text after the decorated terminator to pending-input checks.
-    const decoratedPrompt = normalized.match(
-      /^.+?[$%#](?:\s+(.*))?$/u,
-    );
+    const decoratedPrompt = normalized.match(/^.+?[$%#](?:\s+(.*))?$/u);
     if (decoratedPrompt) {
       return { input: decoratedPrompt[1] ?? "" };
     }
@@ -42,6 +37,20 @@ export function matchesShellPrompt(text: string): boolean {
   return matchesShellPromptWithOptions(text, false);
 }
 
+/** Pending text on the last shell prompt line, or null when the line is empty/unrecognized. */
+export function pendingShellPromptInput(text: string): string | null {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]?.trim()) {
+    end -= 1;
+  }
+  if (end === 0) {
+    return null;
+  }
+  const input = matchShellPromptLine(lines[end - 1] ?? "")?.input.trim() ?? "";
+  return input.length > 0 ? input : null;
+}
+
 export function matchesShellPromptStrict(text: string): boolean {
   return matchesShellPromptWithOptions(text, true);
 }
@@ -53,9 +62,7 @@ function matchesShellPromptWithOptions(text: string, strict: boolean): boolean {
     end -= 1;
   }
   const prompt =
-    end > 0
-      ? matchShellPromptLine(lines[end - 1] ?? "", { strict })
-      : null;
+    end > 0 ? matchShellPromptLine(lines[end - 1] ?? "", { strict }) : null;
   return prompt?.input.trim() === "";
 }
 

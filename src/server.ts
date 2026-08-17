@@ -128,6 +128,7 @@ import {
   launcherFailureFromShell,
   matchShellPromptLine,
   matchesShellPrompt,
+  pendingShellPromptInput,
 } from "./shell-prompt.js";
 import {
   CreatedIdentityScope,
@@ -462,6 +463,8 @@ function bootPromptUpdateMaxMs(): number {
 }
 const LAUNCH_SHELL_READY_TIMEOUT_MS = 10_000;
 const LAUNCH_SHELL_READY_POLL_MS = 100;
+const LAUNCH_SHELL_JUNK_CLEAR_INTERVAL_MS = 2_500;
+const LAUNCH_SHELL_JUNK_CLEAR_MAX = 3;
 const LAUNCH_SUBMIT_READY_TIMEOUT_MS = 15_000;
 const LAUNCHER_LINE_CORRUPTION_RECOVERY_ATTEMPTS = 2;
 const LAUNCHER_LINE_CORRUPTION_ERROR =
@@ -1010,6 +1013,7 @@ class BootPromptTimeoutError extends Error {
   constructor(
     message: string,
     readonly last_10_lines: string[],
+    readonly pending_input_observed = false,
   ) {
     super(message);
     this.name = "BootPromptTimeoutError";
@@ -3283,6 +3287,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   const activeSurfaceWrites = context.activeSurfaceWrites;
   const originalLaunchCommandsBySurface =
     context.originalLaunchCommandsBySurface;
+  const launchShellRecoveryBySurface = new Map<
+    string,
+    { recovered: true; cleared: string[] }
+  >();
   const surfaceWriteLiveness = context.surfaceWriteLiveness;
   const surfaceWriteLivenessCandidates = context.surfaceWriteLivenessCandidates;
   const surfacePtyDeadSince = context.surfacePtyDeadSince;
@@ -5257,10 +5265,35 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     workspace?: string;
     timeout_ms?: number;
     require_fresh_shell_prompt?: boolean;
-  }): Promise<void> => {
+    stableSurfaceIdentity?: string | null;
+    assertSurfaceBindingCurrent?: () => Promise<void>;
+  }): Promise<{ recovered: boolean; cleared: string[] }> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SHELL_READY_TIMEOUT_MS;
     const start = Date.now();
     let lastText = "";
+    const cleared: string[] = [];
+    let clears = 0;
+    let lastClearAt = 0;
+    let lastClearKey: "ctrl-u" | "ctrl-c" | null = null;
+    let pendingInputObserved = false;
+
+    const screenShowsAgentReady = (text: string): boolean =>
+      READY_PATTERN_CLIS.some((cli) => matchReadyPattern(cli, text).matched);
+
+    const sendClearKey = async (key: "ctrl-u" | "ctrl-c"): Promise<void> => {
+      await executeDeliveryEngine({
+        surface: opts.surface,
+        workspace: opts.workspace,
+        chunks: [],
+        key,
+        chunk_size: 0,
+        chunk_delay_ms: 0,
+        press_enter: false,
+        source_event: "send_key",
+        stableSurfaceIdentity: opts.stableSurfaceIdentity,
+        beforeMutation: opts.assertSurfaceBindingCurrent,
+      });
+    };
 
     while (Date.now() - start < timeoutMs) {
       try {
@@ -5270,14 +5303,34 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           scrollback: false,
         });
         lastText = screen.text;
-        if (
-          matchesShellPrompt(screen.text) ||
-          (!opts.require_fresh_shell_prompt &&
-            READY_PATTERN_CLIS.some(
-              (cli) => matchReadyPattern(cli, screen.text).matched,
-            ))
-        ) {
-          return;
+        const agentReady = screenShowsAgentReady(screen.text);
+        if (!opts.require_fresh_shell_prompt && agentReady) {
+          return { recovered: cleared.length > 0, cleared };
+        }
+        if (matchesShellPrompt(screen.text)) {
+          return { recovered: cleared.length > 0, cleared };
+        }
+        const pending = agentReady
+          ? null
+          : pendingShellPromptInput(screen.text);
+        if (pending) {
+          pendingInputObserved = true;
+          if (lastClearKey === "ctrl-u") {
+            await sendClearKey("ctrl-c");
+            lastClearKey = "ctrl-c";
+          } else if (
+            clears < LAUNCH_SHELL_JUNK_CLEAR_MAX &&
+            (clears === 0 ||
+              Date.now() - lastClearAt >= LAUNCH_SHELL_JUNK_CLEAR_INTERVAL_MS)
+          ) {
+            await sendClearKey("ctrl-u");
+            if (!cleared.includes(pending)) {
+              cleared.push(pending);
+            }
+            clears += 1;
+            lastClearAt = Date.now();
+            lastClearKey = "ctrl-u";
+          }
         }
       } catch (error) {
         if (isSurfaceGoneReadFailure(error, opts.surface)) {
@@ -5296,6 +5349,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     throw new BootPromptTimeoutError(
       `Timed out after ${timeoutMs}ms waiting for shell readiness on ${opts.surface}`,
       tailLines(lastText, 10),
+      pendingInputObserved,
     );
   };
 
@@ -5459,11 +5513,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         : [sanitizedCommand];
 
     if (!opts.relaunch) {
-      await waitForLaunchShellReady({
+      const shellRecovery = await waitForLaunchShellReady({
         surface: opts.surface,
         workspace: opts.workspace,
         timeout_ms: opts.timeout_ms,
+        stableSurfaceIdentity: opts.stableSurfaceIdentity,
+        assertSurfaceBindingCurrent: opts.assertSurfaceBindingCurrent,
       });
+      if (shellRecovery.recovered) {
+        launchShellRecoveryBySurface.set(opts.surface, {
+          recovered: true,
+          cleared: shellRecovery.cleared,
+        });
+      }
     }
     await opts.assertSurfaceBindingCurrent?.();
     await withSurfaceWrite(
@@ -5543,6 +5605,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             workspace: opts.workspace,
             timeout_ms: opts.timeout_ms,
             require_fresh_shell_prompt: true,
+            stableSurfaceIdentity: opts.stableSurfaceIdentity,
+            assertSurfaceBindingCurrent: opts.assertSurfaceBindingCurrent,
           });
         };
         const typeLauncherCommand = async (verifySubmit: boolean) =>
@@ -11353,7 +11417,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             if (
               e instanceof AgentLaunchError &&
               e.launch_phase === "launch" &&
-              e.launch_cause instanceof LauncherReadinessError
+              (e.launch_cause instanceof LauncherReadinessError ||
+                (e.launch_cause instanceof BootPromptTimeoutError &&
+                  e.launch_cause.pending_input_observed))
             ) {
               await cleanupFailedLauncherArtifacts(
                 e,
@@ -11407,6 +11473,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
           );
           originalLaunchCommandsBySurface.delete(result.surface_id);
+          const launchShellRecovery = launchShellRecoveryBySurface.get(
+            result.surface_id,
+          );
+          launchShellRecoveryBySurface.delete(result.surface_id);
           const monitorBoot = ensureMonitorBoot(result.agent_id);
           const injectedBootPrompt = mailboxBootContract(
             result.agent_id,
@@ -11654,6 +11724,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_bytes: bootPromptDelivery?.bytes,
             boot_prompt_submit_verified:
               bootPromptDelivery?.submit_verified ?? null,
+            ...(launchShellRecovery?.recovered
+              ? {
+                  readiness_recovered: true,
+                  readiness_cleared: launchShellRecovery.cleared,
+                }
+              : {}),
           };
           return buildSpawnToolReturn(
             {
@@ -11829,6 +11905,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.surface_id,
           );
           originalLaunchCommandsBySurface.delete(result.surface_id);
+          const launchShellRecovery = launchShellRecoveryBySurface.get(
+            result.surface_id,
+          );
+          launchShellRecoveryBySurface.delete(result.surface_id);
           appendStaleBuildWarning(result);
           if (targetResolution.warnings.length > 0) {
             result.warnings = [
@@ -11915,6 +11995,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             boot_prompt_bytes: bootPromptDelivery?.bytes,
             boot_prompt_submit_verified:
               bootPromptDelivery?.submit_verified ?? null,
+            ...(launchShellRecovery?.recovered
+              ? {
+                  readiness_recovered: true,
+                  readiness_cleared: launchShellRecovery.cleared,
+                }
+              : {}),
           };
           return buildSpawnToolReturn(
             {
@@ -12216,6 +12302,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               result.surface_id,
             );
             originalLaunchCommandsBySurface.delete(result.surface_id);
+            const launchShellRecovery = launchShellRecoveryBySurface.get(
+              result.surface_id,
+            );
+            launchShellRecoveryBySurface.delete(result.surface_id);
             const monitorBoot = ensureMonitorBoot(result.agent_id);
             const injectedBootPrompt = mailboxBootContract(
               result.agent_id,
@@ -12314,6 +12404,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               boot_prompt_receipt: bootPromptDelivery,
               boot_prompt_submit_verified:
                 bootPromptDelivery?.submit_verified ?? null,
+              ...(launchShellRecovery?.recovered
+                ? {
+                    readiness_recovered: true,
+                    readiness_cleared: launchShellRecovery.cleared,
+                  }
+                : {}),
             });
             leanSpawnedAgents.push(
               shapeSpawnResponse({
@@ -12325,6 +12421,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 boot_prompt_receipt: bootPromptDelivery,
                 boot_prompt_submit_verified:
                   bootPromptDelivery?.submit_verified ?? null,
+                ...(launchShellRecovery?.recovered
+                  ? {
+                      readiness_recovered: true,
+                      readiness_cleared: launchShellRecovery.cleared,
+                    }
+                  : {}),
               }),
             );
           }
