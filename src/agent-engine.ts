@@ -53,6 +53,8 @@ import {
   MAX_SPAWN_DEPTH,
   MAX_CHILDREN,
   MAX_RESPAWN_ATTEMPTS,
+  resolveBootPromptText,
+  summarizeTaskSummary,
   type AgentRoute,
   type AgentRecord,
   type AgentAuthority,
@@ -234,6 +236,7 @@ export interface SpawnAgentParams {
   effort?: string;
   cli: CliType;
   prompt: string;
+  boot_prompt_path?: string | null;
   boot_prompt_timeout_ms?: number;
   boot_prompt_pending?: boolean;
   workspace?: string;
@@ -601,6 +604,13 @@ const DEFAULT_HALT_WEDGED_DWELL_MS = 120_000;
 const DEFAULT_HALT_WEDGED_SWEEPS = 3;
 const PROMPT_MOTION_GRACE_MS = 30_000;
 const MAX_AUTO_REVIVE_BACKOFF_MS = 30_000;
+/**
+ * Harness responses that mean "I refused this resume command" -- a wrong flag,
+ * an unknown/expired session, or no such binary. Matched only against the screen
+ * tail that follows our own echoed resume command.
+ */
+const RESUME_REJECTION_RE =
+  /\b(?:unknown option|unknown argument|unknown flag|unrecognized (?:option|argument)|unexpected argument|command not found|no rollout found|failed to resume|session not found|no such session|invalid session)\b/i;
 const DONE_QUIESCENCE_MS = 1_500;
 const SESSION_ID_PATTERN =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -1702,7 +1712,12 @@ export class AgentEngine {
     goalText: string | null,
     reportText: string | null,
   ): boolean {
-    return [agent.task_summary, goalText, reportText]
+    return [
+      resolveBootPromptText(agent),
+      agent.task_summary,
+      goalText,
+      reportText,
+    ]
       .filter(Boolean)
       .join("\n")
       .split(/\r?\n/)
@@ -2371,7 +2386,7 @@ export class AgentEngine {
       agent.launch_cwd?.trim() ||
       agent.worktree_path?.trim(),
     );
-    if (agent.task_summary.trim().length === 0 && !hasManagedLaunchContext) {
+    if (resolveBootPromptText(agent).length === 0 && !hasManagedLaunchContext) {
       return false;
     }
     return this.hasCustomSessionIdentityResolver || hasManagedLaunchContext;
@@ -2384,7 +2399,7 @@ export class AgentEngine {
     if (!agent.boot_prompt_pending) {
       return false;
     }
-    const prompt = agent.task_summary.trim();
+    const prompt = resolveBootPromptText(agent);
     if (!prompt) {
       return !this.isBootPromptPendingStale(agent);
     }
@@ -2559,7 +2574,7 @@ export class AgentEngine {
       this.harnessCwdForAgent(agent),
       {
         sinceMs,
-        expectedText: agent.task_summary,
+        expectedText: resolveBootPromptText(agent),
         ...(process.env.CMUXLAYER_HARNESS_HOME
           ? { home: process.env.CMUXLAYER_HARNESS_HOME }
           : {}),
@@ -3063,6 +3078,15 @@ export class AgentEngine {
 
       if (!evidence.ready && !evidence.activeCodex) {
         this.readyPatternMatches.delete(agent.agent_id);
+        // A harness that rejected the resume command is a FAILED attempt, not a
+        // slow boot. Record it now instead of burning the boot timeout in
+        // silence and then retrying the identical broken command.
+        const rejection = this.detectResumeRejection(agent, screen.text);
+        if (rejection) {
+          const settled = this.stateMgr.updateRecord(agent.agent_id, settlement);
+          this.registry.set(agent.agent_id, settled);
+          return this.recordAutoReviveResumeFailure(settled, rejection);
+        }
         const since = Date.parse(agent.updated_at);
         if (
           !Number.isNaN(since) &&
@@ -3886,7 +3910,7 @@ export class AgentEngine {
 
   private async dispatchCliExitOutcome(
     agent: AgentRecord,
-    outcome: "revived" | "unrecoverable",
+    outcome: "revived" | "recovered" | "unrecoverable",
   ): Promise<{ record: AgentRecord; dispatched: boolean }> {
     if (!agent.parent_agent_id || agent.revive_notification_sent_at) {
       return { record: agent, dispatched: false };
@@ -3896,15 +3920,19 @@ export class AgentEngine {
       ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
       : null;
     const tag =
-      outcome === "revived"
-        ? "agent_cli_exit_revived"
-        : "agent_cli_exit_unrecoverable";
+      outcome === "unrecoverable"
+        ? "agent_cli_exit_unrecoverable"
+        : "agent_cli_exit_revived";
     const task =
       outcome === "revived"
         ? `Agent ${agent.agent_id} revived automatically on attempt ${attempts} ` +
           `in surface ${agent.surface_id}; verified model ${agent.parsed_model ?? "unknown"}.`
-        : `Agent ${agent.agent_id} CLI exit is unrecoverable after ${attempts} attempts ` +
-          `in surface ${agent.surface_id}. Manual fallback: ${manualResumeCommand ?? "no captured session"}`;
+        : outcome === "recovered"
+          ? `Agent ${agent.agent_id} recovered in surface ${agent.surface_id} without an ` +
+            `engine resume after ${attempts} attempts; the pending auto-resume was ` +
+            `cleared before injection so nothing was typed into the live agent.`
+          : `Agent ${agent.agent_id} CLI exit is unrecoverable after ${attempts} attempts ` +
+            `in surface ${agent.surface_id}. Manual fallback: ${manualResumeCommand ?? "no captured session"}`;
     try {
       dispatchOnce(
         agent.parent_agent_id,
@@ -3985,8 +4013,187 @@ export class AgentEngine {
     return completed;
   }
 
+  /**
+   * Classify what currently occupies a revive target's surface. Auto-resume may
+   * only type into a bare shell: between the death signal and the injection the
+   * pane can be revived by other means (a human running `--resume` by hand), and
+   * typing then lands the resume command in a working agent's composer as if it
+   * were a user message. Same guard class as the interactive-overlay delivery
+   * refusal.
+   */
+  private async classifyReviveTarget(
+    agent: AgentRecord,
+    knownShellScreenText?: string,
+  ): Promise<"shell" | "live_agent" | "unverified"> {
+    let screenText: string;
+    try {
+      screenText =
+        knownShellScreenText ?? (await this.readSweepScreen(agent, {})).text;
+    } catch {
+      return "unverified";
+    }
+    const parsed = parseScreen(screenText);
+    if (parsed.control_state === "shell") return "shell";
+    if (
+      parsed.control_state === "ready" ||
+      parsed.control_state === "busy" ||
+      parsed.control_state === "permission_prompt" ||
+      parsed.control_state === "interactive_overlay" ||
+      screenHasReadyAgentIdentity(agent.cli, screenText, parsed)
+    ) {
+      return "live_agent";
+    }
+    return "unverified";
+  }
+
+  /**
+   * The pane came back without us: clear the pending resume so nothing is typed,
+   * and hand the record back to the ordinary boot-readiness path.
+   */
+  private async markAutoReviveRecovered(
+    agent: AgentRecord,
+  ): Promise<AgentRecord> {
+    let recovered = this.stateMgr.updateRecord(agent.agent_id, {
+      revive_last_outcome: "revived",
+      revive_last_error: null,
+      revive_next_attempt_at: null,
+      revive_completed_at: new Date().toISOString(),
+      revive_observation_source: "screen",
+      revive_observed_at_ms: Date.now(),
+      error: null,
+    });
+    this.registry.set(agent.agent_id, recovered);
+    const notification = await this.dispatchCliExitOutcome(
+      recovered,
+      "recovered",
+    );
+    recovered = notification.record;
+    this.appendAutoReviveCliExitEvent(
+      recovered,
+      "revived",
+      notification.dispatched,
+    );
+    try {
+      const creating = this.stateMgr.transition(
+        recovered.agent_id,
+        "creating",
+        {
+          error: null,
+          pid: null,
+        },
+      );
+      this.registry.set(creating.agent_id, creating);
+      const booting = this.stateMgr.transition(creating.agent_id, "booting", {
+        error: null,
+        pid: null,
+      });
+      this.registry.set(booting.agent_id, booting);
+      return booting;
+    } catch {
+      return recovered;
+    }
+  }
+
+  /**
+   * Hold the attempt without consuming one: we could not prove the surface is a
+   * bare shell, and typing on an unproven surface is the failure mode this guard
+   * exists to prevent.
+   */
+  private deferAutoReviveAttempt(
+    agent: AgentRecord,
+    attempt: number,
+  ): AgentRecord {
+    try {
+      const deferred = this.stateMgr.updateRecord(agent.agent_id, {
+        revive_next_attempt_at: new Date(
+          Date.now() + this.autoReviveBackoffMs(attempt),
+        ).toISOString(),
+        revive_observation_source: "screen",
+        revive_observed_at_ms: Date.now(),
+      });
+      this.registry.set(agent.agent_id, deferred);
+      return deferred;
+    } catch {
+      return agent;
+    }
+  }
+
+  /**
+   * The harness rejected the resume command itself (bad flag, unknown session).
+   * Record the failure and back off; at the cap, escalate as unrecoverable.
+   */
+  private async recordAutoReviveResumeFailure(
+    agent: AgentRecord,
+    reason: string,
+  ): Promise<AgentRecord> {
+    const attempts = agent.revive_attempts ?? 0;
+    let failed: AgentRecord;
+    try {
+      failed =
+        agent.state === "error"
+          ? agent
+          : this.stateMgr.transition(agent.agent_id, "error", {
+              error: `Auto-revive attempt ${attempts} failed: ${reason}`,
+            });
+      failed = this.stateMgr.updateRecord(failed.agent_id, {
+        revive_last_outcome: "failed",
+        revive_last_error: reason,
+        revive_next_attempt_at: new Date(
+          Date.now() + this.autoReviveBackoffMs(Math.max(1, attempts)),
+        ).toISOString(),
+        revive_observation_source: "screen",
+        revive_observed_at_ms: Date.now(),
+      });
+      this.registry.set(failed.agent_id, failed);
+    } catch {
+      return agent;
+    }
+    if (attempts >= MAX_RESPAWN_ATTEMPTS) {
+      return this.markAutoReviveUnrecoverable(failed, reason);
+    }
+    return failed;
+  }
+
+  /**
+   * Detect a resume command the harness refused, by reading only the screen tail
+   * that followed our own echoed command. Returns the offending line, or null.
+   */
+  private detectResumeRejection(
+    agent: AgentRecord,
+    screenText: string,
+  ): string | null {
+    if (agent.revive_last_outcome !== "pending" || !agent.cli_session_id) {
+      return null;
+    }
+    let resumeCommand: string;
+    try {
+      resumeCommand = buildRawResumeCommand(
+        agent.cli,
+        agent.repo,
+        agent.cli_session_id,
+      );
+    } catch {
+      return null;
+    }
+    const echoed = screenText.lastIndexOf(resumeCommand);
+    if (echoed < 0) return null;
+    const tail = screenText.slice(echoed + resumeCommand.length);
+    const parsed = parseScreen(tail);
+    // An agent that actually came up is not a rejected resume, whatever else
+    // its own output happens to say.
+    if (screenHasReadyAgentIdentity(agent.cli, tail, parsed)) return null;
+    return (
+      tail
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .find((line) => RESUME_REJECTION_RE.test(line)) ?? null
+    );
+  }
+
   private async attemptSameSurfaceAutoRevive(
     agent: AgentRecord,
+    knownShellScreenText?: string,
   ): Promise<AgentRecord> {
     const attempt = (agent.revive_attempts ?? 0) + 1;
     if (attempt > MAX_RESPAWN_ATTEMPTS) {
@@ -4001,6 +4208,13 @@ export class AgentEngine {
         agent,
         "captured session id is missing",
       );
+    }
+    const target = await this.classifyReviveTarget(agent, knownShellScreenText);
+    if (target === "live_agent") {
+      return this.markAutoReviveRecovered(agent);
+    }
+    if (target === "unverified") {
+      return this.deferAutoReviveAttempt(agent, attempt);
     }
     const attemptedAt = new Date().toISOString();
     let attempted = this.stateMgr.updateRecord(agent.agent_id, {
@@ -4207,7 +4421,9 @@ export class AgentEngine {
       });
       this.registry.set(agent.agent_id, tracked);
       this.appendAutoReviveCliExitEvent(tracked, "pending", false);
-      return this.attemptSameSurfaceAutoRevive(tracked);
+      // This sweep just proved the surface is a bare shell; reuse that read
+      // rather than paying for (and racing on) a second one.
+      return this.attemptSameSurfaceAutoRevive(tracked, screenText);
     }
 
     let inboxDispatched = false;
@@ -4578,7 +4794,7 @@ export class AgentEngine {
   }
 
   private extractNamedBlocker(agent: AgentRecord): string | null {
-    const text = [agent.error, agent.task_summary]
+    const text = [agent.error, resolveBootPromptText(agent), agent.task_summary]
       .filter((value): value is string => Boolean(value?.trim()))
       .join(" ");
     const match = text.match(
@@ -6677,7 +6893,11 @@ export class AgentEngine {
       seat_role: seatIdentity.seat_role,
       seat_identity_status: seatIdentity.seat_identity_status,
       seat_identity_error: seatIdentity.seat_identity_error,
-      task_summary: spawnParams.prompt,
+      task_summary: summarizeTaskSummary(
+        spawnParams.prompt,
+        spawnParams.boot_prompt_path,
+      ),
+      boot_prompt_text: spawnParams.prompt.trim() ? spawnParams.prompt : null,
       pid: null,
       version: 1,
       created_at: now,

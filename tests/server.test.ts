@@ -3081,7 +3081,65 @@ describe("tool handler integration", () => {
       max_cost_per_agent: null,
     });
 
-    const mockExec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:95"],
+                surface_ids: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+                selected_surface_ref: "surface:95",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [
+              {
+                ref: "surface:95",
+                id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                title: "BL-LEAD",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "{}", stderr: "" };
+    });
     const server = createServer({
       exec: mockExec,
       stateDir,
@@ -3214,6 +3272,62 @@ describe("tool handler integration", () => {
     });
 
     const mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
+      if (args.includes("list-workspaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspaces: [
+              {
+                ref: "workspace:1",
+                title: "Main",
+                index: 0,
+                selected: true,
+                pinned: false,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-panes")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            panes: [
+              {
+                ref: "pane:1",
+                index: 0,
+                focused: true,
+                surface_count: 1,
+                surface_refs: ["surface:positive"],
+                surface_ids: ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+                selected_surface_ref: "surface:positive",
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
+      if (args.includes("list-pane-surfaces")) {
+        return {
+          stdout: JSON.stringify({
+            workspace_ref: "workspace:1",
+            window_ref: "window:1",
+            pane_ref: "pane:1",
+            surfaces: [
+              {
+                ref: "surface:positive",
+                id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                title: "cmuxlayerCodex positive",
+                type: "terminal",
+                index: 0,
+                selected: true,
+              },
+            ],
+          }),
+          stderr: "",
+        };
+      }
       if (args.includes("read-screen")) {
         return {
           stdout: JSON.stringify({

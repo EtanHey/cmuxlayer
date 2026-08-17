@@ -105,6 +105,10 @@ import type {
   DeliveryTelemetryEvent,
 } from "./agent-types.js";
 import {
+  bootPromptRegistryFields,
+  summarizeTaskSummary,
+} from "./agent-types.js";
+import {
   formatListSurfaces,
   formatReadScreen,
   formatListAgents,
@@ -346,10 +350,7 @@ const QueryMonitorRegistryArgsSchema = {
 
 const WatchSpecArgsSchema = {
   owner: z.string().min(1).describe("Agent/seat notified by the watch"),
-  target: z
-    .string()
-    .min(1)
-    .describe("Absolute file path or public agent_id"),
+  target: z.string().min(1).describe("Absolute file path or public agent_id"),
   predicate: z
     .enum(WATCH_AGENT_PREDICATES)
     .optional()
@@ -602,7 +603,9 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       screen: z.record(z.unknown()).nullable().optional(),
       state_conflict: z.boolean().optional(),
       health: z.record(z.unknown()).optional(),
-      receipts: z.array(z.object({ ...DeliveryOutputShape }).passthrough()).optional(),
+      receipts: z
+        .array(z.object({ ...DeliveryOutputShape }).passthrough())
+        .optional(),
     })
     .passthrough(),
   read_screen: z
@@ -2006,10 +2009,7 @@ function formatToolValidationError(
       return `${path}: ${issue.message}`;
     })
     .join("; ");
-  const example =
-    toolName === "send_to"
-      ? ` ${SEND_TO_WORKING_EXAMPLE}`
-      : "";
+  const example = toolName === "send_to" ? ` ${SEND_TO_WORKING_EXAMPLE}` : "";
   return `${toolName} invalid arguments: ${details}.${example}`;
 }
 
@@ -2467,10 +2467,7 @@ function screenShowsQueuedAgentInput(
     return false;
   }
 
-  while (
-    index >= 0 &&
-    !stripCodexQueueGutter(lines[index] ?? "").trim()
-  ) {
+  while (index >= 0 && !stripCodexQueueGutter(lines[index] ?? "").trim()) {
     index -= 1;
   }
   const queueHeadingPattern =
@@ -2701,16 +2698,18 @@ export interface TargetIdentity {
   agent_type?: string;
 }
 
-// Best-effort, CHEAP target-agent identity for delivery responses (send_input /
-// send_command). Sourced from the in-memory state cache only — no extra socket
-// round-trip / read_screen per send. Unknown fields are omitted.
+// Best-effort target-agent identity for delivery responses (send_input /
+// send_command). `title` is the live cmux tab/surface title when known — never
+// the boot prompt / task_summary. Model/cli come from the in-memory registry.
 function resolveTargetIdentity(
   stateMgr: StateManager,
   surfaceRef: string,
+  surfaceTitle?: string | null,
 ): TargetIdentity {
   const identity: TargetIdentity = { surface: surfaceRef };
+  const title = surfaceTitle?.trim();
+  if (title) identity.title = title;
   const record = resolveLatestSurfaceAgentRecord(stateMgr, surfaceRef);
-  if (record?.task_summary) identity.title = record.task_summary;
   if (record?.model) identity.model = record.model;
   if (record?.cli) identity.agent_type = record.cli;
   return identity;
@@ -3774,7 +3773,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         },
       };
     }
-    if (palette && typeof toolName === "string" && !palette.shouldRegister(toolName)) {
+    if (
+      palette &&
+      typeof toolName === "string" &&
+      !palette.shouldRegister(toolName)
+    ) {
       return palette.defer(toolName, args);
     }
     if (typeof toolName === "string") {
@@ -4622,11 +4625,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       } else {
         retryEligiblePendingSince = null;
       }
-      const retryObserveMs =
-        codexRetryEligiblePendingInput
-          ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
-          : opts.source_event === "spawn_agent" &&
-              !hasParsedAgentIdentity(snapshot.parsed)
+      const retryObserveMs = codexRetryEligiblePendingInput
+        ? Math.min(timeoutMs, CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS)
+        : opts.source_event === "spawn_agent" &&
+            !hasParsedAgentIdentity(snapshot.parsed)
           ? 0
           : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
@@ -4735,7 +4737,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     await opts.beforeMutation?.();
     if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
-        throw new Error("Delivery engine key input is mutually exclusive with text submission");
+        throw new Error(
+          "Delivery engine key input is mutually exclusive with text submission",
+        );
       }
       const key = normalizeKeyName(opts.key);
       await sendKeyWithRetry(
@@ -4888,8 +4892,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 deliveryOutcome === "queued"
                   ? ("queued" as const)
                   : submit_verified === false
-                  ? ("failed" as const)
-                  : ("submitted" as const),
+                    ? ("failed" as const)
+                    : ("submitted" as const),
             }
           : {}),
       });
@@ -5573,10 +5577,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               throw readinessError;
             }
             if (
-              screenShowsPendingShellInput(
-                pendingScreen.text,
-                sanitizedCommand,
-              )
+              screenShowsPendingShellInput(pendingScreen.text, sanitizedCommand)
             ) {
               throw new LauncherReadinessError(
                 `launcher command remained pending after Return on ${opts.surface}`,
@@ -5607,11 +5608,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     timeout_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
     resolveRoute?: () => Promise<{ surface: string; workspace?: string }>;
-  }): Promise<PublicDeliveryReceipt & {
-    bytes: number;
-    prompt_text: string | null;
-    prompt_warning: string | null;
-  }> => {
+  }): Promise<
+    PublicDeliveryReceipt & {
+      bytes: number;
+      prompt_text: string | null;
+      prompt_warning: string | null;
+    }
+  > => {
     const bootPromptPath = getBootPromptPath(opts.boot_prompt_path);
     assertBootPromptMode(opts.prompt, bootPromptPath);
     if (
@@ -6351,6 +6354,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   type RawSurfaceMutationRoute = {
     surface: string;
     workspace?: string;
+    /** Live cmux tab title for this surface when topology knows it. */
+    title: string | null;
     stableSurfaceIdentity: string | null;
     assertCurrent: () => Promise<void>;
   };
@@ -6456,6 +6461,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         return {
           surface: currentRef,
           workspace,
+          title: topology.titleBySurface.get(currentRef) ?? null,
           stableSurfaceIdentity: stableUuid,
           assertCurrent,
         };
@@ -6484,6 +6490,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return {
         surface: requestedSurface,
         workspace,
+        title: topology.titleBySurface.get(requestedSurface) ?? null,
         stableSurfaceIdentity: null,
         assertCurrent: async () => {
           const current = await collectSurfaceTopology();
@@ -6513,6 +6520,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     return {
       surface: requestedSurface,
       workspace: explicitWorkspace,
+      title: null,
       stableSurfaceIdentity: null,
       assertCurrent: async () => {},
     };
@@ -8129,7 +8137,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           };
           startBackgroundDelivery(record);
 
-          const identity = resolveTargetIdentity(stateMgr, route.surface);
+          const identity = resolveTargetIdentity(
+            stateMgr,
+            route.surface,
+            route.title,
+          );
           const data = {
             ...identity,
             ...buildPublicDeliveryReceipt({
@@ -8178,7 +8190,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           },
         );
 
-        const identity = resolveTargetIdentity(stateMgr, route.surface);
+        const identity = resolveTargetIdentity(
+          stateMgr,
+          route.surface,
+          route.title,
+        );
         const data = {
           ...identity,
           ...delivery,
@@ -8350,7 +8366,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           });
         }
 
-        const identity = resolveTargetIdentity(stateMgr, route.surface);
+        const identity = resolveTargetIdentity(
+          stateMgr,
+          route.surface,
+          route.title,
+        );
         const data = {
           ...identity,
           command: sanitizedCommand,
@@ -8711,10 +8731,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     ANNOTATIONS.mutating,
     async (args) => {
       try {
-        const handlerName = args.action === "move" ? "move_surface" : "rename_tab";
+        const handlerName =
+          args.action === "move" ? "move_surface" : "rename_tab";
         const handler = toolHandlersByName.get(handlerName);
         if (!handler) {
-          throw new Error(`Internal surface adapter unavailable: ${handlerName}`);
+          throw new Error(
+            `Internal surface adapter unavailable: ${handlerName}`,
+          );
         }
         if (args.action === "rename" && !args.title) {
           throw new Error("update_surface action=rename requires title");
@@ -8881,7 +8904,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             throw new Error("close_surface scope=agent requires agent_id");
           }
           const handler = toolHandlersByName.get("stop_agent");
-          if (!handler) throw new Error("Internal agent close adapter unavailable");
+          if (!handler)
+            throw new Error("Internal agent close adapter unavailable");
           const result = await handler(
             { agent_id: args.agent_id, force: args.force },
             {},
@@ -9393,9 +9417,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           delivery?: "submitted" | "queued";
           delivery_id?: string;
         } = { attempted: false, sent: false, reason: "" };
-        const acceptedRecord = context.lifecycleRegistry?.get(args.agent_id) ?? null;
-        const wakeIdleAgent =
-          monitor_alive && acceptedRecord?.state === "idle";
+        const acceptedRecord =
+          context.lifecycleRegistry?.get(args.agent_id) ?? null;
+        const wakeIdleAgent = monitor_alive && acceptedRecord?.state === "idle";
         if (args.nudge === "never") {
           nudge.reason = "nudge disabled by caller";
         } else if (monitor_alive && !wakeIdleAgent) {
@@ -9427,10 +9451,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 msg,
                 inboxPath(args.agent_id, inboxOpts),
               );
-              if (
-                record.state === "working" &&
-                context.lifecycleSweepEngine
-              ) {
+              if (record.state === "working" && context.lifecycleSweepEngine) {
                 const queued = context.lifecycleSweepEngine.queueDelivery({
                   agent_id: args.agent_id,
                   text: pointer,
@@ -10141,7 +10162,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               record.cli === "codex"
                 ? Boolean(
                     record.model?.trim() &&
-                      record.model.trim().toLowerCase() !== "codex",
+                    record.model.trim().toLowerCase() !== "codex",
                   )
                 : process.env.REPOGOLEM_ALLOW_MODEL === "1",
           },
@@ -10554,10 +10575,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe("Initial working directory for type=terminal"),
-        title: z
-          .string()
-          .optional()
-          .describe("Tab title for type=terminal"),
+        title: z.string().optional().describe("Tab title for type=terminal"),
         prompt: z
           .string()
           .optional()
@@ -10614,7 +10632,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         authority: z
           .enum(["lead", "worker"])
           .optional()
-          .describe("Authority axis, independent from job function and placement"),
+          .describe(
+            "Authority axis, independent from job function and placement",
+          ),
         auto_archive_on_done: z
           .boolean()
           .optional()
@@ -10714,9 +10734,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             await awaitLifecycleStart();
             const existing = engine.getAgentState(args.resume_agent_id);
             if (!existing) {
-              return err(
-                new Error(`Agent not found: ${args.resume_agent_id}`),
-              );
+              return err(new Error(`Agent not found: ${args.resume_agent_id}`));
             }
             const workspace = await canonicalWorkspaceRef(
               args.workspace ?? existing.workspace_id ?? undefined,
@@ -10753,7 +10771,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               ...result,
               role: inferRecordRoleOrNull(existing) ?? "worker",
               ...(focusRestoreWarning
-                ? { warning: focusRestoreWarning, warnings: [focusRestoreWarning] }
+                ? {
+                    warning: focusRestoreWarning,
+                    warnings: [focusRestoreWarning],
+                  }
                 : {}),
             };
             return buildSpawnToolReturn(
@@ -10783,12 +10804,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               "spawn_agent",
               createsWorkspace
                 ? callerWorkspace
-                : requestedWorkspace ?? callerWorkspace,
+                : (requestedWorkspace ?? callerWorkspace),
             );
             const workspace = createsWorkspace
               ? (await client.createWorkspace(requestedWorkspace!.slice(4)))
                   .workspace
-              : requestedWorkspace ?? callerWorkspace;
+              : (requestedWorkspace ?? callerWorkspace);
             const panes = await client.listPanes({ workspace });
             const placement = chooseAgentSpawnPlacement(
               panes.panes,
@@ -10894,9 +10915,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const effectiveParentAgentId = callerIsWorker
             ? callerAgent!.agent_id
             : (args.parent_agent_id ?? callerAgent?.agent_id);
-          const effectiveRole = callerIsWorker
-            ? "worker"
-            : normalizedRole.role;
+          const effectiveRole = callerIsWorker ? "worker" : normalizedRole.role;
           const workerCallerWarning = callerIsWorker
             ? `Worker caller ${callerAgent!.agent_id} forced child role to worker and recorded itself as parent; worker-spawned agents cannot claim orchestrator placement.`
             : undefined;
@@ -10946,7 +10965,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   workspace_id: agent.workspace_id ?? null,
                   state: agent.state,
                   role: inferRecordRoleOrNull(agent),
-                  task_summary: agent.task_summary,
+                  task_summary: summarizeTaskSummary(agent.task_summary),
                 }));
           const duplicateSpawnWarning =
             existingSameLaneAgents.length > 0
@@ -11025,6 +11044,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               effort: args.effort,
               cli: args.cli,
               prompt: spawnPrompt,
+              boot_prompt_path: bootPromptPath,
               boot_prompt_pending: true,
               workspace: spawnWorkspace,
               cwd: worktree.prepared?.path,
@@ -11168,7 +11188,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               await captureSpawnSessionBestEffort(result);
               if (bootPromptDelivery.prompt_text !== null) {
                 const updated = stateMgr.updateRecord(result.agent_id, {
-                  task_summary: bootPromptDelivery.prompt_text,
+                  ...bootPromptRegistryFields(
+                    bootPromptDelivery.prompt_text,
+                    bootPromptPath,
+                  ),
                   boot_prompt_pending: false,
                   prompt_delivered: bootPromptDelivery.submit_verified === true,
                   submit_verified: bootPromptDelivery.submit_verified,
@@ -11465,8 +11488,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         let mutationWorkspace: string | undefined;
         let surfaceCreated = false;
         let worktree:
-          | Awaited<ReturnType<typeof prepareSpawnWorktree>>
-          | undefined;
+          Awaited<ReturnType<typeof prepareSpawnWorktree>> | undefined;
         try {
           resolveSpawnModelPolicy(args.cli, args.model);
           assertBootPromptMode(args.prompt, null);
@@ -11568,7 +11590,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
             canonicalizeSpawnResult(result);
             const updated = stateMgr.updateRecord(result.agent_id, {
-              task_summary: bootPromptDelivery.prompt_text ?? args.prompt ?? "",
+              ...bootPromptRegistryFields(
+                bootPromptDelivery.prompt_text ?? args.prompt ?? "",
+              ),
               boot_prompt_pending: false,
             });
             registry.set(result.agent_id, updated);
@@ -11893,8 +11917,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 creation.append(
                   "agents",
                   identity,
-                  (left, right) =>
-                    left.surface_id === right.surface_id,
+                  (left, right) => left.surface_id === right.surface_id,
                 );
                 focusRestoreLease = await capturePostCreationFocus(
                   focusRestoreLease,
@@ -11961,8 +11984,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               activeSpawnIdentity.workspace_id =
                 result.workspace_id ?? workspace ?? null;
               const updated = stateMgr.updateRecord(result.agent_id, {
-                task_summary:
+                ...bootPromptRegistryFields(
                   bootPromptDelivery.prompt_text ?? agent.prompt ?? "",
+                ),
                 boot_prompt_pending: false,
                 prompt_delivered:
                   hasPrompt && bootPromptDelivery.submit_verified === true,
@@ -12022,7 +12046,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 ...result,
                 role,
                 health,
-                boot_prompt_delivered: isBootPromptDelivered(bootPromptDelivery),
+                boot_prompt_delivered:
+                  isBootPromptDelivered(bootPromptDelivery),
                 boot_prompt_receipt: bootPromptDelivery,
                 boot_prompt_submit_verified:
                   bootPromptDelivery?.submit_verified ?? null,
@@ -12146,7 +12171,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             });
           }
           if (caught instanceof SurfaceGoneError) {
-            return err(caught, surfaceGonePayload(caught, failureIdentityPayload));
+            return err(
+              caught,
+              surfaceGonePayload(caught, failureIdentityPayload),
+            );
           }
           if (caught instanceof BootPromptTimeoutError) {
             return err(caught, {
@@ -12493,7 +12521,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     type ListAgentsCacheEntry = {
       topology_signature: string;
       derived_at: number;
-      agents: Array<ObservedPublicAgent & { health: AgentHealth }>;
+      agents: Array<
+        ObservedPublicAgent & {
+          surface_id: string;
+          send_via: "send_to";
+          health?: AgentHealth;
+        }
+      >;
       skipped_agents: Array<{ agent_id: string; error: string }>;
     };
     const listAgentsCache = new Map<string, ListAgentsCacheEntry>();
@@ -12515,7 +12549,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage; filter to blocked agents or children with mine/parent_agent_id and request full diagnostics with detail=full.",
+      "List live-derived agents, including registry-persisted prompt blockage; filter to blocked agents or children with mine/parent_agent_id. Default summary is lean (id, state, surface_id, send_via). Pass detail=full for health diagnostics and the full registry record.",
       {
         state: z
           .enum([
@@ -12534,7 +12568,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         blocked_on_prompt: z
           .boolean()
           .optional()
-          .describe("Return only agents whose registry records show a live prompt blocker"),
+          .describe(
+            "Return only agents whose registry records show a live prompt blocker",
+          ),
         mine: z
           .boolean()
           .optional()
@@ -12551,7 +12587,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         detail: z
           .enum(["summary", "full"])
           .optional()
-          .default("summary"),
+          .default("summary")
+          .describe(
+            "summary (default): lean addressable rows. full: health diagnostics plus the full registry record.",
+          ),
         max_age_ms: z
           .number()
           .int()
@@ -12634,10 +12673,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ? agentUuid === surfaceUuid
                     : Boolean(
                         !agentUuid &&
-                          !surfaceUuid &&
-                          agent.surface_observer_id &&
-                          agent.surface_observer_id === registry.getObserverId() &&
-                          surface.surface_id === agent.surface_id,
+                        !surfaceUuid &&
+                        agent.surface_observer_id &&
+                        agent.surface_observer_id ===
+                          registry.getObserverId() &&
+                        surface.surface_id === agent.surface_id,
                       );
                 });
                 const trustedScreenObservation =
@@ -12650,8 +12690,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     ...healthTopologyOverrides(agent, topology),
                     ...(trustedScreenObservation
                       ? {
-                          screen_status:
-                            trustedScreenObservation.parsed_status,
+                          screen_status: trustedScreenObservation.parsed_status,
                           screen_agent_type:
                             trustedScreenObservation.cli === "kiro"
                               ? "unknown"
@@ -12689,14 +12728,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       screenObservedAtMs: screenObservation?.observed_at_ms,
                       screenModel: screenObservation?.model,
                     }),
-                    health: {
-                      ...health,
-                      ...(screenObservation
-                        ? { screen_observation: screenObservation }
-                        : {}),
-                    },
+                    surface_id: agent.surface_id,
+                    send_via: "send_to" as const,
                     ...(args.detail === "full"
                       ? {
+                          health: {
+                            ...health,
+                            ...(screenObservation
+                              ? { screen_observation: screenObservation }
+                              : {}),
+                          },
                           detail: {
                             ...toAgentStatePayload(agent),
                             harvestability: engine.assessHarvestability(agent),
@@ -12732,9 +12773,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const entry: ListAgentsCacheEntry = {
             topology_signature: topologySignature,
             derived_at: Date.now(),
-            agents: agents as Array<
-              ObservedPublicAgent & { health: AgentHealth }
-            >,
+            agents: agents as ListAgentsCacheEntry["agents"],
             skipped_agents: skippedAgents,
           };
           listAgentsCache.set(cacheKey, entry);
@@ -12773,8 +12812,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : null;
             const scoped = merged.filter(
               (agent) =>
-                (!parentAgentId ||
-                  agent.parent_agent_id === parentAgentId) &&
+                (!parentAgentId || agent.parent_agent_id === parentAgentId) &&
                 (!requestedIds || requestedIds.has(agent.agent_id)),
             );
             return { merged: scoped, discovered, observedAtMs };
@@ -12792,18 +12830,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (isSurfaceEnumerationError(e)) {
             try {
               return await buildListAgentsResponse(
-                registry
-                  .list(filter)
-                  .filter((agent) => {
-                    const requestedIds = args.agent_ids
-                      ? new Set(args.agent_ids)
-                      : null;
-                    return (
-                      (!parentAgentId ||
-                        agent.parent_agent_id === parentAgentId) &&
-                      (!requestedIds || requestedIds.has(agent.agent_id))
-                    );
-                  }),
+                registry.list(filter).filter((agent) => {
+                  const requestedIds = args.agent_ids
+                    ? new Set(args.agent_ids)
+                    : null;
+                  return (
+                    (!parentAgentId ||
+                      agent.parent_agent_id === parentAgentId) &&
+                    (!requestedIds || requestedIds.has(agent.agent_id))
+                  );
+                }),
                 null,
                 listAgentsTopologySignature(null),
               );
@@ -13695,7 +13731,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const args = parsedArgs.data;
           const mode = args.mode ?? "agent";
           if (args.targeting && mode !== "agent") {
-            throw new Error("send_to.targeting is supported only in mode=agent");
+            throw new Error(
+              "send_to.targeting is supported only in mode=agent",
+            );
           }
           if (mode !== "agent") {
             const surface = args.surface ?? args.target;
@@ -13862,8 +13900,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             const resolvedTargets = Object.freeze(
               targetPlan
                 .filter(
-                  (entry): entry is TargetPlan & { agent: Readonly<AgentRecord> } =>
-                    entry.resolution === "resolved" && entry.agent !== undefined,
+                  (
+                    entry,
+                  ): entry is TargetPlan & { agent: Readonly<AgentRecord> } =>
+                    entry.resolution === "resolved" &&
+                    entry.agent !== undefined,
                 )
                 .map((entry) => entry.agent),
             );
@@ -13927,7 +13968,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               const deliveryId = randomUUID();
               if (!args.allow_busy && agent.state === "working") {
-              const queued = engine.queueDelivery({
+                const queued = engine.queueDelivery({
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -13968,19 +14009,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         retry_count: delivery.retry_count,
                       })
                     : delivery.delivery === "submitted"
-                    ? engine.resolveDelivery({
-                        delivery_id: deliveryId,
-                        agent_id: agent.agent_id,
-                        text: args.text,
-                        press_enter: args.press_enter,
-                        source_event: "send_to",
-                        delivery_state: "submitted",
-                        terminal: true,
-                        retry_count: delivery.retry_count,
-                        submit_verified: delivery.submit_verified,
-                        error: null,
-                      })
-                    : null;
+                      ? engine.resolveDelivery({
+                          delivery_id: deliveryId,
+                          agent_id: agent.agent_id,
+                          text: args.text,
+                          press_enter: args.press_enter,
+                          source_event: "send_to",
+                          delivery_state: "submitted",
+                          terminal: true,
+                          retry_count: delivery.retry_count,
+                          submit_verified: delivery.submit_verified,
+                          error: null,
+                        })
+                      : null;
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
@@ -14010,7 +14051,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         : 0,
                     submit_verified:
                       error instanceof SubmitVerificationError ? false : null,
-                    error: error instanceof Error ? error.message : String(error),
+                    error:
+                      error instanceof Error ? error.message : String(error),
                   },
                   {
                     appendFailureEvent: !(
@@ -14026,11 +14068,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     delivery_id: failed.delivery_id,
                     typed:
                       error instanceof SubmitVerificationError
-                        ? error.receipt?.typed ?? true
+                        ? (error.receipt?.typed ?? true)
                         : false,
                     submit_attempted:
                       error instanceof SubmitVerificationError
-                        ? error.receipt?.submit_attempted ?? args.press_enter
+                        ? (error.receipt?.submit_attempted ?? args.press_enter)
                         : false,
                     submit_verified: failed.submit_verified,
                     retry_count: failed.retry_count,
@@ -14068,7 +14110,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             if (resolvedTargets.length === 0) {
               return err(
-                new Error("send_to targeting resolved zero targets; refusing silent no-op"),
+                new Error(
+                  "send_to targeting resolved zero targets; refusing silent no-op",
+                ),
                 data,
               );
             }
@@ -14149,20 +14193,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 appendFailureEvent: !(error instanceof SubmitVerificationError),
               },
             );
-            failedReceiptPayload = { ...buildPublicDeliveryReceipt({
-              delivery_state: "failed",
-              delivery_id: failedReceipt.delivery_id,
-              typed:
-                error instanceof SubmitVerificationError
-                  ? error.receipt?.typed ?? true
-                  : false,
-              submit_attempted:
-                error instanceof SubmitVerificationError
-                  ? error.receipt?.submit_attempted ?? args.press_enter
-                  : false,
-              submit_verified: failedReceipt.submit_verified,
-              retry_count: failedReceipt.retry_count,
-            }) };
+            failedReceiptPayload = {
+              ...buildPublicDeliveryReceipt({
+                delivery_state: "failed",
+                delivery_id: failedReceipt.delivery_id,
+                typed:
+                  error instanceof SubmitVerificationError
+                    ? (error.receipt?.typed ?? true)
+                    : false,
+                submit_attempted:
+                  error instanceof SubmitVerificationError
+                    ? (error.receipt?.submit_attempted ?? args.press_enter)
+                    : false,
+                submit_verified: failedReceipt.submit_verified,
+                retry_count: failedReceipt.retry_count,
+              }),
+            };
             throw error;
           }
           const receipt =
@@ -14176,19 +14222,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   retry_count: delivery.retry_count,
                 })
               : delivery.delivery === "submitted"
-              ? engine.resolveDelivery({
-                  delivery_id: deliveryId,
-                  agent_id: agentId,
-                  text: args.text,
-                  press_enter: args.press_enter,
-                  source_event: "send_to",
-                  delivery_state: "submitted",
-                  terminal: true,
-                  retry_count: delivery.retry_count,
-                  submit_verified: delivery.submit_verified,
-                  error: null,
-                })
-              : null;
+                ? engine.resolveDelivery({
+                    delivery_id: deliveryId,
+                    agent_id: agentId,
+                    text: args.text,
+                    press_enter: args.press_enter,
+                    source_event: "send_to",
+                    delivery_state: "submitted",
+                    terminal: true,
+                    retry_count: delivery.retry_count,
+                    submit_verified: delivery.submit_verified,
+                    error: null,
+                  })
+                : null;
           // Preserve the already-terminal receipt if optional evidence
           // collection fails after the pane mutation has succeeded.
           const publicReceipt = buildPublicDeliveryReceipt({
@@ -14937,7 +14983,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 context_window: screenData?.context_window ?? null,
                 context_pct: screenData?.context_pct ?? null,
                 cost: screenData?.cost ?? null,
-                task_summary: agent.task_summary,
+                task_summary: summarizeTaskSummary(agent.task_summary),
                 spawn_depth: agent.spawn_depth,
                 created_at: agent.created_at,
                 quality: agent.quality,
@@ -14978,7 +15024,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     rawRegisterTool(
       "expand_palette",
       {
-        description: "Register the remaining Phase 5 tools for this MCP session.",
+        description:
+          "Register the remaining Phase 5 tools for this MCP session.",
         inputSchema: {},
         outputSchema: z
           .object({
