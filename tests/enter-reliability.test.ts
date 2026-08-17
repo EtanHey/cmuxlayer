@@ -553,7 +553,10 @@ function createReliabilityServer(client: FakeClaudeSurfaceClient) {
   return server;
 }
 
-function registerAgent(server: any, overrides?: Partial<AgentRecord>): AgentRecord {
+function registerAgent(
+  server: any,
+  overrides?: Partial<AgentRecord>,
+): AgentRecord {
   const engine = server._registeredTools["interact"]._engine;
   const stateMgr = engine["stateMgr"];
   const registry = engine.getRegistry();
@@ -664,9 +667,9 @@ describe("enter reliability", () => {
           event.retry_count === 1,
       ),
     ).toBe(true);
-    expect(
-      events.some((event) => event.event_type === "press_enter"),
-    ).toBe(true);
+    expect(events.some((event) => event.event_type === "press_enter")).toBe(
+      true,
+    );
   }, 10_000);
 
   it("verifies a cleared idle composer without waiting for working status", async () => {
@@ -682,12 +685,16 @@ describe("enter reliability", () => {
       press_enter: true,
     });
     const parsed = parseResult(result);
-    const events = readEventLog().filter((event) => event.event_type === "send_to");
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_to",
+    );
 
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
     expect(events).toHaveLength(1);
     expect(events[0]?.submit_verified).toBe(true);
     expect(events[0]?.retry_count).toBe(0);
@@ -699,26 +706,26 @@ describe("enter reliability", () => {
   ] as const)(
     "does not press Enter twice when a submitted %s still shows accepted input",
     async (_name, cli) => {
-    const client = new FakeSlowClearingAgentClient();
-    client.cli = cli;
-    client.clearAfterReads = 35;
-    server = createReliabilityServer(client);
-    registerAgent(server, { cli });
+      const client = new FakeSlowClearingAgentClient();
+      client.cli = cli;
+      client.clearAfterReads = 35;
+      server = createReliabilityServer(client);
+      registerAgent(server, { cli });
 
-    const result = await callTool(server, "send_to", {
-      agent_id: "agent-1",
-      text: "slow first token",
-      press_enter: true,
-    });
-    const parsed = parseResult(result);
+      const result = await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "slow first token",
+        press_enter: true,
+      });
+      const parsed = parseResult(result);
 
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
-      1,
-    );
-    expect(client.duplicateSubmits).toBe(0);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.submit_verified).toBe(true);
-    expect(parsed.retry_count).toBe(0);
+      expect(
+        client.sendKeyCalls.filter((key) => key === "return"),
+      ).toHaveLength(1);
+      expect(client.duplicateSubmits).toBe(0);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.submit_verified).toBe(true);
+      expect(parsed.retry_count).toBe(0);
     },
   );
 
@@ -736,18 +743,20 @@ describe("enter reliability", () => {
     const parsed = parseResult(result);
     const events = readEventLog();
 
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe("input_still_pending");
-    expect(parsed.retry_safe).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
     expect(
       events.some(
         (event) =>
           event.event_type === "send_to" &&
-          event.submit_verified === false &&
+          event.delivery_state === "pending_verify" &&
           event.retry_count === 0,
       ),
     ).toBe(true);
@@ -771,7 +780,9 @@ describe("enter reliability", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
     expect(parsed.retry_count).toBe(0);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(1);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
+      1,
+    );
     expect(
       events.some(
         (event) =>
@@ -808,8 +819,8 @@ describe("enter reliability", () => {
     ["unavailable reads", "throw", "surface_read_unavailable"],
     ["blank screens", "blank", "surface_screen_empty"],
   ] as const)(
-    "fails closed only after a full verification window of %s and returns a non-retry-safe reason",
-    async (_name, mode, expectedReason) => {
+    "returns pending_verify after a full verification window of %s instead of a terminal fail",
+    async (_name, mode, _expectedReason) => {
       const client = new FakeUnavailableVerificationScreenClient(mode);
       client.requiredReturns = 1;
       server = createReliabilityServer(client);
@@ -837,11 +848,11 @@ describe("enter reliability", () => {
       const result = await resultPromise;
       const parsed = parseResult(result);
 
-      expect(result.isError).toBe(true);
-      expect(parsed.ok).toBe(false);
-      expect(parsed.submit_verified).toBe(false);
-      expect(parsed.submit_verification_reason).toBe(expectedReason);
-      expect(parsed.retry_safe).toBe(false);
+      expect(result.isError).not.toBe(true);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.delivery_state).toBe("pending_verify");
+      expect(parsed.terminal).toBe(false);
+      expect(parsed.submit_verified).toBeNull();
       expect(
         client.sendKeyCalls.filter((key) => key === "return"),
       ).toHaveLength(1);
@@ -987,19 +998,23 @@ describe("enter reliability", () => {
       allow_busy: true,
     });
     const parsed = parseResult(result);
-    const events = readEventLog().filter((event) => event.event_type === "send_to");
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_to",
+    );
 
     expect(followUp).toHaveLength(541);
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(1);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       2,
     );
     expect(client.sendCalls.join("")).toBe(followUp);
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBe(false);
+    expect(events[0]?.delivery_state).toBe("pending_verify");
     expect(events[0]?.retry_count).toBe(1);
   }, 10_000);
 
@@ -1186,8 +1201,9 @@ describe("enter reliability", () => {
     const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).toBe(true);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.submit_verified).toBeNull();
     expect(settledAt).not.toBeNull();
     expect(settledAt! - startedAt).toBeLessThanOrEqual(1000);
     expect(client.postReturnScreenReadAttempts).toBeGreaterThanOrEqual(2);
@@ -1204,7 +1220,9 @@ describe("enter reliability", () => {
     client.queuedCodexReadsAfterReturn = 1;
     server = createReliabilityServer(client);
     registerAgent(server, { state: "ready", cli: "codex" });
-    const followUp = "Probe E queued follow-up evidence ".repeat(20).slice(0, 541);
+    const followUp = "Probe E queued follow-up evidence "
+      .repeat(20)
+      .slice(0, 541);
     const tail = followUp.slice(-80);
 
     const result = await callToolInTimerSteps(server, "send_to", {
@@ -1213,7 +1231,9 @@ describe("enter reliability", () => {
       press_enter: true,
     });
     const parsed = parseResult(result);
-    const events = readEventLog().filter((event) => event.event_type === "send_to");
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_to",
+    );
     const queuedScreen = client.screenReads.find((screen) =>
       screen.includes("Messages to be submitted after next tool call"),
     );
@@ -1322,7 +1342,9 @@ describe("enter reliability", () => {
     client.decorateQueuedCodexChrome = true;
     server = createReliabilityServer(client);
     registerAgent(server, { state: "ready", cli: "codex" });
-    const followUp = "decorated correlated queue payload ".repeat(18).slice(0, 541);
+    const followUp = "decorated correlated queue payload "
+      .repeat(18)
+      .slice(0, 541);
 
     const result = await callToolInTimerSteps(server, "send_to", {
       agent_id: "agent-1",
@@ -1363,9 +1385,9 @@ describe("enter reliability", () => {
     });
     const parsed = parseResult(result);
 
-    expect(client.screenReads.some((screen) => screen.includes("another sender"))).toBe(
-      true,
-    );
+    expect(
+      client.screenReads.some((screen) => screen.includes("another sender")),
+    ).toBe(true);
     expect(result.isError).not.toBe(true);
     expect(parsed.ok).toBe(true);
     expect(parsed.submit_verified).toBe(true);
@@ -1385,21 +1407,21 @@ describe("enter reliability", () => {
       press_enter: true,
     });
     const parsed = parseResult(result);
-    const events = readEventLog().filter((event) => event.event_type === "send_to");
-
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
-    expect(parsed.submit_verification_reason).toBe(
-      "surface_read_unavailable",
+    const events = readEventLog().filter(
+      (event) => event.event_type === "send_to",
     );
-    expect(parsed.retry_safe).toBe(false);
+
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
     expect(events).toHaveLength(1);
-    expect(events[0]?.submit_verified).toBe(false);
+    expect(events[0]?.delivery_state).toBe("pending_verify");
     expect(events[0]?.retry_count).toBe(0);
   }, 10_000);
 
@@ -1490,16 +1512,18 @@ describe("enter reliability", () => {
     expect(client.screenReads.at(-1)).toBe(
       CURSOR_PR343_V2_IMMEDIATE_WORKING_RESPONSE_SCREEN,
     );
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
     );
   }, 10_000);
 
-  it("fails closed for retained-composer Cursor evidence when the baseline is unavailable", async () => {
+  it("keeps retained-composer Cursor evidence pending_verify when the baseline is unavailable", async () => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 1;
     client.cli = "cursor";
@@ -1520,9 +1544,11 @@ describe("enter reliability", () => {
     expect(client.screenReads.at(-1)).toBe(
       CURSOR_PR343_LIVE_ACCEPTED_RESPONSE_SCREEN,
     );
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -1618,9 +1644,11 @@ describe("enter reliability", () => {
 
     expect(client.screenReads.at(-1)).toContain("⬡ Running...");
     expect(client.screenReads.at(-1)).not.toContain("Thought for");
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.submit_verified).toBe(false);
+    expect(result.isError).not.toBe(true);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
+    expect(parsed.submit_verified).toBeNull();
     expect(parsed.retry_count).toBe(0);
     expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(
       1,
@@ -1649,9 +1677,9 @@ describe("enter reliability", () => {
       registerAgent(server, { state: "ready", cli });
 
       expect(screen).toContain(placeholder);
-      expect(
-        __submitEvidenceTestHooks.extractComposerInputRegion(screen),
-      ).toBe("");
+      expect(__submitEvidenceTestHooks.extractComposerInputRegion(screen)).toBe(
+        "",
+      );
 
       const result = await callToolInTimerSteps(server, "send_to", {
         agent_id: "agent-1",
@@ -1788,8 +1816,7 @@ describe("enter reliability", () => {
     expect(events).toHaveLength(2);
     expect(
       events.every(
-        (event) =>
-          event.submit_verified === true && event.retry_count === 0,
+        (event) => event.submit_verified === true && event.retry_count === 0,
       ),
     ).toBe(true);
   }, 10_000);

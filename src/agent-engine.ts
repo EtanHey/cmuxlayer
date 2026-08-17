@@ -47,6 +47,13 @@ import type {
   ParsedScreenStatus,
 } from "./types.js";
 import {
+  defaultDeliveryTicketDir,
+  deliveryFailureSignature,
+  fileDeliveryFailureGithubIssue,
+  writeDeliveryFailureTicket,
+  type DeliveryFailureTicket,
+} from "./delivery-failure-tickets.js";
+import {
   generateAgentId,
   isCrashRecoveryEligible,
   isCrashRecoveryExhausted,
@@ -193,7 +200,8 @@ import {
 
 type ProcessLiveness = "alive" | "gone" | "unknown";
 
-export type AgentDeliveryState = "submitted" | "queued" | "failed";
+export type AgentDeliveryState =
+  "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
 
 export interface AgentDeliveryReceipt {
   delivery_id: string;
@@ -214,7 +222,26 @@ export interface AgentDeliveryReceipt {
   next_attempt_at?: string | null;
   /** The receiving TUI visibly accepted this into its own queue; never replay it. */
   composer_accepted?: boolean;
+  /** Hard deadline for background verify; ISO timestamp. */
+  verify_deadline_at?: string | null;
+  ticket_filed?: boolean;
 }
+
+export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
+const DELIVERY_WAIT_POLL_MS = 100;
+
+export type DeliveryVerifyObservation = {
+  outcome: "pending" | "delivered" | "failed_confirmed";
+  submit_verified?: boolean | null;
+  reason?: string;
+  evidence?: Record<string, unknown>;
+};
+
+type DeliveryVerifier = (
+  receipt: AgentDeliveryReceipt,
+) => Promise<DeliveryVerifyObservation>;
+
+type DeliveryIssueFiler = (ticket: DeliveryFailureTicket) => Promise<void>;
 
 /** A known pre-mutation delivery rejection that is safe to retry. */
 export class RetryableDeliveryError extends Error {
@@ -227,7 +254,7 @@ export class RetryableDeliveryError extends Error {
 type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
-  delivery?: "submitted" | "queued";
+  delivery?: "submitted" | "queued" | "pending_verify";
 }>;
 
 export interface SpawnAgentParams {
@@ -549,6 +576,14 @@ export interface AgentEngineOptions {
   fleetWorkingNoProgressTimeoutMs?: number;
   /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
   deliverySubmitTimeoutMs?: number;
+  /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
+  deliveryVerifyDeadlineMs?: number;
+  /** Local evidence-ticket directory; defaults to ~/.cmuxlayer/tickets. */
+  deliveryTicketDir?: string;
+  /** Optional GitHub/local ticket sink invoked once per failure signature. */
+  deliveryIssueFiler?: DeliveryIssueFiler;
+  /** Screen/transcript observer for pending deliveries. */
+  deliveryVerifier?: DeliveryVerifier;
   /** Base delay for same-surface CLI auto-revive retries. */
   autoReviveBackoffBaseMs?: number;
   /** Deterministic clock and per-class dwell controls for live-halt escalation. */
@@ -1183,8 +1218,13 @@ export class AgentEngine {
   private deliveryReceipts = new Map<string, AgentDeliveryReceipt>();
   private deliveryReceiptsPath: string;
   private deliverySubmitter: DeliverySubmitter | null = null;
+  private deliveryVerifier: DeliveryVerifier | null = null;
   private deliveryDrainInFlight = false;
+  private deliveryVerifyInFlight = false;
   private deliverySubmitTimeoutMs: number;
+  private deliveryVerifyDeadlineMs: number;
+  private deliveryTicketDir: string;
+  private deliveryIssueFiler: DeliveryIssueFiler | null = null;
   private autoReviveBackoffBaseMs: number;
   private haltNow: () => number;
   private haltAwaitingInputDwellMs: number;
@@ -1207,6 +1247,14 @@ export class AgentEngine {
       1,
       opts?.deliverySubmitTimeoutMs ?? 30_000,
     );
+    this.deliveryVerifyDeadlineMs = Math.max(
+      1,
+      opts?.deliveryVerifyDeadlineMs ?? DEFAULT_DELIVERY_VERIFY_DEADLINE_MS,
+    );
+    this.deliveryTicketDir =
+      opts?.deliveryTicketDir ?? defaultDeliveryTicketDir();
+    this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
+    this.deliveryVerifier = opts?.deliveryVerifier ?? null;
     this.autoReviveBackoffBaseMs = Math.max(
       0,
       opts?.autoReviveBackoffBaseMs ?? DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS,
@@ -3083,7 +3131,10 @@ export class AgentEngine {
         // silence and then retrying the identical broken command.
         const rejection = this.detectResumeRejection(agent, screen.text);
         if (rejection) {
-          const settled = this.stateMgr.updateRecord(agent.agent_id, settlement);
+          const settled = this.stateMgr.updateRecord(
+            agent.agent_id,
+            settlement,
+          );
           this.registry.set(agent.agent_id, settled);
           return this.recordAutoReviveResumeFailure(settled, rejection);
         }
@@ -6061,10 +6112,19 @@ export class AgentEngine {
   async runSweep(): Promise<void> {
     await this.runLifecycleMutation(() => this.runSweepOnce());
     await this.drainDeliveryQueue();
+    await this.verifyPendingDeliveries();
   }
 
   setDeliverySubmitter(submitter: DeliverySubmitter | null): void {
     this.deliverySubmitter = submitter;
+  }
+
+  setDeliveryVerifier(verifier: DeliveryVerifier | null): void {
+    this.deliveryVerifier = verifier;
+  }
+
+  setDeliveryIssueFiler(filer: DeliveryIssueFiler | null): void {
+    this.deliveryIssueFiler = filer;
   }
 
   private loadDeliveryReceipts(): void {
@@ -6178,6 +6238,9 @@ export class AgentEngine {
       submission_started_at: acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
+      verify_deadline_at: new Date(
+        Date.now() + this.deliveryVerifyDeadlineMs,
+      ).toISOString(),
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -6202,7 +6265,11 @@ export class AgentEngine {
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     this.persistDeliveryReceipts();
-    if (receipt.delivery_state === "failed" && opts?.appendFailureEvent) {
+    if (
+      (receipt.delivery_state === "failed" ||
+        receipt.delivery_state === "failed_confirmed") &&
+      opts?.appendFailureEvent
+    ) {
       this.appendDeliveryReceiptEventBestEffort(receipt);
     }
     return { ...receipt };
@@ -6211,6 +6278,202 @@ export class AgentEngine {
   getDeliveryReceipt(deliveryId: string): AgentDeliveryReceipt | null {
     const receipt = this.deliveryReceipts.get(deliveryId);
     return receipt ? { ...receipt } : null;
+  }
+
+  listDeliveryReceipts(): AgentDeliveryReceipt[] {
+    return [...this.deliveryReceipts.values()].map((receipt) => ({
+      ...receipt,
+    }));
+  }
+
+  findOpenDuplicate(input: {
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+  }): AgentDeliveryReceipt | null {
+    for (const receipt of this.deliveryReceipts.values()) {
+      if (
+        (receipt.delivery_state === "pending_verify" ||
+          receipt.delivery_state === "queued") &&
+        receipt.agent_id === input.agent_id &&
+        receipt.text === input.text &&
+        receipt.press_enter === input.press_enter
+      ) {
+        return { ...receipt };
+      }
+    }
+    return null;
+  }
+
+  acceptPendingVerify(input: {
+    delivery_id: string;
+    agent_id: string;
+    text: string;
+    press_enter: boolean;
+    source_event: DeliveryEventType;
+    retry_count: number;
+    created_at?: string;
+  }): AgentDeliveryReceipt {
+    const now = new Date().toISOString();
+    const existing = this.deliveryReceipts.get(input.delivery_id);
+    const receipt: AgentDeliveryReceipt = {
+      ...input,
+      delivery_state: "pending_verify",
+      terminal: false,
+      created_at: input.created_at ?? existing?.created_at ?? now,
+      resolved_at: null,
+      submit_verified: null,
+      error: null,
+      submission_started_at: existing?.submission_started_at ?? now,
+      next_attempt_at: null,
+      verify_deadline_at:
+        existing?.verify_deadline_at ??
+        new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString(),
+    };
+    this.deliveryReceipts.set(receipt.delivery_id, receipt);
+    this.persistDeliveryReceipts();
+    return { ...receipt };
+  }
+
+  async waitForDelivery(
+    deliveryId: string,
+    timeoutMs: number,
+  ): Promise<AgentDeliveryReceipt> {
+    const start = Date.now();
+    const existing = this.getDeliveryReceipt(deliveryId);
+    if (!existing) {
+      throw new Error(`Delivery not found: ${deliveryId}`);
+    }
+    if (existing.terminal) {
+      return existing;
+    }
+    return new Promise<AgentDeliveryReceipt>((resolve, reject) => {
+      const finish = (receipt: AgentDeliveryReceipt) => {
+        clearInterval(timer);
+        resolve(receipt);
+      };
+      const timer = setInterval(() => {
+        const elapsed = Date.now() - start;
+        const current = this.getDeliveryReceipt(deliveryId);
+        if (!current) {
+          clearInterval(timer);
+          reject(new Error(`Delivery not found: ${deliveryId}`));
+          return;
+        }
+        if (current.terminal) {
+          finish(current);
+          return;
+        }
+        if (elapsed >= timeoutMs) {
+          clearInterval(timer);
+          reject(
+            new Error(
+              `Timed out after ${timeoutMs}ms waiting for delivery ${deliveryId}`,
+            ),
+          );
+        }
+      }, DELIVERY_WAIT_POLL_MS);
+    });
+  }
+
+  async verifyPendingDeliveries(): Promise<void> {
+    if (this.deliveryVerifyInFlight) return;
+    this.deliveryVerifyInFlight = true;
+    try {
+      for (const receipt of this.deliveryReceipts.values()) {
+        const watching =
+          receipt.delivery_state === "pending_verify" ||
+          (receipt.delivery_state === "queued" &&
+            receipt.composer_accepted === true);
+        if (!watching || receipt.terminal) continue;
+        const deadlineMs = receipt.verify_deadline_at
+          ? Date.parse(receipt.verify_deadline_at)
+          : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
+        let observation: DeliveryVerifyObservation = { outcome: "pending" };
+        if (this.deliveryVerifier) {
+          try {
+            observation = await this.deliveryVerifier(receipt);
+          } catch (error) {
+            observation = {
+              outcome: "pending",
+              reason: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+        const timedOut = Date.now() >= deadlineMs;
+        if (observation.outcome === "delivered") {
+          receipt.delivery_state = "submitted";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.submit_verified = observation.submit_verified ?? true;
+          receipt.error = null;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
+        if (observation.outcome === "failed_confirmed" || timedOut) {
+          const reason =
+            observation.reason ??
+            (timedOut ? "verify_deadline_elapsed" : "failed_confirmed");
+          receipt.delivery_state = "failed_confirmed";
+          receipt.terminal = true;
+          receipt.resolved_at = new Date().toISOString();
+          receipt.submit_verified = false;
+          receipt.error = reason;
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          await this.fileConfirmedFailureTicket(receipt, reason, observation);
+        }
+      }
+    } finally {
+      this.deliveryVerifyInFlight = false;
+    }
+  }
+
+  private async fileConfirmedFailureTicket(
+    receipt: AgentDeliveryReceipt,
+    reason: string,
+    observation: DeliveryVerifyObservation,
+  ): Promise<void> {
+    if (receipt.ticket_filed) return;
+    const agent = this.getAgentState(receipt.agent_id);
+    const signature = deliveryFailureSignature({
+      reason,
+      cli: agent?.cli ?? null,
+    });
+    const ticket: DeliveryFailureTicket = {
+      signature,
+      delivery_id: receipt.delivery_id,
+      agent_id: receipt.agent_id,
+      reason,
+      cli: agent?.cli ?? null,
+      what_happened: `Delivery ${receipt.delivery_id} to ${receipt.agent_id} reached failed_confirmed (${reason}) after background verify.`,
+      what_fixed_it:
+        "Do not blind-retry. Identical send_to while pending_verify/queued returns duplicate_of. Query wait_for({delivery_id}) or list_agents detail=full.",
+      evidence: {
+        receipt,
+        observation,
+        target_state: agent?.state ?? null,
+        surface_id: agent?.surface_id ?? null,
+      },
+      observed_at: new Date().toISOString(),
+    };
+    const written = writeDeliveryFailureTicket(ticket, {
+      dir: this.deliveryTicketDir,
+    });
+    receipt.ticket_filed = true;
+    this.persistDeliveryReceipts();
+    if (!written.created) return;
+    const filer =
+      this.deliveryIssueFiler ??
+      (async (nextTicket) => {
+        await fileDeliveryFailureGithubIssue(nextTicket);
+      });
+    try {
+      await filer(ticket);
+    } catch {
+      // Local ticket is authoritative; GitHub is best-effort.
+    }
   }
 
   async drainDeliveryQueue(): Promise<void> {
@@ -6267,6 +6530,17 @@ export class AgentEngine {
             receipt.resolved_at = null;
             receipt.submit_verified = null;
             receipt.composer_accepted = true;
+            receipt.verify_deadline_at ??= new Date(
+              Date.now() + this.deliveryVerifyDeadlineMs,
+            ).toISOString();
+          } else if (result.delivery === "pending_verify") {
+            receipt.delivery_state = "pending_verify";
+            receipt.terminal = false;
+            receipt.resolved_at = null;
+            receipt.submit_verified = null;
+            receipt.verify_deadline_at ??= new Date(
+              Date.now() + this.deliveryVerifyDeadlineMs,
+            ).toISOString();
           } else {
             receipt.delivery_state = "submitted";
             receipt.terminal = true;

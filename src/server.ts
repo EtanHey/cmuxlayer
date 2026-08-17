@@ -49,10 +49,12 @@ import {
   RetryableDeliveryError,
   buildLaunchCommand,
   resolveSweepTiming,
+  type AgentDeliveryReceipt,
   type AgentLifecycleEvent,
   type SessionIdentityResolver,
   type SpawnAgentParams,
 } from "./agent-engine.js";
+import type { DeliveryFailureTicket } from "./delivery-failure-tickets.js";
 import {
   deregisterMonitor,
   queryMonitorRegistryForGates,
@@ -548,8 +550,24 @@ const BaseOutputShape = {
 };
 const DeliveryOutputShape = {
   delivered: z.boolean().optional(),
-  delivery: z.enum(["submitted", "queued", "failed"]).optional(),
-  delivery_state: z.enum(["submitted", "queued", "failed"]).optional(),
+  delivery: z
+    .enum([
+      "submitted",
+      "queued",
+      "failed",
+      "pending_verify",
+      "failed_confirmed",
+    ])
+    .optional(),
+  delivery_state: z
+    .enum([
+      "submitted",
+      "queued",
+      "failed",
+      "pending_verify",
+      "failed_confirmed",
+    ])
+    .optional(),
   terminal: z.boolean().optional(),
   typed: z.boolean().optional(),
   submit_attempted: z.boolean().optional(),
@@ -836,7 +854,8 @@ export const DELIVERY_RECEIPT_VOCABULARY = [
   "retry_count",
 ] as const;
 
-type PublicDeliveryState = "submitted" | "queued" | "failed";
+type PublicDeliveryState =
+  "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
 
 export interface PublicDeliveryReceipt {
   delivered: boolean;
@@ -848,6 +867,7 @@ export interface PublicDeliveryReceipt {
   delivery?: PublicDeliveryState;
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
+  duplicate_of?: string;
 }
 
 /**
@@ -864,13 +884,18 @@ export function buildPublicDeliveryReceipt(input: {
   retry_count: number;
 }): PublicDeliveryReceipt {
   const evidencedState =
-    input.delivery_state === "queued" || input.delivery_state === "failed"
+    input.delivery_state === "queued" ||
+    input.delivery_state === "failed" ||
+    input.delivery_state === "pending_verify" ||
+    input.delivery_state === "failed_confirmed"
       ? input.delivery_state
       : input.delivery_state === "submitted" && input.submit_verified === true
         ? "submitted"
         : undefined;
   const terminal =
-    evidencedState === "submitted" || evidencedState === "failed";
+    evidencedState === "submitted" ||
+    evidencedState === "failed" ||
+    evidencedState === "failed_confirmed";
   return {
     delivered: evidencedState === "submitted",
     terminal,
@@ -2933,6 +2958,12 @@ export interface CreateServerOptions {
   seatManifestNow?: () => string;
   /** Publish the opt-in generated fleet.swift from reconciled lifecycle state. */
   fleetSidebarPublisher?: FleetSidebarPublisherLike;
+  /** Background send_to verify deadline; defaults to 10 minutes. */
+  deliveryVerifyDeadlineMs?: number;
+  /** Local evidence tickets for failed_confirmed deliveries. */
+  deliveryTicketDir?: string;
+  /** Optional GitHub/local ticket sink (tests inject a recorder). */
+  deliveryIssueFiler?: (ticket: DeliveryFailureTicket) => Promise<void>;
 }
 
 type CmuxLayerClient = CmuxClient | CmuxSocketClient;
@@ -4515,7 +4546,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     submit_verified: boolean | null;
     submit_verification_reason: SubmitVerificationFailureReason | null;
     retry_count: number;
-    delivery: "submitted" | "queued";
+    delivery: "submitted" | "queued" | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -4712,7 +4743,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_verified: false,
           submit_verification_reason: "input_still_pending",
           retry_count: retryCount,
-          delivery: "submitted",
+          delivery:
+            opts.source_event === "send_to" ||
+            opts.source_event === "dispatch_nudge"
+              ? "pending_verify"
+              : "submitted",
         };
       }
 
@@ -4746,6 +4781,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             : opts.require_working_status
               ? "working_status_not_observed"
               : "submit_evidence_absent";
+    const allowPendingVerify =
+      opts.source_event === "send_to" || opts.source_event === "dispatch_nudge";
+    if (allowPendingVerify && submitVerified === false) {
+      return {
+        submit_verified: null,
+        submit_verification_reason: null,
+        retry_count: retryCount,
+        delivery: "pending_verify",
+      };
+    }
     return {
       submit_verified: submitVerified,
       submit_verification_reason: failureReason,
@@ -4845,7 +4890,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     let submit_verification_reason: SubmitVerificationFailureReason | null =
       null;
     let retry_count = 0;
-    let deliveryOutcome: "submitted" | "queued" = "submitted";
+    let deliveryOutcome: "submitted" | "queued" | "pending_verify" =
+      "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
@@ -4905,6 +4951,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       submit_verification_reason = verification.submit_verification_reason;
       retry_count = verification.retry_count;
       deliveryOutcome = verification.delivery;
+      if (deliveryOutcome === "pending_verify") {
+        submit_verified = null;
+        submit_verification_reason = null;
+      }
     }
 
     await maybeRenameTask({
@@ -4930,9 +4980,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               delivery_state:
                 deliveryOutcome === "queued"
                   ? ("queued" as const)
-                  : submit_verified === false
-                    ? ("failed" as const)
-                    : ("submitted" as const),
+                  : deliveryOutcome === "pending_verify"
+                    ? ("pending_verify" as const)
+                    : submit_verified === false
+                      ? ("failed" as const)
+                      : ("submitted" as const),
             }
           : {}),
       });
@@ -4942,9 +4994,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery_state:
         deliveryOutcome === "queued"
           ? "queued"
-          : submit_verified === true
-            ? "submitted"
-            : undefined,
+          : deliveryOutcome === "pending_verify"
+            ? "pending_verify"
+            : submit_verified === true
+              ? "submitted"
+              : undefined,
       delivery_id: opts.delivery_id,
       typed: bytes > 0,
       submit_attempted: Boolean(opts.press_enter),
@@ -4952,7 +5006,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       retry_count,
     });
 
-    if (submit_verified === false && deliveryOutcome !== "queued") {
+    if (
+      submit_verified === false &&
+      deliveryOutcome !== "queued" &&
+      deliveryOutcome !== "pending_verify"
+    ) {
       const timeoutMs =
         opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS;
       throw new SubmitVerificationError(
@@ -10236,6 +10294,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           seatRegistry,
           seatRegistryPath: opts?.seatRegistryPath,
           fleetSidebarPublisher: opts?.fleetSidebarPublisher,
+          deliveryVerifyDeadlineMs: opts?.deliveryVerifyDeadlineMs,
+          deliveryTicketDir: opts?.deliveryTicketDir,
+          deliveryIssueFiler: opts?.deliveryIssueFiler,
         },
       );
     lifecycleSeatManifestPublisher = async (input) => {
@@ -10723,10 +10784,51 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       return {
         retry_count: delivery.retry_count,
         submit_verified: delivery.submit_verified,
-        ...(delivery.delivery === "submitted" || delivery.delivery === "queued"
+        ...(delivery.delivery === "submitted" ||
+        delivery.delivery === "queued" ||
+        delivery.delivery === "pending_verify"
           ? { delivery: delivery.delivery }
           : {}),
       };
+    });
+    engine.setDeliveryVerifier(async (receipt: AgentDeliveryReceipt) => {
+      const agent = engine.getAgentState(receipt.agent_id);
+      if (!agent) {
+        return { outcome: "failed_confirmed" as const, reason: "target_gone" };
+      }
+      const snapshot = await readParsedSurface(
+        agent.surface_id,
+        agent.workspace_id ?? undefined,
+      );
+      if (!snapshot?.text.trim()) {
+        return {
+          outcome: "pending" as const,
+          reason: "surface_read_unavailable",
+        };
+      }
+      const pending = screenShowsPendingInput(snapshot.text, receipt.text);
+      const queued = screenShowsQueuedAgentInput(snapshot.text, receipt.text);
+      const composer = extractComposerInputRegion(snapshot.text, receipt.text);
+      const cli = inferComposerCli(snapshot.text, snapshot.parsed);
+      if (queued || (cli === "cursor" && pending)) {
+        return { outcome: "pending" as const };
+      }
+      const composerCleared = composer !== null && composer.trim() === "";
+      const correlationTail = receipt.text
+        .trim()
+        .slice(-Math.min(80, receipt.text.trim().length));
+      const inTranscript =
+        correlationTail.length > 0 &&
+        normalizeTerminalText(snapshot.text).includes(correlationTail) &&
+        !pending;
+      if (
+        composerCleared ||
+        inTranscript ||
+        (!pending && isSubmitVerifiedStatus(snapshot.parsed.status))
+      ) {
+        return { outcome: "delivered" as const, submit_verified: true };
+      }
+      return { outcome: "pending" as const };
     });
 
     // Reconstitute and discover live surfaces before the first sidebar paint.
@@ -12487,6 +12589,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe("Single agent ID from spawn_agent"),
+        delivery_id: z
+          .string()
+          .optional()
+          .describe(
+            "Wait for a send_to delivery_id to reach a terminal outcome",
+          ),
         ids: z
           .array(z.string())
           .min(1)
@@ -12514,9 +12622,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         try {
           if (args.watch) {
-            if (args.agent_id || args.ids || args.mine) {
+            if (args.agent_id || args.ids || args.mine || args.delivery_id) {
               throw new Error(
-                "wait_for watch is mutually exclusive with agent_id, ids, and mine",
+                "wait_for watch is mutually exclusive with agent_id, ids, mine, and delivery_id",
               );
             }
             const result = await engine.waitForWatch(
@@ -12530,6 +12638,25 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }),
               result,
             );
+          }
+          if (args.delivery_id) {
+            if (args.agent_id || args.ids || args.mine) {
+              throw new Error(
+                "wait_for delivery_id is mutually exclusive with agent_id, ids, and mine",
+              );
+            }
+            const receipt = await engine.waitForDelivery(
+              args.delivery_id,
+              args.timeout_ms,
+            );
+            const data = {
+              delivery_id: receipt.delivery_id,
+              delivery_state: receipt.delivery_state,
+              terminal: receipt.terminal,
+              submit_verified: receipt.submit_verified,
+              agent_id: receipt.agent_id,
+            };
+            return okFormatted(formatOk("wait_for", data), data);
           }
           const targetState = args.target_state ?? "done";
           if (args.mine && (args.agent_id || args.ids)) {
@@ -12601,7 +12728,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
           }
           if (!args.agent_id) {
-            throw new Error("wait_for requires agent_id or ids");
+            throw new Error("wait_for requires agent_id, ids, or delivery_id");
           }
           const result = await engine.waitFor(
             args.agent_id,
@@ -12916,6 +13043,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             count: entry.agents.length,
             ...(entry.skipped_agents.length > 0
               ? { skipped_agents: entry.skipped_agents }
+              : {}),
+            ...(args.detail === "full"
+              ? {
+                  deliveries: engine.listDeliveryReceipts().map((receipt) => ({
+                    delivery_id: receipt.delivery_id,
+                    agent_id: receipt.agent_id,
+                    delivery_state: receipt.delivery_state,
+                    terminal: receipt.terminal,
+                    created_at: receipt.created_at,
+                    resolved_at: receipt.resolved_at,
+                  })),
+                }
               : {}),
           };
           const formatted = formatListAgents(
@@ -14240,6 +14379,28 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 });
                 continue;
               }
+              const duplicate = engine.findOpenDuplicate({
+                agent_id: agent.agent_id,
+                text: args.text,
+                press_enter: args.press_enter,
+              });
+              if (duplicate) {
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  duplicate_of: duplicate.delivery_id,
+                  ...buildPublicDeliveryReceipt({
+                    delivery_state: duplicate.delivery_state,
+                    delivery_id: duplicate.delivery_id,
+                    typed: false,
+                    submit_attempted: false,
+                    submit_verified: duplicate.submit_verified,
+                    retry_count: duplicate.retry_count,
+                  }),
+                  accepted: true,
+                });
+                continue;
+              }
               const deliveryId = randomUUID();
               if (!args.allow_busy && agent.state === "working") {
                 const queued = engine.queueDelivery({
@@ -14282,20 +14443,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
                       })
-                    : delivery.delivery === "submitted"
-                      ? engine.resolveDelivery({
+                    : delivery.delivery === "pending_verify"
+                      ? engine.acceptPendingVerify({
                           delivery_id: deliveryId,
                           agent_id: agent.agent_id,
                           text: args.text,
                           press_enter: args.press_enter,
                           source_event: "send_to",
-                          delivery_state: "submitted",
-                          terminal: true,
                           retry_count: delivery.retry_count,
-                          submit_verified: delivery.submit_verified,
-                          error: null,
                         })
-                      : null;
+                      : delivery.delivery === "submitted"
+                        ? engine.resolveDelivery({
+                            delivery_id: deliveryId,
+                            agent_id: agent.agent_id,
+                            text: args.text,
+                            press_enter: args.press_enter,
+                            source_event: "send_to",
+                            delivery_state: "submitted",
+                            terminal: true,
+                            retry_count: delivery.retry_count,
+                            submit_verified: delivery.submit_verified,
+                            error: null,
+                          })
+                        : null;
                 mutableReceipts.push({
                   ...resolutionMetadata,
                   agent_id: agent.agent_id,
@@ -14408,6 +14578,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             cli: targetAgent?.cli,
             allowLongInline: args.allow_long_inline,
           });
+          const duplicate = engine.findOpenDuplicate({
+            agent_id: agentId,
+            text: args.text,
+            press_enter: args.press_enter,
+          });
+          if (duplicate) {
+            const data = {
+              accepted: true,
+              agent_id: agentId,
+              duplicate_of: duplicate.delivery_id,
+              ...buildPublicDeliveryReceipt({
+                delivery_state: duplicate.delivery_state,
+                delivery_id: duplicate.delivery_id,
+                typed: false,
+                submit_attempted: false,
+                submit_verified: duplicate.submit_verified,
+                retry_count: duplicate.retry_count,
+              }),
+            };
+            return okFormatted(
+              `send_to duplicate_of ${duplicate.delivery_id}`,
+              data,
+            );
+          }
           if (!args.allow_busy && targetAgent?.state === "working") {
             const receipt = engine.queueDelivery({
               agent_id: agentId,
@@ -14495,20 +14689,29 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
                 })
-              : delivery.delivery === "submitted"
-                ? engine.resolveDelivery({
+              : delivery.delivery === "pending_verify"
+                ? engine.acceptPendingVerify({
                     delivery_id: deliveryId,
                     agent_id: agentId,
                     text: args.text,
                     press_enter: args.press_enter,
                     source_event: "send_to",
-                    delivery_state: "submitted",
-                    terminal: true,
                     retry_count: delivery.retry_count,
-                    submit_verified: delivery.submit_verified,
-                    error: null,
                   })
-                : null;
+                : delivery.delivery === "submitted"
+                  ? engine.resolveDelivery({
+                      delivery_id: deliveryId,
+                      agent_id: agentId,
+                      text: args.text,
+                      press_enter: args.press_enter,
+                      source_event: "send_to",
+                      delivery_state: "submitted",
+                      terminal: true,
+                      retry_count: delivery.retry_count,
+                      submit_verified: delivery.submit_verified,
+                      error: null,
+                    })
+                  : null;
           // Preserve the already-terminal receipt if optional evidence
           // collection fails after the pane mutation has succeeded.
           const publicReceipt = buildPublicDeliveryReceipt({

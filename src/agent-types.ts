@@ -278,7 +278,8 @@ export interface DeliveryTelemetryEvent {
   /** Stable receipt identity for agent-routed delivery state transitions. */
   delivery_id?: string;
   /** Nonterminal acceptance or terminal resolution. */
-  delivery_state?: "submitted" | "queued" | "failed";
+  delivery_state?:
+    "submitted" | "queued" | "failed" | "pending_verify" | "failed_confirmed";
   target_agent?: string;
 }
 

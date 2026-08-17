@@ -188,7 +188,7 @@ describe("verified relay", () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
   });
 
-  it("send_to a frozen terminal returns an error instead of ok:true (short relay)", async () => {
+  it("send_to a frozen terminal returns pending_verify instead of a false terminal fail (short relay)", async () => {
     const client = new FrozenClaudeSurfaceClient();
     server = createRelayServer(client);
     registerAgent(server);
@@ -200,11 +200,18 @@ describe("verified relay", () => {
     });
     const parsed = parseResult(result);
 
-    // A relay that cannot confirm the input landed must NOT report success.
-    expect(result.isError).toBe(true);
-    expect(parsed.ok).not.toBe(true);
-    expect(
-      client.sendKeyCalls.filter((key) => key === "return").length,
-    ).toBe(1);
+    // A relay that cannot confirm the input landed must not report delivered.
+    // Timeout-without-evidence is nonterminal pending_verify, not a false fail.
+    expect(result.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      delivered: false,
+      terminal: false,
+      delivery_state: "pending_verify",
+      submit_verified: null,
+    });
+    expect(client.sendKeyCalls.filter((key) => key === "return").length).toBe(
+      1,
+    );
   }, 10_000);
 });
