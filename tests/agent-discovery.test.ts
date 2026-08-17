@@ -18,7 +18,7 @@ const deadCodexShellFixture = JSON.parse(
 
 describe("AgentDiscovery", () => {
   it("keeps a frozen discovered agent non-terminal while it waits for input", () => {
-    expect(discoveredStatusToAgentState("frozen")).toBe("idle");
+    expect(discoveredStatusToAgentState("frozen")).toBe("error");
   });
 
   it("derives a repo root instead of a nested cwd basename", () => {

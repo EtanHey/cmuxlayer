@@ -222,9 +222,7 @@ export class RetryableDeliveryError extends Error {
   }
 }
 
-type DeliverySubmitter = (
-  receipt: AgentDeliveryReceipt,
-) => Promise<{
+type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   retry_count: number;
   submit_verified: boolean | null;
   delivery?: "submitted" | "queued";
@@ -286,7 +284,10 @@ export class AgentLaunchError extends Error {
     readonly launch_cause?: unknown,
     readonly launch_phase: "focus" | "launch" = "launch",
   ) {
-    super(message, launch_cause === undefined ? undefined : { cause: launch_cause });
+    super(
+      message,
+      launch_cause === undefined ? undefined : { cause: launch_cause },
+    );
     this.name = "AgentLaunchError";
   }
 }
@@ -2264,9 +2265,7 @@ export class AgentEngine {
     if (!requestedWorkspace || !surface.workspace) {
       return surface;
     }
-    if (
-      surface.workspace === requestedWorkspace
-    ) {
+    if (surface.workspace === requestedWorkspace) {
       return surface;
     }
     return {
@@ -2914,10 +2913,7 @@ export class AgentEngine {
       }
       if (resolvedSession) {
         try {
-          return this.finalizeCapturedSession(
-            captureAgent,
-            resolvedSession,
-          );
+          return this.finalizeCapturedSession(captureAgent, resolvedSession);
         } catch {
           return captureAgent;
         }
@@ -2926,9 +2922,8 @@ export class AgentEngine {
         !resolvingFirstConnect &&
         captureAgent.transcript_session_capture_deferred === true
       ) {
-        captureAgent = this.recordDeferredTranscriptCaptureFailure(
-          captureAgent,
-        );
+        captureAgent =
+          this.recordDeferredTranscriptCaptureFailure(captureAgent);
       }
     }
 
@@ -2961,10 +2956,7 @@ export class AgentEngine {
     const previousAttempts = Number.isFinite(
       agent.transcript_session_capture_attempts,
     )
-      ? Math.max(
-          0,
-          Math.trunc(agent.transcript_session_capture_attempts ?? 0),
-        )
+      ? Math.max(0, Math.trunc(agent.transcript_session_capture_attempts ?? 0))
       : 0;
     const attempts = Math.min(
       MAX_DEFERRED_TRANSCRIPT_CAPTURE_ATTEMPTS,
@@ -3278,9 +3270,9 @@ export class AgentEngine {
   ): AgentRecord {
     const hasEpisodeState = Boolean(
       agent.halt_episode_type ||
-        agent.halt_episode_started_at ||
-        agent.halt_notification_sent_at ||
-        agent.halt_notified_ancestor_id,
+      agent.halt_episode_started_at ||
+      agent.halt_notification_sent_at ||
+      agent.halt_notified_ancestor_id,
     );
     if (!hasEpisodeState && Object.keys(patch).length === 0) return agent;
     const updated = this.stateMgr.updateRecord(agent.agent_id, {
@@ -3373,7 +3365,9 @@ export class AgentEngine {
         const rightScore =
           (right.role === "orchestrator" ? 2 : 0) +
           (right.surface_provenance === "cmuxlayer_spawn" ? 1 : 0);
-        return rightScore - leftScore || left.agent_id.localeCompare(right.agent_id);
+        return (
+          rightScore - leftScore || left.agent_id.localeCompare(right.agent_id)
+        );
       });
     const bestSink = async (
       scoped: AgentRecord[],
@@ -3392,7 +3386,9 @@ export class AgentEngine {
     const scopedSink = await bestSink(sameWorkspace);
     if (scopedSink) return scopedSink;
     return bestSink(
-      candidates.filter((candidate) => candidate.workspace_id !== agent.workspace_id),
+      candidates.filter(
+        (candidate) => candidate.workspace_id !== agent.workspace_id,
+      ),
     );
   }
 
@@ -3447,7 +3443,10 @@ export class AgentEngine {
         error,
       });
     } catch (eventError) {
-      console.error("[cmuxlayer] failed to log halt escalation outcome:", eventError);
+      console.error(
+        "[cmuxlayer] failed to log halt escalation outcome:",
+        eventError,
+      );
     }
   }
 
@@ -3468,10 +3467,7 @@ export class AgentEngine {
     ) {
       return false;
     }
-    const excerpt = excerptSource
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 240);
+    const excerpt = excerptSource.replace(/\s+/g, " ").trim().slice(0, 240);
     this.stateMgr.getEventLog().appendResolvedPrompt({
       ts: input.nowIso,
       event_type: "resolved_prompt",
@@ -3671,8 +3667,8 @@ export class AgentEngine {
     ) {
       const hasProgressMemory = Boolean(
         agent.halt_last_active_at ||
-          agent.halt_last_progress_at_ms ||
-          agent.halt_last_progress_signature,
+        agent.halt_last_progress_at_ms ||
+        agent.halt_last_progress_signature,
       );
       return this.clearHaltEpisode(
         agent,
@@ -3688,9 +3684,8 @@ export class AgentEngine {
 
     const screenActive =
       parsed.status === "working" || parsed.status === "thinking";
-    const blockingBackgroundWaitMs = this.blockingBackgroundWaitElapsedMs(
-      screenText,
-    );
+    const blockingBackgroundWaitMs =
+      this.blockingBackgroundWaitElapsedMs(screenText);
     let haltType: AgentHaltType | null = null;
     let episodeStartedAtMs = nowMs;
     if (
@@ -3953,7 +3948,8 @@ export class AgentEngine {
       auto_revive: true,
       revive_attempts: agent.revive_attempts ?? 0,
       revive_outcome: outcome,
-      verified_model: outcome === "revived" ? agent.parsed_model ?? null : null,
+      verified_model:
+        outcome === "revived" ? (agent.parsed_model ?? null) : null,
       manual_resume_command:
         outcome === "unrecoverable" && agent.cli_session_id
           ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
@@ -4026,11 +4022,15 @@ export class AgentEngine {
         workspace: attempted.workspace_id ?? undefined,
       });
       const observerEpoch = this.captureSurfaceObserverEpoch();
-      const creating = this.stateMgr.transition(attempted.agent_id, "creating", {
-        error: null,
-        pid: null,
-        cli_session_id: sessionId,
-      });
+      const creating = this.stateMgr.transition(
+        attempted.agent_id,
+        "creating",
+        {
+          error: null,
+          pid: null,
+          cli_session_id: sessionId,
+        },
+      );
       this.registry.set(agent.agent_id, creating);
       const booting = this.stateMgr.transition(attempted.agent_id, "booting", {
         error: null,
@@ -4094,7 +4094,10 @@ export class AgentEngine {
       error: null,
     });
     this.registry.set(agent.agent_id, completed);
-    const notification = await this.dispatchCliExitOutcome(completed, "revived");
+    const notification = await this.dispatchCliExitOutcome(
+      completed,
+      "revived",
+    );
     completed = notification.record;
     this.appendAutoReviveCliExitEvent(
       completed,
@@ -4126,7 +4129,9 @@ export class AgentEngine {
       if ((agent.revive_attempts ?? 0) >= MAX_RESPAWN_ATTEMPTS) {
         await this.markAutoReviveUnrecoverable(
           agent,
-          agent.revive_last_error ?? agent.error ?? "readiness verification failed",
+          agent.revive_last_error ??
+            agent.error ??
+            "readiness verification failed",
         );
         continue;
       }
@@ -6568,9 +6573,10 @@ export class AgentEngine {
     // Job role is authoritative. The versioned tool rejects missing agent
     // axes; direct legacy engine callers default to worker without consulting
     // the selected harness.
-    const role = spawnParams.role !== undefined
-      ? inferAgentRole({ role: spawnParams.role })
-      : "worker";
+    const role =
+      spawnParams.role !== undefined
+        ? inferAgentRole({ role: spawnParams.role })
+        : "worker";
 
     this.spawnGuard.check(spawnParams.workspace);
 
@@ -6661,8 +6667,7 @@ export class AgentEngine {
       state: "booting",
       repo: spawnParams.repo,
       model: spawnParams.model ?? modelPolicy.effective_model,
-      effort:
-        spawnParams.cli === "codex" ? (effort ?? "high") : null,
+      effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
       cli: spawnParams.cli,
       cli_session_id: null,
       cli_session_path: null,
@@ -6861,9 +6866,7 @@ export class AgentEngine {
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
-      warnings: [
-        ...modelPolicy.warnings,
-      ],
+      warnings: [...modelPolicy.warnings],
       model_policy: modelPolicy,
       cwd: launchCwd ?? undefined,
       mcp_env: spawnParams.mcp_env,
@@ -6897,7 +6900,8 @@ export class AgentEngine {
       agent.cli_session_id,
       agent.launcher_name,
     );
-    const requestedWorkspace = opts?.workspace ?? agent.workspace_id ?? undefined;
+    const requestedWorkspace =
+      opts?.workspace ?? agent.workspace_id ?? undefined;
     this.spawnGuard.check(requestedWorkspace);
 
     let surface: CreatedAgentSurface | null = null;
@@ -7966,6 +7970,22 @@ export class AgentEngine {
         this.registry.set(canonicalAgentId, updated);
       } catch {
         // Preserve the post-condition error for the caller.
+      }
+      throw new Error(error);
+    }
+
+    if (force && !forceSignalAccepted) {
+      const error =
+        `Stop post-condition failed for ${agent.agent_id}: process still alive ` +
+        `(pid=${agent.pid ?? "unknown"} surface=${agent.surface_id} pane=${stopResult.paneRef ?? "unknown"})`;
+      try {
+        const updated = this.stateMgr.updateRecord(canonicalAgentId, {
+          error,
+          quality: "degraded",
+        });
+        this.registry.set(canonicalAgentId, updated);
+      } catch {
+        // Preserve explicit force-stop failure for the caller.
       }
       throw new Error(error);
     }

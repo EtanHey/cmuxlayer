@@ -52,8 +52,10 @@ export function inferRepoFromTitle(title: string): string {
   return stripped.replace(/^[A-Z]/, (match) => match.toLowerCase());
 }
 
-function inferCliFromLauncherTitle(title: string): CliType | "unknown" {
-  const launcherTitle = title.trim().split(":", 1)[0] ?? "";
+function inferCliFromLauncherTitle(
+  title: string | null | undefined,
+): CliType | "unknown" {
+  const launcherTitle = (title ?? "").trim().split(":", 1)[0] ?? "";
   const match = launcherTitle.match(/(?:Claude|Codex|Cursor|Gemini|Kiro)$/i);
   return (match?.[0]?.toLowerCase() as CliType | undefined) ?? "unknown";
 }
@@ -84,7 +86,7 @@ export function discoveredStatusToAgentState(
     case "done":
       return "done";
     case "frozen":
-      return "idle";
+      return "error";
     default:
       return "ready";
   }

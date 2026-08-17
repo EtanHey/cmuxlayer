@@ -61,9 +61,7 @@ function makeSurface(ref: string): CmuxSurface {
   };
 }
 
-function makeDiscovered(
-  overrides: Partial<DiscoveredAgent>,
-): DiscoveredAgent {
+function makeDiscovered(overrides: Partial<DiscoveredAgent>): DiscoveredAgent {
   return {
     surface_id: "surface:live",
     surface_title: "cmuxlayerClaude",
@@ -293,9 +291,9 @@ describe("AgentRegistry", () => {
 
       await registry.reconstitute();
 
-      expect(stateMgr.readState("legacy-ref-only-observation")).not.toHaveProperty(
-        "surface_observer_id",
-      );
+      expect(
+        stateMgr.readState("legacy-ref-only-observation"),
+      ).not.toHaveProperty("surface_observer_id");
     });
 
     it("does not let the first observer claim a ref-only legacy record", async () => {
@@ -309,20 +307,24 @@ describe("AgentRegistry", () => {
       );
       const nightlyRegistry = new AgentRegistry(
         stateMgr,
-        async () => [{
-          ...makeSurface("surface:shared"),
-          id: "uuid-nightly",
-          workspace_ref: "workspace:nightly",
-        }],
+        async () => [
+          {
+            ...makeSurface("surface:shared"),
+            id: "uuid-nightly",
+            workspace_ref: "workspace:nightly",
+          },
+        ],
         { observerId: "cmux:/tmp/nightly.sock" },
       );
       const prodRegistry = new AgentRegistry(
         stateMgr,
-        async () => [{
-          ...makeSurface("surface:shared"),
-          id: "uuid-prod",
-          workspace_ref: "workspace:prod",
-        }],
+        async () => [
+          {
+            ...makeSurface("surface:shared"),
+            id: "uuid-prod",
+            workspace_ref: "workspace:prod",
+          },
+        ],
         { observerId: "cmux:/tmp/prod.sock" },
       );
 
@@ -350,20 +352,24 @@ describe("AgentRegistry", () => {
       );
       const nightlyRegistry = new AgentRegistry(
         stateMgr,
-        async () => [{
-          ...makeSurface("surface:stale"),
-          id: "uuid-nightly",
-          workspace_ref: "workspace:nightly",
-        }],
+        async () => [
+          {
+            ...makeSurface("surface:stale"),
+            id: "uuid-nightly",
+            workspace_ref: "workspace:nightly",
+          },
+        ],
         { observerId: "cmux:/tmp/nightly.sock" },
       );
       const prodRegistry = new AgentRegistry(
         stateMgr,
-        async () => [{
-          ...makeSurface("surface:moved"),
-          id: "uuid-prod",
-          workspace_ref: "workspace:prod",
-        }],
+        async () => [
+          {
+            ...makeSurface("surface:moved"),
+            id: "uuid-prod",
+            workspace_ref: "workspace:prod",
+          },
+        ],
         { observerId: "cmux:/tmp/prod.sock" },
       );
 
@@ -496,9 +502,9 @@ describe("AgentRegistry", () => {
         },
       ];
 
-      await expect(
-        registry.purgeTerminal({ confirmationMs: 0 }),
-      ).resolves.toBe(0);
+      await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(
+        0,
+      );
       expect(stateMgr.readState(agentId)).not.toBeNull();
     });
 
@@ -548,9 +554,7 @@ describe("AgentRegistry", () => {
       });
       const registry = new AgentRegistry(
         stateMgr,
-        async () => [
-          { ...makeSurface("surface:auto-owned"), id: surfaceUuid },
-        ],
+        async () => [{ ...makeSurface("surface:auto-owned"), id: surfaceUuid }],
         { observerId: "cmux:/tmp/prod.sock" },
       );
       await registry.reconstitute();
@@ -710,10 +714,14 @@ describe("AgentRegistry", () => {
       await registry.reconstitute();
 
       expect(
-        registry.list({ blocked_on_prompt: true }).map((agent) => agent.agent_id),
+        registry
+          .list({ blocked_on_prompt: true })
+          .map((agent) => agent.agent_id),
       ).toEqual(["blocked"]);
       expect(
-        registry.list({ blocked_on_prompt: false }).map((agent) => agent.agent_id),
+        registry
+          .list({ blocked_on_prompt: false })
+          .map((agent) => agent.agent_id),
       ).toEqual(["healthy"]);
 
       const merged = await registry.listMerged(
@@ -1155,20 +1163,17 @@ describe("AgentRegistry", () => {
       await registry.reconstitute();
       changeEpochOnEnumeration = true;
 
-      await registry.listMerged(
-        { scan: vi.fn() } as any,
-        {
-          discovered: [
-            makeDiscovered({
-              surface_id: "surface:new",
-              surface_uuid: surfaceUuid,
-              workspace_id: "workspace:new",
-              surface_title: "brainlayerCodex",
-              cli: "codex",
-            }),
-          ],
-        },
-      );
+      await registry.listMerged({ scan: vi.fn() } as any, {
+        discovered: [
+          makeDiscovered({
+            surface_id: "surface:new",
+            surface_uuid: surfaceUuid,
+            workspace_id: "workspace:new",
+            surface_title: "brainlayerCodex",
+            cli: "codex",
+          }),
+        ],
+      });
 
       expect(observerEpoch).toBe(`${ownerId}@epoch-2`);
       expect(stateMgr.readState("epoch-pinned-managed-agent")).toMatchObject({
@@ -1218,7 +1223,9 @@ describe("AgentRegistry", () => {
         surface_uuid: null,
       });
       expect(merged).toEqual(
-        expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+        expect.arrayContaining([
+          expect.objectContaining({ agent_id: agentId }),
+        ]),
       );
     });
 
@@ -1262,7 +1269,9 @@ describe("AgentRegistry", () => {
         surface_uuid: null,
       });
       expect(merged).toEqual(
-        expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+        expect.arrayContaining([
+          expect.objectContaining({ agent_id: agentId }),
+        ]),
       );
     });
 
@@ -1288,28 +1297,27 @@ describe("AgentRegistry", () => {
         ]);
         await registry.reconstitute();
 
-        const merged = await registry.listMerged(
-          { scan: vi.fn() } as any,
-          {
-            discovered: [
-              makeDiscovered({
-                surface_id: "surface:prompt",
-                surface_uuid: surfaceUuid,
-                cli: "codex",
-                control_state: "interactive_overlay",
-                parsed_status: "frozen",
-                has_agent: false,
-              }),
-            ],
-          },
-        );
+        const merged = await registry.listMerged({ scan: vi.fn() } as any, {
+          discovered: [
+            makeDiscovered({
+              surface_id: "surface:prompt",
+              surface_uuid: surfaceUuid,
+              cli: "codex",
+              control_state: "interactive_overlay",
+              parsed_status: "frozen",
+              has_agent: false,
+            }),
+          ],
+        });
 
         expect(stateMgr.readState(agentId)?.blocked_on_prompt).toBe(
           persistedBlocked,
         );
         expect(registry.get(agentId)?.agent_id).toBe(agentId);
         expect(merged).toEqual(
-          expect.arrayContaining([expect.objectContaining({ agent_id: agentId })]),
+          expect.arrayContaining([
+            expect.objectContaining({ agent_id: agentId }),
+          ]),
         );
       },
     );
@@ -1595,10 +1603,10 @@ describe("AgentRegistry", () => {
         surface_uuid: null,
       });
 
-      const merged = await registry.listMerged(
-        { scan: vi.fn() } as any,
-        { discovered: [moved, refOnlyNeighbor], nonDestructive: true },
-      );
+      const merged = await registry.listMerged({ scan: vi.fn() } as any, {
+        discovered: [moved, refOnlyNeighbor],
+        nonDestructive: true,
+      });
 
       expect(
         merged.find((candidate) => candidate.agent_id === record.agent_id),
@@ -1795,10 +1803,7 @@ describe("AgentRegistry", () => {
         }),
       );
       const registry = new AgentRegistry(stateMgr, async () => []);
-      registry.set(
-        "cmuxlayerCodex",
-        stateMgr.readState("cmuxlayerCodex")!,
-      );
+      registry.set("cmuxlayerCodex", stateMgr.readState("cmuxlayerCodex")!);
       const discovered = [
         makeDiscovered({
           surface_id: "surface:first",
@@ -2187,10 +2192,12 @@ describe("AgentRegistry", () => {
       expect(result.evicted).toEqual([]);
       expect(stateMgr.readState("coach-drifted-record")).not.toBeNull();
       expect(stateMgr.readState("coachClaude")).not.toBeNull();
-      expect(registry.list().map((record) => record.agent_id).sort()).toEqual([
-        "coach-drifted-record",
-        "coachClaude",
-      ]);
+      expect(
+        registry
+          .list()
+          .map((record) => record.agent_id)
+          .sort(),
+      ).toEqual(["coach-drifted-record", "coachClaude"]);
     });
 
     it("does not evict an unobserved duplicate from a first partial discovery omission", async () => {
@@ -2280,9 +2287,7 @@ describe("AgentRegistry", () => {
       );
       const registry = new AgentRegistry(
         stateMgr,
-        async () => [
-          { ...makeSurface("surface:coach-live"), id: liveUuid },
-        ],
+        async () => [{ ...makeSurface("surface:coach-live"), id: liveUuid }],
         { observerId },
       );
       await registry.reconstitute();
@@ -2371,7 +2376,7 @@ describe("AgentRegistry", () => {
         seat_role: "lead",
         role: "orchestrator",
         parent_agent_id: null,
-        halt_escalation: true,
+        halt_escalation: false,
         blocked_on_prompt: false,
         blocked_on_prompt_since: null,
         halt_missing_ancestor_count: 0,
@@ -2907,9 +2912,8 @@ describe("AgentRegistry", () => {
         }),
       );
 
-      const registry = new AgentRegistry(
-        stateMgr,
-        async () => discovered.map((entry) => makeSurface(entry.surface_id)),
+      const registry = new AgentRegistry(stateMgr, async () =>
+        discovered.map((entry) => makeSurface(entry.surface_id)),
       );
       await registry.reconstitute();
 
@@ -3259,9 +3263,9 @@ describe("AgentRegistry", () => {
       await expect(
         registry.evictSurfaceless({ confirmationMs: 0 }),
       ).resolves.toEqual([]);
-      await expect(
-        registry.purgeTerminal({ confirmationMs: 0 }),
-      ).resolves.toBe(0);
+      await expect(registry.purgeTerminal({ confirmationMs: 0 })).resolves.toBe(
+        0,
+      );
       expect(registry.get("deferred-terminal-worker")).toMatchObject({
         cli_session_id: null,
         transcript_session_capture_deferred: true,
@@ -3363,12 +3367,14 @@ describe("AgentRegistry", () => {
           surface_observer_id: "cmux:/tmp/test.sock",
         }),
       );
-      const registry = new AgentRegistry(stateMgr, async () => [
-        { ...makeSurface("surface:shell"), title: "plain shell" },
-      ], {
-        observerId: "cmux:/tmp/test.sock",
-        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
-      });
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [{ ...makeSurface("surface:shell"), title: "plain shell" }],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
       await registry.reconstitute();
 
       const proof = registry.createLiveSeatDiscoveryProof(
@@ -3432,12 +3438,14 @@ describe("AgentRegistry", () => {
           surface_observer_id: "cmux:/tmp/test.sock",
         }),
       );
-      const registry = new AgentRegistry(stateMgr, async () => [
-        makeSurface("surface:coach"),
-      ], {
-        observerId: "cmux:/tmp/test.sock",
-        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
-      });
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:coach")],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
       await registry.reconstitute();
 
       const proof = registry.createLiveSeatDiscoveryProof(
@@ -3497,12 +3505,14 @@ describe("AgentRegistry", () => {
           surface_observer_id: "cmux:/tmp/test.sock",
         }),
       );
-      const registry = new AgentRegistry(stateMgr, async () => [
-        makeSurface("surface:other-agent"),
-      ], {
-        observerId: "cmux:/tmp/test.sock",
-        observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
-      });
+      const registry = new AgentRegistry(
+        stateMgr,
+        async () => [makeSurface("surface:other-agent")],
+        {
+          observerId: "cmux:/tmp/test.sock",
+          observerEpochProvider: () => "cmux:/tmp/test.sock@epoch-1",
+        },
+      );
       await registry.reconstitute();
 
       const proof = registry.createLiveSeatDiscoveryProof(
