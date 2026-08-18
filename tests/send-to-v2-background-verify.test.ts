@@ -518,6 +518,28 @@ describe("send_to v2 background verify", () => {
     expect(client.sendCalls).toEqual(["race me once"]);
   });
 
+  it("stores sanitized text on the delivery receipt so verify matches the typed payload", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const raw = "hello\x07\x1b[31mworld";
+    const sanitized = "helloworld";
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: raw,
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      text: sanitized,
+    });
+    expect(client.sendCalls.join("")).toBe(sanitized);
+  });
+
   it("returns the existing delivery_id with duplicate_of instead of typing again", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);

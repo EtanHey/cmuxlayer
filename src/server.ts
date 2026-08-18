@@ -14512,6 +14512,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.text === undefined) {
             throw new Error("send_to mode=agent requires text");
           }
+          args.text = sanitizeTerminalInput(args.text);
           assertInlineInputAllowed({
             tool: "send_to",
             arg: "text",
