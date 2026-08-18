@@ -10582,14 +10582,15 @@ Session ID: ${sessionId}`,
           text:
             surface === parent.surface_id
               ? "Claude Code\nWorking (2s • esc to interrupt)"
-              : "Claude Code\nPaused\npress enter to resume",
+              : "gpt-5.5 xhigh · 99% left\nGoal paused (/goal resume)\ncodex>",
           lines: 80,
           scrollback_used: false,
         }),
       );
       await engine.getRegistry().reconstitute();
 
-      const pausedScreen = "Claude Code\nPaused\npress enter to resume";
+      const pausedScreen =
+        "gpt-5.5 xhigh · 99% left\nGoal paused (/goal resume)\ncodex>";
       await (engine as any).maybeEscalateLiveHalt(child, pausedScreen);
       await (engine as any).maybeEscalateLiveHalt(
         engine.getAgentState(child.agent_id),
@@ -13687,6 +13688,37 @@ Session ID: ${sessionId}`,
       expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
         text: "persist me",
         delivery_state: "queued",
+      });
+    });
+
+    it("holds a queued delivery while the target is paused without typing or retrying", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "paused-queued-delivery",
+          state: "idle",
+          surface_id: "surface:42",
+          paused: true,
+          paused_source: "inferred",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      const submitter = vi.fn();
+      engine.setDeliverySubmitter(submitter);
+      const receipt = engine.queueDelivery({
+        agent_id: "paused-queued-delivery",
+        text: "do not type this",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(submitter).not.toHaveBeenCalled();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "queued",
+        terminal: false,
+        retry_count: 0,
       });
     });
 

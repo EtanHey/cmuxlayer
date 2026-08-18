@@ -6579,6 +6579,9 @@ export class AgentEngine {
           this.appendDeliveryReceiptEventBestEffort(receipt);
           continue;
         }
+        if (agent.paused === true) {
+          continue;
+        }
         if (
           receipt.next_attempt_at &&
           Date.parse(receipt.next_attempt_at) > Date.now()
@@ -7810,6 +7813,16 @@ export class AgentEngine {
   }
 
   /** Reserve a re-tasked interactive agent before releasing its surface lock. */
+  markObservedPause(agentId: string, paused: boolean): AgentRecord | null {
+    const agent = this.getAgentState(agentId);
+    if (!agent) return null;
+    return this.persistPausedState(
+      agent,
+      paused,
+      new Date().toISOString(),
+    );
+  }
+
   markAgentWorking(agentId: string): AgentRecord | null {
     const current =
       this.registry.get(agentId) ?? this.stateMgr.readState(agentId);

@@ -14339,6 +14339,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     );
 
+    const observePausedTarget = async (
+      agent: AgentRecord | null | undefined,
+    ): Promise<{ paused: boolean; source: string }> => {
+      if (agent?.paused === true) {
+        return {
+          paused: true,
+          source: agent.paused_source ?? "inferred",
+        };
+      }
+      if (!agent?.surface_id) {
+        return { paused: false, source: "inferred" };
+      }
+      const snapshot = await readParsedSurface(
+        agent.surface_id,
+        agent.workspace_id ?? undefined,
+      ).catch(() => null);
+      if (snapshot?.parsed.paused === true) {
+        engine.markObservedPause(agent.agent_id, true);
+        return {
+          paused: true,
+          source: snapshot.parsed.paused_source,
+        };
+      }
+      if (snapshot?.text && screenShowsPaused(snapshot.text)) {
+        engine.markObservedPause(agent.agent_id, true);
+        return { paused: true, source: "inferred" };
+      }
+      return { paused: false, source: "inferred" };
+    };
+
     // 17. send_to
     server.tool(
       "send_to",
@@ -14630,7 +14660,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 continue;
               }
               const deliveryId = randomUUID();
-              if (agent.paused === true) {
+              const livePaused = await observePausedTarget(agent);
+              if (livePaused.paused) {
                 const queued = engine.queueDelivery({
                   agent_id: agent.agent_id,
                   text: args.text,
@@ -14647,9 +14678,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     submit_attempted: false,
                     submit_verified: queued.submit_verified,
                     retry_count: queued.retry_count,
-                    WARNING: pausedTargetWarning(
-                      agent.paused_source ?? "inferred",
-                    ),
+                    WARNING: pausedTargetWarning(livePaused.source),
                   }),
                   accepted: true,
                 });
@@ -14857,22 +14886,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
-          let livePaused = targetAgent?.paused === true;
-          let livePausedSource = targetAgent?.paused_source ?? "inferred";
-          if (!livePaused && targetAgent?.surface_id) {
-            const snapshot = await readParsedSurface(
-              targetAgent.surface_id,
-              targetAgent.workspace_id ?? undefined,
-            ).catch(() => null);
-            if (snapshot?.parsed.paused === true) {
-              livePaused = true;
-              livePausedSource = snapshot.parsed.paused_source;
-            } else if (snapshot?.text && screenShowsPaused(snapshot.text)) {
-              livePaused = true;
-              livePausedSource = "inferred";
-            }
-          }
-          if (livePaused) {
+          const livePaused = await observePausedTarget(targetAgent);
+          if (livePaused.paused) {
             const receipt = engine.queueDelivery({
               agent_id: agentId,
               text: args.text,
@@ -14889,7 +14904,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 submit_attempted: false,
                 submit_verified: receipt.submit_verified,
                 retry_count: receipt.retry_count,
-                WARNING: pausedTargetWarning(livePausedSource),
+                WARNING: pausedTargetWarning(livePaused.source),
               }),
             };
             return okFormatted(

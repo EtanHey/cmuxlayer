@@ -8,6 +8,15 @@ import type { AgentRecord } from "../src/agent-types.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-paused-visibility-test");
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-paused-visibility-test.sock";
+const GOAL_PAUSED_SCREEN = [
+  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+  "Goal paused (/goal resume)",
+  "codex>",
+].join("\n");
+const IDLE_CODEX_SCREEN = [
+  "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+  "codex>",
+].join("\n");
 
 function parseResult(result: any): any {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
@@ -25,20 +34,17 @@ async function callTool(
   return tool.handler(args, {} as any);
 }
 
-class PausedClaudeSurfaceClient {
+class DualCodexSurfaceClient {
   readonly workspace = "workspace:1";
   readonly pane = "pane:1";
-  readonly surface = "surface:paused";
-  readonly title = "cmuxlayerCursor";
+  readonly pausedSurface = "surface:paused";
+  readonly idleSurface = "surface:idle";
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
-  screenText = `Claude Code
->
-Paused
-press enter to resume
-🤖 Opus 5 | 💰 $1.25
-CLAUDE_COUNTER: 1
-`;
+  readonly screens: Record<string, string> = {
+    "surface:paused": GOAL_PAUSED_SCREEN,
+    "surface:idle": IDLE_CODEX_SCREEN,
+  };
 
   async listWorkspaces() {
     return {
@@ -63,9 +69,9 @@ CLAUDE_COUNTER: 1
           ref: this.pane,
           index: 0,
           focused: true,
-          surface_count: 1,
-          surface_refs: [this.surface],
-          selected_surface_ref: this.surface,
+          surface_count: 2,
+          surface_refs: [this.pausedSurface, this.idleSurface],
+          selected_surface_ref: this.pausedSurface,
         },
       ],
     };
@@ -78,37 +84,45 @@ CLAUDE_COUNTER: 1
       pane_ref: this.pane,
       surfaces: [
         {
-          ref: this.surface,
-          title: this.title,
+          ref: this.pausedSurface,
+          title: "cmuxlayerCodex-paused",
           type: "terminal",
           index: 0,
           selected: true,
+        },
+        {
+          ref: this.idleSurface,
+          title: "cmuxlayerCodex-idle",
+          type: "terminal",
+          index: 1,
+          selected: false,
         },
       ],
     };
   }
 
   async send(surface: string, text: string) {
-    if (surface !== this.surface) {
+    if (!(surface in this.screens)) {
       throw new Error(`Unknown surface: ${surface}`);
     }
-    this.sendCalls.push(text);
+    this.sendCalls.push(`${surface}:${text}`);
   }
 
   async sendKey(surface: string, key: string) {
-    if (surface !== this.surface) {
+    if (!(surface in this.screens)) {
       throw new Error(`Unknown surface: ${surface}`);
     }
-    this.sendKeyCalls.push(key);
+    this.sendKeyCalls.push(`${surface}:${key}`);
   }
 
   async readScreen(surface: string, opts?: { lines?: number }) {
-    if (surface !== this.surface) {
+    const text = this.screens[surface];
+    if (text == null) {
       throw new Error(`Unknown surface: ${surface}`);
     }
     return {
       surface,
-      text: this.screenText,
+      text,
       lines: opts?.lines ?? 30,
       scrollback_used: false,
     };
@@ -117,7 +131,7 @@ CLAUDE_COUNTER: 1
   async renameTab() {}
 }
 
-function createPausedServer(client: PausedClaudeSurfaceClient) {
+function createPausedServer(client: DualCodexSurfaceClient) {
   return createServer({
     client,
     stateDir: TEST_DIR,
@@ -127,20 +141,18 @@ function createPausedServer(client: PausedClaudeSurfaceClient) {
   });
 }
 
-function registerPausedAgent(server: any): AgentRecord {
-  const engine = server._registeredTools["interact"]._engine;
-  const stateMgr = engine["stateMgr"] as StateManager;
-  const registry = engine.getRegistry();
+function makeAgent(
+  overrides: Partial<AgentRecord> &
+    Pick<AgentRecord, "agent_id" | "surface_id">,
+): AgentRecord {
   const now = "2026-08-18T13:40:00.000Z";
-  const record: AgentRecord = {
-    agent_id: "agent-paused",
-    surface_id: "surface:paused",
-    surface_observer_id: TEST_OBSERVER_OWNER,
+  return {
     workspace_id: "workspace:1",
+    surface_observer_id: TEST_OBSERVER_OWNER,
     state: "idle",
     repo: "cmuxlayer",
-    model: "opus",
-    cli: "claude",
+    model: "gpt-5.5",
+    cli: "codex",
     cli_session_id: null,
     task_summary: "paused visibility",
     pid: null,
@@ -156,11 +168,17 @@ function registerPausedAgent(server: any): AgentRecord {
     crash_recover: false,
     respawn_attempts: 0,
     user_killed: false,
-    paused: true,
-    paused_source: "inferred",
+    paused: false,
+    paused_source: null,
+    ...overrides,
   };
+}
+
+function registerAgent(server: any, record: AgentRecord): AgentRecord {
+  const engine = server._registeredTools["interact"]._engine;
+  const stateMgr = engine["stateMgr"] as StateManager;
   stateMgr.writeState(record);
-  registry.set(record.agent_id, record);
+  engine.getRegistry().set(record.agent_id, record);
   return record;
 }
 
@@ -173,14 +191,13 @@ function disposeServer(server: any) {
 
 describe("paused pane visibility", () => {
   let server: any;
-  let client: PausedClaudeSurfaceClient;
+  let client: DualCodexSurfaceClient;
 
   beforeEach(() => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
-    client = new PausedClaudeSurfaceClient();
+    client = new DualCodexSurfaceClient();
     server = createPausedServer(client);
-    registerPausedAgent(server);
   });
 
   afterEach(() => {
@@ -189,6 +206,15 @@ describe("paused pane visibility", () => {
   });
 
   it("list_agents summary rows include paused with source", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-paused",
+        surface_id: "surface:paused",
+        paused: true,
+        paused_source: "inferred",
+      }),
+    );
     const result = await callTool(server, "list_agents", {});
     const parsed = parseResult(result);
     expect(parsed.ok).toBe(true);
@@ -202,6 +228,13 @@ describe("paused pane visibility", () => {
   });
 
   it("read_screen parsed output includes paused with inferred source", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-paused",
+        surface_id: "surface:paused",
+      }),
+    );
     const result = await callTool(server, "read_screen", {
       surface: "surface:paused",
       parsed_only: true,
@@ -214,6 +247,13 @@ describe("paused pane visibility", () => {
   });
 
   it("send_to a paused target queues with an unmissable warning and never submitted", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-paused",
+        surface_id: "surface:paused",
+      }),
+    );
     const result = await callTool(server, "send_to", {
       agent_id: "agent-paused",
       text: "please continue",
@@ -229,5 +269,46 @@ describe("paused pane visibility", () => {
     expect(parsed.WARNING).toMatch(/do not relay as sent/i);
     expect(client.sendCalls).toEqual([]);
     expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("fan-out send_to live-checks pause chrome the same way as a single target", async () => {
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-paused",
+        surface_id: "surface:paused",
+      }),
+    );
+    registerAgent(
+      server,
+      makeAgent({
+        agent_id: "agent-idle",
+        surface_id: "surface:idle",
+      }),
+    );
+
+    const result = await callTool(server, "send_to", {
+      text: "please continue",
+      press_enter: true,
+      targeting: { agent_ids: ["agent-paused", "agent-idle"] },
+    });
+    const parsed = parseResult(result);
+    const receipts = parsed.receipts as Array<Record<string, unknown>>;
+    const pausedReceipt = receipts.find(
+      (receipt) => receipt.agent_id === "agent-paused",
+    );
+    const idleReceipt = receipts.find(
+      (receipt) => receipt.agent_id === "agent-idle",
+    );
+
+    expect(result.isError).not.toBe(true);
+    expect(pausedReceipt).toMatchObject({
+      agent_id: "agent-paused",
+      delivered: false,
+      delivery_state: "queued",
+    });
+    expect(String(pausedReceipt?.WARNING ?? "")).toMatch(/paused/i);
+    expect(idleReceipt?.delivered).toBe(true);
+    expect(client.sendCalls).toEqual(["surface:idle:please continue"]);
   });
 });

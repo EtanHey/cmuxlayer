@@ -1886,14 +1886,12 @@ Model: gemini-2.5-pro
   });
 
   describe("paused pane chrome", () => {
-    it("marks a Claude idle screen with a Paused status line as inferred paused", () => {
+    it("marks Codex Goal paused (/goal resume) in the footer as inferred paused", () => {
       const parsed = parseScreen(
         [
-          "Claude Code",
-          "> ",
-          "Paused",
-          "press enter to resume",
-          "🤖 Opus 5 | 💰 $1.25",
+          "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+          "Goal paused (/goal resume)",
+          "codex>",
         ].join("\n"),
       );
 
@@ -1901,16 +1899,22 @@ Model: gemini-2.5-pro
       expect(parsed.paused_source).toBe("inferred");
     });
 
-    it("marks a Cursor pane whose footer says Agent paused as inferred paused", () => {
-      const parsed = parseScreen(`
-Cursor Agent
-v2026.08.11-e8db854
-Agent paused — press enter to resume
-Auto · 22.5% · ~/Gits/cmuxlayer
-`);
+    it("marks zsh: suspended in the footer as inferred paused", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "Working (2s • esc to interrupt)",
+          "zsh: suspended  claude",
+        ].join("\n"),
+      );
 
       expect(parsed.paused).toBe(true);
-      expect(parsed.paused_source).toBe("inferred");
+    });
+
+    it("marks a job-control Stopped line in the footer as inferred paused", () => {
+      const parsed = parseScreen("[1]+  Stopped                 claude\n$ ");
+
+      expect(parsed.paused).toBe(true);
     });
 
     it("does not treat an ordinary idle Claude composer as paused", () => {
@@ -1925,7 +1929,6 @@ Auto · 22.5% · ~/Gits/cmuxlayer
       );
 
       expect(parsed.paused).toBe(false);
-      expect(parsed.paused_source).toBe("inferred");
     });
 
     it("does not treat Claude plan-mode ⏸ footer as paused", () => {
@@ -1936,6 +1939,77 @@ Auto · 22.5% · ~/Gits/cmuxlayer
           "⏸ plan mode on",
           "bypass permissions on",
           "🤖 Opus 5 | 💰 $0.10",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+    });
+
+    it("does not treat a Claude background-task ⏸ paused row as a paused agent", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "  ⏸ paused  Review PR #446",
+          "  ⏸ failed  other task",
+          "> ",
+          "bypass permissions on",
+          "🤖 Opus 5 | 💰 $0.10",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+    });
+
+    it("does not treat memory pause-memory chrome as a paused agent", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "> ",
+          "Paused for this session · /pause-memory to resume",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+    });
+
+    it("does not treat a transcript line that is exactly paused as a paused agent", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "the detector must not trip on",
+          "paused",
+          "> ",
+          "bypass permissions on",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+    });
+
+    it("does not treat authored Agent paused copy in transcript as a paused agent", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "Agent paused — press enter to resume",
+          "> ",
+          "bypass permissions on",
+          "🤖 Opus 5 | 💰 $0.10",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+    });
+
+    it("does not treat Goal paused appearing above the footer as current pause chrome", () => {
+      const parsed = parseScreen(
+        [
+          "Goal paused (/goal resume)",
+          "the lead pasted a review",
+          "more transcript",
+          "even more transcript",
+          "still more transcript",
+          "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
+          "codex>",
         ].join("\n"),
       );
 

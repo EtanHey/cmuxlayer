@@ -2277,9 +2277,13 @@ export class AgentRegistry {
       halt_notified_ancestor_id: null,
       blocked_on_prompt: false,
       blocked_on_prompt_since: null,
-      paused: false,
-      paused_source: null,
-      paused_since: null,
+      paused: discovered.paused === true,
+      paused_source:
+        discovered.paused === true
+          ? (discovered.paused_source ?? "inferred")
+          : null,
+      paused_since:
+        discovered.paused === true ? new Date().toISOString() : null,
       halt_missing_ancestor_count: 0,
       halt_fallback_sink_id: null,
       halt_delivery_failure_count: 0,
