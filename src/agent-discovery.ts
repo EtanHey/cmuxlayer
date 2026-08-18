@@ -123,6 +123,23 @@ export class AgentDiscovery {
     this.cache = null;
   }
 
+  /**
+   * AIDEV-NOTE (F1): the last screen scan, synchronously, or null when there is
+   * none inside the TTL. Consumers that must resolve LIVE agent state on a
+   * synchronous path (caller identity, P11 closure) use this instead of
+   * trusting the registry record, which #408 poisons to `done` within minutes.
+   * Never triggers I/O: no fresh evidence means "no evidence", not "stale ok".
+   */
+  cachedScan(): { rows: DiscoveredAgent[]; observed_at_ms: number } | null {
+    if (!this.cache) return null;
+    if (Date.now() - this.cache.at >= this.ttlMs) return null;
+    const observerScoped = typeof this.deps.observerIdProvider === "function";
+    if (observerScoped && this.cache.observerId !== this.getObserverId()) {
+      return null;
+    }
+    return { rows: this.cache.result, observed_at_ms: this.cache.at };
+  }
+
   private getObserverId(): string | null {
     return this.deps.observerIdProvider?.()?.trim() || null;
   }

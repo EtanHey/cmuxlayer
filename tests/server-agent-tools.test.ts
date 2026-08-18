@@ -2960,6 +2960,104 @@ describe("agent lifecycle tool handlers", () => {
     });
   });
 
+  it("F1: a caller whose registry record went stale-done is still recorded as parent", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    // #408 poisons the record of a live lead within minutes. Under the old
+    // terminal-state filter this caller was invisible, so the child it spawned
+    // got parent_agent_id:null -- the U6 violation observed live.
+    const staleLead = makeServerAgentRecord({
+      agent_id: "cmuxlayerClaude-stale",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      cli: "claude",
+      role: "orchestrator",
+      task_done_detected_at: "2026-08-18T00:00:00Z",
+    });
+    engine.stateMgr.writeState(staleLead);
+    engine.getRegistry().set(staleLead.agent_id, staleLead);
+    mockExec.mockClear();
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: staleLead.surface_id },
+      () =>
+        spawn.handler(
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            role: "reviewer",
+            prompt: "Review PR #456",
+            force_new: true,
+          },
+          {} as any,
+        ),
+    );
+    const parsed = parseToolResult(result);
+    const child = engine.getAgentState(parsed.agent_id);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed.parent_agent_id).toBe(staleLead.agent_id);
+    expect(child).toMatchObject({
+      parent_agent_id: staleLead.agent_id,
+      spawn_depth: 1,
+    });
+  });
+
+  it("F1: the #378 worker guard still fires for a stale-done worker caller", async () => {
+    const server = createLifecycleServer(mockExec);
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+    const engine = (server as any)._registeredTools["interact"]._engine;
+    const staleWorker = makeServerAgentRecord({
+      agent_id: "cmuxlayerCodex-staleworker",
+      surface_id: "surface:caller",
+      workspace_id: "workspace:1",
+      state: "done",
+      repo: "cmuxlayer",
+      cli: "codex",
+      role: "worker",
+      task_done_detected_at: "2026-08-18T00:00:00Z",
+    });
+    engine.stateMgr.writeState(staleWorker);
+    engine.getRegistry().set(staleWorker.agent_id, staleWorker);
+    mockExec.mockClear();
+
+    const result = await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: staleWorker.surface_id },
+      () =>
+        spawn.handler(
+          {
+            repo: "cmuxlayer",
+            cli: "claude",
+            role: "orchestrator",
+            prompt: "Review PR #380",
+            force_new: true,
+          },
+          {} as any,
+        ),
+    );
+    const parsed = parseToolResult(result);
+    const child = engine.getAgentState(parsed.agent_id);
+
+    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+    expect(parsed).toMatchObject({
+      role: "worker",
+      authority: "worker",
+      placement: "right",
+    });
+    expect(parsed.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/worker caller.*forced.*role.*worker/i),
+      ]),
+    );
+    expect(child).toMatchObject({
+      role: "worker",
+      parent_agent_id: staleWorker.agent_id,
+    });
+  });
+
   it("stop_agent logs a durable close entry carrying caller, force, and target", async () => {
     const server = createLifecycleServer(mockExec);
     const stopTool = (server as any)._registeredTools["stop_agent"];
@@ -8921,7 +9019,15 @@ describe("agent lifecycle tool handlers", () => {
     const agentId = (
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
-    const done = engine.stateMgr.transition(agentId, "done");
+    // Detach the seat from any live pane. Under F1 a screen that still reads
+    // WORKING overrules a `done` record — so to test the closure-evidence rule
+    // the record has to be the only evidence there is, which is exactly the
+    // case a lead faces when a worker's pane is gone.
+    const done = {
+      ...engine.stateMgr.transition(agentId, "done"),
+      surface_uuid: "00000000-0000-4000-8000-00000000dead",
+    };
+    engine.stateMgr.writeState(done);
     engine.getRegistry().set(agentId, done);
 
     const result = await getState.handler({ agent_id: agentId }, {} as any);
@@ -9802,13 +9908,19 @@ codex>
       spawnResult.structuredContent ?? JSON.parse(spawnResult.content[0].text)
     ).agent_id;
 
-    // Agent is in "booting" state — not interactive
+    // Agent is in "booting" state — not interactive. The gate still fires and
+    // still names its reason, but a RETRYABLE refusal is not a terminal
+    // outcome (F1): send_to hands back the nonterminal queued receipt its own
+    // description promises, and the engine drains it once the agent is ready.
     const result = await sendTo.handler(
       { agent_id: agentId, text: "hello", press_enter: true },
       {} as any,
     );
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/not in an interactive state/);
+    const parsed = parseToolResult(result);
+    expect(result.isError).toBeFalsy();
+    expect(parsed.terminal).not.toBe(true);
+    expect(parsed.delivery_state).toBe("queued");
+    expect(JSON.stringify(parsed)).toMatch(/not in an interactive state/);
   });
 
   it("send_to_agent leaves an idle agent idle when submitted delivery fails", async () => {
