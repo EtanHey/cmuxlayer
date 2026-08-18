@@ -32,7 +32,11 @@ import {
   type AgentFilter,
 } from "./agent-registry.js";
 import type { AgentDiscovery } from "./agent-discovery.js";
-import { toPublicAgent } from "./agent-facade.js";
+import {
+  resumeCommandForAgent,
+  resumeCwdForAgent,
+  toPublicAgent,
+} from "./agent-facade.js";
 import type {
   CmuxMoveSurfaceResult,
   CmuxPane,
@@ -153,11 +157,18 @@ import {
 } from "./agent-health.js";
 import {
   launcherNameCandidates,
+  loadLauncherRegistrySnapshot,
   resolveLauncherNameFromRegistry,
+  resolveLauncherNameFromRegistryOrNull,
   resolveRepoRootFromLauncherRegistry,
+  type LauncherRegistryOptions,
   type LauncherSuffix,
 } from "./launcher-registry.js";
 import { buildAgentHealthInput } from "./agent-health-input.js";
+import {
+  resolveRepoRootWithoutRegistry,
+  type RepoRootFallbackOptions,
+} from "./repo-root-fallback.js";
 import {
   assertSeatIdentity,
   loadSeatRegistryFromConfig,
@@ -429,6 +440,13 @@ function sessionCollisionSuffix(sessionId: string): string {
 export interface SpawnPreflightResult {
   launcherName?: string;
   repoRoot?: string;
+  /**
+   * How the harness should be started. "launcher" runs the repoGolem wrapper
+   * named by `launcherName`; "raw" runs the CLI binary directly with an
+   * explicit cd into `repoRoot`. Defaults to "launcher" so existing callers
+   * (and every test that stubs preflight) keep their current behaviour.
+   */
+  launchMode?: AgentLaunchMode;
 }
 
 export type CodexModelListRunner = (
@@ -1076,6 +1094,19 @@ function modelMatchesDefaultForLaunch(cli: CliType, model?: string): boolean {
   return cli === "codex" && model?.trim().toLowerCase() === "codex";
 }
 
+export type AgentLaunchMode = "launcher" | "raw";
+
+/**
+ * Raw-CLI equivalents of the repoGolem launcher `-s` (skip approvals) flag.
+ * Verified against the installed CLIs' `--help` output.
+ */
+const RAW_SKIP_APPROVALS: Partial<Record<CliType, string>> = {
+  claude: "--dangerously-skip-permissions",
+  codex: "--dangerously-bypass-approvals-and-sandbox",
+  cursor: "--force",
+  gemini: "-y",
+};
+
 export function buildLaunchCommand(
   cli: CliType,
   repo: string,
@@ -1090,6 +1121,7 @@ export function buildLaunchCommand(
     envPrefix?: string;
     allowModelOverride?: boolean;
     effort?: CodexEffort;
+    launchMode?: AgentLaunchMode;
   },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
@@ -1118,6 +1150,37 @@ export function buildLaunchCommand(
     opts?.envPrefix ?? null,
   ].filter((part): part is string => Boolean(part));
   const envPrefix = envParts.length > 0 ? `${envParts.join(" ")} ` : "";
+
+  // AIDEV-NOTE (issue #392): registry-optional launch. With no repoGolem
+  // launcher registered, spawn drops to the raw CLI and does the cd itself
+  // (the launcher normally owns that). Registered installs are untouched --
+  // "raw" is only ever requested explicitly by preflight.
+  if (opts?.launchMode === "raw" && cli !== "kiro") {
+    // REPOGOLEM_ALLOW_MODEL is a launcher-only escape hatch; it means nothing
+    // to a raw binary, so raw mode carries only the harness + caller env.
+    const rawEnvParts = [
+      cli === "claude" || cli === "gemini" ? AGENT_ENV : null,
+      opts?.envPrefix ?? null,
+    ].filter((part): part is string => Boolean(part));
+    const rawEnvPrefix =
+      rawEnvParts.length > 0 ? `${rawEnvParts.join(" ")} ` : "";
+    const skipFlag = RAW_SKIP_APPROVALS[cli];
+    const rawEffortArg =
+      cli === "codex" && opts?.effort
+        ? ` -c model_reasoning_effort=${opts.effort}`
+        : "";
+    // `codex` takes `-m`; claude/cursor/gemini all accept `--model`.
+    const rawModelFlag = formattedModelFlag
+      ? cli === "codex"
+        ? ` -m ${formattedModelFlag}`
+        : ` --model ${formattedModelFlag}`
+      : "";
+    const binary = cli === "cursor" ? "cursor agent" : cli;
+    return `${rawCdPrefix}${rawEnvPrefix}${binary}${
+      skipFlag ? ` ${skipFlag}` : ""
+    }${rawModelFlag}${rawEffortArg}`;
+  }
+
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
@@ -1148,23 +1211,92 @@ export function extractSessionId(text: string): string | null {
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
 }
 
+function cliForLauncherSuffix(suffix: LauncherSuffix): CliType {
+  return suffix === "Claude"
+    ? "claude"
+    : suffix === "Codex"
+      ? "codex"
+      : suffix === "Cursor"
+        ? "cursor"
+        : "gemini";
+}
+
 /**
  * Validate that a launcher is registered and return its resolved name. Probes
  * the launcher registry instead of executing shell profile code.
+ *
+ * Strict by design: this is the "registry is mandatory" contract. The default
+ * spawn preflight no longer calls it unless
+ * CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY is set — see resolveSpawnLaunchPlan.
  */
 export async function assertLauncherAvailable(
   repo: string,
   suffix: LauncherSuffix,
 ): Promise<string> {
-  const cli =
-    suffix === "Claude"
-      ? "claude"
-      : suffix === "Codex"
-        ? "codex"
-        : suffix === "Cursor"
-          ? "cursor"
-          : "gemini";
-  return resolveLauncherNameFromRegistry(repo, cli);
+  return resolveLauncherNameFromRegistry(repo, cliForLauncherSuffix(suffix));
+}
+
+export const REQUIRE_LAUNCHER_REGISTRY_ENV =
+  "CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY";
+
+function launcherRegistryRequired(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env[REQUIRE_LAUNCHER_REGISTRY_ENV]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+/**
+ * Decide how a spawn should start its harness.
+ *
+ * AIDEV-NOTE (issue #392): the repoGolem launcher registry is an OPTIONAL
+ * enhancement. When it names this repo we keep the launcher path verbatim —
+ * existing installs see no change. When there is no registry, or no entry for
+ * the repo, we fall back to the raw CLI with a cwd resolved from the repo
+ * param. Set CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1 to restore the old hard
+ * failure (useful when a typo'd repo name should be an error, not a raw
+ * launch in a lookalike directory).
+ */
+export function resolveSpawnLaunchPlan(
+  repo: string,
+  cli: CliType,
+  opts?: {
+    registryOptions?: LauncherRegistryOptions;
+    repoRootFallback?: RepoRootFallbackOptions;
+    env?: Record<string, string | undefined>;
+  },
+): SpawnPreflightResult {
+  const registryOptions = opts?.registryOptions;
+  const launcherName = resolveLauncherNameFromRegistryOrNull(
+    repo,
+    cli,
+    registryOptions,
+  );
+  if (launcherName) {
+    return {
+      launcherName,
+      repoRoot: resolveRepoRootFromLauncherRegistry(repo, registryOptions),
+      launchMode: "launcher",
+    };
+  }
+
+  const snapshot = loadLauncherRegistrySnapshot(registryOptions);
+  if (launcherRegistryRequired(opts?.env)) {
+    // Strict mode: reproduce the self-answering registry error.
+    resolveLauncherNameFromRegistry(repo, cli, registryOptions);
+  }
+
+  const registryHint = snapshot.available
+    ? `Launcher registry ${snapshot.sourcePath} has no entry for "${repo}".`
+    : `No launcher registry at ${snapshot.sourcePath} (${snapshot.unavailable_reason}).`;
+
+  return {
+    launchMode: "raw",
+    repoRoot: resolveRepoRootWithoutRegistry(repo, {
+      ...opts?.repoRootFallback,
+      registryHint,
+    }),
+  };
 }
 
 export class AgentEngine {
@@ -1398,31 +1530,11 @@ export class AgentEngine {
     this.spawnPreflight =
       opts?.spawnPreflight ??
       (async (params): Promise<SpawnPreflightResult | void> => {
-        if (params.cli === "claude") {
-          return {
-            launcherName: await assertLauncherAvailable(params.repo, "Claude"),
-            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
-          };
-        }
+        if (params.cli === "kiro") return;
         if (params.cli === "codex") {
           await validateCodexModel(params.model, this.codexModelListRunner);
-          return {
-            launcherName: await assertLauncherAvailable(params.repo, "Codex"),
-            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
-          };
         }
-        if (params.cli === "cursor") {
-          return {
-            launcherName: await assertLauncherAvailable(params.repo, "Cursor"),
-            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
-          };
-        }
-        if (params.cli === "gemini") {
-          return {
-            launcherName: await assertLauncherAvailable(params.repo, "Gemini"),
-            repoRoot: resolveRepoRootFromLauncherRegistry(params.repo),
-          };
-        }
+        return resolveSpawnLaunchPlan(params.repo, params.cli);
       });
   }
 
@@ -4042,8 +4154,12 @@ export class AgentEngine {
       return { record: agent, dispatched: false };
     }
     const attempts = agent.revive_attempts ?? 0;
+    // Human-facing hint for a surface that may be gone: carry the cwd so the
+    // command works when pasted into a fresh terminal.
     const manualResumeCommand = agent.cli_session_id
-      ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+      ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id, {
+          cwd: resumeCwdForAgent(agent),
+        })
       : null;
     const tag =
       outcome === "unrecoverable"
@@ -4106,7 +4222,9 @@ export class AgentEngine {
         outcome === "revived" ? (agent.parsed_model ?? null) : null,
       manual_resume_command:
         outcome === "unrecoverable" && agent.cli_session_id
-          ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id)
+          ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id, {
+              cwd: resumeCwdForAgent(agent),
+            })
           : null,
     });
   }
@@ -4792,6 +4910,7 @@ export class AgentEngine {
           agent.repo,
           sessionId,
           agent.launcher_name,
+          { cwd: this.harnessCwdForAgent(agent) },
         );
         await this.beforeCrashRecoveryMutation?.({
           phase: "placement",
@@ -7482,19 +7601,26 @@ export class AgentEngine {
     });
 
     // 3. Send launch command
+    const launchMode: AgentLaunchMode = preflight?.launchMode ?? "launcher";
     const launchCmd = buildLaunchCommand(
       spawnParams.cli,
       spawnParams.repo,
       modelPolicy.launcher_model ?? undefined,
       preflight?.launcherName,
       {
-        cwd: spawnParams.cwd,
+        // Raw launches must cd themselves; the launcher path keeps its
+        // existing `-w <cwd>` semantics (cwd only when explicitly requested).
+        cwd: launchMode === "raw" ? (launchCwd ?? undefined) : spawnParams.cwd,
         envPrefix: spawnParams.mcp_env,
         allowModelOverride: modelPolicy.override_allowed,
         effort: effort ?? undefined,
+        launchMode,
       },
     );
     try {
+      // Tab title stays `<repo><Cli>` in BOTH modes: agent-discovery parses
+      // the repo and cli back out of it (agent-discovery.ts:43-62), so the
+      // title is a discovery contract, not a claim about which binary ran.
       const launcherName =
         preflight?.launcherName ??
         launcherNameForCli(spawnParams.repo, spawnParams.cli);
@@ -7590,6 +7716,7 @@ export class AgentEngine {
       agent.repo,
       agent.cli_session_id,
       agent.launcher_name,
+      { cwd: this.harnessCwdForAgent(agent) },
     );
     const requestedWorkspace =
       opts?.workspace ?? agent.workspace_id ?? undefined;
@@ -7955,20 +8082,11 @@ export class AgentEngine {
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
     }
-    let resumeCommand: string | undefined;
-    if (agent.cli_session_id) {
-      try {
-        resumeCommand = buildResumeCommand(
-          agent.cli,
-          agent.repo,
-          agent.cli_session_id,
-          agent.launcher_name,
-        );
-      } catch {
-        // Terminal I/O depends on the stable surface binding, not optional
-        // resume metadata. A damaged legacy repo field must not disable send.
-      }
-    }
+    // Terminal I/O depends on the stable surface binding, not optional resume
+    // metadata: resumeCommandForAgent swallows a damaged legacy repo field and
+    // withholds a cwd-keyed raw resume it cannot aim, rather than advertising
+    // a command that would silently start a NEW session.
+    const resumeCommand = resumeCommandForAgent(agent);
     return {
       agent_id: agent.agent_id,
       surface_id: agent.surface_id,

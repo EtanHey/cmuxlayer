@@ -3628,6 +3628,7 @@ describe("AgentEngine", () => {
           model: "gpt-5.4",
           cli: "codex",
           cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          launcher_name: "brainlayerCodex",
           crash_recover: true,
         }),
       );
@@ -3656,6 +3657,38 @@ describe("AgentEngine", () => {
       expect(recovered?.respawn_attempts).toBe(1);
     });
 
+    // Issue #392: a registry-less spawn records no launcher, so crash recovery
+    // must resume through the raw CLI in the recorded cwd -- never through a
+    // guessed `<repo>Codex` binary that does not exist on a fresh install.
+    it("respawns a launcher-less crashed agent through the raw CLI in its launch cwd", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-crash-raw",
+          state: "working",
+          surface_id: "surface:dead-raw",
+          repo: "brainlayer",
+          model: "gpt-5.4",
+          cli: "codex",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          launcher_name: null,
+          launch_cwd: "/srv/repos/brainlayer",
+          crash_recover: true,
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:dead-raw")];
+      await engine.getRegistry().reconstitute();
+
+      liveSurfaces = [makeSurface("surface:other")];
+      await runConfirmedSurfaceAbsenceSweep();
+
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "cd '/srv/repos/brainlayer' && codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "ws:1" },
+      );
+      expect(engine.getAgentState("agent-crash-raw")?.state).toBe("booting");
+    });
+
     it("explicitly resumes a captured session on a new surface without changing the public agent id", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -3666,6 +3699,7 @@ describe("AgentEngine", () => {
           repo: "brainlayer",
           cli: "codex",
           cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          launcher_name: "brainlayerCodex",
         }),
       );
       await engine.getRegistry().reconstitute();
@@ -3680,6 +3714,32 @@ describe("AgentEngine", () => {
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe("booting");
+    });
+
+    it("explicitly resumes a launcher-less agent through the raw CLI", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "agent-stable-resume-raw",
+          state: "done",
+          surface_id: "surface:old-raw",
+          workspace_id: "ws:1",
+          repo: "brainlayer",
+          cli: "claude",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+          launcher_name: null,
+          launch_cwd: "/srv/repos/brainlayer",
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      const resumed = await engine.resumeAgent("agent-stable-resume-raw");
+
+      expect(resumed.agent_id).toBe("agent-stable-resume-raw");
+      expect(mockClient.send).toHaveBeenCalledWith(
+        "surface:new",
+        "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        { workspace: "ws:1" },
+      );
     });
 
     it("rejects an invalid crash-recovery session before creating a surface", async () => {
@@ -11853,7 +11913,7 @@ Session ID: ${sessionId}`,
       ["codex", "Codex"],
       ["cursor", "Cursor"],
     ] as const)(
-      "rejects missing %s repoGolem launchers before creating a surface",
+      "rejects an unresolvable %s repo before creating a surface",
       async (cli, suffix) => {
         const registryPath = join(TEST_DIR, `missing-${cli}-launchers.zsh`);
         writeFileSync(
@@ -11865,13 +11925,21 @@ Session ID: ${sessionId}`,
         const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
         const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
         try {
+          // Registry-optional (#392): an unregistered repo is no longer a hard
+          // stop, but a repo that exists nowhere on disk still cannot spawn --
+          // and the error names both doors it tried.
           await expect(
             defaultEngine.spawnAgent({
               repo: `missinglauncher${suffix}`,
               cli,
               prompt: "",
             }),
-          ).rejects.toThrow(`missinglauncher${suffix}${suffix}`);
+          ).rejects.toThrow(
+            new RegExp(
+              `Cannot resolve a working directory for repo "missinglauncher${suffix}".*has no entry.*Searched:.*CMUXLAYER_REPO_HOME`,
+              "s",
+            ),
+          );
           expect(mockClient.newSplit).not.toHaveBeenCalled();
         } finally {
           defaultEngine.dispose();
@@ -11880,30 +11948,102 @@ Session ID: ${sessionId}`,
       },
     );
 
-    it("uses the launcher registry and fails loudly before any bare split fallback", async () => {
-      const registryPath = join(TEST_DIR, "launchers.zsh");
+    it("falls back to the raw CLI when the repo is not in the registry", async () => {
+      const registryPath = join(TEST_DIR, "raw-fallback-launchers.zsh");
       writeFileSync(
         registryPath,
         'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
       );
+      const repoHome = join(TEST_DIR, "raw-repos");
+      mkdirSync(join(repoHome, "freshrepo"), { recursive: true });
       vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      vi.stubEnv("CMUXLAYER_REPO_HOME", repoHome);
+
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      const defaultEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        sessionIdentityResolver: () => null,
+      });
+      try {
+        const result = await defaultEngine.spawnAgent({
+          repo: "freshrepo",
+          cli: "claude",
+          prompt: "",
+        });
+
+        const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+        expect(launchCmd).toBe(
+          `cd '${join(repoHome, "freshrepo")}' && ` +
+            "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
+        );
+        const state = defaultEngine.getAgentState(result.agent_id);
+        expect(state?.launcher_name).toBeNull();
+        expect(state?.launch_cwd).toBe(join(repoHome, "freshrepo"));
+      } finally {
+        defaultEngine.dispose();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("restores the hard registry requirement under CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY", async () => {
+      const registryPath = join(TEST_DIR, "strict-launchers.zsh");
+      writeFileSync(
+        registryPath,
+        'repoGolem mm "/Users/etanheyman/Gits/matchmat"\n',
+      );
+      const repoHome = join(TEST_DIR, "strict-repos");
+      mkdirSync(join(repoHome, "freshrepo"), { recursive: true });
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+      vi.stubEnv("CMUXLAYER_REPO_HOME", repoHome);
+      vi.stubEnv("CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY", "1");
 
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
       const defaultEngine = new AgentEngine(stateMgr, registry, mockClient);
       try {
         await expect(
           defaultEngine.spawnAgent({
-            repo: "missinglauncher",
+            repo: "freshrepo",
             cli: "claude",
             prompt: "",
-            cwd: "/tmp/cmux-worktree",
           }),
         ).rejects.toThrow(
-          /Launcher registry miss.*missinglauncherClaude.*launchers\.zsh.*\/Users\/etanheyman\/Gits\/matchmat.*mmClaude/s,
+          /Launcher registry miss.*freshrepoClaude.*strict-launchers\.zsh.*mmClaude/s,
         );
         expect(mockClient.newSplit).not.toHaveBeenCalled();
-        expect(mockClient.send).not.toHaveBeenCalled();
         expect(stateMgr.listStates()).toHaveLength(0);
+      } finally {
+        defaultEngine.dispose();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("uses the launcher registry verbatim when the repo IS registered", async () => {
+      const registryPath = join(TEST_DIR, "launchers.zsh");
+      const registeredRoot = join(TEST_DIR, "registered", "matchmat");
+      mkdirSync(registeredRoot, { recursive: true });
+      writeFileSync(
+        registryPath,
+        `repoGolem mm "${registeredRoot}"\n`,
+      );
+      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
+
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces);
+      const defaultEngine = new AgentEngine(stateMgr, registry, mockClient, {
+        sessionIdentityResolver: () => null,
+      });
+      try {
+        const result = await defaultEngine.spawnAgent({
+          repo: "matchmat",
+          cli: "claude",
+          prompt: "",
+        });
+
+        const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+        expect(launchCmd).toBe("mmClaude -s");
+        const state = defaultEngine.getAgentState(result.agent_id);
+        expect(state?.launcher_name).toBe("mmClaude");
+        expect(state?.launch_cwd).toBe(registeredRoot);
       } finally {
         defaultEngine.dispose();
         vi.unstubAllEnvs();
@@ -14295,18 +14435,22 @@ describe("buildResumeCommand", () => {
   });
 
   it("uses the verified resume command for each supported CLI", () => {
-    expect(buildResumeCommand("claude", "brainlayer", sessionId)).toBe(
-      "brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-    );
-    expect(buildResumeCommand("codex", "brainlayer", sessionId)).toBe(
+    // Issue #392: the launcher form requires a RECORDED launcher name. Absent
+    // one, the raw-CLI form is used (covered in registry-optional-resume).
+    expect(
+      buildResumeCommand("claude", "brainlayer", sessionId, "brainlayerClaude"),
+    ).toBe("brainlayerClaude -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
+    expect(
+      buildResumeCommand("codex", "brainlayer", sessionId, "brainlayerCodex"),
+    ).toBe(
       "brainlayerCodex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
-    expect(buildResumeCommand("cursor", "brainlayer", sessionId)).toBe(
-      "brainlayerCursor -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-    );
-    expect(buildResumeCommand("gemini", "brainlayer", sessionId)).toBe(
-      "brainlayerGemini -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-    );
+    expect(
+      buildResumeCommand("cursor", "brainlayer", sessionId, "brainlayerCursor"),
+    ).toBe("brainlayerCursor -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
+    expect(
+      buildResumeCommand("gemini", "brainlayer", sessionId, "brainlayerGemini"),
+    ).toBe("brainlayerGemini -s --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
     expect(
       buildResumeCommand(
         "gemini",
@@ -14362,7 +14506,7 @@ describe("buildResumeCommand", () => {
     ).toThrow(/full session UUID/i);
   });
 
-  it("does not advertise resumable when no clean launcher can be derived", () => {
+  it("does not advertise resumable when no launcher and no cwd can be derived", () => {
     const payload = toAgentStatePayload(
       makeRecord({
         cli: "claude",
@@ -14374,6 +14518,23 @@ describe("buildResumeCommand", () => {
 
     expect(payload.resumable).toBe(false);
     expect(payload).not.toHaveProperty("resume_command");
+  });
+
+  it("advertises the raw form once a launch cwd is recorded", () => {
+    const payload = toAgentStatePayload(
+      makeRecord({
+        cli: "claude",
+        repo: "brainlayer-lead PR647-red-baseline",
+        launcher_name: null,
+        launch_cwd: "/srv/repos/brainlayer",
+        cli_session_id: sessionId,
+      }),
+    );
+
+    expect(payload.resumable).toBe(true);
+    expect(payload.resume_command).toBe(
+      `cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume ${sessionId}`,
+    );
   });
 });
 

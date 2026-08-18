@@ -240,7 +240,8 @@ import {
   type McpProfile,
   type WorktreeExec,
 } from "./worktree.js";
-import { resolveRepoRootFromLauncherRegistry } from "./launcher-registry.js";
+import { resolveRepoRootFromLauncherRegistryOrNull } from "./launcher-registry.js";
+import { resolveRepoRootWithoutRegistry } from "./repo-root-fallback.js";
 import {
   loadSeatRegistryFromConfig,
   type SeatRegistry,
@@ -10717,9 +10718,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
 
       const profile = mcpProfile ?? "inherit";
+      // Registry-optional (issue #392): a registered repo keeps its registry
+      // path; otherwise fall back to the same search spawn uses.
       const repoRoot = disableSpawnPreflight
         ? resolve(opts?.worktreeHomeDir ?? join(homedir(), "Gits"), repo)
-        : resolveRepoRootFromLauncherRegistry(repo);
+        : (resolveRepoRootFromLauncherRegistryOrNull(repo) ??
+          resolveRepoRootWithoutRegistry(repo));
       const prepared = await prepareWorktree({
         repo,
         repoRoot,
@@ -11157,7 +11161,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            'When set, create or reuse a git worktree before launch. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an object with name, path, branch, base, create, and reuse. A repoGolem registration with an absolute path is required; that registry path is the repo root. true uses <registered-root>/.worktrees/<generated-name> (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09). If a later spawn step fails before a recoverable surface exists, a newly created worktree and branch are rolled back.',
+            'When set, create or reuse a git worktree before launch. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an object with name, path, branch, base, create, and reuse. When repoGolem registers the repo with an absolute path, that path is the repo root; otherwise the root is resolved from CMUXLAYER_REPO_HOME, the running checkout, or ~/Gits. true uses <registered-root>/.worktrees/<generated-name> (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09). If a later spawn step fails before a recoverable surface exists, a newly created worktree and branch are rolled back.',
           ),
         mcp_profile: mcpProfileSchema
           .optional()
@@ -12059,7 +12063,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         worktree: worktreeArgSchema
           .optional()
           .describe(
-            'Worktree options. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an options object. A repoGolem registration with an absolute path is required. Defaults to true, creating/reusing <registered-root>/.worktrees/<generated-name>; a newly created worktree and branch are rolled back if spawn fails before a recoverable surface exists (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09).',
+            'Worktree options. Pass a string such as "tool-usage" as the worktree name, true for a generated name, or an options object. A repoGolem registration with an absolute path names the repo root; without one it is resolved from CMUXLAYER_REPO_HOME, the running checkout, or ~/Gits. Defaults to true, creating/reusing <registered-root>/.worktrees/<generated-name>; a newly created worktree and branch are rolled back if spawn fails before a recoverable surface exists (legacy ~/Gits/<repo>.wt read-fallback until ~2026-09).',
           ),
         mcp_profile: mcpProfileSchema
           .optional()

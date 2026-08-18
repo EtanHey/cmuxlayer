@@ -20,6 +20,39 @@ jobs:
       - run: bun run typecheck
       - run: bun run test
 
+  # Issue #392: spawn/resume must behave equivalently with AND without a
+  # repoGolem launcher registry. Runners have none by default, so the "absent"
+  # leg is a genuine fresh-install environment rather than a stubbed one.
+  launcher-parity:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        launcher_registry: [absent, present]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: rm -f package-lock.json
+      - run: bun install
+
+      - name: Plant a repoGolem launcher registry
+        if: matrix.launcher_registry == 'present'
+        run: |
+          mkdir -p "$HOME/.config/ralphtools"
+          printf 'repoGolem parityrepo "%s"\n' "$HOME/checkouts/parityrepo" \
+            > "$HOME/.config/ralphtools/launchers.zsh"
+          mkdir -p "$HOME/checkouts/parityrepo"
+
+      - name: Confirm no registry exists
+        if: matrix.launcher_registry == 'absent'
+        run: |
+          rm -f "$HOME/.config/ralphtools/launchers.zsh"
+          test ! -f "$HOME/.config/ralphtools/launchers.zsh"
+
+      - run: bun run test:parity
+
   build-site:
     runs-on: ubuntu-latest
     defaults:

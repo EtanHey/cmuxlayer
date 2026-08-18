@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadLauncherRegistrySnapshot,
   parseLauncherRegistry,
   resolveLauncherNameFromRegistry,
   resolveLauncherPrefix,
+  resolveLauncherNameFromRegistryOrNull,
   resolveRepoRootFromLauncherRegistry,
+  resolveRepoRootFromLauncherRegistryOrNull,
 } from "../src/launcher-registry.js";
 
 const REGISTRY = `
@@ -135,5 +138,110 @@ describe("launcher registry", () => {
         sourcePath: "/missing/launchers.zsh",
       }),
     ).toThrow(/Launcher registry unavailable.*\/missing\/launchers\.zsh/s);
+  });
+});
+
+describe("registry-optional resolution (issue #392)", () => {
+  const missingRegistry = {
+    sourcePath: "/missing/launchers.zsh",
+    readRegistry: (): string => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+  };
+
+  it("reports an absent registry as unavailable instead of throwing", () => {
+    const snapshot = loadLauncherRegistrySnapshot(missingRegistry);
+
+    expect(snapshot.available).toBe(false);
+    expect(snapshot.entries).toEqual([]);
+    expect(snapshot.sourcePath).toBe("/missing/launchers.zsh");
+    expect(snapshot.unavailable_reason).toMatch(/ENOENT/);
+  });
+
+  it("reports a present registry as available", () => {
+    const snapshot = loadLauncherRegistrySnapshot({
+      sourcePath: "/tmp/launchers.zsh",
+      readRegistry: () => REGISTRY,
+    });
+
+    expect(snapshot.available).toBe(true);
+    expect(snapshot.entries).toHaveLength(3);
+    expect(snapshot.unavailable_reason).toBeNull();
+  });
+
+  it("returns null launcher/root when the registry file is absent", () => {
+    expect(
+      resolveLauncherNameFromRegistryOrNull("matchmat", "claude", missingRegistry),
+    ).toBeNull();
+    expect(
+      resolveRepoRootFromLauncherRegistryOrNull("matchmat", missingRegistry),
+    ).toBeNull();
+  });
+
+  it("returns null when the registry exists but the repo is unregistered", () => {
+    const entries = parseLauncherRegistry(REGISTRY, "/tmp/launchers.zsh");
+
+    expect(
+      resolveLauncherNameFromRegistryOrNull("unknown", "claude", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toBeNull();
+    expect(
+      resolveRepoRootFromLauncherRegistryOrNull("unknown", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toBeNull();
+  });
+
+  it("still answers registered repos exactly as the strict resolver does", () => {
+    const entries = parseLauncherRegistry(REGISTRY, "/tmp/launchers.zsh");
+    const options = { entries, sourcePath: "/tmp/launchers.zsh" };
+
+    expect(resolveLauncherNameFromRegistryOrNull("matchmat", "claude", options)).toBe(
+      resolveLauncherNameFromRegistry("matchmat", "claude", options),
+    );
+    expect(resolveRepoRootFromLauncherRegistryOrNull("hyphen", options)).toBe(
+      resolveRepoRootFromLauncherRegistry("hyphen", options),
+    );
+  });
+
+  it("still throws on a genuinely broken registry rather than falling back", () => {
+    const ambiguous = {
+      entries: parseLauncherRegistry(
+        `repoGolem first "/tmp/one/shared"\nrepoGolem second "/tmp/two/shared"\n`,
+        "/tmp/launchers.zsh",
+      ),
+      sourcePath: "/tmp/launchers.zsh",
+    };
+
+    expect(() =>
+      resolveRepoRootFromLauncherRegistryOrNull("shared", ambiguous),
+    ).toThrow(/Ambiguous launcher registry match/);
+
+    expect(() =>
+      resolveRepoRootFromLauncherRegistryOrNull("relative", {
+        entries: [
+          {
+            prefix: "relative",
+            path: "../somewhere-else",
+            repoBasename: "somewhere-else",
+          },
+        ],
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toThrow(/must be absolute/);
+  });
+
+  it("returns null for a cli that has no launcher suffix (kiro is raw already)", () => {
+    const entries = parseLauncherRegistry(REGISTRY, "/tmp/launchers.zsh");
+
+    expect(
+      resolveLauncherNameFromRegistryOrNull("matchmat", "kiro", {
+        entries,
+        sourcePath: "/tmp/launchers.zsh",
+      }),
+    ).toBeNull();
   });
 });

@@ -8,26 +8,50 @@ import type {
   PublicAgent,
 } from "./agent-types.js";
 import { pauseHonestyFields, type PauseSource } from "./types.js";
-import { buildResumeCommand } from "./agent-command.js";
+import { buildResumeCommand, rawResumeNeedsCwd } from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
   resumable: boolean;
   resume_command?: string;
 };
 
+/**
+ * Directory a resumed harness must be started in. Only the raw-CLI resume form
+ * consumes it — launchers cd themselves.
+ */
+export function resumeCwdForAgent(
+  record: Pick<AgentRecord, "launch_cwd" | "worktree_path">,
+): string | null {
+  return (
+    record.worktree_path?.trim() || record.launch_cwd?.trim() || null
+  );
+}
+
 export function resumeCommandForAgent(
   record: Pick<
     AgentRecord,
-    "cli" | "repo" | "cli_session_id" | "launcher_name"
+    | "cli"
+    | "repo"
+    | "cli_session_id"
+    | "launcher_name"
+    | "launch_cwd"
+    | "worktree_path"
   >,
 ): string | undefined {
   if (!record.cli_session_id) return undefined;
+  const cwd = resumeCwdForAgent(record);
+  // Never advertise a cwd-keyed raw resume we cannot aim: it would start a
+  // fresh session under the same command, which reads as a successful resume.
+  if (!record.launcher_name && !cwd && rawResumeNeedsCwd(record.cli)) {
+    return undefined;
+  }
   try {
     return buildResumeCommand(
       record.cli,
       record.repo,
       record.cli_session_id,
       record.launcher_name,
+      { cwd },
     );
   } catch {
     return undefined;
