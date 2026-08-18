@@ -49,10 +49,13 @@ describe("pre-PR script ladder", () => {
     const hermeticGate = release.indexOf(
       'run "env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test"',
     );
-    const contractGate = release.indexOf('run "bun run test:contract"');
+    const contractGate = release.indexOf('bun run test:contract 2>&1 | tee');
 
     expect(hermeticGate).toBeGreaterThan(-1);
     expect(contractGate).toBeGreaterThan(hermeticGate);
+    // The lane's outcome is classified into the receipt instead of scrolling by (#370).
+    expect(release).toContain('receipt_record "gates.contract"');
+    expect(release).toContain("--require-contract");
   });
 
   it("removes ambient cmux socket pins from the pre-push regression gate", () => {

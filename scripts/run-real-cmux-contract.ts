@@ -887,6 +887,24 @@ async function addPidReceiptToSet(
   }
 }
 
+/**
+ * #370: three releases shipped while this lane silently skipped itself. When
+ * CMUX_CONTRACT_REQUIRE_LIVE=1 the lane is a hard gate — a skip becomes a
+ * failure instead of a zero exit nobody reads.
+ */
+export function requiresLiveContract(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CMUX_CONTRACT_REQUIRE_LIVE === "1";
+}
+
+function reportSkip(reason: string): void {
+  if (requiresLiveContract()) {
+    throw new Error(
+      `CMUX_CONTRACT_REQUIRE_LIVE=1 demands a live contract run, but the lane skipped: ${reason}`,
+    );
+  }
+  console.warn(`[contract] SKIP: ${reason}`);
+}
+
 async function runContractSteps(
   setActiveStep: (step: string) => void,
 ): Promise<void> {
@@ -896,7 +914,7 @@ async function runContractSteps(
   if (requestedPin) {
     const productionGuard = await classifyProductionPin(requestedPin);
     if (productionGuard.kind === "skip") {
-      console.warn(`[contract] SKIP: ${productionGuard.reason}`);
+      reportSkip(productionGuard.reason);
       return;
     }
   }
@@ -905,7 +923,7 @@ async function runContractSteps(
     : null;
   const classification = classifyLivePin(requestedSocket, preflight);
   if (classification.kind === "skip") {
-    console.warn(`[contract] SKIP: ${classification.reason}`);
+    reportSkip(classification.reason);
     return;
   }
   assertPingShape(preflight?.result);
