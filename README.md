@@ -9,7 +9,7 @@
 [![install](https://img.shields.io/badge/install-npm%20install%20--g%20cmuxlayer-22c55e)](https://github.com/EtanHey/cmuxlayer#quick-start)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![MCP Tools](https://img.shields.io/badge/MCP-35%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-798%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-3023%20passing-brightgreen.svg)](#testing)
 
 ## Quick Start
 
@@ -23,6 +23,23 @@ This installs the `cmuxlayer` command (plus `cmuxlayer-app-server` /
 running. For how the golem fleet wires, versions, and dogfoods it — and the
 `CMUX_SOCKET_PATH` instance pin — see
 [docs/releases-and-brew.md](docs/releases-and-brew.md).
+
+Then set up this machine:
+
+```bash
+cmuxlayer init
+```
+
+The wizard asks which repositories agents may be spawned in, whether cmuxlayer
+should call per-repo shell launcher functions or the agent CLIs directly, and
+whether agents run unattended or stop to ask for tool approval. It writes the
+config those answers produce (`~/.config/cmuxlayer/env.sh`, plus a launcher
+registry in launcher mode) and prints the one line to add to your shell profile.
+`--yes` with `--repo <name>=<path>` does the same non-interactively for scripted
+installs. Nothing else in cmuxlayer assumes a particular directory layout — see
+[docs/fresh-install.md](docs/fresh-install.md) for the walkthrough and
+[docs/registry-optional-spawn.md](docs/registry-optional-spawn.md) for how each
+lane behaves.
 
 ### Optional fleet sidebar
 
@@ -229,10 +246,15 @@ Restart Claude Code after adding the MCP config. Run `claude mcp list` to verify
 **Socket connection failed**
 cmuxLayer auto-discovers the cmux socket (macOS: `~/Library/Application Support/cmux/cmux.sock`). Override with `CMUX_SOCKET_PATH` if needed.
 
+**"Cannot resolve a working directory for repo ..."**
+cmuxLayer could not find that checkout. Run `cmuxlayer init` to register it, or
+set `CMUXLAYER_REPO_HOME` to the colon-separated directories holding your
+repositories. The error lists every path it searched.
+
 ## Testing
 
 ```bash
-bun run test        # 798 tests via vitest
+bun run test        # 3023 tests via vitest
 npm run typecheck   # Type checking
 ```
 

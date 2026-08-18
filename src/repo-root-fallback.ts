@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { sanitizeRepoName } from "./agent-command.js";
+import { sanitizeRepoName } from "./shell-safe.js";
 import { normalizeRepoKey } from "./launcher-registry.js";
 
 /**
@@ -32,6 +32,34 @@ function isRealDirectory(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The first configured checkout root, or null when none is set. Used by the
+ * few places that need a *default* directory for a repo (a kiro `cd`, a
+ * transcript probe) rather than a resolved one — so those defaults follow the
+ * machine's configuration before falling back to a historical path.
+ */
+export function firstRepoHomeRoot(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  return envRoots(env)[0] ?? null;
+}
+
+/**
+ * A default checkout path for `repo`: `<first configured root>/<repo>` when
+ * `CMUXLAYER_REPO_HOME` is set, else the historical `~/Gits/<repo>`. This is a
+ * guess, not a resolution — callers that must not launch in the wrong tree use
+ * `resolveRepoRootWithoutRegistry`, which errors instead of guessing.
+ */
+export function defaultRepoCheckoutPath(
+  repo: string,
+  options?: { env?: Record<string, string | undefined>; homeDir?: string },
+): string {
+  const safeRepo = sanitizeRepoName(repo);
+  const root = firstRepoHomeRoot(options?.env ?? process.env);
+  if (root) return join(root, safeRepo);
+  return join(options?.homeDir ?? homedir(), "Gits", safeRepo);
 }
 
 function envRoots(env: Record<string, string | undefined>): string[] {

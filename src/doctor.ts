@@ -37,9 +37,10 @@ import {
   stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import { REPO_HOME_ENV } from "./repo-root-fallback.js";
 import {
   assessCmuxVersionCompatibility,
   type CmuxVersionCompatibilityReport,
@@ -796,17 +797,40 @@ export const realCmuxVersionRunner: CmuxVersionRunner = async (env) => {
   }
 };
 
+/**
+ * Roots to scan for per-repo `.mcp.json`.
+ *
+ * AIDEV-NOTE (E0 sweep): `~/Gits` is a *default*, not the contract. A machine
+ * that told cmuxlayer where its checkouts live (`CMUXLAYER_REPO_HOME`, what
+ * `cmuxlayer init` writes) gets those scanned instead, so the check reports on
+ * the repos that actually exist rather than silently finding nothing.
+ */
+export function mcpConfigScanRoots(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): string[] {
+  const configured = (env[REPO_HOME_ENV] ?? "")
+    .split(":")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && isAbsolute(part));
+  return configured.length > 0 ? configured : [join(home, "Gits")];
+}
+
 export const realMcpConfigPathLister: McpConfigPathLister = async () => {
-  try {
-    const entries = await readdir(join(homedir(), "Gits"), {
-      withFileTypes: true,
-    });
-    return entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join(homedir(), "Gits", entry.name, ".mcp.json"));
-  } catch {
-    return [];
+  const paths: string[] = [];
+  for (const root of mcpConfigScanRoots()) {
+    try {
+      const entries = await readdir(root, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          paths.push(join(root, entry.name, ".mcp.json"));
+        }
+      }
+    } catch {
+      // A configured root that does not exist is not a doctor failure.
+    }
   }
+  return paths;
 };
 
 export const realMcpConfigFileReader: McpConfigFileReader = (path) =>
@@ -1105,7 +1129,7 @@ export async function checkMcpConfigDrift(
     drifted,
     launcherOk: launchers.every((launcher) => launcher.ok),
     launchers,
-    note: "scanned ~/Gits/*/.mcp.json for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
+    note: "scanned <repo root>/*/.mcp.json (CMUXLAYER_REPO_HOME, else ~/Gits) for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
   };
 }
 

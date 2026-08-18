@@ -4,10 +4,13 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CliType } from "./agent-types.js";
 import { sanitizeRepoName } from "./agent-command.js";
 
-export const DEFAULT_LAUNCHER_REGISTRY_PATH = join(
-  homedir(),
-  ".config/ralphtools/launchers.zsh",
-);
+/** Where the repoGolem launcher registry lives under a given home dir. */
+export function launcherRegistryPathForHome(home: string): string {
+  return join(home, ".config/ralphtools/launchers.zsh");
+}
+
+export const DEFAULT_LAUNCHER_REGISTRY_PATH =
+  launcherRegistryPathForHome(homedir());
 
 export interface LauncherRegistryEntry {
   prefix: string;

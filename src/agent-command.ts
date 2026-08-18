@@ -1,4 +1,14 @@
+import { join } from "node:path";
 import type { CliType } from "./agent-types.js";
+import { firstRepoHomeRoot } from "./repo-root-fallback.js";
+import {
+  bypassesApprovals,
+  resolveSpawnPermissionMode,
+  type SpawnPermissionMode,
+} from "./permission-mode.js";
+import { sanitizeRepoName, shellQuote } from "./shell-safe.js";
+
+export { sanitizeRepoName, shellQuote };
 
 // Env vars for headless/spawned agent sessions:
 // - MCP_CONNECTION_NONBLOCKING: skip MCP connection wait (Claude Code 2.1.90+)
@@ -6,18 +16,23 @@ import type { CliType } from "./agent-types.js";
 export const AGENT_ENV =
   "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
 
-export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-export function sanitizeRepoName(repo: string): string {
-  const safeRepo = repo.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safeRepo || safeRepo !== repo || safeRepo === "." || safeRepo === "..") {
-    throw new Error(
-      `Invalid repo name: "${repo}". Only alphanumeric, dots, hyphens, and underscores allowed. "." and ".." are not permitted.`,
-    );
-  }
-  return safeRepo;
+/**
+ * The `cd` a kiro command falls back to when no cwd was resolved for it.
+ *
+ * AIDEV-NOTE (E0 sweep): kiro has no launcher, so its command has always
+ * carried a literal `cd ~/Gits/<repo>` — a directory a fresh machine does not
+ * have. `CMUXLAYER_REPO_HOME` (what `cmuxlayer init` writes) now answers first;
+ * the historical path stays as the last-resort default so registered installs
+ * see the same command they always did.
+ */
+export function defaultKiroCd(
+  repo: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const safeRepo = sanitizeRepoName(repo);
+  const root = firstRepoHomeRoot(env);
+  if (!root) return `cd ~/Gits/${safeRepo} && `;
+  return `cd ${shellQuote(join(root, safeRepo))} && `;
 }
 
 const FULL_SESSION_UUID_RE =
@@ -70,6 +85,18 @@ export const RAW_SKIP_APPROVALS: Partial<Record<CliType, string>> = {
 };
 
 /**
+ * The skip flag a raw launch or resume should carry, or undefined when the
+ * install asked for the prompting mode (`cmuxlayer init --permissions ask`).
+ */
+export function rawSkipApprovalFlag(
+  cli: CliType,
+  permissionMode?: SpawnPermissionMode,
+): string | undefined {
+  const mode = permissionMode ?? resolveSpawnPermissionMode();
+  return bypassesApprovals(mode) ? RAW_SKIP_APPROVALS[cli] : undefined;
+}
+
+/**
  * `gemini --resume` takes `latest` or an INDEX number ("Resume a previous
  * session. Use \"latest\" for most recent or index number (e.g. --resume 5)"),
  * never a session UUID -- so there is no raw gemini resume we can address by
@@ -96,6 +123,12 @@ export interface ResumeCommandOptions {
    * from the wrong directory cannot find the session.
    */
   cwd?: string | null;
+  /**
+   * Whether the resumed harness bypasses its approval prompt. Defaults to the
+   * machine's `CMUXLAYER_SPAWN_PERMISSION_MODE` (skip-permissions unless the
+   * install said otherwise).
+   */
+  permissionMode?: SpawnPermissionMode;
 }
 
 /**
@@ -121,19 +154,23 @@ export function buildResumeCommand(
   }
   const launcher = cleanLauncherName(cli, launcherName);
   if (!launcher) return buildRawResumeCommand(cli, repo, sessionId, opts);
+  const bypass = bypassesApprovals(
+    opts?.permissionMode ?? resolveSpawnPermissionMode(),
+  );
+  const skipArg = bypass ? " -s" : "";
   switch (cli) {
     case "claude":
-      return `${launcher} -s --resume ${sessionId}`;
+      return `${launcher}${skipArg} --resume ${sessionId}`;
     case "codex":
-      return `${launcher} --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`;
+      return `${launcher}${
+        bypass ? " --dangerously-bypass-approvals-and-sandbox" : ""
+      } resume ${sessionId}`;
     case "gemini":
-      return `${launcher} -s --resume ${sessionId}`;
-    case "kiro": {
-      const safeRepo = sanitizeRepoName(repo);
-      return `cd ~/Gits/${safeRepo} && ${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
-    }
+      return `${launcher}${skipArg} --resume ${sessionId}`;
+    case "kiro":
+      return `${defaultKiroCd(repo)}${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     case "cursor":
-      return `${launcher} -s --resume ${sessionId}`;
+      return `${launcher}${skipArg} --resume ${sessionId}`;
   }
 }
 
@@ -163,22 +200,23 @@ export function buildRawResumeCommand(
   }
   const cwd = opts?.cwd?.trim();
   const cd = cwd ? `cd ${shellQuote(cwd)} && ` : "";
-  // The approval bypass must survive a resume; see RAW_SKIP_APPROVALS.
-  const skip = RAW_SKIP_APPROVALS[cli];
+  // The approval bypass must survive a resume; see RAW_SKIP_APPROVALS. An
+  // install that chose the prompting mode gets no bypass on either command.
+  const skipFlag = rawSkipApprovalFlag(cli, opts?.permissionMode);
+  const skip = skipFlag ? `${skipFlag} ` : "";
   switch (cli) {
     case "claude":
-      return `${cd}${AGENT_ENV} claude ${skip} --resume ${sessionId}`;
+      return `${cd}${AGENT_ENV} claude ${skip}--resume ${sessionId}`;
     // Codex takes global options BEFORE the subcommand -- matching the
     // launcher form `<L> --dangerously-bypass-approvals-and-sandbox resume`.
     case "codex":
-      return `${cd}codex ${skip} resume ${sessionId}`;
+      return `${cd}codex ${skip}resume ${sessionId}`;
     // `cursor agent` exposes `--resume [chatId]`; it has no `--session` flag
     // (`error: unknown option '--session'`). Verified against `cursor agent --help`.
     case "cursor":
-      return `${cd}cursor agent ${skip} --resume ${sessionId}`;
+      return `${cd}cursor agent ${skip}--resume ${sessionId}`;
     case "kiro": {
-      const safeRepo = sanitizeRepoName(repo);
-      const kiroCd = cd || `cd ~/Gits/${safeRepo} && `;
+      const kiroCd = cd || defaultKiroCd(repo);
       return `${kiroCd}${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`;
     }
     case "gemini":
@@ -236,8 +274,7 @@ export function rawResumeEchoCandidates(
       forms.push(`${cd}${AGENT_ENV} gemini --resume ${sessionId}`);
       break;
     case "kiro": {
-      const safeRepo = sanitizeRepoName(repo);
-      const kiroCd = cd || `cd ~/Gits/${safeRepo} && `;
+      const kiroCd = cd || defaultKiroCd(repo);
       forms.push(`${kiroCd}${AGENT_ENV} kiro-cli chat --resume-id ${sessionId}`);
       break;
     }
