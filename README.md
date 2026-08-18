@@ -34,7 +34,10 @@ The wizard asks which repositories agents may be spawned in, whether cmuxlayer
 should call per-repo shell launcher functions or the agent CLIs directly, and
 whether agents run unattended or stop to ask for tool approval. It writes the
 config those answers produce (`~/.config/cmuxlayer/env.sh`, plus a launcher
-registry in launcher mode) and prints the one line to add to your shell profile.
+registry in launcher mode), which cmuxlayer reads at startup — so a GUI-launched
+MCP client gets the same configuration as a terminal one, without sourcing
+anything. It never rewrites an existing file without asking, and backs one up
+before it does.
 `--yes` with `--repo <name>=<path>` does the same non-interactively for scripted
 installs. Nothing else in cmuxlayer assumes a particular directory layout — see
 [docs/fresh-install.md](docs/fresh-install.md) for the walkthrough and

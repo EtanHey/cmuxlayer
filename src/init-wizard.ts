@@ -12,12 +12,12 @@
  * be tested by parsing them back with the same readers the engine uses.
  */
 
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { sanitizeRepoName, shellQuote } from "./agent-command.js";
 import {
   launcherRegistryPathForHome,
   normalizeRepoKey,
-  parseLauncherRegistry,
+  parseLauncherRegistryLine,
 } from "./launcher-registry.js";
 import {
   DEFAULT_SPAWN_PERMISSION_MODE,
@@ -75,6 +75,8 @@ export const WIZARD_COPY = {
   ],
   permissionPrompt: (defaultChoice: string) => `Choice [${defaultChoice}]: `,
   writeSection: ["", "4. Writing configuration"],
+  overwritePrompt:
+    "Rewrite it? The current file is backed up first [y/N]: ",
   doneHint: [
     "",
     "Done. Load the configuration in new shells by adding this line to your",
@@ -106,7 +108,12 @@ Options:
   --registry-path <path> Where to write the launcher registry.
   --config-path <path>   Where to write the environment config.
   --print                Print what would be written and exit; write nothing.
-  --force                Overwrite existing files.
+  --force                Rewrite files that already exist. Without it, an
+                         existing file is only rewritten after you confirm at
+                         the prompt, and --yes refuses outright. Either way the
+                         current contents are copied to <file>.bak first. A
+                         launcher registry is patched in place: its
+                         non-registration lines are always preserved.
   --yes, -y              Do not prompt; use the flags above.
   --help, -h             Print this help and exit.
 
@@ -367,30 +374,92 @@ function registryLine(prefix: string, path: string): string {
   return `repoGolem ${prefix} ${rendered}`;
 }
 
+export interface RegistryRepoint {
+  prefix: string;
+  from: string;
+  to: string;
+}
+
+export interface LauncherRegistryPatch {
+  contents: string;
+  /** Registrations whose path this run changes. Reported, never silent. */
+  repoints: RegistryRepoint[];
+}
+
 /**
- * Render the registry, carrying over any registration the wizard is not
- * replacing.
+ * Patch `repoGolem` registrations into an existing registry LINE BY LINE.
  *
- * AIDEV-NOTE: launcher mode is only ever offered when a registry already
- * exists, so "write the file" would mean "delete every launcher this machine
- * had". Existing prefixes survive; a prefix the wizard registers wins.
+ * AIDEV-NOTE: an earlier version of this rebuilt the file from the entries it
+ * could parse. That silently deleted every line that is not a registration —
+ * and a real `launchers.zsh` is mostly shell functions, aliases, and a source
+ * guard, with the `repoGolem` lines a minority. Rebuilding it would have
+ * destroyed exactly the setup the wizard was pointed at. Non-registration
+ * lines are now preserved verbatim; a matching registration is rewritten where
+ * it stands, so the file keeps its own order and grouping.
  */
+export function patchLauncherRegistry(
+  repos: readonly ResolvedInitRepo[],
+  existing?: string | null,
+): LauncherRegistryPatch {
+  if (existing === null || existing === undefined) {
+    return {
+      contents: `${[
+        ...REGISTRY_HEADER,
+        ...repos.map((repo) => registryLine(repo.launcherPrefix, repo.path)),
+      ].join("\n")}\n`,
+      repoints: [],
+    };
+  }
+
+  const byKey = new Map(
+    repos.map((repo) => [normalizeRepoKey(repo.launcherPrefix), repo]),
+  );
+  const written = new Set<string>();
+  const repoints: RegistryRepoint[] = [];
+
+  const lines = existing.split(/\r?\n/);
+  const patched = lines.map((line) => {
+    const parsed = parseLauncherRegistryLine(line);
+    if (!parsed) return line;
+    const key = normalizeRepoKey(parsed.prefix);
+    const repo = byKey.get(key);
+    if (!repo) return line;
+    written.add(key);
+    if (resolve(parsed.path) !== resolve(repo.path)) {
+      repoints.push({
+        prefix: parsed.prefix,
+        from: parsed.path,
+        to: repo.path,
+      });
+    }
+    return registryLine(repo.launcherPrefix, repo.path);
+  });
+
+  const appended = repos
+    .filter((repo) => !written.has(normalizeRepoKey(repo.launcherPrefix)))
+    .map((repo) => registryLine(repo.launcherPrefix, repo.path));
+
+  if (appended.length > 0) {
+    // Keep a single trailing blank line rather than growing one per run.
+    while (patched.length > 0 && patched[patched.length - 1]?.trim() === "") {
+      patched.pop();
+    }
+    patched.push("", ...appended);
+  }
+
+  const contents = patched.join("\n");
+  return {
+    contents: contents.endsWith("\n") ? contents : `${contents}\n`,
+    repoints,
+  };
+}
+
+/** Back-compat shim: render just the contents of a patched registry. */
 export function renderLauncherRegistry(
   repos: readonly ResolvedInitRepo[],
   existing?: string | null,
 ): string {
-  const claimed = new Set(
-    repos.map((repo) => normalizeRepoKey(repo.launcherPrefix)),
-  );
-  const carried = (
-    existing ? parseLauncherRegistry(existing, "") : []
-  ).filter((entry) => !claimed.has(normalizeRepoKey(entry.prefix)));
-
-  const lines = [
-    ...carried.map((entry) => registryLine(entry.prefix, entry.path)),
-    ...repos.map((repo) => registryLine(repo.launcherPrefix, repo.path)),
-  ];
-  return `${[...REGISTRY_HEADER, ...lines].join("\n")}\n`;
+  return patchLauncherRegistry(repos, existing).contents;
 }
 
 export interface EnvConfigInput {
@@ -448,12 +517,20 @@ export function renderEnvConfig(input: EnvConfigInput): string {
   return lines.join("\n");
 }
 
-export type InitArtifactKind = "launcher-registry" | "env";
+export type InitArtifactKind = "launcher-registry" | "env" | "backup";
 
 export interface InitArtifact {
   kind: InitArtifactKind;
   path: string;
   contents: string;
+  /**
+   * "create" when nothing is there, "update" when this run rewrites a file
+   * that already exists. Every "update" is confirmed and backed up first —
+   * see `runInitCommand`.
+   */
+  mode: "create" | "update";
+  /** For an "update": where the current contents are preserved first. */
+  backupPath?: string;
 }
 
 export interface InitPlan {
@@ -463,6 +540,25 @@ export interface InitPlan {
   repoHomes: string[];
   artifacts: InitArtifact[];
   warnings: string[];
+  /** Files this run would rewrite. Empty on a clean machine. */
+  updates: InitArtifact[];
+}
+
+/**
+ * A backup path that never overwrites an earlier backup. Deterministic, so a
+ * run is reproducible and a test can name the file it expects.
+ */
+export function backupPathFor(
+  path: string,
+  exists: (candidate: string) => boolean,
+): string {
+  const base = `${path}.bak`;
+  if (!exists(base)) return base;
+  for (let index = 1; index < 1000; index++) {
+    const candidate = `${base}.${index}`;
+    if (!exists(candidate)) return candidate;
+  }
+  throw new Error(`Could not find an unused backup path next to ${path}.`);
 }
 
 /**
@@ -532,15 +628,32 @@ export function buildInitPlan(
   const repoHomes = repoHomesFor(repos);
   const artifacts: InitArtifact[] = [];
 
-  if (answers.launchMode === "launcher") {
+  const plan = (path: string, kind: InitArtifactKind, contents: string) => {
+    const exists = environment.fileExists(path);
+    if (!exists) {
+      artifacts.push({ kind, path, contents, mode: "create" });
+      return;
+    }
+    const backupPath = backupPathFor(path, environment.fileExists);
     artifacts.push({
-      kind: "launcher-registry",
-      path: answers.registryPath,
-      contents: renderLauncherRegistry(
-        repos,
-        environment.readFile?.(answers.registryPath) ?? null,
-      ),
+      kind: "backup",
+      path: backupPath,
+      contents: environment.readFile?.(path) ?? "",
+      mode: "create",
     });
+    artifacts.push({ kind, path, contents, mode: "update", backupPath });
+  };
+
+  if (answers.launchMode === "launcher") {
+    const existing = environment.readFile?.(answers.registryPath) ?? null;
+    const patch = patchLauncherRegistry(repos, existing);
+    plan(answers.registryPath, "launcher-registry", patch.contents);
+    for (const repoint of patch.repoints) {
+      warnings.push(
+        `"${repoint.prefix}" is already registered at ${repoint.from}; this ` +
+          `run repoints it to ${repoint.to}.`,
+      );
+    }
     warnings.push(
       "Launcher mode assumes the commands " +
         repos.map((repo) => `${repo.launcherPrefix}Claude`).join(", ") +
@@ -549,17 +662,17 @@ export function buildInitPlan(
     );
   }
 
-  artifacts.push({
-    kind: "env",
-    path: answers.configPath,
-    contents: renderEnvConfig({
+  plan(
+    answers.configPath,
+    "env",
+    renderEnvConfig({
       repoHomes,
       permissionMode: answers.permissionMode,
       registryPath:
         answers.launchMode === "launcher" ? answers.registryPath : null,
       requireRegistry: answers.requireRegistry,
     }),
-  });
+  );
 
   return {
     launchMode: answers.launchMode,
@@ -568,6 +681,7 @@ export function buildInitPlan(
     repoHomes,
     artifacts,
     warnings,
+    updates: artifacts.filter((artifact) => artifact.mode === "update"),
   };
 }
 
@@ -615,6 +729,11 @@ async function promptRepos(
     ).trim();
     repos.push({ name: nameAnswer || suggestion, path });
   }
+}
+
+async function confirm(io: InitIo, prompt: string): Promise<boolean> {
+  const answer = (await io.question(prompt)).trim().toLowerCase();
+  return answer === "y" || answer === "yes";
 }
 
 async function promptChoice(
@@ -692,33 +811,58 @@ export async function runInitCommand(
 
   if (options.print) {
     for (const artifact of plan.artifacts) {
-      io.write(`\n--- ${artifact.path} ---\n${artifact.contents}`);
+      if (artifact.kind === "backup") continue;
+      io.write(
+        `\n--- ${artifact.path} (${artifact.mode}${
+          artifact.backupPath ? `, backup: ${artifact.backupPath}` : ""
+        }) ---\n${artifact.contents}`,
+      );
     }
     return 0;
   }
 
-  // A launcher registry is merged, not replaced, so re-running the wizard on a
-  // machine that already has one is safe and needs no --force.
-  const collisions = options.force
-    ? []
-    : plan.artifacts.filter(
-        (artifact) =>
-          artifact.kind !== "launcher-registry" &&
-          environment.fileExists(artifact.path),
+  // Rewriting a file the machine already has is never implicit: it takes an
+  // explicit yes (interactively) or --force (scripted), and the current
+  // contents are copied to a backup BEFORE the rewrite.
+  if (plan.updates.length > 0) {
+    for (const update of plan.updates) {
+      io.write(
+        `  ${update.path} already exists; this run would rewrite it ` +
+          `(backup: ${update.backupPath}).\n`,
       );
-  if (collisions.length > 0) {
-    io.writeError(
-      `Refusing to overwrite ${collisions
-        .map((artifact) => artifact.path)
-        .join(", ")}. Re-run with --force, or --print to see what would be ` +
-        "written.\n",
-    );
-    return 1;
+    }
+    let confirmed = options.force;
+    if (!confirmed && !options.yes) {
+      try {
+        confirmed = await confirm(io, WIZARD_COPY.overwritePrompt);
+      } catch (error) {
+        io.writeError(
+          `${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        return 2;
+      }
+    }
+    if (!confirmed) {
+      io.writeError(
+        `Nothing written. ${
+          options.yes
+            ? "Re-run with --force to rewrite"
+            : "Answer yes, or re-run with --force, to rewrite"
+        } ${plan.updates
+          .map((artifact) => artifact.path)
+          .join(", ")}; --print shows what would be written.\n`,
+      );
+      return 1;
+    }
   }
 
   for (const artifact of plan.artifacts) {
     await writeArtifact(artifact.path, artifact.contents);
-    io.write(`  wrote ${artifact.path}\n`);
+    io.write(
+      artifact.kind === "backup"
+        ? `  backed up to ${artifact.path}\n`
+        : `  wrote ${artifact.path}\n`,
+    );
   }
 
   io.write(`${WIZARD_COPY.doneHint.join("\n")}\n`);

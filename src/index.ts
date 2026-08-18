@@ -14,6 +14,7 @@ import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
 import { writeInboxCursor } from "./inbox.js";
 import { runInitCli } from "./init-cli.js";
+import { loadCmuxlayerConfigFile } from "./config-file.js";
 
 const HELP_TEXT = `cmuxlayer — Terminal multiplexer MCP server for AI agent workspace orchestration.
 
@@ -48,6 +49,11 @@ Environment:
   CMUXLAYER_DAEMON_SOCKET
                        Override the cmuxlayer daemon Unix socket. Defaults to
                        ~/.local/state/cmux/cmuxlayer-stated.sock.
+  CMUXLAYER_CONFIG_FILE
+                       Override the config file cmuxlayer reads at startup.
+                       Defaults to ~/.config/cmuxlayer/env.sh, written by
+                       "cmuxlayer init". Variables already set in the
+                       environment always win over the file.
   CMUXLAYER_REPO_HOME  Colon-separated directories that contain your checkouts.
                        A repo named <repo> resolves to <root>/<repo>.
   CMUXLAYER_SPAWN_PERMISSION_MODE
@@ -61,6 +67,9 @@ Environment:
 
 async function main() {
   const arg = process.argv[2];
+  // The config `cmuxlayer init` wrote applies wherever cmuxlayer is launched
+  // from, not only from a shell that sourced it. Real env vars still win.
+  loadCmuxlayerConfigFile();
   if (arg === "--version" || arg === "-v") {
     process.stdout.write(`cmuxlayer ${RUNNING_VERSION}\n`);
     return;

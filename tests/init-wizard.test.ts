@@ -296,13 +296,16 @@ describe("buildInitPlan", () => {
       environment({
         fileExists: (path) =>
           path === "/home/tester/.config/ralphtools/launchers.zsh",
+        readFile: () => "",
       }),
     );
+    // The registry exists, so it is backed up before it is rewritten.
     expect(plan.artifacts.map((artifact) => artifact.kind)).toEqual([
+      "backup",
       "launcher-registry",
       "env",
     ]);
-    const registry = plan.artifacts[0];
+    const registry = plan.artifacts[1];
     expect(registry?.path).toBe(
       "/home/tester/.config/ralphtools/launchers.zsh",
     );
@@ -396,11 +399,13 @@ describe("buildInitPlan", () => {
       environment({
         fileExists: (path) =>
           path === "/home/tester/.config/ralphtools/launchers.zsh",
+        readFile: () => "",
       }),
     );
-    expect(plan.artifacts[0]?.contents).toContain(
-      "repoGolem betatool /code/beta-tool",
+    const registry = plan.artifacts.find(
+      (artifact) => artifact.kind === "launcher-registry",
     );
+    expect(registry?.contents).toContain("repoGolem betatool /code/beta-tool");
   });
 });
 
@@ -484,7 +489,7 @@ describe("runInitCommand", () => {
     expect(h.out.join("")).toContain("export CMUXLAYER_REPO_HOME='/code'");
   });
 
-  it("re-registers into an existing launcher registry without --force", async () => {
+  it("refuses to rewrite an existing launcher registry without --force", async () => {
     const h = harness({
       env: {
         fileExists: (path) =>
@@ -498,10 +503,9 @@ describe("runInitCommand", () => {
       h.environment,
       h.writer,
     );
-    expect(code).toBe(0);
-    expect(
-      h.written.get("/home/tester/.config/ralphtools/launchers.zsh"),
-    ).toContain("repoGolem legacy /code/legacy");
+    expect(code).toBe(1);
+    expect(h.written.size).toBe(0);
+    expect(h.err.join("")).toContain("--force");
   });
 
   it("fails with a pointer to --yes when input ends mid-wizard", async () => {
@@ -532,10 +536,11 @@ describe("runInitCommand", () => {
     expect(h.err.join("")).toMatch(/--force/);
   });
 
-  it("overwrites with --force", async () => {
+  it("overwrites with --force, keeping a backup of what was there", async () => {
     const h = harness({
       env: {
         fileExists: (path) => path === "/home/tester/.config/cmuxlayer/env.sh",
+        readFile: () => "export CMUXLAYER_REPO_HOME='/previous'\n",
       },
     });
     const code = await runInitCommand(
@@ -545,7 +550,12 @@ describe("runInitCommand", () => {
       h.writer,
     );
     expect(code).toBe(0);
-    expect(h.written.size).toBe(1);
+    expect(h.written.get("/home/tester/.config/cmuxlayer/env.sh.bak")).toBe(
+      "export CMUXLAYER_REPO_HOME='/previous'\n",
+    );
+    expect(h.written.get("/home/tester/.config/cmuxlayer/env.sh")).toContain(
+      "export CMUXLAYER_REPO_HOME='/code'",
+    );
   });
 
   it("prompts through the interactive path and writes what was answered", async () => {

@@ -100,7 +100,15 @@ forcing strict mode on and re-breaking fresh installs.
 | `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1` | restore the pre-#392 hard failure when a repo is unregistered |
 | `CMUXLAYER_SPAWN_PERMISSION_MODE` | `skip-permissions` (default) or `default` — see below |
 
+| `CMUXLAYER_CONFIG_FILE` | override the config file read at startup (default `~/.config/cmuxlayer/env.sh`) |
+
 `cmuxlayer init` writes all of these; see [fresh-install.md](fresh-install.md).
+
+They are read from the **process environment**, and cmuxlayer also reads its own
+config file at startup so a GUI-launched client (which never sources a shell
+profile) is configured the same as a terminal one. The environment always wins
+over the file; only the settings in this table are accepted from it, and the
+file is parsed, never executed.
 
 Set `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1` on a machine where every repo *is*
 registered: a typo'd repo name then fails loudly instead of raw-launching in a

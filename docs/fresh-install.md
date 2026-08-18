@@ -54,12 +54,23 @@ you unless it finds evidence of the first:
 
 ## 3. Load the configuration
 
-The wizard writes `~/.config/cmuxlayer/env.sh`. Source it from your shell
-profile so the panes cmuxlayer starts inherit it:
+The wizard writes `~/.config/cmuxlayer/env.sh`, and **cmuxlayer reads that file
+itself at startup** — you do not have to source it for cmuxlayer to work. This
+matters because an MCP client launched from the GUI (Claude Desktop, VS Code, a
+launchd agent) never reads your shell profile; if the config only lived in
+`~/.zshrc`, those clients would silently run without it.
+
+Sourcing it is still worth doing, so that shells and panes see the same values:
 
 ```bash
 echo '[ -f ~/.config/cmuxlayer/env.sh ] && . ~/.config/cmuxlayer/env.sh' >> ~/.zshrc
 ```
+
+A variable already set in the environment always wins over the file, so an MCP
+client that passes an explicit `env` block is never overridden by a stale
+config. Only cmuxlayer's own settings are read from the file — it is parsed, not
+executed, and it cannot set `PATH`, `NODE_OPTIONS`, or anything else.
+`CMUXLAYER_CONFIG_FILE` points cmuxlayer at a different file.
 
 ## 4. Point your MCP client at cmuxlayer
 
@@ -84,7 +95,10 @@ Restart the client afterwards.
 cmuxlayer doctor
 ```
 
-Read-only, exits 0 when healthy, and names what it could not verify.
+Read-only, exits 0 when healthy, and names what it could not verify. Its
+`init config:` line reports which config file the running process found and
+which settings it actually applied — the fastest way to confirm your answers
+reached cmuxlayer and not just your shell.
 
 ## Scripted installs
 
@@ -93,12 +107,15 @@ Read-only, exits 0 when healthy, and names what it could not verify.
 ```bash
 cmuxlayer init --yes \
   --repo ~/code/my-app \
-  --repo api=/srv/services/api \
+  --repo ~/code/api \
   --permissions skip
 ```
 
 `--repo <path>` names the repository after its directory; `--repo <name>=<path>`
-sets the name explicitly. Add `--print` to see the files without writing them,
+sets the name explicitly — useful in launcher mode, where the path is recorded
+and the directory name does not have to match. On the raw lane a name that
+differs from the directory cannot be found (see "How a repository gets found"),
+and the wizard says so when you try. Add `--print` to see the files without writing them,
 and `--force` to overwrite an existing config. `cmuxlayer init --help` lists
 every flag.
 
@@ -110,12 +127,27 @@ Shell exports, in every mode:
 
 | variable | meaning |
 |---|---|
-| `CMUXLAYER_REPO_HOME` | colon-separated directories holding your checkouts. A repo named `<repo>` is looked for at `<root>/<repo>`, in order. |
+| `CMUXLAYER_REPO_HOME` | colon-separated directories holding your checkouts. A repo named `<repo>` is looked for at `<root>/<repo>`, in order. A directory whose own path contains a `:` cannot be expressed here. |
 | `CMUXLAYER_SPAWN_PERMISSION_MODE` | `skip-permissions` (unattended) or `default` (agents prompt). |
 | `CMUXLAYER_LAUNCHER_REGISTRY_PATH` | written only in launcher mode: where the launcher registry lives. |
 | `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY` | written only with `--require-registry`: fail a spawn for an unregistered repo instead of falling back to the CLI. |
 
+These four are the only settings cmuxlayer accepts from the config file.
+Anything else in it is ignored (and named by `cmuxlayer doctor`).
+
 ### `~/.config/ralphtools/launchers.zsh` — launcher mode only
+
+This path is a historical default: it is where the launcher tooling cmuxlayer
+was first built against keeps its registry, and cmuxlayer reads it so an
+existing setup keeps working untouched. If you have no such file, you are not
+in launcher mode and nothing writes here. To put the registry somewhere of your
+own choosing, pass `--registry-path`, or set `CMUXLAYER_LAUNCHER_REGISTRY_PATH`.
+
+**The file is yours, not cmuxlayer's.** It is read as a shell file that happens
+to contain `repoGolem` lines: the wizard rewrites only those lines, in place,
+and preserves everything else — functions, aliases, comments, guards — verbatim.
+It will not touch an existing file without an explicit yes, and it copies the
+current contents to `<file>.bak` before writing.
 
 One line per repository:
 
@@ -150,7 +182,15 @@ name or to use launcher mode, where the path is recorded explicitly.
 
 ## Re-running it
 
-`cmuxlayer init` refuses to overwrite an existing config; re-run with `--force`
-to replace it, or edit the files by hand — they are plain shell and are meant to
+`cmuxlayer init` never rewrites a file that already exists without asking. The
+interactive run tells you which file it would rewrite and where the backup goes,
+and waits for a yes; `--yes` refuses outright unless you also pass `--force`.
+Either way the current contents are copied to `<file>.bak` (`.bak.1`, `.bak.2`,
+… — an earlier backup is never overwritten) before anything is written.
+
+Re-registering a repository that already points somewhere else is reported as a
+note naming both paths, so a moved checkout is never repointed silently.
+
+You can also just edit the files by hand — they are plain shell and are meant to
 be readable. The full behaviour of both lanes is in
 [registry-optional-spawn.md](registry-optional-spawn.md).

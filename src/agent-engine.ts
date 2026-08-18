@@ -1389,7 +1389,7 @@ export async function assertLauncherAvailable(
 export const REQUIRE_LAUNCHER_REGISTRY_ENV =
   "CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY";
 
-function launcherRegistryRequired(
+export function launcherRegistryRequired(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   const value = env[REQUIRE_LAUNCHER_REGISTRY_ENV]?.trim().toLowerCase();
