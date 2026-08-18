@@ -55,6 +55,7 @@ import {
   type SpawnAgentParams,
 } from "./agent-engine.js";
 import {
+  COORDINATION_FOOTER_NOT_DELIVERED,
   issueCoordinationContract,
   coordinationFooterBytes,
   type CoordinationContract,
@@ -622,6 +623,8 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       report_path: z.string().optional(),
       done_marker: z.string().optional(),
       coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      coordination_footer_delivered: z.boolean().optional(),
+      coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
     })
     .passthrough(),
@@ -644,6 +647,8 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       report_path: z.string().optional(),
       done_marker: z.string().optional(),
       coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      coordination_footer_delivered: z.boolean().optional(),
+      coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
       boot_prompt_warning: z.string().nullable().optional(),
       registry_state: z.string().nullable().optional(),
@@ -11249,9 +11254,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           ),
         report_path: z
           .string()
+          .refine((value) => isAbsolute(value.trim()), {
+            message:
+              "report_path must be absolute so the producer and consumer resolve the same file",
+          })
           .optional()
           .describe(
-            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, and tells the worker the same path, so the DONE signal's producer and consumer cannot disagree. Pass this only to place the report somewhere you already watch (e.g. a collab dir); the resolved value is still echoed here and persisted.",
+            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. NOTE: the engine does NOT yet tell the worker this path -- the boot-prompt footer is not wired (see coordination_footer_delivered in the receipt), so until then YOU must relay report_path and done_marker to the worker, or every done worker will render closure:\"artifact_missing\". Pass this only to place the report somewhere you already watch (e.g. a collab dir).",
           ),
         force_new: z
           .boolean()
@@ -11286,6 +11295,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         const creation = new CreatedIdentityScope();
         try {
+          // P11 finding 2: reject a relative override BEFORE anything launches.
+          // The zod .refine() covers real MCP calls; this covers direct handler
+          // invocation, so no call path can leave an orphaned pane behind an
+          // input-validation error.
+          if (
+            typeof args.report_path === "string" &&
+            !isAbsolute(args.report_path.trim())
+          ) {
+            return err(
+              new Error(
+                `report_path must be absolute so the producer and consumer resolve the same file: ${args.report_path}`,
+              ),
+            );
+          }
           if (args.resume_agent_id) {
             const incompatible = [
               "repo",
@@ -11786,8 +11809,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           result.report_path = coordination.report_path;
           result.done_marker = coordination.done_marker;
+          // Finding 3: never report the footer's size without reporting that it
+          // was not sent -- same shape as the v0.4.42 `paused` provenance fix.
           result.coordination_footer_bytes =
             coordinationFooterBytes(coordination);
+          result.coordination_footer_delivered = false;
+          result.coordination_footer_note = COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
               report_path: coordination.report_path,
@@ -13040,6 +13067,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                   ...(harvest
                     ? {
                         closure: harvest.closure,
+                        closure_artifact_verified:
+                          harvest.closure_artifact_verified,
                         report_path: harvest.report_path,
                         done_marker: harvest.done_marker,
                       }
@@ -15374,6 +15403,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const supersedePatch = {
             task_summary: taskSummary,
             goal_file: args.goal_file,
+            // AIDEV-NOTE (P11 finding 1): clear the engine-issued pair so the
+            // prose fallback resumes for the NEW brief. supersede is the one
+            // contract channel that actually reaches the worker -- it delivers
+            // `/goal Read and execute this goal file` to the pane -- so the
+            // worker will honor the superseding brief's path. If the consumer
+            // kept checking the originally issued path it would render
+            // artifact_missing forever: the exact S3 disagreement, re-created
+            // through the door that used to work. Whatever reached the worker
+            // is what the consumer must verify against.
+            report_path: null,
+            done_marker: null,
             task_done_candidate_at: null,
             task_done_detected_at: null,
             boot_prompt_pending: false,

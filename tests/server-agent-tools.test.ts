@@ -15285,6 +15285,77 @@ describe("P11 engine-issued coordination paths", () => {
     ).not.toBe(briefReportPath);
   });
 
+  it("FINDING 1: supersede_agent_goal clears the issued pair so the NEW brief wins", async () => {
+    // supersede is the one contract channel that actually reaches the worker --
+    // it delivers `/goal Read and execute this goal file` to the pane. If the
+    // consumer kept verifying the ORIGINALLY issued path, a superseded worker
+    // would render artifact_missing forever: the S3 disagreement re-created
+    // through the door that used to work.
+    const goalPath = join(TEST_DIR, "p11-supersede-goal.md");
+    const supersededReportPath = join(TEST_DIR, "p11-supersede-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Superseding brief",
+        "",
+        "Write the report to:",
+        "",
+        `\`${supersededReportPath}\``,
+        "",
+        "Final line:",
+        "",
+        "`DONE_P11_SUPERSEDED`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = registeredTestTool(server, "spawn_agent");
+    const supersede = registeredTestTool(server, "supersede_agent_goal");
+    const getState = registeredTestTool(server, "get_agent_state");
+
+    const spawned = parseToolResult(
+      await spawn.handler(
+        { repo: "brainlayer", model: "gpt-5.5", cli: "codex", role: "worker" },
+        {},
+      ),
+    );
+    const agentId = spawned.agent_id as string;
+    // Spawned after P11, so it carries an engine-issued pair.
+    expect(spawned.report_path).toBeTruthy();
+
+    const engine = testLifecycleEngine(server);
+    const registry = engine.getRegistry();
+    registry.set(agentId, engine.stateMgr.transition(agentId, "ready"));
+    registry.set(agentId, engine.stateMgr.transition(agentId, "working"));
+
+    const superseded = parseToolResult(
+      await supersede.handler({ agent_id: agentId, goal_file: goalPath }, {}),
+    );
+    expect(superseded.ok).toBe(true);
+
+    // The record must stop pinning the now-stale issued pair.
+    const after = engine.getAgentState(agentId);
+    expect(after?.report_path ?? null).toBeNull();
+    expect(after?.done_marker ?? null).toBeNull();
+
+    // And the consumer verifies against the brief the worker actually got.
+    writeFileSync(
+      supersededReportPath,
+      "Status: COMPLETE\nDONE_P11_SUPERSEDED\n",
+      "utf8",
+    );
+    registry.set(agentId, engine.stateMgr.transition(agentId, "done"));
+    const parsed = parseToolResult(
+      await getState.handler({ agent_id: agentId }, {}),
+    );
+    expect(parsed.harvestability).toMatchObject({
+      report_path: supersededReportPath,
+      done_marker: "DONE_P11_SUPERSEDED",
+    });
+  });
+
   it("falls back to the prose heuristic for legacy records with no engine-issued contract", async () => {
     const goalPath = join(TEST_DIR, "p11-legacy-goal.md");
     const reportPath = join(TEST_DIR, "p11-legacy-report.md");

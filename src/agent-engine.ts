@@ -347,6 +347,9 @@ export interface SpawnAgentResult {
   done_marker?: string;
   /** Constraint 1: the footer's own byte cost, declared not buried (#424/#425). */
   coordination_footer_bytes?: number;
+  /** Provenance: the footer is NOT injected yet, so the bytes were never sent. */
+  coordination_footer_delivered?: boolean;
+  coordination_footer_note?: string;
 }
 
 export class AgentLaunchError extends Error {
@@ -1707,7 +1710,12 @@ export class AgentEngine {
         closure: resolveClosureState({
           state: agent.state,
           role,
-          contractIssued: Boolean(agent.report_path && agent.done_marker),
+          // A contract exists if EITHER source supplies one; sourcing this from
+          // the record alone made a legacy prose agent read not_applicable while
+          // working and verified once done (reviewer nit).
+          contractIssued:
+            Boolean(agent.report_path && agent.done_marker) ||
+            Boolean(agent.goal_file),
           closureArtifactVerified: null,
         }),
         closure_artifact_verified: null,

@@ -68,13 +68,17 @@ export function issueCoordinationContract(
 /**
  * Constraint 1 (Etan): at most two short lines, byte cost declared in the boot
  * receipt. Ships as ONE line, and that is deliberate -- the cap is a maximum.
- A newline here would make the injected boot prompt
+ * A newline here would make the injected boot prompt
  * multiline, and every extra character pushes the combined injection toward the
  * 500-char chunk threshold that splits the boot write. The shipped mailbox
  * contract solves the same problem the same way: one line, "; " separated.
  * Every prompt byte is instruction-layer cost (#424/#425), so this is as short
  * as it can be while still naming BOTH issued strings verbatim -- naming them
  * is the point, so they are what the budget is spent on.
+ *
+ * NOT WIRED into the boot prompt today -- see COORDINATION_FOOTER_NOT_DELIVERED
+ * and the spawn site. Any receipt that reports this footer's size MUST also
+ * report that it was not sent.
  */
 export function coordinationFooter(contract: CoordinationContract): string {
   return (
@@ -91,6 +95,16 @@ export function coordinationFooter(contract: CoordinationContract): string {
  * blast radius of a spawn -- see the guard test.
  */
 export const BOOT_INJECTION_CHUNK_THRESHOLD = 500;
+
+/**
+ * Receipt provenance for the unsent footer. Reviewer finding 3: reporting
+ * `coordination_footer_bytes` alone is the v0.4.41 `paused` hazard -- an
+ * authoritative-looking number with no provenance, from which a lead concludes
+ * the worker was told. It was not. v0.4.42 fixed `paused` by attaching coverage
+ * plus a note naming the issue; this does the same.
+ */
+export const COORDINATION_FOOTER_NOT_DELIVERED =
+  "not_wired: the shipped mailbox contract already uses ~479 of the 500-char boot injection budget, so injecting this footer would move every spawn onto the chunked paste path (#434/#438). The LEAD must relay report_path and done_marker to the worker until the pointer-file follow-up lands (P11b).";
 
 export function coordinationFooterBytes(contract: CoordinationContract): number {
   return Buffer.byteLength(coordinationFooter(contract), "utf8");

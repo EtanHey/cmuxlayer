@@ -32,6 +32,9 @@ const ESSENTIAL_FIELDS = [
   "report_path",
   "done_marker",
   "coordination_footer_bytes",
+  // Provenance travels WITH the byte count or the count is a false claim.
+  "coordination_footer_delivered",
+  "coordination_footer_note",
 ] as const;
 
 type JsonObject = Record<string, unknown>;

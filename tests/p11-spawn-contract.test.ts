@@ -324,14 +324,19 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         }).report_path,
       );
       expect(raw.done_marker).toBeTruthy();
+      // Assert both are actually defined -- the earlier ternary compared `raw`
+      // to itself when `registered` was undefined, which proved nothing.
+      expect(typeof registered.coordination_footer_bytes).toBe("number");
       expect(raw.coordination_footer_bytes).toBe(
-        registered.coordination_footer_bytes === undefined
-          ? raw.coordination_footer_bytes
-          : coordinationFooterBytes({
-              report_path: raw.report_path,
-              done_marker: raw.done_marker,
-            }),
+        coordinationFooterBytes({
+          report_path: raw.report_path,
+          done_marker: raw.done_marker,
+        }),
       );
+      // Provenance travels on both doors too.
+      for (const receipt of [registered, raw]) {
+        expect(receipt.coordination_footer_delivered).toBe(false);
+      }
       // Same contract SHAPE on both doors: issued, absolute, marker present.
       for (const receipt of [registered, raw]) {
         expect(receipt.report_path).toMatch(/^\/.+\/report\.md$/);
@@ -346,6 +351,53 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       rmSync(rawInboxDir, { recursive: true, force: true });
       rmSync(rawStateDir, { recursive: true, force: true });
     }
+  });
+
+  it("FINDING 3: never reports footer bytes without reporting they were not sent", async () => {
+    const parsed = await spawn();
+    // The v0.4.41 `paused` hazard: an authoritative number with no provenance.
+    expect(parsed.coordination_footer_bytes).toBeGreaterThan(0);
+    expect(parsed.coordination_footer_delivered).toBe(false);
+    expect(parsed.coordination_footer_note).toMatch(/not_wired/);
+    // A lead reading this must learn it has to relay the contract itself.
+    expect(parsed.coordination_footer_note).toMatch(/LEAD must relay/i);
+  });
+
+  it("FINDING 2: a relative report_path is rejected BEFORE anything launches", async () => {
+    const tool = server._registeredTools["spawn_agent"];
+    const before = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .length;
+    let rejected = false;
+    let message = "";
+    try {
+      const result = await runWithCallerContext(
+        { workspaceId: "workspace:1" },
+        () =>
+          tool.handler(
+            {
+              repo: "brainlayer",
+              cli: "claude",
+              role: "worker",
+              prompt: "task",
+              report_path: "reports/worker.md",
+            },
+            {} as any,
+          ),
+      );
+      const parsed =
+        result.structuredContent ?? JSON.parse(result.content[0].text);
+      rejected = parsed.ok === false;
+      message = String(parsed.error ?? "");
+    } catch (error) {
+      rejected = true;
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(rejected).toBe(true);
+    expect(message).toMatch(/absolute/i);
+    // The real defect: no pane, no worktree, no launch on a validation error.
+    expect(
+      (exec as unknown as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBe(before);
   });
 
   it("echoes and persists an explicit absolute report_path override", async () => {
