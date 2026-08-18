@@ -149,7 +149,7 @@ describe("agent facade projections", () => {
 
     expect(projected.resumable).toBe(true);
     expect(projected.resume_command).toBe(
-      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 
@@ -168,7 +168,7 @@ describe("agent facade projections", () => {
     );
 
     expect(projected.resume_command).toBe(
-      "codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      "codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
     );
   });
 

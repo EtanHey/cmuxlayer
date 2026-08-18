@@ -8,7 +8,11 @@ import type {
   PublicAgent,
 } from "./agent-types.js";
 import { pauseHonestyFields, type PauseSource } from "./types.js";
-import { buildResumeCommand, rawResumeNeedsCwd } from "./agent-command.js";
+import {
+  buildResumeCommand,
+  rawResumeNeedsCwd,
+  rawResumeSupported,
+} from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
   resumable: boolean;
@@ -27,6 +31,69 @@ export function resumeCwdForAgent(
   );
 }
 
+/**
+ * The command that actually resumes this agent, or `undefined` when no honest
+ * one exists. THE single authority: `resolveAgentRoute`, the public
+ * projections, and the engine's own resume paths all go through it, so what
+ * `list_agents` advertises and what `resume_agent` sends can never disagree.
+ */
+/**
+ * Like `resumeCommandForAgent`, but explains itself. Callers that must fail
+ * loudly (the engine's resume + crash-recovery paths) use this so the real
+ * reason — an invalid session id, a missing cwd, a harness with no UUID resume
+ * form — reaches the operator instead of being flattened to `undefined`.
+ */
+export function resumeInvocationForAgent(
+  record: Pick<
+    AgentRecord,
+    | "cli"
+    | "repo"
+    | "cli_session_id"
+    | "launcher_name"
+    | "launch_cwd"
+    | "worktree_path"
+  >,
+): { command: string; reason: null } | { command: null; reason: string } {
+  if (!record.cli_session_id) {
+    return { command: null, reason: "no CLI session has been captured" };
+  }
+  const cwd = resumeCwdForAgent(record);
+  if (!record.launcher_name) {
+    if (!cwd && rawResumeNeedsCwd(record.cli)) {
+      return {
+        command: null,
+        reason:
+          `a raw ${record.cli} resume needs a recorded working directory ` +
+          `(${record.cli} keys its session store by cwd) and neither ` +
+          `launch_cwd nor worktree_path is set`,
+      };
+    }
+    if (!rawResumeSupported(record.cli)) {
+      return {
+        command: null,
+        reason: `${record.cli} has no raw resume form that takes a session UUID`,
+      };
+    }
+  }
+  try {
+    return {
+      command: buildResumeCommand(
+        record.cli,
+        record.repo,
+        record.cli_session_id,
+        record.launcher_name,
+        { cwd },
+      ),
+      reason: null,
+    };
+  } catch (error) {
+    return {
+      command: null,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function resumeCommandForAgent(
   record: Pick<
     AgentRecord,
@@ -38,24 +105,7 @@ export function resumeCommandForAgent(
     | "worktree_path"
   >,
 ): string | undefined {
-  if (!record.cli_session_id) return undefined;
-  const cwd = resumeCwdForAgent(record);
-  // Never advertise a cwd-keyed raw resume we cannot aim: it would start a
-  // fresh session under the same command, which reads as a successful resume.
-  if (!record.launcher_name && !cwd && rawResumeNeedsCwd(record.cli)) {
-    return undefined;
-  }
-  try {
-    return buildResumeCommand(
-      record.cli,
-      record.repo,
-      record.cli_session_id,
-      record.launcher_name,
-      { cwd },
-    );
-  } catch {
-    return undefined;
-  }
+  return resumeInvocationForAgent(record).command ?? undefined;
 }
 
 function observed<T>(

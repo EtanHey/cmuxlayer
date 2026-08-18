@@ -21,8 +21,9 @@ import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
   AGENT_ENV,
+  RAW_SKIP_APPROVALS,
   buildRawResumeCommand,
-  buildResumeCommand,
+  rawResumeEchoCandidates,
   sanitizeRepoName,
   shellQuote,
 } from "./agent-command.js";
@@ -35,6 +36,7 @@ import type { AgentDiscovery } from "./agent-discovery.js";
 import {
   resumeCommandForAgent,
   resumeCwdForAgent,
+  resumeInvocationForAgent,
   toPublicAgent,
 } from "./agent-facade.js";
 import type {
@@ -332,6 +334,10 @@ export interface SpawnAgentResult {
   model_policy?: SpawnModelPolicy;
   cwd?: string;
   mcp_env?: string;
+  /** Which door answered: the repoGolem launcher, or the raw CLI (#392). */
+  launch_mode?: AgentLaunchMode;
+  /** Whether the reported `model` was actually pinned, and by what (#433). */
+  model_pin?: ModelPinSource;
 }
 
 export class AgentLaunchError extends Error {
@@ -447,6 +453,12 @@ export interface SpawnPreflightResult {
    * (and every test that stubs preflight) keep their current behaviour.
    */
   launchMode?: AgentLaunchMode;
+  /**
+   * Why the launcher registry did not answer, when it did not. Surfaced as a
+   * spawn warning so a fallback past a PRESENT registry is legible instead of
+   * silent -- a registered machine spawning raw is usually a typo'd repo.
+   */
+  launchModeReason?: string;
 }
 
 export type CodexModelListRunner = (
@@ -834,19 +846,17 @@ function resumeAwaitsFreshReadiness(
   ) {
     return false;
   }
-  let resumeCommand: string;
-  try {
-    resumeCommand = buildRawResumeCommand(
-      agent.cli,
-      agent.repo,
-      agent.cli_session_id,
-    );
-  } catch {
-    return false;
-  }
-  const latestResume = screenText.lastIndexOf(resumeCommand);
-  if (latestResume < 0) return true;
-  const afterResume = screenText.slice(latestResume + resumeCommand.length);
+  // Recognition, not emission: scan every form a resume may have been typed
+  // as, including ones this build no longer sends (see rawResumeEchoCandidates).
+  const echo = latestRawResumeEcho(
+    screenText,
+    agent.cli,
+    agent.repo,
+    agent.cli_session_id,
+  );
+  if (!echo) return false;
+  if (echo.index < 0) return true;
+  const afterResume = screenText.slice(echo.index + echo.command.length);
   const parsed = parseScreen(afterResume);
   const hasFreshIdentity =
     screenHasReadyAgentIdentity(agent.cli, afterResume, parsed) ||
@@ -1097,15 +1107,81 @@ function modelMatchesDefaultForLaunch(cli: CliType, model?: string): boolean {
 export type AgentLaunchMode = "launcher" | "raw";
 
 /**
- * Raw-CLI equivalents of the repoGolem launcher `-s` (skip approvals) flag.
- * Verified against the installed CLIs' `--help` output.
+ * How the model the receipt reports was actually applied to the launch.
+ *   launcher    - the repoGolem launcher carries the pin (canon §5)
+ *   cli_flag    - raw mode passed an explicit --model/-m the CLI understands
+ *   cli_default - raw mode passed NO model flag; the CLI uses its own
+ *                 configured default, which may be a prior session's model
+ *
+ * AIDEV-NOTE (#433 family): the receipt must never claim a pin the command did
+ * not apply. `cli_default` is the honest name for "unpinned", and it carries a
+ * spawn warning rather than being reported silently.
  */
-const RAW_SKIP_APPROVALS: Partial<Record<CliType, string>> = {
-  claude: "--dangerously-skip-permissions",
-  codex: "--dangerously-bypass-approvals-and-sandbox",
-  cursor: "--force",
-  gemini: "-y",
-};
+export type ModelPinSource = "launcher" | "cli_flag" | "cli_default";
+
+/**
+ * Model tokens in this repo are LAUNCHER vocabulary: `claude-opus-5[1m]`,
+ * `pro`, `codex`, `auto`. Raw binaries do not share it. This returns the token
+ * that is safe to hand a raw CLI, or null when the pin cannot be expressed.
+ *
+ * - claude/codex/cursor: the resolved flag is already a real CLI model name
+ *   (`sonnet`, `gpt-5.4`, ...) because resolveLaunchModelFlag only emits one
+ *   when the caller asked for a specific model.
+ * - gemini: `pro`/`flash`/`pro-high` are repoGolem aliases that raw gemini
+ *   does not define, so only canonical `gemini-*` names are passed through.
+ */
+export function rawModelFlagToken(
+  cli: CliType,
+  modelFlag: string | null,
+): string | null {
+  if (!modelFlag) return null;
+  if (cli === "gemini" && !/^gemini-/i.test(modelFlag.trim())) return null;
+  return modelFlag;
+}
+
+/**
+ * The exact model flag buildLaunchCommand will resolve for these inputs.
+ * Exported so spawn can report the pin it actually applied without
+ * re-deriving (and drifting from) the command builder's own logic.
+ */
+export function resolveLaunchModelFlagForCommand(
+  cli: CliType,
+  model: string | undefined,
+  opts?: { allowModelOverride?: boolean },
+): string | null {
+  return resolveLaunchModelFlag(cli, model, {
+    allowModelOverride:
+      opts?.allowModelOverride ??
+      (cli === "codex" &&
+        Boolean(model?.trim()) &&
+        !modelMatchesDefaultForLaunch(cli, model)),
+  });
+}
+
+/** Truthful model provenance for a launch, plus the warning it owes the caller. */
+export function describeModelPin(
+  cli: CliType,
+  launchMode: AgentLaunchMode,
+  modelFlag: string | null,
+  effectiveModel: string | undefined,
+): { pin: ModelPinSource; warning: string | null } {
+  if (launchMode === "launcher") return { pin: "launcher", warning: null };
+  if (cli === "kiro") return { pin: "launcher", warning: null };
+  if (rawModelFlagToken(cli, modelFlag)) {
+    return { pin: "cli_flag", warning: null };
+  }
+  const claimed = effectiveModel?.trim();
+  return {
+    pin: "cli_default",
+    warning:
+      `MODEL PIN NOT APPLIED: this is a raw ${cli} launch (no repoGolem ` +
+      `launcher for this repo), and ${cli} accepts no flag for ` +
+      `"${claimed ?? "the policy default"}". The agent starts on whichever ` +
+      `model ${cli} has configured, which may be a prior session's. ` +
+      `model_pin="cli_default" -- the reported model is the policy default, ` +
+      `not an applied pin. Register a repoGolem launcher to pin it.`,
+  };
+}
 
 export function buildLaunchCommand(
   cli: CliType,
@@ -1125,12 +1201,8 @@ export function buildLaunchCommand(
   },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
-  const modelFlag = resolveLaunchModelFlag(cli, model, {
-    allowModelOverride:
-      opts?.allowModelOverride ??
-      (cli === "codex" &&
-        Boolean(model?.trim()) &&
-        !modelMatchesDefaultForLaunch(cli, model)),
+  const modelFlag = resolveLaunchModelFlagForCommand(cli, model, {
+    allowModelOverride: opts?.allowModelOverride,
   });
   const formattedModelFlag = modelFlag ? formatModelArg(modelFlag) : null;
   const launcherModelArgs = formattedModelFlag
@@ -1169,11 +1241,15 @@ export function buildLaunchCommand(
       cli === "codex" && opts?.effort
         ? ` -c model_reasoning_effort=${opts.effort}`
         : "";
+    // Only pass a model the raw binary actually understands; launcher-only
+    // vocabulary is dropped here and disclosed by describeModelPin instead.
+    const rawToken = rawModelFlagToken(cli, modelFlag);
+    const formattedRawToken = rawToken ? formatModelArg(rawToken) : null;
     // `codex` takes `-m`; claude/cursor/gemini all accept `--model`.
-    const rawModelFlag = formattedModelFlag
+    const rawModelFlag = formattedRawToken
       ? cli === "codex"
-        ? ` -m ${formattedModelFlag}`
-        : ` --model ${formattedModelFlag}`
+        ? ` -m ${formattedRawToken}`
+        : ` --model ${formattedRawToken}`
       : "";
     const binary = cli === "cursor" ? "cursor agent" : cli;
     return `${rawCdPrefix}${rawEnvPrefix}${binary}${
@@ -1209,6 +1285,49 @@ export function extractSessionId(text: string): string | null {
   const matches = [...text.matchAll(SESSION_ID_RE)].map((match) => match[0]);
   const uniqueMatches = [...new Set(matches)];
   return uniqueMatches.length === 1 ? uniqueMatches[0] : null;
+}
+
+/**
+ * `buildRawResumeCommand` throws for harnesses with no UUID resume form
+ * (gemini) and for malformed session ids. The same-surface auto-revive paths
+ * treat that as "not revivable", never as a sweep-breaking error.
+ */
+function rawResumeCommandOrNull(
+  cli: CliType,
+  repo: string,
+  sessionId: string,
+  opts?: { cwd?: string | null },
+): string | null {
+  try {
+    return buildRawResumeCommand(cli, repo, sessionId, opts);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Last position in `screenText` at which any recognized raw-resume form for
+ * this agent appears. `null` means the harness has no recognizable form at
+ * all; `index === -1` means it has one but the screen does not show it.
+ */
+function latestRawResumeEcho(
+  screenText: string,
+  cli: CliType,
+  repo: string,
+  sessionId: string,
+  opts?: { cwd?: string | null },
+): { command: string; index: number } | null {
+  const candidates = rawResumeEchoCandidates(cli, repo, sessionId, opts);
+  if (candidates.length === 0) return null;
+  let best: { command: string; index: number } = {
+    command: candidates[0]!,
+    index: -1,
+  };
+  for (const command of candidates) {
+    const index = screenText.lastIndexOf(command);
+    if (index > best.index) best = { command, index };
+  }
+  return best;
 }
 
 function cliForLauncherSuffix(suffix: LauncherSuffix): CliType {
@@ -1292,6 +1411,7 @@ export function resolveSpawnLaunchPlan(
 
   return {
     launchMode: "raw",
+    launchModeReason: registryHint,
     repoRoot: resolveRepoRootWithoutRegistry(repo, {
       ...opts?.repoRootFallback,
       registryHint,
@@ -4054,18 +4174,13 @@ export class AgentEngine {
       );
       return episode;
     }
-    let resumeCommand = "no captured session; inspect the live surface";
-    if (episode.cli_session_id) {
-      try {
-        resumeCommand = buildRawResumeCommand(
+    const resumeCommand = episode.cli_session_id
+      ? (rawResumeCommandOrNull(
           episode.cli,
           episode.repo,
           episode.cli_session_id,
-        );
-      } catch {
-        // Keep the explicit non-resumable fallback above.
-      }
-    }
+        ) ?? `no raw ${episode.cli} resume form; inspect the live surface`)
+      : "no captured session; inspect the live surface";
     const durationSeconds = Math.max(
       0,
       Math.floor((nowMs - startedAtMs) / 1_000),
@@ -4131,12 +4246,12 @@ export class AgentEngine {
       !!agent.cli_session_id &&
       this.registry.canControlSurface(agent);
     if (!structurallyEligible) return false;
-    try {
-      buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id!);
-      return true;
-    } catch {
-      return false;
-    }
+    // A harness with no raw resume form (gemini) is structurally not
+    // auto-revivable on its own surface.
+    return (
+      rawResumeCommandOrNull(agent.cli, agent.repo, agent.cli_session_id!) !==
+      null
+    );
   }
 
   private autoReviveBackoffMs(attempt: number): number {
@@ -4157,7 +4272,7 @@ export class AgentEngine {
     // Human-facing hint for a surface that may be gone: carry the cwd so the
     // command works when pasted into a fresh terminal.
     const manualResumeCommand = agent.cli_session_id
-      ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id, {
+      ? rawResumeCommandOrNull(agent.cli, agent.repo, agent.cli_session_id, {
           cwd: resumeCwdForAgent(agent),
         })
       : null;
@@ -4222,9 +4337,12 @@ export class AgentEngine {
         outcome === "revived" ? (agent.parsed_model ?? null) : null,
       manual_resume_command:
         outcome === "unrecoverable" && agent.cli_session_id
-          ? buildRawResumeCommand(agent.cli, agent.repo, agent.cli_session_id, {
-              cwd: resumeCwdForAgent(agent),
-            })
+          ? rawResumeCommandOrNull(
+              agent.cli,
+              agent.repo,
+              agent.cli_session_id,
+              { cwd: resumeCwdForAgent(agent) },
+            )
           : null,
     });
   }
@@ -4409,19 +4527,14 @@ export class AgentEngine {
     if (agent.revive_last_outcome !== "pending" || !agent.cli_session_id) {
       return null;
     }
-    let resumeCommand: string;
-    try {
-      resumeCommand = buildRawResumeCommand(
-        agent.cli,
-        agent.repo,
-        agent.cli_session_id,
-      );
-    } catch {
-      return null;
-    }
-    const echoed = screenText.lastIndexOf(resumeCommand);
-    if (echoed < 0) return null;
-    const tail = screenText.slice(echoed + resumeCommand.length);
+    const echo = latestRawResumeEcho(
+      screenText,
+      agent.cli,
+      agent.repo,
+      agent.cli_session_id,
+    );
+    if (!echo || echo.index < 0) return null;
+    const tail = screenText.slice(echo.index + echo.command.length);
     const parsed = parseScreen(tail);
     // An agent that actually came up is not a rejected resume, whatever else
     // its own output happens to say.
@@ -4905,13 +5018,14 @@ export class AgentEngine {
         if (!sessionId) {
           throw new Error("Crash recovery requires a captured session id");
         }
-        const resumeCmd = buildResumeCommand(
-          agent.cli,
-          agent.repo,
-          sessionId,
-          agent.launcher_name,
-          { cwd: this.harnessCwdForAgent(agent) },
-        );
+        // Surface the REAL reason (bad session id, missing cwd, no UUID
+        // resume form) instead of flattening it to "not resumable".
+        const recovery = resumeInvocationForAgent({
+          ...agent,
+          cli_session_id: sessionId,
+        });
+        if (recovery.command === null) throw new Error(recovery.reason);
+        const resumeCmd = recovery.command;
         await this.beforeCrashRecoveryMutation?.({
           phase: "placement",
           agent_id: agent.agent_id,
@@ -7388,6 +7502,30 @@ export class AgentEngine {
 
     const preflight = await this.spawnPreflight(spawnParams);
     const launchCwd = spawnParams.cwd ?? preflight?.repoRoot ?? null;
+    const launchMode: AgentLaunchMode = preflight?.launchMode ?? "launcher";
+    // Truthful provenance for BOTH the door we used and the pin we applied.
+    // Neither may be inferable only from a null field on the record.
+    const modelPin = describeModelPin(
+      spawnParams.cli,
+      launchMode,
+      resolveLaunchModelFlagForCommand(
+        spawnParams.cli,
+        modelPolicy.launcher_model ?? undefined,
+        { allowModelOverride: modelPolicy.override_allowed },
+      ),
+      modelPolicy.effective_model,
+    );
+    const launchWarnings = [
+      ...modelPolicy.warnings,
+      ...(launchMode === "raw" && preflight?.launchModeReason
+        ? [
+            `RAW LAUNCH: ${preflight.launchModeReason} Started \`${spawnParams.cli}\` ` +
+              `directly in "${launchCwd ?? "the surface cwd"}" -- without the ` +
+              `launcher's MCP wiring or contexts.`,
+          ]
+        : []),
+      ...(modelPin.warning ? [modelPin.warning] : []),
+    ];
     const seatIdentity = assertSeatIdentity({
       repo: spawnParams.repo,
       cli: spawnParams.cli,
@@ -7478,6 +7616,8 @@ export class AgentEngine {
       cli_session_id: null,
       cli_session_path: null,
       launcher_name: preflight?.launcherName ?? null,
+      launch_mode: launchMode,
+      model_pin: modelPin.pin,
       seat_id: seatIdentity.seat_id,
       seat_lane: seatIdentity.seat_lane,
       seat_role: seatIdentity.seat_role,
@@ -7601,7 +7741,6 @@ export class AgentEngine {
     });
 
     // 3. Send launch command
-    const launchMode: AgentLaunchMode = preflight?.launchMode ?? "launcher";
     const launchCmd = buildLaunchCommand(
       spawnParams.cli,
       spawnParams.repo,
@@ -7683,10 +7822,12 @@ export class AgentEngine {
       state: "booting",
       model: modelPolicy.effective_model,
       requested_model: modelPolicy.requested_model,
-      warnings: [...modelPolicy.warnings],
+      warnings: [...launchWarnings],
       model_policy: modelPolicy,
       cwd: launchCwd ?? undefined,
       mcp_env: spawnParams.mcp_env,
+      launch_mode: launchMode,
+      model_pin: modelPin.pin,
     };
   }
 
@@ -7711,13 +7852,18 @@ export class AgentEngine {
         `Agent "${agent.agent_id}" has no captured CLI session to resume`,
       );
     }
-    const resumeCommand = buildResumeCommand(
-      agent.cli,
-      agent.repo,
-      agent.cli_session_id,
-      agent.launcher_name,
-      { cwd: this.harnessCwdForAgent(agent) },
-    );
+    // Same authority list_agents uses. Previously this passed
+    // harnessCwdForAgent, whose ~/Gits guess never returns null -- so an agent
+    // reported NOT resumable could still be sent `cd ~/Gits/<repo> && claude
+    // --resume <id>`, silently starting a new session in a lookalike tree.
+    const resumeInvocation = resumeInvocationForAgent(agent);
+    if (resumeInvocation.command === null) {
+      throw new Error(
+        `Agent "${agent.agent_id}" has no runnable resume command: ` +
+          `${resumeInvocation.reason}`,
+      );
+    }
+    const resumeCommand = resumeInvocation.command;
     const requestedWorkspace =
       opts?.workspace ?? agent.workspace_id ?? undefined;
     this.spawnGuard.check(requestedWorkspace);

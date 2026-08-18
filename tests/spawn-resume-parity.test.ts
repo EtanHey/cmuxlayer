@@ -17,6 +17,11 @@ import {
   buildLaunchCommand,
   resolveSpawnLaunchPlan,
 } from "../src/agent-engine.js";
+import {
+  loadLauncherRegistrySnapshot,
+  resolveLauncherPrefix,
+  resolveRepoRootFromLauncherRegistry,
+} from "../src/launcher-registry.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
@@ -91,6 +96,47 @@ const EXPECTED_LAUNCHER_NAME: Record<string, string> = {
 
 const AGENT_ENV = "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1";
 
+/**
+ * Approval-bypass token each lane must carry, in BOTH its launch and its
+ * resume command. Asserted lane-INDEPENDENTLY below: a hand-written
+ * per-lane expectation table cannot catch a divergence it encodes, which is
+ * exactly how the first cut of this suite blessed a raw resume that had
+ * silently dropped `--dangerously-skip-permissions` (review MUST_FIX 1).
+ */
+const RAW_BYPASS: Record<string, string> = {
+  claude: " --dangerously-skip-permissions",
+  codex: " --dangerously-bypass-approvals-and-sandbox",
+  cursor: " --force",
+  gemini: " -y",
+};
+
+const LAUNCH_BYPASS: Record<LauncherPath, Record<string, string>> = {
+  // repoGolem launchers take `-s` for every harness at launch.
+  registry: { claude: " -s", codex: " -s", cursor: " -s", gemini: " -s" },
+  raw: RAW_BYPASS,
+};
+
+const RESUME_BYPASS: Record<LauncherPath, Record<string, string>> = {
+  // ...but the codex launcher's resume form spells it out in full.
+  registry: {
+    claude: " -s",
+    codex: " --dangerously-bypass-approvals-and-sandbox",
+    cursor: " -s",
+    gemini: " -s",
+  },
+  raw: RAW_BYPASS,
+};
+
+/**
+ * `gemini --resume` takes "latest" or an index, never a UUID, so there is no
+ * raw gemini resume to compare. The parity contract for it is a REFUSAL on
+ * the raw lane, asserted explicitly rather than skipped.
+ */
+const RAW_RESUME_UNSUPPORTED: readonly CliType[] = ["gemini"];
+const RESUMABLE_CLIS = CLIS.filter(
+  (cli) => !RAW_RESUME_UNSUPPORTED.includes(cli),
+);
+
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") return `${EXPECTED_LAUNCHER_NAME[cli]} -s`;
   const cd = `cd '${root}' && `;
@@ -117,15 +163,13 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
   const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":
-      return `${cd}${AGENT_ENV} claude --resume ${SESSION}`;
+      return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions --resume ${SESSION}`;
     case "codex":
-      return `${cd}codex resume ${SESSION}`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox resume ${SESSION}`;
     case "cursor":
-      return `${cd}cursor agent --resume ${SESSION}`;
-    case "gemini":
-      return `${cd}${AGENT_ENV} gemini --resume ${SESSION}`;
+      return `${cd}cursor agent --force --resume ${SESSION}`;
     default:
-      throw new Error(`unreachable cli ${cli}`);
+      throw new Error(`no raw resume form for ${cli}`);
   }
 }
 
@@ -137,22 +181,40 @@ describe.each<LauncherPath>(["registry", "raw"])(
     let engine: AgentEngine;
     let repoRoot: string;
     let liveSurfaces: CmuxSurface[];
+    /** True when this lane read the HOST's registry instead of a stubbed one. */
+    let registryIsAmbient = false;
 
     beforeEach(() => {
       rmSync(TEST_DIR, { recursive: true, force: true });
       mkdirSync(TEST_DIR, { recursive: true });
+      registryIsAmbient = false;
 
       const repoHome = join(TEST_DIR, "checkouts");
       repoRoot = join(repoHome, REPO);
       mkdirSync(repoRoot, { recursive: true });
 
-      const registryPath = join(TEST_DIR, "launchers.zsh");
-      if (path === "registry") {
-        writeFileSync(registryPath, `repoGolem ${REPO} "${repoRoot}"\n`);
+      // When the host already has a registry naming this repo (the `present`
+      // leg of the launcher-parity CI matrix, or a dev machine with a
+      // `parityrepo` registration), the registry lane runs against THAT file
+      // rather than a stub -- so the planted registry is genuinely observed
+      // instead of being shadowed by an env override.
+      const ambient = loadLauncherRegistrySnapshot();
+      const ambientRegistered =
+        ambient.available && resolveLauncherPrefix(REPO, ambient.entries);
+
+      if (path === "registry" && ambientRegistered) {
+        registryIsAmbient = true;
+        repoRoot = resolveRepoRootFromLauncherRegistry(REPO);
+        mkdirSync(repoRoot, { recursive: true });
+      } else {
+        const registryPath = join(TEST_DIR, "launchers.zsh");
+        if (path === "registry") {
+          writeFileSync(registryPath, `repoGolem ${REPO} "${repoRoot}"\n`);
+        }
+        // The raw lane points at a path that does not exist: exactly what a
+        // brew-install machine looks like.
+        vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
       }
-      // The raw lane points at a path that does not exist: exactly what a
-      // brew-install machine looks like.
-      vi.stubEnv("CMUXLAYER_LAUNCHER_REGISTRY_PATH", registryPath);
       vi.stubEnv("CMUXLAYER_REPO_HOME", repoHome);
       delete process.env.CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY;
 
@@ -202,10 +264,18 @@ describe.each<LauncherPath>(["registry", "raw"])(
         launch_cwd: repoRoot,
         role: "worker",
       });
-      // The ONLY receipt field that legitimately differs between lanes.
+      // The ONLY receipt fields that legitimately differ between lanes.
       expect(record?.launcher_name).toBe(
         path === "registry" ? EXPECTED_LAUNCHER_NAME[cli] : null,
       );
+      expect(record?.launch_mode).toBe(
+        path === "registry" ? "launcher" : "raw",
+      );
+      if (registryIsAmbient) {
+        // Proof the planted/host registry drove this, not a stubbed one: the
+        // root came from launchers.zsh, outside the test's own scratch dir.
+        expect(repoRoot.startsWith(TEST_DIR)).toBe(false);
+      }
 
       // --- Launch command: launcher form vs raw form. ---
       const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
@@ -220,33 +290,166 @@ describe.each<LauncherPath>(["registry", "raw"])(
       );
     });
 
-    it.each(CLIS)("resumes %s with a runnable command", async (cli) => {
-      const spawned = await engine.spawnAgent({
-        repo: REPO,
-        cli,
-        prompt: "parity probe",
-      });
-      const updated = stateMgr.updateRecord(spawned.agent_id, {
-        state: "done",
-        cli_session_id: SESSION,
-      });
-      engine.getRegistry().set(spawned.agent_id, updated);
-      (client.send as ReturnType<typeof vi.fn>).mockClear();
+    it.each(RESUMABLE_CLIS)(
+      "resumes %s with a runnable command",
+      async (cli) => {
+        const spawned = await engine.spawnAgent({
+          repo: REPO,
+          cli,
+          prompt: "parity probe",
+        });
+        const updated = stateMgr.updateRecord(spawned.agent_id, {
+          state: "done",
+          cli_session_id: SESSION,
+        });
+        engine.getRegistry().set(spawned.agent_id, updated);
+        (client.send as ReturnType<typeof vi.fn>).mockClear();
 
-      const resumed = await engine.resumeAgent(spawned.agent_id);
+        const resumed = await engine.resumeAgent(spawned.agent_id);
 
-      // Public identity survives a resume on BOTH lanes (U5 spawn-resume law).
-      expect(resumed.agent_id).toBe(spawned.agent_id);
-      expect(resumed.state).toBe("booting");
+        // Public identity survives a resume on BOTH lanes (U5 spawn-resume law).
+        expect(resumed.agent_id).toBe(spawned.agent_id);
+        expect(resumed.state).toBe("booting");
 
-      const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
-        .calls[0];
-      expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
-      // Whatever the lane, the resumed command names the captured session.
-      expect(resumeCmd).toContain(SESSION);
-    });
+        const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+        expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
+        // Whatever the lane, the resumed command names the captured session.
+        expect(resumeCmd).toContain(SESSION);
+      },
+    );
+
+    // --- Lane-INDEPENDENT invariants. These read the command the engine
+    // actually sent and assert a property of it, so they hold no per-lane
+    // expected string that could encode a divergence as intentional. ---
 
     it.each(CLIS)(
+      "launches %s with an approval bypass on either lane",
+      async (cli) => {
+        await engine.spawnAgent({ repo: REPO, cli, prompt: "parity probe" });
+
+        const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+        expect(launchCmd).toContain(LAUNCH_BYPASS[path][cli]);
+      },
+    );
+
+    it.each(RESUMABLE_CLIS)(
+      "RESUMES %s with the same approval bypass it was launched with",
+      async (cli) => {
+        const spawned = await engine.spawnAgent({
+          repo: REPO,
+          cli,
+          prompt: "parity probe",
+        });
+        const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+        const updated = stateMgr.updateRecord(spawned.agent_id, {
+          state: "done",
+          cli_session_id: SESSION,
+        });
+        engine.getRegistry().set(spawned.agent_id, updated);
+        (client.send as ReturnType<typeof vi.fn>).mockClear();
+
+        await engine.resumeAgent(spawned.agent_id);
+        const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+
+        // An agent that comes back WITHOUT its bypass blocks on its first tool
+        // call and presents as a hung pane, not a failed resume.
+        expect(launchCmd).toContain(LAUNCH_BYPASS[path][cli]);
+        expect(resumeCmd).toContain(RESUME_BYPASS[path][cli]);
+      },
+    );
+
+    it.each(RAW_RESUME_UNSUPPORTED)(
+      "refuses to fabricate a raw %s resume rather than sending a bogus one",
+      async (cli) => {
+        const spawned = await engine.spawnAgent({
+          repo: REPO,
+          cli,
+          prompt: "parity probe",
+        });
+        const updated = stateMgr.updateRecord(spawned.agent_id, {
+          state: "done",
+          cli_session_id: SESSION,
+        });
+        engine.getRegistry().set(spawned.agent_id, updated);
+        (client.send as ReturnType<typeof vi.fn>).mockClear();
+
+        if (path === "raw") {
+          // `gemini --resume` takes "latest" or an index, never a UUID.
+          await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
+            /no runnable resume command/i,
+          );
+          expect(client.send).not.toHaveBeenCalled();
+          expect(
+            engine.resolveAgentRoute(spawned.agent_id).resumable,
+          ).toBe(false);
+        } else {
+          await engine.resumeAgent(spawned.agent_id);
+          const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+            .calls[0];
+          expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
+        }
+      },
+    );
+
+    it.each(CLIS)(
+      "reports truthful model provenance for %s",
+      async (cli) => {
+        const result = await engine.spawnAgent({
+          repo: REPO,
+          cli,
+          prompt: "parity probe",
+        });
+        const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
+          .calls[0];
+
+        expect(result.launch_mode).toBe(path === "registry" ? "launcher" : "raw");
+        expect(engine.getAgentState(result.agent_id)?.launch_mode).toBe(
+          result.launch_mode,
+        );
+
+        // The receipt may claim a pin ONLY if the command applied one.
+        const commandPinned = / (--model|-m) /.test(launchCmd);
+        if (path === "registry") {
+          expect(result.model_pin).toBe("launcher");
+        } else if (commandPinned) {
+          expect(result.model_pin).toBe("cli_flag");
+        } else {
+          expect(result.model_pin).toBe("cli_default");
+          expect(result.warnings).toEqual(
+            expect.arrayContaining([
+              expect.stringContaining("MODEL PIN NOT APPLIED"),
+            ]),
+          );
+        }
+        expect(engine.getAgentState(result.agent_id)?.model_pin).toBe(
+          result.model_pin,
+        );
+      },
+    );
+
+    it("discloses a raw launch that happened past a PRESENT registry", async () => {
+      const result = await engine.spawnAgent({
+        repo: REPO,
+        cli: "claude",
+        prompt: "parity probe",
+      });
+
+      if (path === "raw") {
+        expect(result.warnings).toEqual(
+          expect.arrayContaining([expect.stringContaining("RAW LAUNCH:")]),
+        );
+      } else {
+        expect(result.warnings ?? []).not.toEqual(
+          expect.arrayContaining([expect.stringContaining("RAW LAUNCH:")]),
+        );
+      }
+    });
+
+    it.each(RESUMABLE_CLIS)(
       "advertises the same resumability for %s through the public projection",
       async (cli) => {
         const spawned = await engine.spawnAgent({

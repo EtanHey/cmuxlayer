@@ -3683,7 +3683,7 @@ describe("AgentEngine", () => {
 
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "cd '/srv/repos/brainlayer' && codex resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-crash-raw")?.state).toBe("booting");
@@ -3737,7 +3737,7 @@ describe("AgentEngine", () => {
       expect(resumed.agent_id).toBe("agent-stable-resume-raw");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
     });
@@ -9335,7 +9335,7 @@ Session ID: ${sessionId}`,
         .mockResolvedValue({
           surface: "surface:cli-auto-revive",
           text:
-            `❯ codex resume ${sessionId}\n` +
+            `❯ codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}\n` +
             "gpt-5.4 xhigh · 64% left\nWorking (2s • esc to interrupt)",
           lines: 80,
           scrollback_used: false,
@@ -9348,7 +9348,7 @@ Session ID: ${sessionId}`,
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:cli-auto-revive",
-        `codex resume ${sessionId}`,
+        `codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`,
         expect.objectContaining({ workspace: undefined }),
       );
       expect(mockClient.sendKey).toHaveBeenCalledWith(
@@ -9411,7 +9411,7 @@ Session ID: ${sessionId}`,
         text:
           "› signal: killed my current changes\n" +
           "  gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
-          "        %  etanheyman ~/Gits/cmuxlayer [main] $ codex resume 019faccc-4040-7555-8666-777788889999\n" +
+          "        %  etanheyman ~/Gits/cmuxlayer [main] $ codex --dangerously-bypass-approvals-and-sandbox resume 019faccc-4040-7555-8666-777788889999\n" +
           "Shellbook: starting the agent directly.\n" +
           "Shellbook: run `shellbook tui` in another terminal for the social pane.\n" +
           "Error: Failed to resume session: no rollout found (code -32600)\n" +
@@ -9468,7 +9468,7 @@ Session ID: ${sessionId}`,
           text:
             "› signal: killed my current changes\n" +
             "gpt-5.6-sol xhigh · ~/Gits/cmuxlayer\n" +
-            `${shellPrompt} codex resume 019faccc-4545-7555-8666-777788889999\n` +
+            `${shellPrompt} codex --dangerously-bypass-approvals-and-sandbox resume 019faccc-4545-7555-8666-777788889999\n` +
             "Shellbook: starting the agent directly.\n" +
             "Error: Failed to resume session: no rollout found (code -32600)\n" +
             "exit status 1",
@@ -9562,7 +9562,7 @@ Session ID: ${sessionId}`,
         text:
           "Claude Code\n" +
           "❯\n" +
-          "➜ MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume 019faccc-4646-7555-8666-777788889999\n" +
+          "➜ MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019faccc-4646-7555-8666-777788889999\n" +
           "Error: No conversation found with session ID 019faccc-4646-7555-8666-777788889999\n" +
           "exit status 1",
         lines: 80,
@@ -9587,7 +9587,7 @@ Session ID: ${sessionId}`,
         cli: "cursor" as const,
         id: "019faccc-4848-7555-8666-777788889999",
         command:
-          "cursor agent --resume 019faccc-4848-7555-8666-777788889999",
+          "cursor agent --force --resume 019faccc-4848-7555-8666-777788889999",
         staleReady: "Cursor Agent\ncursor>",
       },
       {
@@ -9676,7 +9676,7 @@ Session ID: ${sessionId}`,
         text:
           "Error: Failed to resume session: no rollout found (code -32600)\n" +
           "exit status 1\n" +
-          "% codex resume 019faccc-5050-7666-8777-888899990000\n" +
+          "% codex --dangerously-bypass-approvals-and-sandbox resume 019faccc-5050-7666-8777-888899990000\n" +
           "OpenAI Codex\n" +
           "Model: gpt-5.6-sol xhigh\n" +
           "› Continue the previous task\n" +
@@ -9735,7 +9735,7 @@ Session ID: ${sessionId}`,
 
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:cli-auto-revive-flapping",
-        `codex resume ${sessionId}`,
+        `codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`,
         expect.objectContaining({ workspace: undefined }),
       );
       expect(
@@ -9939,7 +9939,7 @@ Session ID: ${sessionId}`,
       expect(readInbox("cmuxlayerClaude", { baseDir: TEST_DIR })).toEqual([
         expect.objectContaining({
           tag: "agent_cli_exit_unrecoverable",
-          task: expect.stringContaining(`Manual fallback: codex resume ${sessionId}`),
+          task: expect.stringContaining(`Manual fallback: codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`),
         }),
       ]);
       expect(
@@ -9983,7 +9983,7 @@ Session ID: ${sessionId}`,
         .mockResolvedValue({
           surface: "surface:cursor-auto-revive",
           text:
-            `% cursor agent --resume ${sessionId}\n` +
+            `% cursor agent --force --resume ${sessionId}\n` +
             "Cursor Agent\n→ Plan, search, build anything\nAuto\ncursor>",
           lines: 80,
           scrollback_used: false,
@@ -9995,7 +9995,7 @@ Session ID: ${sessionId}`,
 
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:cursor-auto-revive",
-        `cursor agent --resume ${sessionId}`,
+        `cursor agent --force --resume ${sessionId}`,
         expect.objectContaining({ workspace: undefined }),
       );
 
@@ -10101,7 +10101,7 @@ Session ID: ${sessionId}`,
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:cursor-auto-revive-rejected",
         text: [
-          `% cursor agent --resume ${sessionId}`,
+          `% cursor agent --force --resume ${sessionId}`,
           "error: unknown option '--resume'",
           "(Did you mean --version?)",
           "%",
@@ -10152,7 +10152,7 @@ Session ID: ${sessionId}`,
       liveSurfaces = [makeSurface("surface:cursor-auto-revive-exhausted")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
         surface: "surface:cursor-auto-revive-exhausted",
-        text: [`% cursor agent --resume ${sessionId}`, "%"].join("\n"),
+        text: [`% cursor agent --force --resume ${sessionId}`, "%"].join("\n"),
         lines: 80,
         scrollback_used: false,
       });
@@ -10173,7 +10173,7 @@ Session ID: ${sessionId}`,
         expect.objectContaining({
           tag: "agent_cli_exit_unrecoverable",
           task: expect.stringContaining(
-            `Manual fallback: cursor agent --resume ${sessionId}`,
+            `Manual fallback: cursor agent --force --resume ${sessionId}`,
           ),
         }),
       ]);
@@ -10903,7 +10903,7 @@ Session ID: ${sessionId}`,
           to: parent.agent_id,
           tag: "agent_halt_awaiting_input",
           task: expect.stringMatching(
-            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex resume 019fad12-1111-7222-8333-444455556666/s,
+            /cmuxlayerCodex-awaiting.*surface:halt-awaiting.*awaiting_input.*1s.*send_key\(surface: "surface:halt-awaiting", key: "return"\).*codex --dangerously-bypass-approvals-and-sandbox resume 019fad12-1111-7222-8333-444455556666/s,
           ),
         }),
       ]);
@@ -14415,20 +14415,22 @@ describe("buildResumeCommand", () => {
 
   it("builds raw harness resume commands for engine-owned same-surface revival", () => {
     expect(buildRawResumeCommand("codex", "brainlayer", sessionId)).toBe(
-      `codex resume ${sessionId}`,
+      `codex --dangerously-bypass-approvals-and-sandbox resume ${sessionId}`,
     );
     expect(buildRawResumeCommand("claude", "brainlayer", sessionId)).toBe(
-      `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume ${sessionId}`,
+      `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${sessionId}`,
     );
     // `cursor agent` has no `--session`; the real flag is `--resume [chatId]`.
     // Verified against `cursor agent --help` -- `--session` exits with
     // "error: unknown option '--session'".
     expect(buildRawResumeCommand("cursor", "brainlayer", sessionId)).toBe(
-      `cursor agent --resume ${sessionId}`,
+      `cursor agent --force --resume ${sessionId}`,
     );
-    expect(buildRawResumeCommand("gemini", "brainlayer", sessionId)).toBe(
-      `MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 gemini --resume ${sessionId}`,
-    );
+    // gemini is refused, not emitted: `gemini --resume` takes "latest" or an
+    // index number, never a session UUID (verified against `gemini --help`).
+    expect(() =>
+      buildRawResumeCommand("gemini", "brainlayer", sessionId),
+    ).toThrow(/No raw gemini resume exists for a session UUID/);
     expect(buildRawResumeCommand("kiro", "brainlayer", sessionId)).toBe(
       `cd ~/Gits/brainlayer && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 kiro-cli chat --resume-id ${sessionId}`,
     );
@@ -14533,7 +14535,7 @@ describe("buildResumeCommand", () => {
 
     expect(payload.resumable).toBe(true);
     expect(payload.resume_command).toBe(
-      `cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --resume ${sessionId}`,
+      `cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume ${sessionId}`,
     );
   });
 });
