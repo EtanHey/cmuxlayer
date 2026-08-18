@@ -1897,6 +1897,8 @@ Model: gemini-2.5-pro
 
       expect(parsed.paused).toBe(true);
       expect(parsed.paused_source).toBe("inferred");
+      expect(parsed.paused_coverage).toBe("harness_only");
+      expect(parsed.paused_note).toBe("cmux-UI pause not detectable; see #447");
     });
 
     it("marks zsh: suspended in the footer as inferred paused", () => {
@@ -1929,6 +1931,9 @@ Model: gemini-2.5-pro
       );
 
       expect(parsed.paused).toBe(false);
+      expect(parsed.paused_source).toBe("inferred");
+      expect(parsed.paused_coverage).toBe("harness_only");
+      expect(parsed.paused_note).toBe("cmux-UI pause not detectable; see #447");
     });
 
     it("does not treat Claude plan-mode ⏸ footer as paused", () => {

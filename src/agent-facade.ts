@@ -7,7 +7,7 @@ import type {
   ObservedPublicAgent,
   PublicAgent,
 } from "./agent-types.js";
-import type { PauseSource } from "./types.js";
+import { pauseHonestyFields, type PauseSource } from "./types.js";
 import { buildResumeCommand } from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
@@ -78,6 +78,9 @@ export function toObservedPublicAgent(
   const model = hasScreenModelObservation
     ? (opts.screenModel ?? null)
     : (record.model ?? null);
+  const pausedSource = (opts.pausedSource ??
+    record.paused_source ??
+    "inferred") as PauseSource;
   return {
     agent_id: record.agent_id,
     repo: record.repo,
@@ -119,13 +122,12 @@ export function toObservedPublicAgent(
     ),
     paused: {
       value: opts.paused ?? record.paused === true,
-      source: (opts.pausedSource ??
-        record.paused_source ??
-        "inferred") as PauseSource,
+      source: pausedSource,
       observed_at_ms:
         opts.paused !== undefined
           ? (opts.screenObservedAtMs ?? derivedAtMs)
           : registryObservedAtMs,
+      ...pauseHonestyFields(pausedSource),
     },
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };

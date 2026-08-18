@@ -4,6 +4,7 @@ import type {
   ParsedScreenResult,
   ParsedScreenStatus,
 } from "./types.js";
+import { pauseHonestyFields } from "./types.js";
 import type { CliType } from "./agent-types.js";
 // AIDEV-NOTE: Single source of truth for per-model context windows lives in
 // harness-session.ts (MODEL_WINDOW_RULES). screen-parser delegates versioned lookups to it
@@ -1723,6 +1724,7 @@ export function parseScreen(text: string): ParsedScreenResult {
 
   const status = inferStatus(normalized, doneSignal, errors, agentType);
   const cliUpdateState = parseCliUpdateState(normalized, agentType);
+  const honesty = pauseHonestyFields("inferred");
   const result: ParsedScreenResult = {
     agent_type: agentType,
     status,
@@ -1738,6 +1740,12 @@ export function parseScreen(text: string): ParsedScreenResult {
     cost,
     paused: screenShowsPaused(normalized),
     paused_source: "inferred",
+    ...(honesty.coverage
+      ? {
+          paused_coverage: honesty.coverage,
+          paused_note: honesty.note,
+        }
+      : {}),
   };
 
   if (cliUpdateState !== undefined) {
