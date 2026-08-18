@@ -69,10 +69,11 @@ type Fixture = {
  */
 function makeReleaseFixture(
   opts: {
-    installedVersion?: string;
+    installedVersion?: string | null;
     contractOutput?: string;
     withBrew?: boolean;
     withBrewTapClone?: boolean;
+    withNode?: boolean;
   } = {},
 ): Fixture {
   const {
@@ -80,6 +81,7 @@ function makeReleaseFixture(
     contractOutput = "[contract] PASS real-cmux contract lane",
     withBrew = true,
     withBrewTapClone = true,
+    withNode = true,
   } = opts;
 
   const root = makeRoot("cmuxlayer-release-receipts-");
@@ -146,7 +148,7 @@ case "\${args[0]:-}" in
       v*) exit 1 ;;
       *) echo "1111111111111111111111111111111111111111" ;;
     esac ;;
-  rev-list) echo 0 ;;
+  rev-list) echo "\${STUB_BEHIND:-0}" ;;
   *) exit 0 ;;
 esac
 `,
@@ -158,6 +160,7 @@ esac
 printf 'bun %s\\n' "$*" >>"$STUB_LOG"
 if [ "\${2:-}" = "test:contract" ]; then
   printf '%s\\n' "$STUB_CONTRACT_OUTPUT"
+  exit "\${STUB_CONTRACT_EXIT:-0}"
 fi
 exit 0
 `,
@@ -194,10 +197,24 @@ exit 0
 printf 'brew %s\\n' "$*" >>"$STUB_LOG"
 case "\${1:-}" in
   --repository) printf '%s\\n' "$STUB_BREW_REPO" ;;
-  list) printf 'cmuxlayer %s\\n' "$STUB_INSTALLED_VERSION" ;;
+  list)
+    # real brew exits 1 when the formula is not installed
+    [ -z "$STUB_INSTALLED_VERSION" ] && exit 1
+    printf 'cmuxlayer %s\\n' "$STUB_INSTALLED_VERSION" ;;
   *) : ;;
 esac
 exit 0
+`,
+    );
+  }
+
+  if (!withNode) {
+    writeExecutable(
+      join(binDir, "node"),
+      `#!/usr/bin/env bash
+printf 'node %s\\n' "$*" >>"$STUB_LOG"
+echo "bash: node: command not found" >&2
+exit 127
 `,
     );
   }
@@ -208,7 +225,7 @@ exit 0
     HOME: root,
     STUB_LOG: stubLog,
     STUB_BREW_REPO: brewRepo,
-    STUB_INSTALLED_VERSION: installedVersion,
+    STUB_INSTALLED_VERSION: installedVersion ?? "",
     STUB_CONTRACT_OUTPUT: contractOutput,
     CMUXLAYER_TAP_DIR: tapDir,
     CMUXLAYER_RELEASE_RECEIPTS_DIR: receiptsDir,
@@ -449,6 +466,82 @@ describe("release.sh receipts", () => {
     expect(receipt.gates.contract_reason).toContain("CMUX_SOCKET_PATH");
   });
 
+  it("classifies a PASS that is followed by cleanup output on stderr", () => {
+    // The runner's finally block prints "[contract] cleanup warning …" AFTER
+    // its PASS marker, so the lane's verdict is never reliably the last line.
+    const fixture = makeReleaseFixture({
+      contractOutput: [
+        "[contract] PASS real-cmux contract lane",
+        "[contract] cleanup warning for pid 4242: kill ESRCH",
+      ].join("\n"),
+    });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("pass");
+    expect(result.log).toContain("git push origin main");
+  });
+
+  it("classifies a SKIP that is followed by cleanup output", () => {
+    const fixture = makeReleaseFixture({
+      contractOutput: [
+        "[contract] SKIP: refusing production cmux socket /x.sock",
+        "[contract] cleanup warning reading daemon pid receipt: EACCES",
+      ].join("\n"),
+    });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    const receipt = readReceipt(fixture, "0.4.1");
+    expect(receipt.gates.contract).toBe("skip");
+    expect(receipt.gates.contract_reason).toContain("production cmux socket");
+  });
+
+  it("warns and records — never aborts — on an unrecognised zero-exit lane", () => {
+    const fixture = makeReleaseFixture({
+      contractOutput: "some unrecognised runner chatter",
+    });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("WARNING");
+    expect(readReceipt(fixture, "0.4.1").gates.contract).toBe("unknown");
+    expect(result.log).toContain("git push origin main");
+  });
+
+  it("still aborts when the contract lane exits non-zero", () => {
+    const fixture = makeReleaseFixture({
+      contractOutput: "[contract] FAIL: doctor --json unhealthy",
+    });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      STUB_CONTRACT_EXIT: "1",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.log).not.toContain("git push origin main");
+  });
+
+  it("refuses an unrecognised lane under --require-contract", () => {
+    const fixture = makeReleaseFixture({ contractOutput: "chatter only" });
+    const result = runScript(fixture, "release.sh", [
+      "0.4.1",
+      "--yes",
+      "--require-contract",
+    ]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.log).not.toContain("git push origin main");
+  });
+
+  it("never claims a dry-run in the banner when the receipt could not be written", () => {
+    const fixture = makeReleaseFixture({ withNode: false });
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("dry-run");
+    expect(result.stdout).toContain("receipt unavailable");
+  });
+
   it("refuses to release on a skipped contract gate under --require-contract", () => {
     const fixture = makeReleaseFixture({
       contractOutput: "[contract] SKIP: no live cmux socket",
@@ -573,6 +666,68 @@ describe("release-verify.sh", () => {
       installed: "cmuxlayer 0.4.0",
     });
   });
+
+  it("records evidence when cmuxlayer is not installed on this Mac at all", () => {
+    const fixture = makeReleaseFixture({ installedVersion: null });
+    const result = runScript(fixture, "release-verify.sh", [
+      "0.4.1",
+      "--verify-only",
+    ]);
+
+    expect(result.status).not.toBe(0);
+    const receipt = readReceipt(fixture, "0.4.1");
+    expect(receipt.verify.result).toBe("fail");
+    expect(receipt.installs[0]).toMatchObject({
+      result: "fail",
+      installed: "not installed",
+    });
+  });
+
+  it("measures how far brew's clone was behind instead of asserting zero", () => {
+    const fixture = makeReleaseFixture({ installedVersion: "0.4.1" });
+    const result = runScript(fixture, "release-verify.sh", ["0.4.1"], {
+      STUB_BEHIND: "3",
+    });
+
+    expect(result.status).toBe(0);
+    // measured after the reset, so the stub's post-sync answer wins
+    expect(readReceipt(fixture, "0.4.1").verify.tap_clone_behind).toBe("3");
+  });
+});
+
+describe("release receipt ledger hardening", () => {
+  it("refuses prototype-polluting and structural keys", () => {
+    const dir = makeRoot("cmuxlayer-receipt-cli-");
+    const env = { CMUXLAYER_RELEASE_RECEIPTS_DIR: dir };
+    runReceipt(["init", "0.9.1"], env);
+
+    for (const key of ["__proto__.polluted", "installs", "events", "version"]) {
+      const result = runReceipt(["record", "0.9.1", key, "x"], env);
+      expect(result.status, `expected ${key} to be refused`).not.toBe(0);
+    }
+
+    const receipt = JSON.parse(
+      readFileSync(join(dir, "release-0.9.1.json"), "utf8"),
+    );
+    expect(Array.isArray(receipt.installs)).toBe(true);
+    expect(receipt.version).toBe("0.9.1");
+    expect(({} as any).polluted).toBeUndefined();
+  });
+
+  it("keeps a recorded value that starts with dashes", () => {
+    const dir = makeRoot("cmuxlayer-receipt-cli-");
+    const env = { CMUXLAYER_RELEASE_RECEIPTS_DIR: dir };
+    runReceipt(["init", "0.9.1"], env);
+    runReceipt(
+      ["record", "0.9.1", "gates.contract_reason", "--require-contract said no"],
+      env,
+    );
+
+    const receipt = JSON.parse(
+      readFileSync(join(dir, "release-0.9.1.json"), "utf8"),
+    );
+    expect(receipt.gates.contract_reason).toBe("--require-contract said no");
+  });
 });
 
 describe("docs/releases-and-brew.md tracks the shipped release path", () => {
@@ -588,6 +743,12 @@ describe("docs/releases-and-brew.md tracks the shipped release path", () => {
   it("documents verify-only and the release-side tap-clone sync", () => {
     expect(doc()).toContain("--verify-only");
     expect(doc()).toContain("Library/Taps/etanhey/homebrew-layers");
+  });
+
+  it("tells the truth about the per-Mac ledger and how to aggregate it", () => {
+    expect(doc()).toContain("per-Mac");
+    expect(doc()).not.toContain("so the fleet-wide picture is one file");
+    expect(doc()).toContain("shared");
   });
 
   it("documents the contract gate's require mode", () => {

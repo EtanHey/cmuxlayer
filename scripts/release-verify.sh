@@ -56,11 +56,13 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
 else
   git -C "$BREW_TAP_DIR" fetch origin
   git -C "$BREW_TAP_DIR" reset --hard origin/main
-  receipt_record "verify.tap_clone_behind" "0"
+  # measured after the sync, not asserted
+  receipt_record "verify.tap_clone_behind" \
+    "$(git -C "$BREW_TAP_DIR" rev-list --count HEAD..origin/main 2>/dev/null || echo unknown)"
   brew upgrade etanhey/layers/cmuxlayer
 fi
 
-INSTALLED="$(brew list --versions cmuxlayer)"
+INSTALLED="$(brew list --versions cmuxlayer || true)"
 if [ "$INSTALLED" = "cmuxlayer $VERSION" ]; then
   receipt_record "verify.result" "pass"
   receipt install "$VERSION" --result pass --installed "$INSTALLED" --mode "$MODE"

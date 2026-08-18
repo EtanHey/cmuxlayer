@@ -119,12 +119,29 @@ scrollback.
   `gates.contract_reason` on a skip), the tap push, and the tap-clone sync
   (`tap.clone_sync` = `synced` / `skipped` / `failed`, with before/after SHAs).
 - `release-verify.sh` records `verify.result`, `verify.mode`, tap-clone
-  divergence, and appends one **per-Mac install evidence** entry
-  (`{host, result, installed, mode, at}`) to `installs[]` — every Mac that runs
-  it appends its own entry, so the fleet-wide picture is one file.
+  divergence, and appends one **install evidence** entry
+  (`{host, result, installed, mode, at}`) to `installs[]`.
 - Every mutation also appends to an in-file `events[]` trail; writes are atomic
   (temp file + rename), and re-running `init` never drops existing install
   evidence.
+
+**The default ledger is per-Mac, not fleet-wide.** `~/.local/state/…` is local
+disk: four Macs running `release-verify.sh` produce four separate
+`release-<version>.json` files, each holding its own single `installs[]` entry.
+That is still a real improvement — four durable files beat four scrollbacks —
+but collecting them is on you.
+
+To aggregate a release into **one** file, point every Mac at shared storage:
+
+```bash
+export CMUXLAYER_RELEASE_RECEIPTS_DIR=/path/to/shared/release-receipts
+```
+
+The `installs[]` array and its `host` field exist for exactly that. One caveat
+before you do it: `release-receipt.mjs` does a read-modify-write with **no
+locking**, so two Macs verifying the same version at the same moment can drop
+one another's entry. Stagger them, or treat a shared ledger as best-effort
+until locking lands.
 
 Read one directly:
 

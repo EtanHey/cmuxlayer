@@ -20,6 +20,21 @@ import { join } from "node:path";
 
 const SCHEMA = "cmuxlayer.release-receipt/v1";
 
+// `record` may only reach these top-level sections. The ledger's whole value is
+// that it cannot be corrupted by a stray key: structural fields (installs,
+// events, version, …) are owned by this file, never by a caller's dotted key.
+const RECORDABLE_ROOTS = new Set([
+  "gates",
+  "artifact",
+  "tap",
+  "verify",
+  "commit",
+  "pushed",
+  "previous_version",
+  "notes",
+]);
+const FORBIDDEN_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
 function die(message) {
   process.stderr.write(`release-receipt: ${message}\n`);
   process.exit(2);
@@ -55,6 +70,11 @@ function readReceipt(path) {
   }
 }
 
+// NOTE: read-modify-write with no locking. That is safe for the default
+// per-Mac ledger dir (one writer per file). If CMUXLAYER_RELEASE_RECEIPTS_DIR
+// is ever pointed at shared/synced storage, two Macs verifying at the same
+// moment can drop one another's installs[] entry — add locking before trusting
+// a shared ledger.
 function writeReceipt(path, receipt) {
   mkdirSync(join(path, ".."), { recursive: true });
   receipt.updated_at = utcNow();
@@ -86,6 +106,18 @@ function emptyReceipt(version, env) {
 export function loadOrCreate(version, env = process.env) {
   const path = receiptPath(version, env);
   return { path, receipt: readReceipt(path) ?? emptyReceipt(version, env) };
+}
+
+export function assertRecordableKey(dottedKey) {
+  const parts = dottedKey.split(".");
+  if (parts.some((part) => part === "" || FORBIDDEN_SEGMENTS.has(part))) {
+    die(`refusing unsafe key: ${dottedKey}`);
+  }
+  if (!RECORDABLE_ROOTS.has(parts[0])) {
+    die(
+      `refusing to record '${dottedKey}': only ${[...RECORDABLE_ROOTS].join(", ")} are writable`,
+    );
+  }
 }
 
 export function setDottedKey(target, dottedKey, value) {
@@ -126,7 +158,10 @@ function main(argv) {
   const [command, ...rest] = argv;
   if (!command) die("usage: release-receipt.mjs <init|record|install|path|show> …");
 
-  const args = positionals(rest);
+  // `record` takes its arguments strictly positionally so a value may start
+  // with "--"; every other command is flag-parsed.
+  const recordArgs = rest.filter((arg) => arg !== "--json");
+  const args = command === "record" ? recordArgs : positionals(rest);
   const version = args[0];
   if (!version) die(`${command} needs a version`);
 
@@ -156,11 +191,12 @@ function main(argv) {
   }
 
   if (command === "record") {
-    const key = args[1];
-    const raw = args[2];
+    const key = recordArgs[1];
+    const raw = recordArgs[2];
     if (!key || raw === undefined) {
       die("usage: release-receipt.mjs record <version> <dotted.key> <value> [--json]");
     }
+    assertRecordableKey(key);
     let value = raw;
     if (rest.includes("--json")) {
       try {

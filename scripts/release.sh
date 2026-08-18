@@ -39,6 +39,15 @@ for arg in "${@:2}"; do
   esac
 done
 
+CONTRACT_LOG=""
+TMP=""
+cleanup() {
+  [ -n "$CONTRACT_LOG" ] && rm -f "$CONTRACT_LOG"
+  [ -n "$TMP" ] && rm -f "$TMP"
+  return 0
+}
+trap cleanup EXIT
+
 die() { echo "release: $*" >&2; exit 1; }
 run() { if [ "$DRY" -eq 1 ]; then printf 'DRY  %s\n' "$*"; else eval "$@"; fi; }
 
@@ -101,21 +110,23 @@ else
   fi
   CONTRACT_STATUS=${PIPESTATUS[0]}
   set -e
-  CONTRACT_LAST="$(awk 'NF { line = $0 } END { print line }' "$CONTRACT_LOG")"
-  rm -f "$CONTRACT_LOG"
 
+  # The verdict is SEARCHED for, never read off the tail: the runner's finally
+  # block prints cleanup warnings AFTER its PASS/SKIP marker, and stdout/stderr
+  # merge through one pipe — so the last line is not the lane's answer.
   CONTRACT_RESULT="fail"
-  CONTRACT_REASON="$CONTRACT_LAST"
+  CONTRACT_REASON="$(awk 'NF { line = $0 } END { print line }' "$CONTRACT_LOG")"
   if [ "$CONTRACT_STATUS" -eq 0 ]; then
-    case "$CONTRACT_LAST" in
-      "[contract] PASS real-cmux contract lane")
-        CONTRACT_RESULT="pass"; CONTRACT_REASON="" ;;
-      "[contract] SKIP: "*)
-        CONTRACT_RESULT="skip"; CONTRACT_REASON="${CONTRACT_LAST#\[contract\] SKIP: }" ;;
-      *)
-        CONTRACT_RESULT="unknown"
-        CONTRACT_REASON="contract lane exited zero without a final PASS or SKIP marker" ;;
-    esac
+    if grep -q '^\[contract\] PASS real-cmux contract lane$' "$CONTRACT_LOG"; then
+      CONTRACT_RESULT="pass"
+      CONTRACT_REASON=""
+    elif grep -q '^\[contract\] SKIP: ' "$CONTRACT_LOG"; then
+      CONTRACT_RESULT="skip"
+      CONTRACT_REASON="$(grep -m1 '^\[contract\] SKIP: ' "$CONTRACT_LOG" | sed -e 's/^\[contract\] SKIP: //')"
+    else
+      CONTRACT_RESULT="unknown"
+      CONTRACT_REASON="contract lane exited zero without a PASS or SKIP marker"
+    fi
   fi
   receipt_record "gates.contract" "$CONTRACT_RESULT"
   if [ -n "$CONTRACT_REASON" ]; then
@@ -124,14 +135,17 @@ else
 
   case "$CONTRACT_RESULT" in
     pass) ;;
-    skip)
+    skip|unknown)
+      # A zero exit is the lane saying it did not fail. Recording that and
+      # warning is what this script has always done; only --require-contract
+      # turns a non-pass into a stop.
       if [ "$REQUIRE_CONTRACT" -eq 1 ]; then
-        die "--require-contract: the real-cmux contract gate skipped ($CONTRACT_REASON)"
+        die "--require-contract: the real-cmux contract gate did not pass ($CONTRACT_RESULT: $CONTRACT_REASON)"
       fi
-      echo "release: WARNING — real-cmux contract gate SKIPPED ($CONTRACT_REASON); recorded in the receipt"
+      echo "release: WARNING — real-cmux contract gate $CONTRACT_RESULT ($CONTRACT_REASON); recorded in the receipt"
       ;;
     *)
-      die "real-cmux contract gate did not pass: $CONTRACT_REASON" ;;
+      die "real-cmux contract gate failed: $CONTRACT_REASON" ;;
   esac
 fi
 
@@ -162,7 +176,6 @@ if [ "$DRY" -eq 1 ]; then
   SHA="<sha256-of-$TAG>"
 else
   TMP="$(mktemp)"
-  trap 'rm -f "$TMP"' EXIT
   # GitHub may take a moment to generate the tag tarball.
   for i in 1 2 3 4 5; do
     if curl -fsSL "$URL" -o "$TMP"; then break; fi
@@ -224,10 +237,16 @@ else
   fi
 fi
 
+if [ "$DRY" -eq 1 ]; then
+  RECEIPT_LABEL="<dry-run: no receipt written>"
+else
+  RECEIPT_LABEL="${RECEIPT_PATH:-<receipt unavailable — is node installed? see warnings above>}"
+fi
+
 cat <<EOF
 
 release: done — cmuxlayer $TAG is tagged and the formula is bumped.
-Receipt: ${RECEIPT_PATH:-<dry-run: no receipt written>}
+Receipt: $RECEIPT_LABEL
 Next (on EACH Mac — each run appends its own install evidence to the receipt):
   $REPO_DIR/scripts/release-verify.sh "$VERSION"
   $REPO_DIR/scripts/release-verify.sh "$VERSION" --verify-only   # never upgrades
