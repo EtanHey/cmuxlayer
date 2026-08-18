@@ -8,12 +8,14 @@ import {
   type JsonRpcRequest,
 } from "./app-server-bridge.js";
 import { CmuxAppServerRuntime } from "./app-server-runtime.js";
+import { loadCmuxlayerConfigFile } from "./config-file.js";
 
 function writeJson(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
 async function main() {
+  loadCmuxlayerConfigFile();
   const client = await createCmuxClient();
   const runtime = new CmuxAppServerRuntime({ client, inboxOpts: {} });
   await runtime.initialize();

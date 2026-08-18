@@ -247,7 +247,11 @@ import {
   type WorktreeExec,
 } from "./worktree.js";
 import { resolveRepoRootFromLauncherRegistryOrNull } from "./launcher-registry.js";
-import { resolveRepoRootWithoutRegistry } from "./repo-root-fallback.js";
+import {
+  defaultRepoCheckoutPath,
+  resolveRepoRootWithoutRegistry,
+} from "./repo-root-fallback.js";
+import { resolveSpawnPermissionMode } from "./permission-mode.js";
 import {
   loadSeatRegistryFromConfig,
   type SeatRegistry,
@@ -10552,8 +10556,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           session_name: updated.cli_session_id,
           model: updated.model,
           permission_mode:
-            updated.cli === "kiro" ? "default" : "skip-permissions",
-          cwd: updated.launch_cwd ?? join(homedir(), "Gits", updated.repo),
+            updated.cli === "kiro" ? "default" : resolveSpawnPermissionMode(),
+          cwd: updated.launch_cwd ?? defaultRepoCheckoutPath(updated.repo),
           repo: updated.repo,
           cli: updated.cli,
           updated_at: seatManifestNow(),

@@ -52,6 +52,7 @@ import type {
   CmuxStatusEntry,
   ControlMode,
 } from "./types.js";
+import { defaultRepoCheckoutPath } from "./repo-root-fallback.js";
 
 const SEND_INPUT_CHUNK_THRESHOLD = 500;
 const SEND_INPUT_CHUNK_DELAY_MS = 5;
@@ -502,7 +503,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
     }
 
     const cwd =
-      this.threadCwds.get(threadId) ?? join(homedir(), "Gits", agent.repo);
+      this.threadCwds.get(threadId) ?? defaultRepoCheckoutPath(agent.repo);
     const createdAt = Math.floor(new Date(agent.created_at).getTime() / 1000);
     return toBridgeThread(cwd, createdAt, agent);
   }

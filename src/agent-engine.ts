@@ -25,12 +25,18 @@ import { StateManager } from "./state-manager.js";
 import { isSafeShellToken, sanitizeTerminalInput } from "./sanitize.js";
 import {
   AGENT_ENV,
-  RAW_SKIP_APPROVALS,
   buildRawResumeCommand,
+  defaultKiroCd,
   rawResumeEchoCandidates,
+  rawSkipApprovalFlag,
   sanitizeRepoName,
   shellQuote,
 } from "./agent-command.js";
+import {
+  bypassesApprovals,
+  resolveSpawnPermissionMode,
+  type SpawnPermissionMode,
+} from "./permission-mode.js";
 import {
   AgentRegistry,
   SURFACE_EVICTION_CONFIRMATION_MS,
@@ -172,6 +178,7 @@ import {
 } from "./launcher-registry.js";
 import { buildAgentHealthInput } from "./agent-health-input.js";
 import {
+  defaultRepoCheckoutPath,
   resolveRepoRootWithoutRegistry,
   type RepoRootFallbackOptions,
 } from "./repo-root-fallback.js";
@@ -1216,6 +1223,8 @@ export function buildLaunchCommand(
     allowModelOverride?: boolean;
     effort?: CodexEffort;
     launchMode?: AgentLaunchMode;
+    /** Approval handling for this launch; defaults to the machine's setting. */
+    permissionMode?: SpawnPermissionMode;
   },
 ): string {
   const safeRepo = sanitizeRepoName(repo);
@@ -1230,6 +1239,10 @@ export function buildLaunchCommand(
   const rawModelArgs = formattedModelFlag
     ? ` --model ${formattedModelFlag}`
     : "";
+  const bypassApprovals = bypassesApprovals(
+    opts?.permissionMode ?? resolveSpawnPermissionMode(),
+  );
+  const launcherSkipArg = bypassApprovals ? " -s" : "";
   const launcherWorktreeArg = opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : "";
   const launcherEffortArg = opts?.effort ? ` -E ${opts.effort}` : "";
   const rawCdPrefix = opts?.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
@@ -1254,7 +1267,7 @@ export function buildLaunchCommand(
     ].filter((part): part is string => Boolean(part));
     const rawEnvPrefix =
       rawEnvParts.length > 0 ? `${rawEnvParts.join(" ")} ` : "";
-    const skipFlag = RAW_SKIP_APPROVALS[cli];
+    const skipFlag = rawSkipApprovalFlag(cli, opts?.permissionMode);
     const rawEffortArg =
       cli === "codex" && opts?.effort
         ? ` -c model_reasoning_effort=${opts.effort}`
@@ -1278,17 +1291,17 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`} -s${claudeModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherWorktreeArg}`;
     case "codex":
-      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`} -s${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`} -s${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
     case "kiro":
-      return `${rawCdPrefix || `cd ~/Gits/${safeRepo} && `}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
+      return `${rawCdPrefix || defaultKiroCd(repo)}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`} -s${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
   }
 }
 
@@ -1376,7 +1389,7 @@ export async function assertLauncherAvailable(
 export const REQUIRE_LAUNCHER_REGISTRY_ENV =
   "CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY";
 
-function launcherRegistryRequired(
+export function launcherRegistryRequired(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   const value = env[REQUIRE_LAUNCHER_REGISTRY_ENV]?.trim().toLowerCase();
@@ -2911,7 +2924,11 @@ export class AgentEngine {
     if (launchCwd) return launchCwd;
     const worktreePath = agent.worktree_path?.trim();
     if (worktreePath) return worktreePath;
-    return join(homedir(), "Gits", agent.repo);
+    // AIDEV-NOTE (E0 sweep): a guess for transcript probing only -- it never
+    // aims a resume command (see resumeInvocationForAgent). It follows
+    // CMUXLAYER_REPO_HOME before the historical ~/Gits default so a fresh
+    // install probes the right tree.
+    return defaultRepoCheckoutPath(agent.repo);
   }
 
   /**

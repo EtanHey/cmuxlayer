@@ -98,10 +98,36 @@ forcing strict mode on and re-breaking fresh installs.
 | `CMUXLAYER_LAUNCHER_REGISTRY_PATH` | override the registry location |
 | `CMUXLAYER_REPO_HOME` | colon-separated roots searched first on the raw lane |
 | `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1` | restore the pre-#392 hard failure when a repo is unregistered |
+| `CMUXLAYER_SPAWN_PERMISSION_MODE` | `skip-permissions` (default) or `default` — see below |
+
+| `CMUXLAYER_CONFIG_FILE` | override the config file read at startup (default `~/.config/cmuxlayer/env.sh`) |
+
+`cmuxlayer init` writes all of these; see [fresh-install.md](fresh-install.md).
+
+They are read from the **process environment**, and cmuxlayer also reads its own
+config file at startup so a GUI-launched client (which never sources a shell
+profile) is configured the same as a terminal one. The environment always wins
+over the file; only the settings in this table are accepted from it, and the
+file is parsed, never executed.
 
 Set `CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY=1` on a machine where every repo *is*
 registered: a typo'd repo name then fails loudly instead of raw-launching in a
 directory that happens to exist.
+
+## Approval bypass is a choice, not a constant
+
+Both lanes bypass the harness approval prompt by default, because an agent in a
+background pane that stops on its first tool call reads as a hung pane. An
+install that would rather be asked sets
+`CMUXLAYER_SPAWN_PERMISSION_MODE=default` (what `cmuxlayer init --permissions
+ask` writes), and then **neither** lane carries a bypass: the raw lane drops
+`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`
+/ `--force` / `-y`, and the launcher lane drops `-s`. Launch and resume move
+together, so a resumed agent comes back in the mode it was spawned in.
+
+The parity suite's "both lanes carry an approval bypass" invariant is an
+assertion about the *default*, and it still holds: nothing changes for an
+install that does not set the variable.
 
 ## Resume honesty
 
@@ -118,8 +144,10 @@ engine sends can never disagree. It returns either a command or a *reason*, and
 the engine surfaces that reason — a malformed session id, a missing cwd, a
 harness with no UUID resume form — instead of flattening it to "not resumable".
 
-`harnessCwdForAgent`'s `~/Gits/<repo>` default remains, but only for transcript
-probing; it is no longer used to aim a resume command.
+`harnessCwdForAgent`'s default remains, but only for transcript probing; it is
+no longer used to aim a resume command. It now reads the first
+`CMUXLAYER_REPO_HOME` root before falling back to `~/Gits/<repo>`, so the probe
+follows the machine's own layout.
 
 ## CI
 

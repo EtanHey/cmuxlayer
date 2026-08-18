@@ -37,9 +37,17 @@ import {
   stat,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { defaultDaemonSocketPath } from "./daemon-socket-path.js";
+import { REPO_HOME_ENV } from "./repo-root-fallback.js";
+import {
+  getLoadedConfigFile,
+  loadCmuxlayerConfigFile,
+  type LoadedConfigFile,
+} from "./config-file.js";
+import { resolveSpawnPermissionMode } from "./permission-mode.js";
+import { launcherRegistryRequired } from "./agent-engine.js";
 import {
   assessCmuxVersionCompatibility,
   type CmuxVersionCompatibilityReport,
@@ -193,6 +201,71 @@ export interface DoctorReport {
   mcpReconnectProcedure: McpReconnectProcedureReport;
   /** Read-only `.mcp.json` drift report; does NOT affect health. */
   mcpConfigDrift: McpConfigDriftReport;
+  /** What `cmuxlayer init` wrote, and whether this process can see it. */
+  initConfig: InitConfigReport;
+}
+
+/**
+ * AIDEV-NOTE: a config file the running process cannot see is the failure this
+ * check exists to name. A GUI-launched MCP client never sources a shell
+ * profile, so before the startup loader existed, `cmuxlayer init --permissions
+ * ask` failed open with nothing to look at. Reported, never health-affecting:
+ * not having run the wizard is a supported state.
+ */
+export interface InitConfigReport {
+  path: string;
+  found: boolean;
+  /** Settings this process took from the file. */
+  applied: string[];
+  /** Settings the file names but the real environment already answered. */
+  overridden: string[];
+  /** Settings in the file cmuxlayer does not accept from a config file. */
+  ignored: string[];
+  /** Effective values, after the file and the environment are combined. */
+  effective: {
+    repoHome: string | null;
+    permissionMode: string;
+    launcherRegistryPath: string | null;
+    requireLauncherRegistry: boolean;
+  };
+  note: string;
+}
+
+export function checkInitConfig(
+  env: Record<string, string | undefined> = process.env,
+  loader: typeof loadCmuxlayerConfigFile = loadCmuxlayerConfigFile,
+  startupLoad: LoadedConfigFile | null = getLoadedConfigFile(),
+): InitConfigReport {
+  // Prefer what the startup loader actually did. Re-loading would see the
+  // values it already applied and mis-report them as environment-supplied.
+  // Load into a scratch copy: doctor reports, it never mutates the process.
+  const resolved: Record<string, string | undefined> = { ...env };
+  const loaded = startupLoad ?? loader({ env, target: resolved });
+  const effective = {
+    repoHome: resolved[REPO_HOME_ENV]?.trim() || null,
+    permissionMode: resolveSpawnPermissionMode(resolved),
+    launcherRegistryPath:
+      resolved.CMUXLAYER_LAUNCHER_REGISTRY_PATH?.trim() || null,
+    requireLauncherRegistry: launcherRegistryRequired(resolved),
+  };
+  const note = loaded.found
+    ? `config read from ${loaded.path}` +
+      (loaded.applied.length > 0
+        ? `; applied ${loaded.applied.join(", ")}`
+        : "; nothing to apply (environment already sets these)") +
+      (loaded.ignored.length > 0
+        ? `; ignored ${loaded.ignored.join(", ")} (not configurable from a file)`
+        : "")
+    : `no config file at ${loaded.path} — run \`cmuxlayer init\` to create one`;
+  return {
+    path: loaded.path,
+    found: loaded.found,
+    applied: [...loaded.applied],
+    overridden: [...loaded.overridden],
+    ignored: loaded.ignored,
+    effective,
+    note,
+  };
 }
 
 export interface DoctorSelfHealReport {
@@ -236,6 +309,8 @@ export interface RunDoctorOptions {
   readMcpConfigFile?: McpConfigFileReader;
   /** Injectable runtime provenance probe for tests. */
   runtimeProvenance?: () => RuntimeProvenanceReport;
+  /** Injectable config-file loader for the init-config report. */
+  loadConfigFile?: typeof loadCmuxlayerConfigFile;
   /** Injectable installed-build detector for daemon version comparisons. */
   detectStaleBuild?: (
     deps?: DetectStaleBuildDeps,
@@ -796,17 +871,40 @@ export const realCmuxVersionRunner: CmuxVersionRunner = async (env) => {
   }
 };
 
+/**
+ * Roots to scan for per-repo `.mcp.json`.
+ *
+ * AIDEV-NOTE (E0 sweep): `~/Gits` is a *default*, not the contract. A machine
+ * that told cmuxlayer where its checkouts live (`CMUXLAYER_REPO_HOME`, what
+ * `cmuxlayer init` writes) gets those scanned instead, so the check reports on
+ * the repos that actually exist rather than silently finding nothing.
+ */
+export function mcpConfigScanRoots(
+  env: Record<string, string | undefined> = process.env,
+  home: string = homedir(),
+): string[] {
+  const configured = (env[REPO_HOME_ENV] ?? "")
+    .split(":")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && isAbsolute(part));
+  return configured.length > 0 ? configured : [join(home, "Gits")];
+}
+
 export const realMcpConfigPathLister: McpConfigPathLister = async () => {
-  try {
-    const entries = await readdir(join(homedir(), "Gits"), {
-      withFileTypes: true,
-    });
-    return entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join(homedir(), "Gits", entry.name, ".mcp.json"));
-  } catch {
-    return [];
+  const paths: string[] = [];
+  for (const root of mcpConfigScanRoots()) {
+    try {
+      const entries = await readdir(root, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          paths.push(join(root, entry.name, ".mcp.json"));
+        }
+      }
+    } catch {
+      // A configured root that does not exist is not a doctor failure.
+    }
   }
+  return paths;
 };
 
 export const realMcpConfigFileReader: McpConfigFileReader = (path) =>
@@ -1105,7 +1203,7 @@ export async function checkMcpConfigDrift(
     drifted,
     launcherOk: launchers.every((launcher) => launcher.ok),
     launchers,
-    note: "scanned ~/Gits/*/.mcp.json for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
+    note: "scanned <repo root>/*/.mcp.json (CMUXLAYER_REPO_HOME, else ~/Gits) for cmux/cmuxlayer entries expected to reference an existing executable launcher cmuxlayer-mcp; read-only, skipped missing/unreadable/invalid JSON",
   };
 }
 
@@ -1189,6 +1287,10 @@ export async function runDoctor(opts: RunDoctorOptions): Promise<DoctorReport> {
     runtimeProvenance,
     mcpReconnectProcedure: mcpReconnectProcedure(),
     mcpConfigDrift,
+    initConfig: checkInitConfig(
+      env,
+      opts.loadConfigFile ?? loadCmuxlayerConfigFile,
+    ),
   };
 }
 
@@ -1284,6 +1386,13 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(`│      ${report.runtimeProvenance.note}`);
 
   lines.push(`│ — MCP reconnect probe: ${report.mcpReconnectProcedure.note}`);
+
+  lines.push(`│ — init config: ${report.initConfig.note}`);
+  lines.push(
+    `│ —    effective: repo_home=${
+      report.initConfig.effective.repoHome ?? "(unset)"
+    } permission_mode=${report.initConfig.effective.permissionMode}`,
+  );
 
   for (const launcher of report.mcpConfigDrift.launchers) {
     lines.push(

@@ -4,10 +4,13 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CliType } from "./agent-types.js";
 import { sanitizeRepoName } from "./agent-command.js";
 
-export const DEFAULT_LAUNCHER_REGISTRY_PATH = join(
-  homedir(),
-  ".config/ralphtools/launchers.zsh",
-);
+/** Where the repoGolem launcher registry lives under a given home dir. */
+export function launcherRegistryPathForHome(home: string): string {
+  return join(home, ".config/ralphtools/launchers.zsh");
+}
+
+export const DEFAULT_LAUNCHER_REGISTRY_PATH =
+  launcherRegistryPathForHome(homedir());
 
 export interface LauncherRegistryEntry {
   prefix: string;
@@ -105,20 +108,36 @@ function shellWords(line: string): string[] {
   return words;
 }
 
+/**
+ * Read one registry line, or null when the line is not a registration.
+ *
+ * Exported so a writer can patch registrations IN PLACE and leave everything
+ * else — shell functions, aliases, source guards, comments — untouched. A
+ * registry file is a hand-maintained zsh file that happens to contain
+ * `repoGolem` lines, not a file cmuxlayer owns.
+ */
+export function parseLauncherRegistryLine(
+  line: string,
+): { prefix: string; path: string } | null {
+  const words = shellWords(line.trim());
+  if (words[0] !== "repoGolem" || words.length < 3) return null;
+  const [, prefix, path] = words;
+  if (!prefix || !path) return null;
+  return { prefix, path };
+}
+
 export function parseLauncherRegistry(
   input: string,
   _sourcePath: string,
 ): LauncherRegistryEntry[] {
   const entries: LauncherRegistryEntry[] = [];
   for (const line of input.split(/\r?\n/)) {
-    const words = shellWords(line.trim());
-    if (words[0] !== "repoGolem" || words.length < 3) continue;
-    const [, prefix, path] = words;
-    if (!prefix || !path) continue;
+    const parsed = parseLauncherRegistryLine(line);
+    if (!parsed) continue;
     entries.push({
-      prefix,
-      path,
-      repoBasename: basename(path),
+      prefix: parsed.prefix,
+      path: parsed.path,
+      repoBasename: basename(parsed.path),
     });
   }
   return entries;

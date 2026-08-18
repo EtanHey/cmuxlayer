@@ -55,6 +55,7 @@ import {
   type StaleBuildResult,
 } from "./version.js";
 import { isMainModule } from "./is-main.js";
+import { loadCmuxlayerConfigFile } from "./config-file.js";
 import { FleetSidebarPublisher } from "./fleet-sidebar.js";
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -1196,6 +1197,9 @@ export async function runDaemon(
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {
+  // A GUI-launched client starts the daemon without a login shell, so the
+  // config file is read here too rather than only in the CLI entrypoint.
+  loadCmuxlayerConfigFile();
   runDaemon().catch((error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
     process.exit(1);

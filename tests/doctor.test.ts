@@ -1421,6 +1421,20 @@ describe("renderDoctorText", () => {
         launchers: [],
         note: "scanned ~/Gits/*/.mcp.json for cmuxlayer launcher drift",
       },
+      initConfig: {
+        path: "/home/tester/.config/cmuxlayer/env.sh",
+        found: false,
+        applied: [],
+        overridden: [],
+        ignored: [],
+        effective: {
+          repoHome: null,
+          permissionMode: "skip-permissions",
+          launcherRegistryPath: null,
+          requireLauncherRegistry: false,
+        },
+        note: "no config file at /home/tester/.config/cmuxlayer/env.sh — run `cmuxlayer init` to create one",
+      },
     };
   }
 

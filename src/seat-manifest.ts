@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,21 +24,36 @@ export interface SeatManifest {
 
 export type SeatManifestWriter = (manifest: SeatManifest) => Promise<void>;
 
+function isRealDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where seat manifests are published.
+ *
+ * AIDEV-NOTE (E0 sweep): the historical default writes into a *sibling repo's*
+ * checkout, and `mkdir -p` would happily conjure that whole tree on a machine
+ * that has no such repo. The legacy path is kept when it genuinely exists, so
+ * installs that depend on it are untouched; anywhere else this lands in the
+ * XDG-style state directory the daemon socket already uses.
+ */
 export function defaultSeatManifestDir(
   env: NodeJS.ProcessEnv = process.env,
+  isDirectory: (path: string) => boolean = isRealDirectory,
 ): string {
   const override = env.CMUXLAYER_SEAT_MANIFEST_DIR?.trim();
   if (override) return override;
 
   const home = env.HOME?.trim() || homedir();
-  return join(
-    home,
-    "Gits",
-    "orchestrator",
-    "docs.local",
-    "monitor-state",
-    "seat-manifests",
-  );
+  const legacyRoot = join(home, "Gits", "orchestrator", "docs.local");
+  if (isDirectory(legacyRoot)) {
+    return join(legacyRoot, "monitor-state", "seat-manifests");
+  }
+  return join(home, ".local", "state", "cmuxlayer", "seat-manifests");
 }
 
 export function seatManifestFileName(surfaceId: string): string {
