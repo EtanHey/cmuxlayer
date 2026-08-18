@@ -144,9 +144,14 @@ class FakeAgentSurfaceClient {
     };
   }
 
+  sendGate: Promise<void> | null = null;
+
   async send(surface: string, text: string) {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);
+    }
+    if (this.sendGate) {
+      await this.sendGate;
     }
     this.sendCalls.push(text);
     this.pendingText += text;
@@ -463,6 +468,52 @@ describe("send_to v2 background verify", () => {
       terminal: true,
       submit_verified: true,
     });
+  });
+
+  it("registers the delivery before typing so concurrent identical sends return duplicate_of", async () => {
+    const client = new FakeAgentSurfaceClient();
+    let releaseSend!: () => void;
+    client.sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const args = {
+      agent_id: "agent-1",
+      text: "race me once",
+      press_enter: true,
+    };
+    const firstPromise = server._registeredTools.send_to.handler(
+      args,
+      {} as any,
+    );
+    for (let i = 0; i < 30; i++) {
+      await Promise.resolve();
+    }
+    const engine = server._registeredTools.interact._engine;
+    const inFlight = engine.listDeliveryReceipts();
+    expect(inFlight).toEqual([
+      expect.objectContaining({
+        text: "race me once",
+        delivery_state: "pending_verify",
+        terminal: false,
+      }),
+    ]);
+    expect(client.sendCalls).toEqual([]);
+
+    const second = parseResult(
+      await server._registeredTools.send_to.handler(args, {} as any),
+    );
+    releaseSend();
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    const first = parseResult(await firstPromise);
+
+    expect(second.duplicate_of).toBe(inFlight[0].delivery_id);
+    expect(second.delivery_id).toBe(first.delivery_id);
+    expect(client.sendCalls).toEqual(["race me once"]);
   });
 
   it("returns the existing delivery_id with duplicate_of instead of typing again", async () => {

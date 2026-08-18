@@ -14660,9 +14660,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 continue;
               }
               const deliveryId = randomUUID();
+              engine.acceptPendingVerify({
+                delivery_id: deliveryId,
+                agent_id: agent.agent_id,
+                text: args.text,
+                press_enter: args.press_enter,
+                source_event: "send_to",
+                retry_count: 0,
+              });
               const livePaused = await observePausedTarget(agent);
               if (livePaused.paused) {
                 const queued = engine.queueDelivery({
+                  delivery_id: deliveryId,
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -14686,6 +14695,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               if (!args.allow_busy && agent.state === "working") {
                 const queued = engine.queueDelivery({
+                  delivery_id: deliveryId,
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -14886,9 +14896,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
+          const deliveryId = randomUUID();
+          engine.acceptPendingVerify({
+            delivery_id: deliveryId,
+            agent_id: agentId,
+            text: args.text,
+            press_enter: args.press_enter,
+            source_event: "send_to",
+            retry_count: 0,
+          });
           const livePaused = await observePausedTarget(targetAgent);
           if (livePaused.paused) {
             const receipt = engine.queueDelivery({
+              delivery_id: deliveryId,
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
@@ -14914,6 +14934,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (!args.allow_busy && targetAgent?.state === "working") {
             const receipt = engine.queueDelivery({
+              delivery_id: deliveryId,
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
@@ -14936,7 +14957,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
-          const deliveryId = randomUUID();
           let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
           try {
             delivery = await deliverAgentInput({

@@ -6255,23 +6255,31 @@ export class AgentEngine {
   }
 
   queueDelivery(input: {
+    delivery_id?: string;
     agent_id: string;
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
   }): AgentDeliveryReceipt {
+    const existing = input.delivery_id
+      ? this.deliveryReceipts.get(input.delivery_id)
+      : undefined;
     const receipt: AgentDeliveryReceipt = {
-      delivery_id: randomUUID(),
-      ...input,
+      delivery_id: input.delivery_id ?? existing?.delivery_id ?? randomUUID(),
+      agent_id: input.agent_id,
+      text: input.text,
+      press_enter: input.press_enter,
+      source_event: input.source_event,
       delivery_state: "queued",
       terminal: false,
-      created_at: new Date().toISOString(),
+      created_at: existing?.created_at ?? new Date().toISOString(),
       resolved_at: null,
-      retry_count: 0,
+      retry_count: existing?.retry_count ?? 0,
       submit_verified: null,
       error: null,
       submission_started_at: null,
       next_attempt_at: null,
+      verify_deadline_at: null,
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -6295,21 +6303,24 @@ export class AgentEngine {
     delivery_state?: "queued" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
+    const existing = this.deliveryReceipts.get(input.delivery_id);
+    const queuedFollowup =
+      (input.delivery_state ?? "queued") === "queued_followup";
     const receipt: AgentDeliveryReceipt = {
       ...input,
       delivery_state: input.delivery_state ?? "queued",
       terminal: false,
-      created_at: acceptedAt,
+      created_at: existing?.created_at ?? acceptedAt,
       resolved_at: null,
       submit_verified: null,
       error: null,
-      submission_started_at: acceptedAt,
+      submission_started_at: existing?.submission_started_at ?? acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
-      verify_deadline_at:
-        (input.delivery_state ?? "queued") === "queued_followup"
-          ? null
-          : new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString(),
+      verify_deadline_at: queuedFollowup
+        ? null
+        : (existing?.verify_deadline_at ??
+          new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString()),
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -7816,11 +7827,7 @@ export class AgentEngine {
   markObservedPause(agentId: string, paused: boolean): AgentRecord | null {
     const agent = this.getAgentState(agentId);
     if (!agent) return null;
-    return this.persistPausedState(
-      agent,
-      paused,
-      new Date().toISOString(),
-    );
+    return this.persistPausedState(agent, paused, new Date().toISOString());
   }
 
   markAgentWorking(agentId: string): AgentRecord | null {
