@@ -30,6 +30,10 @@ import { generateAgentId, type AgentRecord } from "../src/agent-types.js";
 import type { ParsedScreenResult } from "../src/types.js";
 import type { SeatManifest } from "../src/seat-manifest.js";
 import { AgentRegistry } from "../src/agent-registry.js";
+import {
+  coordinationContractPath,
+  issueCoordinationContract,
+} from "../src/coordination-paths.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
 import {
@@ -2344,6 +2348,74 @@ describe("agent lifecycle tool handlers", () => {
       surface_id: "surface:new",
     });
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
+  });
+
+  it("P11b/#462: resume issues, persists, and REFRESHES the contract -- and says it was not re-delivered", async () => {
+    // Before this, resume returned no contract at all: no report_path, no
+    // done_marker, no contract file. The crash-recovery case this repo exists
+    // for was the one case where a lead could not even see where its worker
+    // should report.
+    const agentId = "cmuxlayerCodex-stable-resume-contract";
+    const resumeInboxDir = mkdtempSync(join(tmpdir(), "p11b-resume-inbox-"));
+    const stateMgr = new StateManager(TEST_DIR);
+    stateMgr.writeState(
+      makeServerAgentRecord({
+        agent_id: agentId,
+        repo: "brainlayer",
+        cli: "codex",
+        state: "done",
+        surface_id: "surface:old",
+        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+      }),
+    );
+    const exec = makeLifecycleExec();
+    const server = createTrackedServer({
+      exec,
+      stateDir: TEST_DIR,
+      disableSpawnPreflight: true,
+      sessionIdentityResolver: () => null,
+      inboxBaseDir: resumeInboxDir,
+    });
+    await serverContexts.at(-1)?.lifecycleStartPromise;
+    const spawn = (server as any)._registeredTools["spawn_agent"];
+
+    try {
+      const result = await spawn.handler({ resume_agent_id: agentId }, {} as any);
+      const parsed = parseToolResult(result) as Record<string, any>;
+      expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+      expect(parsed.resumed).toBe(true);
+
+      // Byte-identical to what the original spawn issued -- both strings derive
+      // from agent_id alone, which is why refreshing is safe and idempotent.
+      const expected = issueCoordinationContract(agentId, {
+        baseDir: resumeInboxDir,
+      });
+      expect(parsed.report_path).toBe(expected.report_path);
+      expect(parsed.done_marker).toBe(expected.done_marker);
+      expect(parsed.contract_path).toBe(
+        coordinationContractPath(agentId, { baseDir: resumeInboxDir }),
+      );
+      const file = readFileSync(parsed.contract_path, "utf8");
+      expect(file).toContain(expected.report_path);
+      expect(file).toContain(expected.done_marker);
+
+      // The honest half: nothing was typed into the resuming pane, and the
+      // receipt must say so rather than inheriting the spawn path's `true`.
+      expect(parsed.coordination_footer_delivered).toBe(false);
+      expect(parsed.coordination_footer_note).toMatch(
+        /refreshed_not_redelivered/,
+      );
+
+      // Persisted, so the closure consumer reads what resume issued.
+      const stateTool = (server as any)._registeredTools["get_agent_state"];
+      const detail = parseToolResult(
+        await stateTool.handler({ agent_id: agentId }, {} as any),
+      ) as Record<string, unknown>;
+      expect(detail.report_path).toBe(expected.report_path);
+      expect(detail.done_marker).toBe(expected.done_marker);
+    } finally {
+      rmSync(resumeInboxDir, { recursive: true, force: true });
+    }
   });
 
   it("spawn_agent accepts placement as the canonical role-placement argument", async () => {

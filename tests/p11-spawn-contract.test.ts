@@ -9,7 +9,13 @@
  * receipt, persists it, and tells the worker the same two strings.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -320,6 +326,66 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(writes[0]!.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
   });
 
+  it("P11b R4: an unwritable contract file falls back to inline WITHOUT emitting a dangling pointer", async () => {
+    // The adversarial case: if the write fails, the boot prompt must not point
+    // at a file that does not exist. The inline-mode test reaches the same
+    // OUTCOME by a different route, so this branch needs its own pin -- a
+    // regression that emitted the pointer before the write, or let the throw
+    // escape and fail the spawn, would otherwise stay green.
+    const blockedBase = join(tmpdir(), `p11b-blocked-${process.pid}-inbox`);
+    rmSync(blockedBase, { recursive: true, force: true });
+    // A FILE where the base dir should be: every channel-dir mkdir under it
+    // fails, so the contract write cannot succeed.
+    writeFileSync(blockedBase, "not a directory");
+    const blockedExec = makeExec();
+    const blockedStateDir = mkdtempSync(join(tmpdir(), "p11b-blocked-state-"));
+    const blockedServer: any = createServer(
+      withTestSurfaceObserver({
+        exec: blockedExec,
+        stateDir: blockedStateDir,
+        disableSpawnPreflight: true,
+        inboxBaseDir: blockedBase,
+      }),
+    );
+    try {
+      const parsed = await runWithCallerContext(
+        { workspaceId: "workspace:1" },
+        async () => {
+          const result = await blockedServer._registeredTools[
+            "spawn_agent"
+          ].handler(
+            {
+              repo: "brainlayer",
+              model: "sonnet",
+              cli: "claude",
+              role: "worker",
+              prompt: "task",
+            },
+            {} as any,
+          );
+          return result.structuredContent ?? JSON.parse(result.content[0].text);
+        },
+      );
+
+      // The spawn still succeeds -- a contract-file failure is not a spawn
+      // failure.
+      expect(parsed.ok).toBe(true);
+      expect(parsed.contract_path).toBeUndefined();
+      // No dangling pointer on the wire, and the mailbox contract still got
+      // through: the worker loses the report half, not its inbox.
+      const wire = sentText(blockedExec);
+      expect(wire).not.toContain("Read and follow");
+      expect(wire).toContain("cmuxlayer mailbox contract for");
+      // And the receipt says the lead must relay.
+      expect(parsed.coordination_footer_delivered).toBe(false);
+      expect(parsed.coordination_footer_note).toMatch(/not_wired/);
+      expect(parsed.coordination_footer_note).toMatch(/LEAD must relay/i);
+    } finally {
+      rmSync(blockedBase, { recursive: true, force: true });
+      rmSync(blockedStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("P11b: CMUXLAYER_BOOT_CONTRACT=inline restores the pre-P11b inline contract", async () => {
     process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
     try {
@@ -444,8 +510,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       /delivered_via_contract_file/,
     );
     expect(parsed.coordination_footer_note).not.toMatch(/not_wired/);
-    // The honest cost is stated in the receipt, not just the PR body.
+    // The honest cost is stated in the receipt, not just the PR body -- and
+    // stated at the strength the build actually provides: nothing detects an
+    // unread contract file today, so the note must not claim it does.
     expect(parsed.coordination_footer_note).toMatch(/ignores the pointer/i);
+    expect(parsed.coordination_footer_note).toMatch(/observable in principle/i);
+    // R3: the byte count describes the UNSENT inline rendering, and must say so
+    // rather than reading as a measure of what went on the wire.
+    expect(parsed.coordination_footer_note).toMatch(/NOT what was sent/i);
   });
 
   it("FINDING 2: a relative report_path is rejected BEFORE anything launches", async () => {

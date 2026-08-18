@@ -56,6 +56,7 @@ import {
 } from "./agent-engine.js";
 import {
   COORDINATION_CONTRACT_DELIVERED_NOTE,
+  COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED,
   COORDINATION_FOOTER_NOT_DELIVERED,
   bootContractMode,
   bootContractPointer,
@@ -11423,6 +11424,53 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               result.surface_id,
               result.workspace_id ?? workspace,
             );
+            // AIDEV-NOTE (P11b / #462 item 2): resume used to return NO
+            // contract at all -- no report_path, no done_marker, no contract
+            // file -- so the crash-recovery case this repo exists for was the
+            // one case where a lead could not even SEE where its worker should
+            // report. The contract is derived from agent_id alone, so what is
+            // issued here is byte-identical to what the original spawn issued;
+            // refreshing the file is idempotent and restores it if the channel
+            // dir was reaped between the crash and the resume.
+            //
+            // What is deliberately NOT done: re-injecting the pointer as
+            // keystrokes into a resuming pane. `claude --resume` restores the
+            // prior session, so the original pointer message is already in the
+            // agent's context, and typing into a pane mid-resume is a change to
+            // the most incident-prone path in this repo -- the exact thing this
+            // PR exists to move work OFF. That sliver stays open on #462.
+            const resumeMonitorBoot = ensureMonitorBoot(result.agent_id);
+            const resumeCoordination = issueSpawnCoordination(
+              result.agent_id,
+              args.report_path,
+            );
+            const resumeContract = buildBootContractInjection(
+              result.agent_id,
+              resumeMonitorBoot,
+              resumeCoordination,
+            );
+            result.report_path = resumeCoordination.report_path;
+            result.done_marker = resumeCoordination.done_marker;
+            result.contract_path = resumeContract.contract_path ?? undefined;
+            result.coordination_footer_bytes =
+              coordinationFooterBytes(resumeCoordination);
+            // Provenance, same rule as the spawn path: the file is refreshed,
+            // but nothing was re-delivered to the pane on this call. Saying
+            // `true` here would be the claim this PR's own thesis forbids.
+            result.coordination_footer_delivered = false;
+            result.coordination_footer_note = resumeContract.contract_path
+              ? COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED
+              : COORDINATION_FOOTER_NOT_DELIVERED;
+            try {
+              const patched = stateMgr.updateRecord(result.agent_id, {
+                report_path: resumeCoordination.report_path,
+                done_marker: resumeCoordination.done_marker,
+              });
+              registry.set(result.agent_id, patched);
+            } catch {
+              // Receipt already carries the contract; a registry write failure
+              // must not fail an otherwise-successful resume.
+            }
             const resumed = {
               version: 1,
               type: "agent",

@@ -206,7 +206,26 @@ export function renderBootContractFile(input: BootContractFileInput): string {
     "",
     "## Mailbox",
     "",
-    `Monitor your inbox: ${input.mailbox.monitor_command}`,
+    // AIDEV-NOTE (F5 / ledger #24): `tail -n0 -F` BLOCKS. Run in the
+    // foreground it is a self-deadlock -- the ledger recorded it happening
+    // twice to the same reviewer. Inline, there was no budget to qualify it;
+    // in the file there is, and the file is now the engine's own words under a
+    // pointer that says "Read and follow", which reads MORE imperative than
+    // the old "monitor with", not less. So the qualifier goes here, where it
+    // costs zero wire bytes.
+    //
+    // Deliberately qualified HERE and not in recommendedMonitorCommand: that
+    // function has other callers (receipts, nudges, tool descriptions) whose
+    // consumers expect the bare command, and changing monitor semantics for
+    // all of them inside a boot-delivery PR is the scope creep this lane is
+    // supposed to model against. Those callers are the F5 follow-up (#461).
+    // The canonical command stays a verbatim substring of the line below, so a
+    // consumer matching on it still matches.
+    "Run this in the BACKGROUND -- it blocks, and holding a turn open on it is a",
+    "self-deadlock (ledger #24). Detach it, then return:",
+    "",
+    `    ${input.mailbox.monitor_command} &`,
+    "",
     `After each handled message run: ${input.mailbox.cursor_update_env}=<handled-message-id> ${input.mailbox.cursor_update_command}`,
     "",
   ];
@@ -273,4 +292,13 @@ export function writeBootContractFile(
  * number and concludes something the engine never did.
  */
 export const COORDINATION_CONTRACT_DELIVERED_NOTE =
-  "delivered_via_contract_file: the boot prompt is a one-line pointer at contract_path, which carries the mailbox contract AND report_path/done_marker. The pointer keeps boot delivery on the typed path (under the 500-char chunk threshold). Caveat: an agent that ignores the pointer never reads the contract -- detectable (the file is unread) rather than silent, but not eliminated.";
+  "delivered_via_contract_file: the boot prompt is a one-line pointer at contract_path, which carries the mailbox contract AND report_path/done_marker. The pointer keeps boot delivery under the 500-char chunk threshold, so it is not split. Caveat: an agent that ignores the pointer never reads the contract. That is OBSERVABLE IN PRINCIPLE -- the file is on disk unread, unlike a chunked boot prompt that never submitted -- but NO health or closure path checks it today; nothing here detects it for you. coordination_footer_bytes measures the inline one-line rendering, which is NOT what was sent: the wire carried a ~130-byte pointer and the contract lives in a file of a different size again.";
+
+/**
+ * Resume provenance (#462 item 2). The contract file is refreshed on resume --
+ * idempotent, since both strings derive from agent_id alone -- but no pointer
+ * is re-typed into the resuming pane. Reporting `delivered: true` here would be
+ * the undisclosed non-delivery this lane exists to eliminate.
+ */
+export const COORDINATION_CONTRACT_REFRESHED_NOT_REDELIVERED =
+  "refreshed_not_redelivered: the spawn contract file at contract_path was rewritten on resume (identical bytes -- both strings derive from agent_id alone), and report_path/done_marker are re-issued and re-persisted. The boot POINTER was NOT re-typed into the resuming pane: `--resume` restores the prior session, which already contains it, and typing into a pane mid-resume is a delivery-path change this did not make. If the resumed session did NOT restore its context, the LEAD must point the worker at contract_path.";
