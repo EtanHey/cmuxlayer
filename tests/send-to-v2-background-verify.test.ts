@@ -48,6 +48,7 @@ class FakeAgentSurfaceClient {
   title = "brainlayerClaude";
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
+  readScreenCalls = 0;
   cli: "claude" | "cursor" = "claude";
   requiredReturns = 99;
   /** Model Cursor's follow-ups box that needs a second Return ("enter send now"). */
@@ -190,6 +191,7 @@ class FakeAgentSurfaceClient {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);
     }
+    this.readScreenCalls += 1;
     const tail = this.pendingText.slice(-160);
     const text =
       this.screenOverride ??
@@ -946,6 +948,71 @@ describe("send_to v2 background verify", () => {
       });
       expect(existsSync(ticketDir)).toBe(false);
       expect(filed).toHaveLength(0);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("dedupes surface snapshots across pending deliveries in one verify sweep", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "first pending",
+        press_enter: true,
+      }),
+    );
+    parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "second pending",
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.listDeliveryReceipts()).toHaveLength(2);
+    client.readScreenCalls = 0;
+    await engine.verifyPendingDeliveries();
+    expect(client.readScreenCalls).toBe(1);
+  });
+
+  it("backs off verify reads as the deadline recedes", async () => {
+    let reads = 0;
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryVerifyDeadlineMs: 10_000,
+        deliverySnapshotReader: async () => {
+          reads += 1;
+          return { text: "Claude Code\n> leftover\n" };
+        },
+        deliveryVerifier: async () => ({ outcome: "pending" }),
+      },
+    );
+    try {
+      engine.acceptPendingVerify({
+        delivery_id: "backoff-1",
+        agent_id: "agent-1",
+        text: "backoff pending",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      await engine.verifyPendingDeliveries();
+      expect(reads).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      await engine.verifyPendingDeliveries();
+      expect(reads).toBe(1);
     } finally {
       engine.dispose();
     }

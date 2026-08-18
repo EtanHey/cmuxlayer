@@ -10968,45 +10968,72 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : {}),
       };
     });
-    engine.setDeliveryVerifier(async (receipt: AgentDeliveryReceipt) => {
+    engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
       const agent = engine.getAgentState(receipt.agent_id);
-      if (!agent) {
-        return { outcome: "pending" as const, reason: "target_gone" };
-      }
-      const snapshot = await readParsedSurface(
+      if (!agent) return null;
+      return readParsedSurface(
         agent.surface_id,
         agent.workspace_id ?? undefined,
       );
-      if (!snapshot?.text.trim()) {
-        return {
-          outcome: "pending" as const,
-          reason: "surface_read_unavailable",
-        };
-      }
-      const pending = screenShowsPendingInput(snapshot.text, receipt.text);
-      const queued = screenShowsQueuedAgentInput(snapshot.text, receipt.text);
-      const cursorQueuedFollowup = screenShowsQueuedCursorFollowup(
-        snapshot.text,
-        receipt.text,
-      );
-      const composer = extractComposerInputRegion(snapshot.text, receipt.text);
-      const cli = inferComposerCli(snapshot.text, snapshot.parsed);
-      if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
-        return { outcome: "pending" as const };
-      }
-      const composerCleared = composer !== null && composer.trim() === "";
-      const correlationTail = receipt.text
-        .trim()
-        .slice(-Math.min(80, receipt.text.trim().length));
-      const inTranscript =
-        correlationTail.length > 0 &&
-        normalizeTerminalText(snapshot.text).includes(correlationTail) &&
-        !pending;
-      if (composerCleared || inTranscript) {
-        return { outcome: "delivered" as const, submit_verified: true };
-      }
-      return { outcome: "pending" as const };
     });
+    engine.setDeliveryVerifier(
+      async (receipt: AgentDeliveryReceipt, snapshot) => {
+        const agent = engine.getAgentState(receipt.agent_id);
+        if (!agent) {
+          return { outcome: "pending" as const, reason: "target_gone" };
+        }
+        const resolvedSnapshot =
+          snapshot === undefined
+            ? await readParsedSurface(
+                agent.surface_id,
+                agent.workspace_id ?? undefined,
+              )
+            : snapshot;
+        if (!resolvedSnapshot?.text.trim()) {
+          return {
+            outcome: "pending" as const,
+            reason: "surface_read_unavailable",
+          };
+        }
+        const pending = screenShowsPendingInput(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const queued = screenShowsQueuedAgentInput(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const cursorQueuedFollowup = screenShowsQueuedCursorFollowup(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const composer = extractComposerInputRegion(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const cli = inferComposerCli(
+          resolvedSnapshot.text,
+          resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
+        );
+        if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
+          return { outcome: "pending" as const };
+        }
+        const composerCleared = composer !== null && composer.trim() === "";
+        const correlationTail = receipt.text
+          .trim()
+          .slice(-Math.min(80, receipt.text.trim().length));
+        const inTranscript =
+          correlationTail.length > 0 &&
+          normalizeTerminalText(resolvedSnapshot.text).includes(
+            correlationTail,
+          ) &&
+          !pending;
+        if (composerCleared || inTranscript) {
+          return { outcome: "delivered" as const, submit_verified: true };
+        }
+        return { outcome: "pending" as const };
+      },
+    );
 
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a

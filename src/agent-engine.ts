@@ -230,11 +230,18 @@ export interface AgentDeliveryReceipt {
   ticket_filed?: boolean;
   /** Consecutive verifier observations that the target agent is missing. */
   verify_miss_count?: number;
+  /** Last time background verify actually read the target surface. */
+  verify_last_attempt_at?: string | null;
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
+
+export type DeliveryVerifySnapshot = {
+  text: string;
+  parsed?: unknown;
+};
 
 export type DeliveryVerifyObservation = {
   outcome: "pending" | "delivered" | "failed_confirmed";
@@ -245,7 +252,12 @@ export type DeliveryVerifyObservation = {
 
 type DeliveryVerifier = (
   receipt: AgentDeliveryReceipt,
+  snapshot?: DeliveryVerifySnapshot | null,
 ) => Promise<DeliveryVerifyObservation>;
+
+type DeliverySnapshotReader = (
+  receipt: AgentDeliveryReceipt,
+) => Promise<DeliveryVerifySnapshot | null>;
 
 type DeliveryIssueFiler = (ticket: DeliveryFailureTicket) => Promise<void>;
 
@@ -596,6 +608,8 @@ export interface AgentEngineOptions {
   deliveryIssueFiler?: DeliveryIssueFiler;
   /** Screen/transcript observer for pending deliveries. */
   deliveryVerifier?: DeliveryVerifier;
+  /** Optional per-sweep surface reader so many receipts share one snapshot. */
+  deliverySnapshotReader?: DeliverySnapshotReader;
   /** Base delay for same-surface CLI auto-revive retries. */
   autoReviveBackoffBaseMs?: number;
   /** Deterministic clock and per-class dwell controls for live-halt escalation. */
@@ -1231,6 +1245,7 @@ export class AgentEngine {
   private deliveryReceiptsPath: string;
   private deliverySubmitter: DeliverySubmitter | null = null;
   private deliveryVerifier: DeliveryVerifier | null = null;
+  private deliverySnapshotReader: DeliverySnapshotReader | null = null;
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
   private deliverySubmitTimeoutMs: number;
@@ -1271,6 +1286,7 @@ export class AgentEngine {
     this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
     this.deliveryVerifier = opts?.deliveryVerifier ?? null;
+    this.deliverySnapshotReader = opts?.deliverySnapshotReader ?? null;
     this.autoReviveBackoffBaseMs = Math.max(
       0,
       opts?.autoReviveBackoffBaseMs ?? DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS,
@@ -6182,6 +6198,10 @@ export class AgentEngine {
     this.deliveryVerifier = verifier;
   }
 
+  setDeliverySnapshotReader(reader: DeliverySnapshotReader | null): void {
+    this.deliverySnapshotReader = reader;
+  }
+
   setDeliveryIssueFiler(filer: DeliveryIssueFiler | null): void {
     this.deliveryIssueFiler = filer;
   }
@@ -6468,6 +6488,7 @@ export class AgentEngine {
     if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
     this.deliveryVerifyInFlight = true;
     try {
+      const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
       for (const receipt of this.deliveryReceipts.values()) {
         const watching =
           receipt.delivery_state === "pending_verify" ||
@@ -6479,12 +6500,28 @@ export class AgentEngine {
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
+        const now = Date.now();
+        const timedOut = deadlineApplies && now >= deadlineMs;
+        const skipRead = this.shouldSkipVerifyRead(receipt, now);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
-        if (this.deliveryVerifier) {
+        if (skipRead && !timedOut) continue;
+        if (!skipRead && this.deliveryVerifier) {
+          const agent = this.getAgentState(receipt.agent_id);
+          const snapshotKey = agent?.surface_id ?? receipt.agent_id;
+          let snapshot: DeliveryVerifySnapshot | null | undefined;
+          if (this.deliverySnapshotReader) {
+            if (!snapshots.has(snapshotKey)) {
+              snapshots.set(
+                snapshotKey,
+                await this.deliverySnapshotReader(receipt),
+              );
+            }
+            snapshot = snapshots.get(snapshotKey) ?? null;
+          }
           let timeout: ReturnType<typeof setTimeout> | null = null;
           try {
             observation = await Promise.race([
-              this.deliveryVerifier(receipt),
+              this.deliveryVerifier(receipt, snapshot),
               new Promise<never>((_resolve, reject) => {
                 timeout = setTimeout(
                   () =>
@@ -6505,6 +6542,8 @@ export class AgentEngine {
           } finally {
             if (timeout) clearTimeout(timeout);
           }
+          receipt.verify_last_attempt_at = new Date().toISOString();
+          this.persistDeliveryReceipts();
         }
         if (observation.outcome === "delivered") {
           receipt.delivery_state = "submitted";
@@ -6528,7 +6567,6 @@ export class AgentEngine {
           observation.reason === "target_gone" &&
           (receipt.verify_miss_count ?? 0) >=
             DELIVERY_TARGET_GONE_CONFIRM_MISSES;
-        const timedOut = deadlineApplies && Date.now() >= deadlineMs;
         if (
           observation.outcome === "failed_confirmed" ||
           confirmedGone ||
@@ -6550,6 +6588,36 @@ export class AgentEngine {
     } finally {
       this.deliveryVerifyInFlight = false;
     }
+  }
+
+  private verifyReadIntervalMs(
+    receipt: AgentDeliveryReceipt,
+    now: number,
+  ): number {
+    if (
+      receipt.delivery_state === "queued_followup" ||
+      !receipt.verify_deadline_at
+    ) {
+      const ageMs = Math.max(0, now - Date.parse(receipt.created_at));
+      const minutes = Math.floor(ageMs / 60_000);
+      return Math.min(60_000, 5_000 * 2 ** Math.min(minutes, 3));
+    }
+    const remaining = Math.max(0, Date.parse(receipt.verify_deadline_at) - now);
+    const created = Date.parse(receipt.created_at);
+    const total = Math.max(1, Date.parse(receipt.verify_deadline_at) - created);
+    const remainingRatio = remaining / total;
+    if (remainingRatio > 0.5) return 5_000;
+    if (remainingRatio > 0.2) return 15_000;
+    return 30_000;
+  }
+
+  private shouldSkipVerifyRead(
+    receipt: AgentDeliveryReceipt,
+    now: number,
+  ): boolean {
+    if (!receipt.verify_last_attempt_at) return false;
+    const since = now - Date.parse(receipt.verify_last_attempt_at);
+    return since > 0 && since < this.verifyReadIntervalMs(receipt, now);
   }
 
   private async fileConfirmedFailureTicket(
