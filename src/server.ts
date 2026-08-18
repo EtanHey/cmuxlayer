@@ -586,6 +586,7 @@ const DeliveryOutputShape = {
   submit_attempted: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
   delivery_id: z.string().optional(),
+  duplicate_of: z.string().optional(),
 };
 const DeliveryReceiptOutputSchema = z
   .object({
