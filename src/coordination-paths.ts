@@ -1,4 +1,5 @@
-import { isAbsolute, join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { agentDir, type InboxOpts } from "./inbox.js";
 
 // AIDEV-NOTE (P11 / U10): engine-issued coordination paths. Before this, the
@@ -76,9 +77,12 @@ export function issueCoordinationContract(
  * as it can be while still naming BOTH issued strings verbatim -- naming them
  * is the point, so they are what the budget is spent on.
  *
- * NOT WIRED into the boot prompt today -- see COORDINATION_FOOTER_NOT_DELIVERED
- * and the spawn site. Any receipt that reports this footer's size MUST also
- * report that it was not sent.
+ * P11b: the contract now reaches the worker through the spawn contract FILE,
+ * not this inline footer. This stays as the canonical one-line rendering of the
+ * two issued strings (and as the receipt's byte measure); the inline injection
+ * it was sized for is only reachable via CMUXLAYER_BOOT_CONTRACT=inline, where
+ * it is still NOT sent. Any receipt reporting this size MUST also report how
+ * (or whether) the contract was delivered.
  */
 export function coordinationFooter(contract: CoordinationContract): string {
   return (
@@ -104,7 +108,7 @@ export const BOOT_INJECTION_CHUNK_THRESHOLD = 500;
  * plus a note naming the issue; this does the same.
  */
 export const COORDINATION_FOOTER_NOT_DELIVERED =
-  "not_wired: the shipped mailbox contract already uses ~479 of the 500-char boot injection budget, so injecting this footer would move every spawn onto the chunked paste path (#434/#438). The LEAD must relay report_path and done_marker to the worker until the pointer-file follow-up lands (P11b).";
+  "not_wired: boot delivery fell back to the pre-P11b INLINE mailbox contract (CMUXLAYER_BOOT_CONTRACT=inline, or the contract file could not be written). Inline, the mailbox contract already uses ~479 of the 500-char boot injection budget, so the report contract cannot ride with it without moving every spawn onto the chunked paste path (#434/#438). The LEAD must relay report_path and done_marker to this worker.";
 
 export function coordinationFooterBytes(contract: CoordinationContract): number {
   return Buffer.byteLength(coordinationFooter(contract), "utf8");
@@ -139,3 +143,134 @@ export function resolveClosureState(input: {
     ? "verified"
     : "artifact_missing";
 }
+
+// ---------------------------------------------------------------------------
+// P11b: the boot prompt carries a POINTER, not the contract.
+//
+// The mailbox contract is ~479 characters of instructions riding the most
+// incident-prone delivery path in this repo. At 500 characters
+// (SEND_INPUT_CHUNK_THRESHOLD) boot delivery leaves the typed path for the
+// chunked paste path (#434/#438), so ANY addition -- the #454 report contract
+// included -- was unshippable. That is the fleet's own pointer-brief law
+// (payload in a file, one line on the wire) being violated by the engine.
+//
+// So: the engine WRITES the contract to a file at spawn, and the boot prompt
+// points at it. One extra read before the agent's first turn, and an agent
+// that ignores the pointer never learns its contract -- but a contract file
+// that was never read is OBSERVABLE, whereas a chunked boot prompt that never
+// submitted is silent today. This trades a silent failure for a visible one;
+// it does not eliminate failure.
+// ---------------------------------------------------------------------------
+
+/** Contract file name inside the agent's channel dir (next to inbox.jsonl). */
+export const COORDINATION_CONTRACT_BASENAME = "contract.md";
+
+/**
+ * Absolute path of the spawn contract file. In the channel dir, NOT the
+ * worktree, for the same reason report_path is (U10): it must survive worktree
+ * removal, and the agent's channel dir is the one directory the engine already
+ * guarantees exists for every managed agent.
+ */
+export function coordinationContractPath(
+  agentId: string,
+  opts?: InboxOpts,
+): string {
+  return join(agentDir(agentId, opts), COORDINATION_CONTRACT_BASENAME);
+}
+
+/** Mailbox half of the contract, as the boot prompt used to carry it inline. */
+export interface MailboxContractFields {
+  monitor_command: string;
+  cursor_update_command: string;
+  cursor_update_env: string;
+}
+
+export interface BootContractFileInput {
+  agentId: string;
+  mailbox: MailboxContractFields;
+  /** #454's issued contract. Omitted only where the spawn path issues none. */
+  coordination?: CoordinationContract | null;
+}
+
+/**
+ * The file's body. Every string here is ENGINE-AUTHORED and identical to what
+ * the receipt reports -- the P11 invariant. Prose is kept minimal because the
+ * agent pays for it in context, but unlike the boot prompt this budget is not
+ * bounded by a keystroke threshold.
+ */
+export function renderBootContractFile(input: BootContractFileInput): string {
+  const lines = [
+    `# cmuxlayer contract for ${input.agentId}`,
+    "",
+    "Engine-issued at spawn. Do not re-derive these strings; use them verbatim.",
+    "",
+    "## Mailbox",
+    "",
+    `Monitor your inbox: ${input.mailbox.monitor_command}`,
+    `After each handled message run: ${input.mailbox.cursor_update_env}=<handled-message-id> ${input.mailbox.cursor_update_command}`,
+    "",
+  ];
+  if (input.coordination) {
+    lines.push(
+      "## Report",
+      "",
+      `Write your report to: ${input.coordination.report_path}`,
+      `Its final line must be exactly: ${input.coordination.done_marker}`,
+      "",
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Discriminator kept in the wire line on purpose. Boot injection and launcher
+ * keystrokes land on the same surface, and both the engine's own delivery
+ * bookkeeping and the session-identity stripper need to tell them apart from
+ * the text alone -- a bare `Read and follow <path>` is indistinguishable from a
+ * caller's pointer brief.
+ */
+export const BOOT_CONTRACT_POINTER_PREFIX = "cmuxlayer contract for";
+
+export function bootContractPointer(
+  agentId: string,
+  contractPath: string,
+): string {
+  return `${BOOT_CONTRACT_POINTER_PREFIX} ${agentId}: Read and follow ${contractPath}`;
+}
+
+/**
+ * Escape hatch for the migration step the brief allows. Default is the pointer;
+ * `CMUXLAYER_BOOT_CONTRACT=inline` restores the pre-P11b inline mailbox
+ * contract (which, being ~479 chars, still carries NO report contract -- the
+ * inline mode is the old behaviour exactly, budget collision included).
+ */
+export type BootContractMode = "pointer" | "inline";
+
+export function bootContractMode(
+  env: NodeJS.ProcessEnv = process.env,
+): BootContractMode {
+  return env.CMUXLAYER_BOOT_CONTRACT?.trim().toLowerCase() === "inline"
+    ? "inline"
+    : "pointer";
+}
+
+/** Write the contract file, returning its absolute path and exact contents. */
+export function writeBootContractFile(
+  input: BootContractFileInput,
+  opts?: InboxOpts,
+): { path: string; content: string } {
+  const path = coordinationContractPath(input.agentId, opts);
+  const content = renderBootContractFile(input);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content, "utf8");
+  return { path, content };
+}
+
+/**
+ * Pointer-mode provenance, the counterpart to COORDINATION_FOOTER_NOT_DELIVERED.
+ * Finding 3 again: a receipt that reports the contract's byte cost must also
+ * report HOW it reached the worker, or a lead reads an authoritative-looking
+ * number and concludes something the engine never did.
+ */
+export const COORDINATION_CONTRACT_DELIVERED_NOTE =
+  "delivered_via_contract_file: the boot prompt is a one-line pointer at contract_path, which carries the mailbox contract AND report_path/done_marker. The pointer keeps boot delivery on the typed path (under the 500-char chunk threshold). Caveat: an agent that ignores the pointer never reads the contract -- detectable (the file is unread) rather than silent, but not eliminated.";

@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -28,7 +29,7 @@ function makeExec(): ExecFn {
       const text = String(args[args.length - 1] ?? "");
       if (/Codex/.test(text)) activeCli = "codex";
       if (/Claude/.test(text)) activeCli = "claude";
-      if (text.includes("cmuxlayer mailbox contract")) bootTextSent = true;
+      if (text.includes("cmuxlayer contract for")) bootTextSent = true;
     }
     if (args.includes("list-workspaces")) {
       return {
@@ -216,11 +217,16 @@ describe("spawn monitor boot", () => {
       status: "bootstrapped",
       cursor_update_env: "CMUX_INBOX_MSG_ID",
     });
+    // P11b: the wire carries a POINTER; the concrete mailbox and cursor
+    // commands live in the contract file it points at. Both halves asserted --
+    // a pointer at a file that lacks the commands tells the worker nothing.
     const deliveredText = deliveredInput(exec);
     expect(deliveredText).toContain(parsed.agent_id);
-    expect(deliveredText).toContain(parsed.monitor_boot.monitor_command);
-    expect(deliveredText).toContain(parsed.monitor_boot.cursor_update_command);
-    expect(deliveredText).toContain("CMUX_INBOX_MSG_ID");
+    expect(deliveredText).toContain(parsed.contract_path);
+    const contractFile = readFileSync(parsed.contract_path, "utf8");
+    expect(contractFile).toContain(parsed.monitor_boot.monitor_command);
+    expect(contractFile).toContain(parsed.monitor_boot.cursor_update_command);
+    expect(contractFile).toContain("CMUX_INBOX_MSG_ID");
     expect(monitorAlive(parsed.agent_id, 1_000, { baseDir: inboxDir })).toBe(
       false,
     );

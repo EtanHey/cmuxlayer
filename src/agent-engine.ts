@@ -352,9 +352,11 @@ export interface SpawnAgentResult {
   /** P11/U10: engine-issued coordination contract, returned in the receipt. */
   report_path?: string;
   done_marker?: string;
-  /** Constraint 1: the footer's own byte cost, declared not buried (#424/#425). */
+  /** Constraint 1: the contract's own byte cost, declared not buried (#424/#425). */
   coordination_footer_bytes?: number;
-  /** Provenance: the footer is NOT injected yet, so the bytes were never sent. */
+  /** P11b: file the boot pointer points at, carrying mailbox + report contract. */
+  contract_path?: string;
+  /** Provenance: whether the contract actually reached the worker at boot. */
   coordination_footer_delivered?: boolean;
   coordination_footer_note?: string;
 }

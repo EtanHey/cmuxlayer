@@ -88,7 +88,7 @@ function makeLifecycleExec(initialReadyText: string | (() => string) = "codex> "
       const text = String(args.at(-1) ?? "");
       if (
         text.trim() &&
-        (text.includes("cmuxlayer mailbox contract") || !/Codex\b/.test(text))
+        (text.includes("cmuxlayer contract for") || !/Codex\b/.test(text))
       ) {
         promptPending = true;
       }

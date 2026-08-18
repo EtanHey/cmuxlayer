@@ -55,9 +55,13 @@ import {
   type SpawnAgentParams,
 } from "./agent-engine.js";
 import {
+  COORDINATION_CONTRACT_DELIVERED_NOTE,
   COORDINATION_FOOTER_NOT_DELIVERED,
+  bootContractMode,
+  bootContractPointer,
   issueCoordinationContract,
   coordinationFooterBytes,
+  writeBootContractFile,
   type CoordinationContract,
 } from "./coordination-paths.js";
 import {
@@ -627,6 +631,7 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       report_path: z.string().optional(),
       done_marker: z.string().optional(),
       coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      contract_path: z.string().optional(),
       coordination_footer_delivered: z.boolean().optional(),
       coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
@@ -651,6 +656,7 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       report_path: z.string().optional(),
       done_marker: z.string().optional(),
       coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      contract_path: z.string().optional(),
       coordination_footer_delivered: z.boolean().optional(),
       coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
@@ -3499,6 +3505,45 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): string =>
     `cmuxlayer mailbox contract for ${agentId}: monitor with ${monitorBoot.monitor_command}; ` +
     `after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> ${monitorBoot.cursor_update_command}`;
+
+  // AIDEV-NOTE (P11b): the boot prompt carries a POINTER, not the contract.
+  // Inline, the mailbox contract alone is ~479 chars against a 500-char chunk
+  // threshold, so #454's report contract could not be added without moving
+  // EVERY spawn's boot delivery onto the chunked paste path (#434/#438). The
+  // contract now lives in a file the engine writes at spawn; the wire carries
+  // one short line. See coordination-paths.ts for the honest cost.
+  const buildBootContractInjection = (
+    agentId: string,
+    monitorBoot: MonitorBootResult,
+    coordination: CoordinationContract | null,
+  ): { text: string; contract_path: string | null } => {
+    if (bootContractMode() === "inline") {
+      return { text: mailboxBootContract(agentId, monitorBoot), contract_path: null };
+    }
+    try {
+      const written = writeBootContractFile(
+        {
+          agentId,
+          mailbox: {
+            monitor_command: monitorBoot.monitor_command,
+            cursor_update_command: monitorBoot.cursor_update_command,
+            cursor_update_env: monitorBoot.cursor_update_env,
+          },
+          coordination,
+        },
+        inboxOpts,
+      );
+      return {
+        text: bootContractPointer(agentId, written.path),
+        contract_path: written.path,
+      };
+    } catch {
+      // A contract-file write failure must not fail an otherwise-successful
+      // spawn. Fall back to the pre-P11b inline mailbox contract: the worker
+      // loses the report half (exactly as before P11b), not its mailbox.
+      return { text: mailboxBootContract(agentId, monitorBoot), contract_path: null };
+    }
+  };
 
   // AIDEV-NOTE (P11/U10): the engine issues the coordination contract at spawn,
   // returns it in the receipt, persists it on the record, AND tells the worker
@@ -11264,7 +11309,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           })
           .optional()
           .describe(
-            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. NOTE: the engine does NOT yet tell the worker this path -- the boot-prompt footer is not wired (see coordination_footer_delivered in the receipt), so until then YOU must relay report_path and done_marker to the worker, or every done worker will render closure:\"artifact_missing\". Pass this only to place the report somewhere you already watch (e.g. a collab dir).",
+            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. The engine also WRITES both strings to the spawn contract file (`contract_path`) and points the boot prompt at it, so the worker is told; check `coordination_footer_delivered` -- if false the contract file could not be written and YOU must relay report_path and done_marker, or a done worker renders closure:\"artifact_missing\". Pass this only to place the report somewhere you already watch (e.g. a collab dir).",
           ),
         force_new: z
           .boolean()
@@ -11792,33 +11837,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             result.agent_id,
             args.report_path,
           );
-          // AIDEV-NOTE (P11): the coordination footer is NOT injected here yet,
-          // and that is a measured decision, not an oversight. The mailbox
-          // contract alone is ~479 chars for a real agent id, and
-          // SEND_INPUT_CHUNK_THRESHOLD is 500 -- so appending ANY report
-          // contract pushes the boot injection over the threshold and moves
-          // every spawn's boot delivery from the typed path to the chunked
-          // paste path (measured: 618 chars, 10 failing tests, 4 of them
-          // submit-verification timeouts). That is a change to the most
-          // incident-prone path in this repo (#434/#438), not an additive one.
-          // Landing it needs either a slimmer mailbox contract (#425 measured
-          // that class) or an explicit decision to move boot delivery onto the
-          // chunked route. Until then the contract is still ISSUED, RETURNED,
-          // and PERSISTED, so the consumer is authoritative: a worker that
-          // writes somewhere else now renders as closure "artifact_missing"
-          // (actionable) instead of a silent deadlock.
-          const injectedBootPrompt = mailboxBootContract(
+          // AIDEV-NOTE (P11b): P11 could not deliver this contract -- inline,
+          // the mailbox contract alone was ~479 chars against a 500-char chunk
+          // threshold, so appending the report contract (measured 618 chars)
+          // moved every spawn onto the chunked paste path (#434/#438). The
+          // contract now goes to a file and the wire carries one short line, so
+          // the worker is finally TOLD the same two strings the receipt reports.
+          const bootContract = buildBootContractInjection(
             result.agent_id,
             monitorBoot,
+            coordination,
           );
+          const injectedBootPrompt = bootContract.text;
           result.report_path = coordination.report_path;
           result.done_marker = coordination.done_marker;
-          // Finding 3: never report the footer's size without reporting that it
-          // was not sent -- same shape as the v0.4.42 `paused` provenance fix.
+          // Finding 3: never report the contract's size without reporting how
+          // (or whether) it reached the worker -- the v0.4.42 `paused`
+          // provenance fix, applied to both outcomes of the fallback above.
           result.coordination_footer_bytes =
             coordinationFooterBytes(coordination);
-          result.coordination_footer_delivered = false;
-          result.coordination_footer_note = COORDINATION_FOOTER_NOT_DELIVERED;
+          result.contract_path = bootContract.contract_path ?? undefined;
+          result.coordination_footer_delivered =
+            bootContract.contract_path !== null;
+          result.coordination_footer_note = bootContract.contract_path
+            ? COORDINATION_CONTRACT_DELIVERED_NOTE
+            : COORDINATION_FOOTER_NOT_DELIVERED;
           try {
             const patched = stateMgr.updateRecord(result.agent_id, {
               report_path: coordination.report_path,
@@ -12654,10 +12697,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             );
             launchShellRecoveryBySurface.delete(result.surface_id);
             const monitorBoot = ensureMonitorBoot(result.agent_id);
-            const injectedBootPrompt = mailboxBootContract(
+            // P11b: pointer form here too, so no spawn path keeps the ~479-char
+            // inline contract on the wire. `null` because this batch path never
+            // issued a coordination contract (P11 wired spawn_agent only), so
+            // the file carries the mailbox half alone -- exactly what this path
+            // delivered before, now via the pointer.
+            const injectedBootPrompt = buildBootContractInjection(
               result.agent_id,
               monitorBoot,
-            );
+              null,
+            ).text;
             const spawnedBinding = engine.getAgentState(result.agent_id);
             appendStaleBuildWarning(result);
             let bootPromptDelivery:

@@ -1346,7 +1346,7 @@ describe("tool handler integration", () => {
       newSurface: vi.fn(),
       focusSurface: vi.fn().mockResolvedValue(undefined),
       send: vi.fn().mockImplementation(async (surface: string, text: string) => {
-        if (text.includes("cmuxlayer mailbox contract")) {
+        if (text.includes("cmuxlayer contract for")) {
           pendingBootContracts.add(surface);
         } else {
           launchedSurfaces.add(surface);
@@ -1354,7 +1354,7 @@ describe("tool handler integration", () => {
       }),
       pasteText: vi.fn().mockImplementation(
         async (surface: string, text: string) => {
-          if (text.includes("cmuxlayer mailbox contract")) {
+          if (text.includes("cmuxlayer contract for")) {
             pendingBootContracts.add(surface);
           }
         },
@@ -8482,7 +8482,7 @@ describe("tool handler integration", () => {
           sentTexts.push(text);
           if (
             text.includes("cmuxlayerCodex") &&
-            !text.includes("cmuxlayer mailbox contract")
+            !text.includes("cmuxlayer contract for")
           ) {
             if (launcherSends === 0) {
               delete process.env.REPOGOLEM_ALLOW_MODEL;
@@ -8570,7 +8570,7 @@ describe("tool handler integration", () => {
           sentTexts.filter(
             (text) =>
               text.includes("cmuxlayerCodex") &&
-              !text.includes("cmuxlayer mailbox contract"),
+              !text.includes("cmuxlayer contract for"),
           ),
         ).toEqual([fixture.launcher_command, fixture.launcher_command]);
         expect(sentTexts.filter((text) => text.includes(prompt))).toHaveLength(1);
@@ -8784,7 +8784,7 @@ describe("tool handler integration", () => {
           if (launcherSendAttempts === 1) {
             throw new Error("socket closed before receiving response");
           }
-        } else if (text.includes("cmuxlayer mailbox contract")) {
+        } else if (text.includes("cmuxlayer contract for")) {
           composer += text;
         }
         return { stdout: "{}", stderr: "" };
@@ -8801,7 +8801,7 @@ describe("tool handler integration", () => {
             ? fixture.screen
             : submitted === fixture.launcher_command
               ? "OpenAI Codex\nmodel: gpt-5.6-sol high\n\n›"
-              : submitted?.includes("cmuxlayer mailbox contract")
+              : submitted?.includes("cmuxlayer contract for")
                 ? "OpenAI Codex\nWorking (1s - esc to interrupt)"
               : composer
                 ? `etanheyman ~/Gits/brainlayer [main] $ ${composer}`
@@ -8841,7 +8841,7 @@ describe("tool handler integration", () => {
       );
 
       expect(submittedCommands[0]).toBe(fixture.launcher_command);
-      expect(submittedCommands[1]).toContain("cmuxlayer mailbox contract");
+      expect(submittedCommands[1]).toContain("cmuxlayer contract for");
       expect(submittedCommands).not.toContain(fixture.corrupted_command);
       expect(launcherSendAttempts).toBe(1);
     } finally {
@@ -8955,7 +8955,7 @@ describe("tool handler integration", () => {
             launcherWriteBecameAmbiguous = true;
             throw new Error(fixture.replay.transport_error);
           }
-        } else if (text.includes("cmuxlayer mailbox contract")) {
+        } else if (text.includes("cmuxlayer contract for")) {
           composer += text;
         }
         return { stdout: "{}", stderr: "" };
@@ -8967,7 +8967,7 @@ describe("tool handler integration", () => {
       }
       if (args.includes("read-screen")) {
         let text = fixture.replay.stale_probe_screen;
-        if (submittedCommands.at(-1)?.includes("cmuxlayer mailbox contract")) {
+        if (submittedCommands.at(-1)?.includes("cmuxlayer contract for")) {
           text = "OpenAI Codex\nWorking (1s - esc to interrupt)";
         } else if (submittedCommands.length > 0) {
           text = "OpenAI Codex\nmodel: gpt-5.6-sol xhigh\n\n›";
@@ -9031,7 +9031,7 @@ describe("tool handler integration", () => {
       );
       if (probe === "delayed-visible") {
         expect(submittedCommands[0]).toBe(fixture.launcher_command);
-        expect(submittedCommands[1]).toContain("cmuxlayer mailbox contract");
+        expect(submittedCommands[1]).toContain("cmuxlayer contract for");
       } else {
         expect(submittedCommands).toEqual([]);
       }
@@ -9143,7 +9143,7 @@ describe("tool handler integration", () => {
         sentTexts.push(text);
         if (
           text.includes("cmuxlayerCodex") &&
-          !text.includes("cmuxlayer mailbox contract")
+          !text.includes("cmuxlayer contract for")
         ) {
           launcherSends += 1;
         } else if (text.includes(prompt)) {
@@ -9332,7 +9332,7 @@ describe("tool handler integration", () => {
         sentTexts.push(text);
         if (
           text.includes("cmuxlayerCodex") &&
-          !text.includes("cmuxlayer mailbox contract")
+          !text.includes("cmuxlayer contract for")
         ) {
           launcherSent = true;
         } else if (text.includes(prompt)) {

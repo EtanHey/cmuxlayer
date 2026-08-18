@@ -172,7 +172,7 @@ function makeExec(
       const text = String(args.at(-1) ?? "");
       if (
         text.trim() &&
-        (text.includes("cmuxlayer mailbox contract") ||
+        (text.includes("cmuxlayer contract for") ||
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;

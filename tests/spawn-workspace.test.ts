@@ -274,8 +274,8 @@ describe("workspace spawn tools", () => {
     let launcherSends = 0;
     const normalSend = client.send.getMockImplementation()!;
     client.send.mockImplementation(async (surface: string, text: string) => {
-      if (!text.includes("cmuxlayer mailbox contract")) launcherSends += 1;
-      if (launcherSends === 2 && !text.includes("cmuxlayer mailbox contract")) {
+      if (!text.includes("cmuxlayer contract for")) launcherSends += 1;
+      if (launcherSends === 2 && !text.includes("cmuxlayer contract for")) {
         throw new Error("second launcher send failed");
       }
       await normalSend(surface, text);

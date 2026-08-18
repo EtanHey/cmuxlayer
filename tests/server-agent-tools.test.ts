@@ -3528,7 +3528,7 @@ describe("agent lifecycle tool handlers", () => {
       chunks.every((chunk) => Buffer.byteLength(chunk, "utf-8") <= 16_000),
     ).toBe(true);
     expect(chunks.join("")).toContain(prompt);
-    expect(chunks.join("")).toContain("cmuxlayer mailbox contract");
+    expect(chunks.join("")).toContain("cmuxlayer contract for");
     expect(chunks.join("")).toContain("\n\n");
   });
 
