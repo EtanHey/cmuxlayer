@@ -77,6 +77,7 @@ describe("public tool output schemas over stdio", () => {
           "title",
           "model",
           "agent_type",
+          "duplicate_of",
           "boot_prompt_delivered",
           "boot_prompt_receipt",
           "boot_prompt_bytes",
@@ -101,9 +102,12 @@ describe("public tool output schemas over stdio", () => {
       };
       for (const [toolName, fields] of Object.entries(declaredFields)) {
         const schema = tools.find((tool) => tool.name === toolName)
-          ?.outputSchema as { properties?: Record<string, unknown> } | undefined;
+          ?.outputSchema as
+          { properties?: Record<string, unknown> } | undefined;
         for (const field of fields) {
-          expect(schema?.properties, `${toolName}.${field}`).toHaveProperty(field);
+          expect(schema?.properties, `${toolName}.${field}`).toHaveProperty(
+            field,
+          );
         }
       }
 

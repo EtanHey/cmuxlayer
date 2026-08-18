@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const DEFAULT_TICKET_DIR = join(homedir(), ".cmuxlayer", "tickets");
 const DEFAULT_REPO = "EtanHey/cmuxlayer";
+export const DELIVERY_TICKET_OCCURRENCE_CAP = 10;
 
 export interface DeliveryFailureTicket {
   signature: string;
@@ -55,7 +56,9 @@ export function writeDeliveryFailureTicket(
     ? {
         ...existing,
         occurrence_count: existing.occurrence_count + 1,
-        occurrences: [...existing.occurrences, ticket],
+        occurrences: [...existing.occurrences, ticket].slice(
+          -DELIVERY_TICKET_OCCURRENCE_CAP,
+        ),
       }
     : {
         signature: ticket.signature,
@@ -81,7 +84,7 @@ export async function fileDeliveryFailureGithubIssue(
   const run =
     opts?.runner ??
     (async (file, args) => execFileAsync(file, args, { timeout: 15_000 }));
-  const marker = `cmuxlayer-delivery-failure:${ticket.signature}`;
+  const marker = `cmuxlayer-delivery-failure-${ticket.signature}`;
   const title = ticketTitle(ticket);
   const body = [
     marker,

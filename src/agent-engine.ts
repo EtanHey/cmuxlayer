@@ -230,11 +230,18 @@ export interface AgentDeliveryReceipt {
   ticket_filed?: boolean;
   /** Consecutive verifier observations that the target agent is missing. */
   verify_miss_count?: number;
+  /** Last time background verify actually read the target surface. */
+  verify_last_attempt_at?: string | null;
 }
 
 export const DEFAULT_DELIVERY_VERIFY_DEADLINE_MS = 10 * 60 * 1000;
 export const DELIVERY_TARGET_GONE_CONFIRM_MISSES = 3;
 const DELIVERY_WAIT_POLL_MS = 100;
+
+export type DeliveryVerifySnapshot = {
+  text: string;
+  parsed?: unknown;
+};
 
 export type DeliveryVerifyObservation = {
   outcome: "pending" | "delivered" | "failed_confirmed";
@@ -245,7 +252,12 @@ export type DeliveryVerifyObservation = {
 
 type DeliveryVerifier = (
   receipt: AgentDeliveryReceipt,
+  snapshot?: DeliveryVerifySnapshot | null,
 ) => Promise<DeliveryVerifyObservation>;
+
+type DeliverySnapshotReader = (
+  receipt: AgentDeliveryReceipt,
+) => Promise<DeliveryVerifySnapshot | null>;
 
 type DeliveryIssueFiler = (ticket: DeliveryFailureTicket) => Promise<void>;
 
@@ -582,6 +594,8 @@ export interface AgentEngineOptions {
   fleetWorkingNoProgressTimeoutMs?: number;
   /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
   deliverySubmitTimeoutMs?: number;
+  /** Bound one background verify observation so a hung reader cannot wedge later sweeps. */
+  deliveryVerifyTimeoutMs?: number;
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
   /**
@@ -594,6 +608,8 @@ export interface AgentEngineOptions {
   deliveryIssueFiler?: DeliveryIssueFiler;
   /** Screen/transcript observer for pending deliveries. */
   deliveryVerifier?: DeliveryVerifier;
+  /** Optional per-sweep surface reader so many receipts share one snapshot. */
+  deliverySnapshotReader?: DeliverySnapshotReader;
   /** Base delay for same-surface CLI auto-revive retries. */
   autoReviveBackoffBaseMs?: number;
   /** Deterministic clock and per-class dwell controls for live-halt escalation. */
@@ -1229,9 +1245,11 @@ export class AgentEngine {
   private deliveryReceiptsPath: string;
   private deliverySubmitter: DeliverySubmitter | null = null;
   private deliveryVerifier: DeliveryVerifier | null = null;
+  private deliverySnapshotReader: DeliverySnapshotReader | null = null;
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
   private deliverySubmitTimeoutMs: number;
+  private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
   private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
@@ -1257,6 +1275,10 @@ export class AgentEngine {
       1,
       opts?.deliverySubmitTimeoutMs ?? 30_000,
     );
+    this.deliveryVerifyTimeoutMs = Math.max(
+      1,
+      opts?.deliveryVerifyTimeoutMs ?? this.deliverySubmitTimeoutMs,
+    );
     this.deliveryVerifyDeadlineMs = Math.max(
       1,
       opts?.deliveryVerifyDeadlineMs ?? DEFAULT_DELIVERY_VERIFY_DEADLINE_MS,
@@ -1264,6 +1286,7 @@ export class AgentEngine {
     this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
     this.deliveryVerifier = opts?.deliveryVerifier ?? null;
+    this.deliverySnapshotReader = opts?.deliverySnapshotReader ?? null;
     this.autoReviveBackoffBaseMs = Math.max(
       0,
       opts?.autoReviveBackoffBaseMs ?? DEFAULT_AUTO_REVIVE_BACKOFF_BASE_MS,
@@ -6175,6 +6198,10 @@ export class AgentEngine {
     this.deliveryVerifier = verifier;
   }
 
+  setDeliverySnapshotReader(reader: DeliverySnapshotReader | null): void {
+    this.deliverySnapshotReader = reader;
+  }
+
   setDeliveryIssueFiler(filer: DeliveryIssueFiler | null): void {
     this.deliveryIssueFiler = filer;
   }
@@ -6255,23 +6282,31 @@ export class AgentEngine {
   }
 
   queueDelivery(input: {
+    delivery_id?: string;
     agent_id: string;
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
   }): AgentDeliveryReceipt {
+    const existing = input.delivery_id
+      ? this.deliveryReceipts.get(input.delivery_id)
+      : undefined;
     const receipt: AgentDeliveryReceipt = {
-      delivery_id: randomUUID(),
-      ...input,
+      delivery_id: input.delivery_id ?? existing?.delivery_id ?? randomUUID(),
+      agent_id: input.agent_id,
+      text: input.text,
+      press_enter: input.press_enter,
+      source_event: input.source_event,
       delivery_state: "queued",
       terminal: false,
-      created_at: new Date().toISOString(),
+      created_at: existing?.created_at ?? new Date().toISOString(),
       resolved_at: null,
-      retry_count: 0,
+      retry_count: existing?.retry_count ?? 0,
       submit_verified: null,
       error: null,
       submission_started_at: null,
       next_attempt_at: null,
+      verify_deadline_at: null,
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -6295,21 +6330,24 @@ export class AgentEngine {
     delivery_state?: "queued" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
+    const existing = this.deliveryReceipts.get(input.delivery_id);
+    const queuedFollowup =
+      (input.delivery_state ?? "queued") === "queued_followup";
     const receipt: AgentDeliveryReceipt = {
       ...input,
       delivery_state: input.delivery_state ?? "queued",
       terminal: false,
-      created_at: acceptedAt,
+      created_at: existing?.created_at ?? acceptedAt,
       resolved_at: null,
       submit_verified: null,
       error: null,
-      submission_started_at: acceptedAt,
+      submission_started_at: existing?.submission_started_at ?? acceptedAt,
       next_attempt_at: null,
       composer_accepted: true,
-      verify_deadline_at:
-        (input.delivery_state ?? "queued") === "queued_followup"
-          ? null
-          : new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString(),
+      verify_deadline_at: queuedFollowup
+        ? null
+        : (existing?.verify_deadline_at ??
+          new Date(Date.now() + this.deliveryVerifyDeadlineMs).toISOString()),
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
     try {
@@ -6408,7 +6446,7 @@ export class AgentEngine {
   async waitForDelivery(
     deliveryId: string,
     timeoutMs: number,
-  ): Promise<AgentDeliveryReceipt> {
+  ): Promise<AgentDeliveryReceipt & { timed_out?: boolean }> {
     const start = Date.now();
     const existing = this.getDeliveryReceipt(deliveryId);
     if (!existing) {
@@ -6417,39 +6455,39 @@ export class AgentEngine {
     if (existing.terminal) {
       return existing;
     }
-    return new Promise<AgentDeliveryReceipt>((resolve, reject) => {
-      const finish = (receipt: AgentDeliveryReceipt) => {
-        clearInterval(timer);
-        resolve(receipt);
-      };
-      const timer = setInterval(() => {
-        const elapsed = Date.now() - start;
-        const current = this.getDeliveryReceipt(deliveryId);
-        if (!current) {
+    return new Promise<AgentDeliveryReceipt & { timed_out?: boolean }>(
+      (resolve, reject) => {
+        const finish = (
+          receipt: AgentDeliveryReceipt & { timed_out?: boolean },
+        ) => {
           clearInterval(timer);
-          reject(new Error(`Delivery not found: ${deliveryId}`));
-          return;
-        }
-        if (current.terminal) {
-          finish(current);
-          return;
-        }
-        if (elapsed >= timeoutMs) {
-          clearInterval(timer);
-          reject(
-            new Error(
-              `Timed out after ${timeoutMs}ms waiting for delivery ${deliveryId}`,
-            ),
-          );
-        }
-      }, DELIVERY_WAIT_POLL_MS);
-    });
+          resolve(receipt);
+        };
+        const timer = setInterval(() => {
+          const elapsed = Date.now() - start;
+          const current = this.getDeliveryReceipt(deliveryId);
+          if (!current) {
+            clearInterval(timer);
+            reject(new Error(`Delivery not found: ${deliveryId}`));
+            return;
+          }
+          if (current.terminal) {
+            finish(current);
+            return;
+          }
+          if (elapsed >= timeoutMs) {
+            finish({ ...current, timed_out: true });
+          }
+        }, DELIVERY_WAIT_POLL_MS);
+      },
+    );
   }
 
   async verifyPendingDeliveries(): Promise<void> {
     if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
     this.deliveryVerifyInFlight = true;
     try {
+      const snapshots = new Map<string, DeliveryVerifySnapshot | null>();
       for (const receipt of this.deliveryReceipts.values()) {
         const watching =
           receipt.delivery_state === "pending_verify" ||
@@ -6461,16 +6499,50 @@ export class AgentEngine {
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
+        const now = Date.now();
+        const timedOut = deadlineApplies && now >= deadlineMs;
+        const skipRead = this.shouldSkipVerifyRead(receipt, now);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
-        if (this.deliveryVerifier) {
+        if (skipRead && !timedOut) continue;
+        if (!skipRead && this.deliveryVerifier) {
+          const agent = this.getAgentState(receipt.agent_id);
+          const snapshotKey = agent?.surface_id ?? receipt.agent_id;
+          let snapshot: DeliveryVerifySnapshot | null | undefined;
+          if (this.deliverySnapshotReader) {
+            if (!snapshots.has(snapshotKey)) {
+              snapshots.set(
+                snapshotKey,
+                await this.deliverySnapshotReader(receipt),
+              );
+            }
+            snapshot = snapshots.get(snapshotKey) ?? null;
+          }
+          let timeout: ReturnType<typeof setTimeout> | null = null;
           try {
-            observation = await this.deliveryVerifier(receipt);
+            observation = await Promise.race([
+              this.deliveryVerifier(receipt, snapshot),
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `Delivery verify timed out after ${this.deliveryVerifyTimeoutMs}ms`,
+                      ),
+                    ),
+                  this.deliveryVerifyTimeoutMs,
+                );
+              }),
+            ]);
           } catch (error) {
             observation = {
               outcome: "pending",
               reason: error instanceof Error ? error.message : String(error),
             };
+          } finally {
+            if (timeout) clearTimeout(timeout);
           }
+          receipt.verify_last_attempt_at = new Date().toISOString();
+          this.persistDeliveryReceipts();
         }
         if (observation.outcome === "delivered") {
           receipt.delivery_state = "submitted";
@@ -6494,7 +6566,6 @@ export class AgentEngine {
           observation.reason === "target_gone" &&
           (receipt.verify_miss_count ?? 0) >=
             DELIVERY_TARGET_GONE_CONFIRM_MISSES;
-        const timedOut = deadlineApplies && Date.now() >= deadlineMs;
         if (
           observation.outcome === "failed_confirmed" ||
           confirmedGone ||
@@ -6516,6 +6587,36 @@ export class AgentEngine {
     } finally {
       this.deliveryVerifyInFlight = false;
     }
+  }
+
+  private verifyReadIntervalMs(
+    receipt: AgentDeliveryReceipt,
+    now: number,
+  ): number {
+    if (
+      receipt.delivery_state === "queued_followup" ||
+      !receipt.verify_deadline_at
+    ) {
+      const ageMs = Math.max(0, now - Date.parse(receipt.created_at));
+      const minutes = Math.floor(ageMs / 60_000);
+      return Math.min(60_000, 5_000 * 2 ** Math.min(minutes, 3));
+    }
+    const remaining = Math.max(0, Date.parse(receipt.verify_deadline_at) - now);
+    const created = Date.parse(receipt.created_at);
+    const total = Math.max(1, Date.parse(receipt.verify_deadline_at) - created);
+    const remainingRatio = remaining / total;
+    if (remainingRatio > 0.5) return 5_000;
+    if (remainingRatio > 0.2) return 15_000;
+    return 30_000;
+  }
+
+  private shouldSkipVerifyRead(
+    receipt: AgentDeliveryReceipt,
+    now: number,
+  ): boolean {
+    if (!receipt.verify_last_attempt_at) return false;
+    const since = now - Date.parse(receipt.verify_last_attempt_at);
+    return since > 0 && since < this.verifyReadIntervalMs(receipt, now);
   }
 
   private async fileConfirmedFailureTicket(
@@ -7816,11 +7917,7 @@ export class AgentEngine {
   markObservedPause(agentId: string, paused: boolean): AgentRecord | null {
     const agent = this.getAgentState(agentId);
     if (!agent) return null;
-    return this.persistPausedState(
-      agent,
-      paused,
-      new Date().toISOString(),
-    );
+    return this.persistPausedState(agent, paused, new Date().toISOString());
   }
 
   markAgentWorking(agentId: string): AgentRecord | null {

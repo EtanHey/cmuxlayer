@@ -48,6 +48,7 @@ class FakeAgentSurfaceClient {
   title = "brainlayerClaude";
   readonly sendCalls: string[] = [];
   readonly sendKeyCalls: string[] = [];
+  readScreenCalls = 0;
   cli: "claude" | "cursor" = "claude";
   requiredReturns = 99;
   /** Model Cursor's follow-ups box that needs a second Return ("enter send now"). */
@@ -144,9 +145,14 @@ class FakeAgentSurfaceClient {
     };
   }
 
+  sendGate: Promise<void> | null = null;
+
   async send(surface: string, text: string) {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);
+    }
+    if (this.sendGate) {
+      await this.sendGate;
     }
     this.sendCalls.push(text);
     this.pendingText += text;
@@ -185,6 +191,7 @@ class FakeAgentSurfaceClient {
     if (surface !== this.surface) {
       throw new Error(`Unknown surface: ${surface}`);
     }
+    this.readScreenCalls += 1;
     const tail = this.pendingText.slice(-160);
     const text =
       this.screenOverride ??
@@ -465,6 +472,74 @@ describe("send_to v2 background verify", () => {
     });
   });
 
+  it("registers the delivery before typing so concurrent identical sends return duplicate_of", async () => {
+    const client = new FakeAgentSurfaceClient();
+    let releaseSend!: () => void;
+    client.sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const args = {
+      agent_id: "agent-1",
+      text: "race me once",
+      press_enter: true,
+    };
+    const firstPromise = server._registeredTools.send_to.handler(
+      args,
+      {} as any,
+    );
+    for (let i = 0; i < 30; i++) {
+      await Promise.resolve();
+    }
+    const engine = server._registeredTools.interact._engine;
+    const inFlight = engine.listDeliveryReceipts();
+    expect(inFlight).toEqual([
+      expect.objectContaining({
+        text: "race me once",
+        delivery_state: "pending_verify",
+        terminal: false,
+      }),
+    ]);
+    expect(client.sendCalls).toEqual([]);
+
+    const second = parseResult(
+      await server._registeredTools.send_to.handler(args, {} as any),
+    );
+    releaseSend();
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    const first = parseResult(await firstPromise);
+
+    expect(second.duplicate_of).toBe(inFlight[0].delivery_id);
+    expect(second.delivery_id).toBe(first.delivery_id);
+    expect(client.sendCalls).toEqual(["race me once"]);
+  });
+
+  it("stores sanitized text on the delivery receipt so verify matches the typed payload", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const raw = "hello\x07\x1b[31mworld";
+    const sanitized = "helloworld";
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: raw,
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+      text: sanitized,
+    });
+    expect(client.sendCalls.join("")).toBe(sanitized);
+  });
+
   it("returns the existing delivery_id with duplicate_of instead of typing again", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);
@@ -591,6 +666,46 @@ describe("send_to v2 background verify", () => {
 
     expect(readdirSync(ticketDir)).toHaveLength(1);
     expect(filed).toHaveLength(1);
+  });
+
+  it("returns a nonterminal wait_for delivery receipt with timed_out instead of rejecting", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "still waiting",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("pending_verify");
+
+    const waitPromise = server._registeredTools.wait_for.handler(
+      { delivery_id: sent.delivery_id, timeout_ms: 200 },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(300);
+    const waited = await waitPromise;
+    const parsed = parseResult(waited);
+
+    expect(waited.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      delivery_id: sent.delivery_id,
+      delivery_state: "pending_verify",
+      terminal: false,
+      timed_out: true,
+    });
+    expect(
+      server._registeredTools.interact._engine.getDeliveryReceipt(
+        sent.delivery_id,
+      ),
+    ).toMatchObject({
+      delivery_state: "pending_verify",
+      terminal: false,
+    });
   });
 
   it("lets wait_for accept a delivery_id and return the terminal receipt", async () => {
@@ -895,6 +1010,125 @@ describe("send_to v2 background verify", () => {
       });
       expect(existsSync(ticketDir)).toBe(false);
       expect(filed).toHaveLength(0);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("dedupes surface snapshots across pending deliveries in one verify sweep", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "first pending",
+        press_enter: true,
+      }),
+    );
+    parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "second pending",
+        press_enter: true,
+      }),
+    );
+
+    const engine = server._registeredTools.interact._engine;
+    expect(engine.listDeliveryReceipts()).toHaveLength(2);
+    client.readScreenCalls = 0;
+    await engine.verifyPendingDeliveries();
+    expect(client.readScreenCalls).toBe(1);
+  });
+
+  it("backs off verify reads as the deadline recedes", async () => {
+    let reads = 0;
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryVerifyDeadlineMs: 10_000,
+        deliverySnapshotReader: async () => {
+          reads += 1;
+          return { text: "Claude Code\n> leftover\n" };
+        },
+        deliveryVerifier: async () => ({ outcome: "pending" }),
+      },
+    );
+    try {
+      engine.acceptPendingVerify({
+        delivery_id: "backoff-1",
+        agent_id: "agent-1",
+        text: "backoff pending",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      await engine.verifyPendingDeliveries();
+      expect(reads).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      await engine.verifyPendingDeliveries();
+      expect(reads).toBe(1);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it("times out a hung delivery verifier so later sweeps can still run", async () => {
+    let calls = 0;
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryVerifyTimeoutMs: 50,
+        deliveryVerifier: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return new Promise(() => {});
+          }
+          return { outcome: "delivered", submit_verified: true };
+        },
+      },
+    );
+    try {
+      engine.acceptPendingVerify({
+        delivery_id: "hung-1",
+        agent_id: "agent-1",
+        text: "hangs the verifier",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      let settled = false;
+      const first = engine.verifyPendingDeliveries().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await first;
+      expect(settled).toBe(true);
+      expect(engine.getDeliveryReceipt("hung-1")).toMatchObject({
+        delivery_state: "pending_verify",
+        terminal: false,
+      });
+
+      await engine.verifyPendingDeliveries();
+      expect(calls).toBe(2);
+      expect(engine.getDeliveryReceipt("hung-1")).toMatchObject({
+        delivery_id: "hung-1",
+        delivery_state: "submitted",
+        terminal: true,
+        submit_verified: true,
+      });
     } finally {
       engine.dispose();
     }

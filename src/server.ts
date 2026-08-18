@@ -586,6 +586,7 @@ const DeliveryOutputShape = {
   submit_attempted: z.boolean().optional(),
   submit_verified: z.boolean().nullable().optional(),
   delivery_id: z.string().optional(),
+  duplicate_of: z.string().optional(),
 };
 const DeliveryReceiptOutputSchema = z
   .object({
@@ -663,6 +664,10 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       agent_id: z.string().optional(),
       results: z.array(z.record(z.unknown())).optional(),
       watch: z.record(z.unknown()).optional(),
+      delivery_id: z.string().optional(),
+      delivery_state: z.string().optional(),
+      terminal: z.boolean().optional(),
+      timed_out: z.boolean().optional(),
     })
     .passthrough(),
   control_health: z
@@ -10968,45 +10973,72 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : {}),
       };
     });
-    engine.setDeliveryVerifier(async (receipt: AgentDeliveryReceipt) => {
+    engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
       const agent = engine.getAgentState(receipt.agent_id);
-      if (!agent) {
-        return { outcome: "pending" as const, reason: "target_gone" };
-      }
-      const snapshot = await readParsedSurface(
+      if (!agent) return null;
+      return readParsedSurface(
         agent.surface_id,
         agent.workspace_id ?? undefined,
       );
-      if (!snapshot?.text.trim()) {
-        return {
-          outcome: "pending" as const,
-          reason: "surface_read_unavailable",
-        };
-      }
-      const pending = screenShowsPendingInput(snapshot.text, receipt.text);
-      const queued = screenShowsQueuedAgentInput(snapshot.text, receipt.text);
-      const cursorQueuedFollowup = screenShowsQueuedCursorFollowup(
-        snapshot.text,
-        receipt.text,
-      );
-      const composer = extractComposerInputRegion(snapshot.text, receipt.text);
-      const cli = inferComposerCli(snapshot.text, snapshot.parsed);
-      if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
-        return { outcome: "pending" as const };
-      }
-      const composerCleared = composer !== null && composer.trim() === "";
-      const correlationTail = receipt.text
-        .trim()
-        .slice(-Math.min(80, receipt.text.trim().length));
-      const inTranscript =
-        correlationTail.length > 0 &&
-        normalizeTerminalText(snapshot.text).includes(correlationTail) &&
-        !pending;
-      if (composerCleared || inTranscript) {
-        return { outcome: "delivered" as const, submit_verified: true };
-      }
-      return { outcome: "pending" as const };
     });
+    engine.setDeliveryVerifier(
+      async (receipt: AgentDeliveryReceipt, snapshot) => {
+        const agent = engine.getAgentState(receipt.agent_id);
+        if (!agent) {
+          return { outcome: "pending" as const, reason: "target_gone" };
+        }
+        const resolvedSnapshot =
+          snapshot === undefined
+            ? await readParsedSurface(
+                agent.surface_id,
+                agent.workspace_id ?? undefined,
+              )
+            : snapshot;
+        if (!resolvedSnapshot?.text.trim()) {
+          return {
+            outcome: "pending" as const,
+            reason: "surface_read_unavailable",
+          };
+        }
+        const pending = screenShowsPendingInput(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const queued = screenShowsQueuedAgentInput(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const cursorQueuedFollowup = screenShowsQueuedCursorFollowup(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const composer = extractComposerInputRegion(
+          resolvedSnapshot.text,
+          receipt.text,
+        );
+        const cli = inferComposerCli(
+          resolvedSnapshot.text,
+          resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
+        );
+        if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
+          return { outcome: "pending" as const };
+        }
+        const composerCleared = composer !== null && composer.trim() === "";
+        const correlationTail = receipt.text
+          .trim()
+          .slice(-Math.min(80, receipt.text.trim().length));
+        const inTranscript =
+          correlationTail.length > 0 &&
+          normalizeTerminalText(resolvedSnapshot.text).includes(
+            correlationTail,
+          ) &&
+          !pending;
+        if (composerCleared || inTranscript) {
+          return { outcome: "delivered" as const, submit_verified: true };
+        }
+        return { outcome: "pending" as const };
+      },
+    );
 
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a
@@ -12870,6 +12902,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               terminal: receipt.terminal,
               submit_verified: receipt.submit_verified,
               agent_id: receipt.agent_id,
+              ...(receipt.timed_out ? { timed_out: true } : {}),
             };
             return okFormatted(formatOk("wait_for", data), data);
           }
@@ -14480,6 +14513,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.text === undefined) {
             throw new Error("send_to mode=agent requires text");
           }
+          args.text = sanitizeTerminalInput(args.text);
           assertInlineInputAllowed({
             tool: "send_to",
             arg: "text",
@@ -14660,9 +14694,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 continue;
               }
               const deliveryId = randomUUID();
+              engine.acceptPendingVerify({
+                delivery_id: deliveryId,
+                agent_id: agent.agent_id,
+                text: args.text,
+                press_enter: args.press_enter,
+                source_event: "send_to",
+                retry_count: 0,
+              });
               const livePaused = await observePausedTarget(agent);
               if (livePaused.paused) {
                 const queued = engine.queueDelivery({
+                  delivery_id: deliveryId,
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -14686,6 +14729,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               }
               if (!args.allow_busy && agent.state === "working") {
                 const queued = engine.queueDelivery({
+                  delivery_id: deliveryId,
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
@@ -14886,9 +14930,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
+          const deliveryId = randomUUID();
+          engine.acceptPendingVerify({
+            delivery_id: deliveryId,
+            agent_id: agentId,
+            text: args.text,
+            press_enter: args.press_enter,
+            source_event: "send_to",
+            retry_count: 0,
+          });
           const livePaused = await observePausedTarget(targetAgent);
           if (livePaused.paused) {
             const receipt = engine.queueDelivery({
+              delivery_id: deliveryId,
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
@@ -14914,6 +14968,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           if (!args.allow_busy && targetAgent?.state === "working") {
             const receipt = engine.queueDelivery({
+              delivery_id: deliveryId,
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
@@ -14936,7 +14991,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               data,
             );
           }
-          const deliveryId = randomUUID();
           let delivery: Awaited<ReturnType<typeof deliverAgentInput>>;
           try {
             delivery = await deliverAgentInput({
