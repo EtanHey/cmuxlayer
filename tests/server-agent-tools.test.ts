@@ -15220,3 +15220,244 @@ describe("auto-focus discipline (focus target before split, restore after render
     expect(restorePrior).toBeGreaterThan(lastReadScreenIdx(calls));
   });
 });
+
+// AIDEV-NOTE (P11 / lane brief): the S3 regression test is the non-negotiable
+// test of this lane. It reproduces the 2026-08-17 deadlock mechanically: a lead
+// brief that names one report path while the engine issued another. Before P11
+// the prose heuristic won and the consumer verified the WRONG file.
+describe("P11 engine-issued coordination paths", () => {
+  beforeEach(() => {
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+
+  it("S3 REGRESSION: engine-issued contract beats a brief naming a different path", async () => {
+    const goalPath = join(TEST_DIR, "p11-s3-goal.md");
+    const briefReportPath = join(TEST_DIR, "p11-brief-invented-report.md");
+    const engineReportPath = join(TEST_DIR, "p11-engine-issued-report.md");
+
+    // The lead's brief invents its own path + marker, exactly as briefs do today.
+    writeFileSync(
+      goalPath,
+      [
+        "# Lane brief",
+        "",
+        "Write the report to:",
+        "",
+        `\`${briefReportPath}\``,
+        "",
+        "The final report line must be exactly:",
+        "",
+        "`DONE_BRIEF_INVENTED`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    // The worker honored the ENGINE-issued contract it was told at boot.
+    writeFileSync(
+      engineReportPath,
+      "Status: COMPLETE\nDONE_P11_S3\n",
+      "utf8",
+    );
+
+    const server = createLifecycleServer(makeLifecycleExec());
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-p11-s3";
+    const record = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+      report_path: engineReportPath,
+      done_marker: "DONE_P11_S3",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(agentId, record);
+
+    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    // The engine-issued pair wins; the brief's invented pair is ignored.
+    expect(parsed.harvestability).toMatchObject({
+      report_path: engineReportPath,
+      done_marker: "DONE_P11_S3",
+      closure_artifact_verified: true,
+      closure: "verified",
+    });
+    expect(
+      (parsed.harvestability as { report_path: string }).report_path,
+    ).not.toBe(briefReportPath);
+  });
+
+  it("falls back to the prose heuristic for legacy records with no engine-issued contract", async () => {
+    const goalPath = join(TEST_DIR, "p11-legacy-goal.md");
+    const reportPath = join(TEST_DIR, "p11-legacy-report.md");
+    writeFileSync(
+      goalPath,
+      [
+        "# Legacy brief",
+        "",
+        "Write the report to:",
+        "",
+        `\`${reportPath}\``,
+        "",
+        "Final line:",
+        "",
+        "`DONE_LEGACY_PROSE`",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_LEGACY_PROSE\n", "utf8");
+
+    const server = createLifecycleServer(makeLifecycleExec());
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-p11-legacy";
+    const record = makeServerAgentRecord({
+      agent_id: agentId,
+      goal_file: goalPath,
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(agentId, record);
+
+    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    expect(parsed.harvestability).toMatchObject({
+      report_path: reportPath,
+      done_marker: "DONE_LEGACY_PROSE",
+      closure_artifact_verified: true,
+      closure: "verified",
+    });
+  });
+
+  it("done child with no written report reads artifact_missing, not pending", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const getState = registeredTestTool(server, "get_agent_state");
+    const engine = testLifecycleEngine(server);
+    const agentId = "codex-golems-p11-deadlocked";
+    const record = makeServerAgentRecord({
+      agent_id: agentId,
+      state: "done",
+      report_path: join(TEST_DIR, "p11-never-written.md"),
+      done_marker: "DONE_P11_DEADLOCK",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(agentId, record);
+
+    const parsed = parseToolResult(await getState.handler({ agent_id: agentId }, {}));
+    expect(parsed.harvestability).toMatchObject({
+      closure: "artifact_missing",
+      closure_artifact_verified: false,
+    });
+    expect(
+      (parsed.harvestability as { issue_codes: string[] }).issue_codes,
+    ).toContain("report_missing");
+  });
+});
+
+// AIDEV-NOTE (P11 Constraint 3): skillcreator's falsifier, from the #727 lane.
+// An implementor sat DONE with an open PR and no marker while its lead waited
+// on that marker. Under a bare boolean that pane and a busy pane were BOTH
+// `false`. These tests pin that they are distinguishable at DEFAULT detail.
+describe("P11 closure state at default list_agents detail", () => {
+  beforeEach(() => {
+    mkdirSync(TEST_DIR, { recursive: true });
+  });
+
+  async function listDefault(server: unknown) {
+    const list = registeredTestTool(server, "list_agents");
+    const parsed = parseToolResult(await list.handler({}, {}));
+    return (parsed.agents ?? []) as Array<Record<string, unknown>>;
+  }
+
+  it("a deadlocked child and a working child are DISTINGUISHABLE without detail:full", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = testLifecycleEngine(server);
+
+    const deadlocked = makeServerAgentRecord({
+      agent_id: "codex-golems-p11-done-no-artifact",
+      state: "done",
+      report_path: join(TEST_DIR, "p11-list-never-written.md"),
+      done_marker: "DONE_P11_LIST_DEADLOCK",
+    });
+    const working = makeServerAgentRecord({
+      agent_id: "codex-golems-p11-still-working",
+      state: "working",
+      task_done_detected_at: null,
+      report_path: join(TEST_DIR, "p11-list-working.md"),
+      done_marker: "DONE_P11_LIST_WORKING",
+    });
+    for (const record of [deadlocked, working]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+
+    const agents = await listDefault(server);
+    const byId = new Map(agents.map((a) => [a.agent_id as string, a]));
+    expect(byId.get(deadlocked.agent_id)?.closure).toBe("artifact_missing");
+    expect(byId.get(working.agent_id)?.closure).toBe("pending");
+    // The whole point of Constraint 3.
+    expect(byId.get(deadlocked.agent_id)?.closure).not.toBe(
+      byId.get(working.agent_id)?.closure,
+    );
+  });
+
+  it("a child that wrote its report reads verified at default detail", async () => {
+    const reportPath = join(TEST_DIR, "p11-list-verified.md");
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_P11_LIST_OK\n", "utf8");
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = testLifecycleEngine(server);
+    const record = makeServerAgentRecord({
+      agent_id: "codex-golems-p11-list-verified",
+      state: "done",
+      report_path: reportPath,
+      done_marker: "DONE_P11_LIST_OK",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+
+    const agents = await listDefault(server);
+    expect(agents.find((a) => a.agent_id === record.agent_id)?.closure).toBe(
+      "verified",
+    );
+  });
+
+  it("a stale report left by an earlier occupant is NOT read as this agent's closure", async () => {
+    // The issued path is stable per agent_id, so a resumed/recycled id could
+    // otherwise inherit an old report and read `verified` without doing work.
+    const reportPath = join(TEST_DIR, "p11-list-stale.md");
+    writeFileSync(reportPath, "Status: COMPLETE\nDONE_P11_LIST_STALE\n", "utf8");
+    const stale = new Date("2026-07-05T05:00:00.000Z");
+    utimesSync(reportPath, stale, stale);
+
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = testLifecycleEngine(server);
+    const record = makeServerAgentRecord({
+      agent_id: "codex-golems-p11-list-stale",
+      state: "done",
+      created_at: "2026-07-05T07:00:00.000Z",
+      report_path: reportPath,
+      done_marker: "DONE_P11_LIST_STALE",
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+
+    const agents = await listDefault(server);
+    expect(agents.find((a) => a.agent_id === record.agent_id)?.closure).toBe(
+      "artifact_missing",
+    );
+  });
+
+  it("a contract-less spawn is not_applicable, never a falsey negative", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const engine = testLifecycleEngine(server);
+    const record = makeServerAgentRecord({
+      agent_id: "codex-golems-p11-no-contract",
+      state: "done",
+      goal_file: null,
+    });
+    engine.stateMgr.writeState(record);
+    engine.getRegistry().set(record.agent_id, record);
+
+    const agents = await listDefault(server);
+    expect(agents.find((a) => a.agent_id === record.agent_id)?.closure).toBe(
+      "not_applicable",
+    );
+  });
+});

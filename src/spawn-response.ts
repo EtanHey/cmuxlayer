@@ -26,6 +26,12 @@ const ESSENTIAL_FIELDS = [
   "boot_prompt_submit_verified",
   "readiness_recovered",
   "readiness_cleared",
+  // P11/U10: the engine-issued coordination contract is ESSENTIAL, not verbose
+  // detail -- a lead that cannot see it falls back to inventing its own path,
+  // which is the S3 disagreement this lane exists to make impossible.
+  "report_path",
+  "done_marker",
+  "coordination_footer_bytes",
 ] as const;
 
 type JsonObject = Record<string, unknown>;
