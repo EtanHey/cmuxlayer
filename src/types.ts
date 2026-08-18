@@ -153,6 +153,7 @@ export type ParsedControlPlaneState =
   | "dead"
   | "stale_surface"
   | "poisoned_registry";
+export type PauseSource = "cmux-reported" | "inferred";
 
 export interface ParsedScreenResult {
   agent_type: ParsedScreenAgentType;
@@ -169,6 +170,9 @@ export interface ParsedScreenResult {
   cost: number | null;
   cli_update_state?: ParsedCliUpdateState;
   actions?: string[];
+  /** Visible pause chrome. Absent cmux field means this is always inferred. */
+  paused: boolean;
+  paused_source: PauseSource;
 }
 
 export interface CmuxStatusEntry {

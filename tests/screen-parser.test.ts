@@ -103,7 +103,9 @@ Claude Code
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("working");
-    expect(parsed.current_action).toBe("Bash(cat >> /tmp/orchestra.md <<'EOF')");
+    expect(parsed.current_action).toBe(
+      "Bash(cat >> /tmp/orchestra.md <<'EOF')",
+    );
   });
 
   it.each(["❯", ">", ">>>", "$"])(
@@ -205,7 +207,9 @@ Claude Code
   });
 
   it("recognizes Claude permission approval dialogs as Claude", () => {
-    const parsed = parseScreen(readFixture("painpoints/claude-permission-confirmation.txt"));
+    const parsed = parseScreen(
+      readFixture("painpoints/claude-permission-confirmation.txt"),
+    );
 
     expect(parsed.agent_type).toBe("claude");
     expect(parsed.status).toBe("frozen");
@@ -1878,6 +1882,64 @@ Model: gemini-2.5-pro
     it("returns null for unknown models", () => {
       expect(inferContextWindow(null, 50_000, "")).toBeNull();
       expect(inferContextWindow("mystery", 50_000, "")).toBeNull();
+    });
+  });
+
+  describe("paused pane chrome", () => {
+    it("marks a Claude idle screen with a Paused status line as inferred paused", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "> ",
+          "Paused",
+          "press enter to resume",
+          "🤖 Opus 5 | 💰 $1.25",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(true);
+      expect(parsed.paused_source).toBe("inferred");
+    });
+
+    it("marks a Cursor pane whose footer says Agent paused as inferred paused", () => {
+      const parsed = parseScreen(`
+Cursor Agent
+v2026.08.11-e8db854
+Agent paused — press enter to resume
+Auto · 22.5% · ~/Gits/cmuxlayer
+`);
+
+      expect(parsed.paused).toBe(true);
+      expect(parsed.paused_source).toBe("inferred");
+    });
+
+    it("does not treat an ordinary idle Claude composer as paused", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "> ",
+          "bypass permissions on",
+          "🤖 Opus 5 | 💰 $1.25",
+          "CLAUDE_COUNTER: 3",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
+      expect(parsed.paused_source).toBe("inferred");
+    });
+
+    it("does not treat Claude plan-mode ⏸ footer as paused", () => {
+      const parsed = parseScreen(
+        [
+          "Claude Code",
+          "> ",
+          "⏸ plan mode on",
+          "bypass permissions on",
+          "🤖 Opus 5 | 💰 $0.10",
+        ].join("\n"),
+      );
+
+      expect(parsed.paused).toBe(false);
     });
   });
 });

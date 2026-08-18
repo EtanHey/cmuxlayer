@@ -242,6 +242,18 @@ const CLAUDE_WORKING_LINE_RE =
 // Claude's context-limit/auto-compact banner wording is not stable. A pane
 // sitting at one of these blockers must not become "working" merely because
 // the same line also contains a busy-looking marker.
+const PAUSED_STATUS_LINE_RE =
+  /^(?:[⏸⏸️⬡●]\s*)?(?:agent|session|worker|pane)?\s*paused(?:\s*[·•.\-—:].*)?$/i;
+
+export function screenShowsPaused(text: string): boolean {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-24)
+    .some((line) => PAUSED_STATUS_LINE_RE.test(line));
+}
+
 const CONTEXT_LIMIT_BANNER_RE =
   /\bcontext\s+(?:low|window\s+is\s+almost\s+full|limit\s+reached)\b|\bauto-compact(?:ing)?\b|\bcompacting\s+conversation\b/i;
 const THINKING_RE =
@@ -1713,6 +1725,8 @@ export function parseScreen(text: string): ParsedScreenResult {
     errors,
     model,
     cost,
+    paused: screenShowsPaused(normalized),
+    paused_source: "inferred",
   };
 
   if (cliUpdateState !== undefined) {

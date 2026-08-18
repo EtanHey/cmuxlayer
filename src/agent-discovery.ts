@@ -20,6 +20,8 @@ export interface DiscoveredAgent {
   cli: CliType | "unknown";
   control_state: ParsedControlPlaneState;
   parsed_status: ParsedScreenStatus | null;
+  paused?: boolean;
+  paused_source?: "inferred" | "cmux-reported" | null;
   model: string | null;
   token_count: number | null;
   context_pct: number | null;
@@ -159,6 +161,8 @@ export class AgentDiscovery {
         cli,
         control_state: parsed.control_state,
         parsed_status: parsed.status,
+        paused: parsed.paused,
+        paused_source: parsed.paused ? parsed.paused_source : null,
         model: parsed.model,
         token_count: parsed.token_count,
         context_pct: parsed.context_pct,
@@ -186,6 +190,8 @@ export class AgentDiscovery {
         cli: "unknown",
         control_state: "unknown",
         parsed_status: null,
+        paused: false,
+        paused_source: null,
         model: null,
         token_count: null,
         context_pct: null,

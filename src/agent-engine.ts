@@ -3277,6 +3277,7 @@ export class AgentEngine {
   private haltDwellMs(type: AgentHaltType): number {
     switch (type) {
       case "awaiting_input":
+      case "paused":
         return this.haltAwaitingInputDwellMs;
       case "idle_without_done":
         return this.haltIdleWithoutDoneDwellMs;
@@ -3296,6 +3297,12 @@ export class AgentEngine {
         return `interact(agent: "${agent.agent_id}", action: "send", text: "Continue and report status.")`;
       case "wedged":
         return `interact(agent: "${agent.agent_id}", action: "interrupt")`;
+      case "paused":
+        return (
+          `read_screen(surface: "${agent.surface_id}", parsed_only: true); ` +
+          `the child is paused and cannot act — unpause the pane before send_to, ` +
+          `or send_key(surface: "${agent.surface_id}", key: "return") if the screen says to resume`
+        );
     }
   }
 
@@ -3397,6 +3404,37 @@ export class AgentEngine {
     return updated;
   }
 
+  private persistPausedState(
+    agent: AgentRecord,
+    paused: boolean,
+    nowIso: string,
+  ): AgentRecord {
+    const source = paused ? "inferred" : null;
+    if (
+      paused &&
+      agent.paused === true &&
+      agent.paused_source === "inferred" &&
+      agent.paused_since != null
+    ) {
+      return agent;
+    }
+    if (
+      !paused &&
+      agent.paused !== true &&
+      agent.paused_source == null &&
+      agent.paused_since == null
+    ) {
+      return agent;
+    }
+    const updated = this.stateMgr.updateRecord(agent.agent_id, {
+      paused,
+      paused_source: source,
+      paused_since: paused ? (agent.paused_since ?? nowIso) : null,
+    });
+    this.registry.set(agent.agent_id, updated);
+    return updated;
+  }
+
   private async haltSinkQuality(
     candidate: AgentRecord,
     nowMs: number,
@@ -3417,6 +3455,7 @@ export class AgentEngine {
         parsed.agent_type === "unknown" ||
         parsed.control_state === "permission_prompt" ||
         parsed.control_state === "interactive_overlay" ||
+        parsed.paused === true ||
         this.isMatureHaltEpisode(candidate, nowMs)
       ) {
         return "fallback";
@@ -3737,17 +3776,19 @@ export class AgentEngine {
       disposition.kind === "escalate",
       nowIso,
     );
+    agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
     if (agent.halt_escalation === false) return agent;
     if (
-      parsed.control_state === "shell" ||
-      parsed.control_state === "dead" ||
-      parsed.control_state === "stale_surface" ||
-      this.hasOutputDoneEvidence(agent.cli, screenText) ||
-      this.hasCurrentRecordedOutputDoneEvidence(agent) ||
-      (agent.cli === "codex" && this.transcriptHasSettledDone(agent)) ||
-      (parsed.status === "idle" &&
-        parsed.control_state === "ready" &&
-        this.hasParentVisibleArtifactSinceIdle(agent))
+      parsed.paused !== true &&
+      (parsed.control_state === "shell" ||
+        parsed.control_state === "dead" ||
+        parsed.control_state === "stale_surface" ||
+        this.hasOutputDoneEvidence(agent.cli, screenText) ||
+        this.hasCurrentRecordedOutputDoneEvidence(agent) ||
+        (agent.cli === "codex" && this.transcriptHasSettledDone(agent)) ||
+        (parsed.status === "idle" &&
+          parsed.control_state === "ready" &&
+          this.hasParentVisibleArtifactSinceIdle(agent)))
     ) {
       const hasProgressMemory = Boolean(
         agent.halt_last_active_at ||
@@ -3777,6 +3818,8 @@ export class AgentEngine {
       parsed.control_state === "interactive_overlay"
     ) {
       haltType = "awaiting_input";
+    } else if (parsed.paused === true) {
+      haltType = "paused";
     } else if (screenActive) {
       if (blockingBackgroundWaitMs !== null) {
         haltType = "wedged";
