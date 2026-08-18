@@ -950,4 +950,58 @@ describe("send_to v2 background verify", () => {
       engine.dispose();
     }
   });
+
+  it("times out a hung delivery verifier so later sweeps can still run", async () => {
+    let calls = 0;
+    const client = new FakeAgentSurfaceClient();
+    const stateMgr = new StateManager(TEST_DIR);
+    const engine = new AgentEngine(
+      stateMgr,
+      new AgentRegistry(stateMgr, async () => []),
+      client as any,
+      {
+        deliveryVerifyTimeoutMs: 50,
+        deliveryVerifier: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return new Promise(() => {});
+          }
+          return { outcome: "delivered", submit_verified: true };
+        },
+      },
+    );
+    try {
+      engine.acceptPendingVerify({
+        delivery_id: "hung-1",
+        agent_id: "agent-1",
+        text: "hangs the verifier",
+        press_enter: true,
+        source_event: "send_to",
+        retry_count: 0,
+      });
+
+      let settled = false;
+      const first = engine.verifyPendingDeliveries().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      await first;
+      expect(settled).toBe(true);
+      expect(engine.getDeliveryReceipt("hung-1")).toMatchObject({
+        delivery_state: "pending_verify",
+        terminal: false,
+      });
+
+      await engine.verifyPendingDeliveries();
+      expect(calls).toBe(2);
+      expect(engine.getDeliveryReceipt("hung-1")).toMatchObject({
+        delivery_id: "hung-1",
+        delivery_state: "submitted",
+        terminal: true,
+        submit_verified: true,
+      });
+    } finally {
+      engine.dispose();
+    }
+  });
 });

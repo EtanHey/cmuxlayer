@@ -582,6 +582,8 @@ export interface AgentEngineOptions {
   fleetWorkingNoProgressTimeoutMs?: number;
   /** Bound one queued terminal submission so lifecycle sweeps cannot hang forever. */
   deliverySubmitTimeoutMs?: number;
+  /** Bound one background verify observation so a hung reader cannot wedge later sweeps. */
+  deliveryVerifyTimeoutMs?: number;
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
   /**
@@ -1232,6 +1234,7 @@ export class AgentEngine {
   private deliveryDrainInFlight = false;
   private deliveryVerifyInFlight = false;
   private deliverySubmitTimeoutMs: number;
+  private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
   private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
@@ -1256,6 +1259,10 @@ export class AgentEngine {
     this.deliverySubmitTimeoutMs = Math.max(
       1,
       opts?.deliverySubmitTimeoutMs ?? 30_000,
+    );
+    this.deliveryVerifyTimeoutMs = Math.max(
+      1,
+      opts?.deliveryVerifyTimeoutMs ?? this.deliverySubmitTimeoutMs,
     );
     this.deliveryVerifyDeadlineMs = Math.max(
       1,
@@ -6474,13 +6481,29 @@ export class AgentEngine {
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (this.deliveryVerifier) {
+          let timeout: ReturnType<typeof setTimeout> | null = null;
           try {
-            observation = await this.deliveryVerifier(receipt);
+            observation = await Promise.race([
+              this.deliveryVerifier(receipt),
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `Delivery verify timed out after ${this.deliveryVerifyTimeoutMs}ms`,
+                      ),
+                    ),
+                  this.deliveryVerifyTimeoutMs,
+                );
+              }),
+            ]);
           } catch (error) {
             observation = {
               outcome: "pending",
               reason: error instanceof Error ? error.message : String(error),
             };
+          } finally {
+            if (timeout) clearTimeout(timeout);
           }
         }
         if (observation.outcome === "delivered") {
