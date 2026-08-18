@@ -84,7 +84,7 @@ export async function fileDeliveryFailureGithubIssue(
   const run =
     opts?.runner ??
     (async (file, args) => execFileAsync(file, args, { timeout: 15_000 }));
-  const marker = `cmuxlayer-delivery-failure:${ticket.signature}`;
+  const marker = `cmuxlayer-delivery-failure-${ticket.signature}`;
   const title = ticketTitle(ticket);
   const body = [
     marker,

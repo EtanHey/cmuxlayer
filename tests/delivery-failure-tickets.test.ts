@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  fileDeliveryFailureGithubIssue,
   writeDeliveryFailureTicket,
   type DeliveryFailureTicket,
 } from "../src/delivery-failure-tickets.js";
@@ -60,5 +61,23 @@ describe("delivery failure tickets", () => {
     expect(record.occurrences.at(-1)?.delivery_id).toBe(
       `delivery-${total - 1}`,
     );
+  });
+
+  it("uses a colon-free GitHub search marker", async () => {
+    const searches: string[] = [];
+    const ticket = makeTicket();
+    await fileDeliveryFailureGithubIssue(ticket, {
+      runner: async (_file, args) => {
+        const searchAt = args.indexOf("--search");
+        if (searchAt >= 0) {
+          searches.push(String(args[searchAt + 1]));
+        }
+        return { stdout: "[]", stderr: "" };
+      },
+    });
+
+    expect(searches).toHaveLength(1);
+    expect(searches[0]).toBe(`cmuxlayer-delivery-failure-${ticket.signature}`);
+    expect(searches[0]).not.toMatch(/:/);
   });
 });
