@@ -9,7 +9,13 @@
  * receipt, persists it, and tells the worker the same two strings.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "../src/server.js";
@@ -18,10 +24,13 @@ import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { runWithCallerContext } from "../src/caller-context.js";
 import {
   BOOT_INJECTION_CHUNK_THRESHOLD,
+  bootContractPointer,
+  coordinationContractPath,
   coordinationFooter,
   coordinationFooterBytes,
   issueCoordinationContract,
 } from "../src/coordination-paths.js";
+import { recommendedMonitorCommand } from "../src/inbox.js";
 
 const STATE_DIR = join(tmpdir(), "cmux-agents-test-p11-spawn");
 
@@ -150,7 +159,7 @@ function makeExec(
       const text = String(args.at(-1) ?? "");
       if (
         text.trim() &&
-        (text.includes("cmuxlayer mailbox contract") ||
+        (text.includes("cmuxlayer contract for") ||
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
@@ -239,24 +248,157 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.done_marker).toBe(parsed.done_marker);
   });
 
-  it("does NOT yet inject the footer into the boot prompt (measured budget collision)", async () => {
-    // The mailbox contract alone is ~479 chars for a real agent id and
-    // SEND_INPUT_CHUNK_THRESHOLD is 500, so injecting the report contract moves
-    // EVERY spawn's boot delivery onto the chunked paste path. That is not
-    // additive, so it is deliberately not wired -- pinned here so the day it is
-    // wired is a deliberate, reviewed change rather than a silent one.
+  // -------------------------------------------------------------------------
+  // P11b: the boot prompt carries a POINTER, not the contract.
+  // -------------------------------------------------------------------------
+
+  it("P11b: the contract file exists and carries the mailbox contract AND the issued report contract", async () => {
     const parsed = await spawn();
-    expect(sentText(exec)).not.toContain(parsed.report_path);
+    expect(parsed.contract_path).toBe(
+      coordinationContractPath(parsed.agent_id as string, {
+        baseDir: inboxDir,
+      }),
+    );
+    const file = readFileSync(parsed.contract_path, "utf8");
+    // Mailbox half -- the ~479 chars that used to ride the wire.
+    expect(file).toContain(recommendedMonitorCommand(parsed.agent_id, {
+      baseDir: inboxDir,
+    }));
+    expect(file).toContain("CMUX_INBOX_MSG_ID=<handled-message-id>");
+    expect(file).toContain(`cmuxlayer inbox-cursor '${parsed.agent_id}'`);
+    // Report half -- the #454-issued contract that never fit inline. Byte-equal
+    // to the receipt, which is the whole P11 invariant.
+    expect(file).toContain(parsed.report_path);
+    expect(file).toContain(parsed.done_marker);
   });
 
-  it("keeps the boot injection inside the chunk-threshold budget", async () => {
+  it("P11b: the boot prompt is a one-line pointer, and it points at the file", async () => {
+    const parsed = await spawn();
+    const injection = bootContractPointer(
+      parsed.agent_id as string,
+      parsed.contract_path as string,
+    );
+    expect(injection).not.toMatch(/[\r\n]/);
+    expect(sentText(exec)).toContain(injection);
+    // The instructions themselves are NOT on the wire any more.
+    expect(sentText(exec)).not.toContain("monitor with tail -n0 -F");
+  });
+
+  it("P11b: the composed boot prompt stays under SEND_INPUT_CHUNK_THRESHOLD for a real-length agent id", async () => {
+    // This is the regression that took the suite 10 red at 618 chars. Asserted
+    // on the delivered text, not on the injection alone: what crosses the
+    // threshold is caller prompt + injection joined, and that is what splits.
     await spawn();
-    const injections = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const deliveries = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls
       .map(([, args]: [string, string[]]) => String((args ?? []).at(-1) ?? ""))
-      .filter((text) => text.includes("cmuxlayer mailbox contract"));
-    expect(injections.length).toBeGreaterThan(0);
-    for (const text of injections) {
+      .filter((text) => text.includes("cmuxlayer contract for"));
+    expect(deliveries.length).toBeGreaterThan(0);
+    for (const text of deliveries) {
       expect(text.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
+    }
+
+    // And on the pure function, for an agent id at the long end of the real
+    // range -- the spawned id is short, so it alone would not catch a widening.
+    const longId = "cmuxlayerClaude-d2fc302f";
+    const longPointer = bootContractPointer(
+      longId,
+      coordinationContractPath(longId, {
+        baseDir: "/Users/someone-with-a-long-name/.cmux/agents",
+      }),
+    );
+    expect(longPointer.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
+  });
+
+  it("P11b: boot delivery is not SPLIT -- the whole composed prompt lands in one write", async () => {
+    // Splitting is the hazard, not pasting: the composed boot prompt (caller
+    // text + injection, newline-joined) has always gone through the composer
+    // paste, but at 618 chars it CHUNKED, and multi-chunk boot delivery is the
+    // most incident-prone route in this repo (#434/#438). So assert one write
+    // carrying BOTH halves -- two writes would mean the split came back.
+    await spawn();
+    const writes = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([, args]: [string, string[]]) =>
+        (args ?? []).some((arg) => String(arg).includes("cmuxlayer contract for")),
+      )
+      .map(([, args]: [string, string[]]) => String((args ?? []).at(-1) ?? ""));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain("task");
+    expect(writes[0]!.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
+  });
+
+  it("P11b R4: an unwritable contract file falls back to inline WITHOUT emitting a dangling pointer", async () => {
+    // The adversarial case: if the write fails, the boot prompt must not point
+    // at a file that does not exist. The inline-mode test reaches the same
+    // OUTCOME by a different route, so this branch needs its own pin -- a
+    // regression that emitted the pointer before the write, or let the throw
+    // escape and fail the spawn, would otherwise stay green.
+    const blockedBase = join(tmpdir(), `p11b-blocked-${process.pid}-inbox`);
+    rmSync(blockedBase, { recursive: true, force: true });
+    // A FILE where the base dir should be: every channel-dir mkdir under it
+    // fails, so the contract write cannot succeed.
+    writeFileSync(blockedBase, "not a directory");
+    const blockedExec = makeExec();
+    const blockedStateDir = mkdtempSync(join(tmpdir(), "p11b-blocked-state-"));
+    const blockedServer: any = createServer(
+      withTestSurfaceObserver({
+        exec: blockedExec,
+        stateDir: blockedStateDir,
+        disableSpawnPreflight: true,
+        inboxBaseDir: blockedBase,
+      }),
+    );
+    try {
+      const parsed = await runWithCallerContext(
+        { workspaceId: "workspace:1" },
+        async () => {
+          const result = await blockedServer._registeredTools[
+            "spawn_agent"
+          ].handler(
+            {
+              repo: "brainlayer",
+              model: "sonnet",
+              cli: "claude",
+              role: "worker",
+              prompt: "task",
+            },
+            {} as any,
+          );
+          return result.structuredContent ?? JSON.parse(result.content[0].text);
+        },
+      );
+
+      // The spawn still succeeds -- a contract-file failure is not a spawn
+      // failure.
+      expect(parsed.ok).toBe(true);
+      expect(parsed.contract_path).toBeUndefined();
+      // No dangling pointer on the wire, and the mailbox contract still got
+      // through: the worker loses the report half, not its inbox.
+      const wire = sentText(blockedExec);
+      expect(wire).not.toContain("Read and follow");
+      expect(wire).toContain("cmuxlayer mailbox contract for");
+      // And the receipt says the lead must relay.
+      expect(parsed.coordination_footer_delivered).toBe(false);
+      expect(parsed.coordination_footer_note).toMatch(/not_wired/);
+      expect(parsed.coordination_footer_note).toMatch(/LEAD must relay/i);
+    } finally {
+      rmSync(blockedBase, { recursive: true, force: true });
+      rmSync(blockedStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("P11b: CMUXLAYER_BOOT_CONTRACT=inline restores the pre-P11b inline contract", async () => {
+    process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
+    try {
+      const parsed = await spawn();
+      expect(sentText(exec)).toContain("cmuxlayer mailbox contract for");
+      expect(parsed.contract_path).toBeUndefined();
+      // Provenance follows the mode: inline cannot carry the report contract,
+      // so the receipt must say so rather than claiming delivery.
+      expect(parsed.coordination_footer_delivered).toBe(false);
+      expect(parsed.coordination_footer_note).toMatch(/not_wired/);
+      expect(sentText(exec)).not.toContain(parsed.report_path);
+    } finally {
+      delete process.env.CMUXLAYER_BOOT_CONTRACT;
     }
   });
 
@@ -333,9 +475,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           done_marker: raw.done_marker,
         }),
       );
-      // Provenance travels on both doors too.
+      // P11b: provenance travels on both doors, and both now actually DELIVER
+      // the contract -- the pointer file is written above launchMode, so a
+      // raw-CLI spawn cannot end up as the one door that tells its worker
+      // nothing.
       for (const receipt of [registered, raw]) {
-        expect(receipt.coordination_footer_delivered).toBe(false);
+        expect(receipt.coordination_footer_delivered).toBe(true);
+        expect(receipt.contract_path).toMatch(/^\/.+\/contract\.md$/);
       }
       // Same contract SHAPE on both doors: issued, absolute, marker present.
       for (const receipt of [registered, raw]) {
@@ -353,14 +499,25 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     }
   });
 
-  it("FINDING 3: never reports footer bytes without reporting they were not sent", async () => {
+  it("FINDING 3: never reports contract bytes without reporting how they were sent", async () => {
     const parsed = await spawn();
     // The v0.4.41 `paused` hazard: an authoritative number with no provenance.
+    // P11b keeps the rule and flips the answer -- the note must now say the
+    // contract went via the file, and must not oversell it.
     expect(parsed.coordination_footer_bytes).toBeGreaterThan(0);
-    expect(parsed.coordination_footer_delivered).toBe(false);
-    expect(parsed.coordination_footer_note).toMatch(/not_wired/);
-    // A lead reading this must learn it has to relay the contract itself.
-    expect(parsed.coordination_footer_note).toMatch(/LEAD must relay/i);
+    expect(parsed.coordination_footer_delivered).toBe(true);
+    expect(parsed.coordination_footer_note).toMatch(
+      /delivered_via_contract_file/,
+    );
+    expect(parsed.coordination_footer_note).not.toMatch(/not_wired/);
+    // The honest cost is stated in the receipt, not just the PR body -- and
+    // stated at the strength the build actually provides: nothing detects an
+    // unread contract file today, so the note must not claim it does.
+    expect(parsed.coordination_footer_note).toMatch(/ignores the pointer/i);
+    expect(parsed.coordination_footer_note).toMatch(/observable in principle/i);
+    // R3: the byte count describes the UNSENT inline rendering, and must say so
+    // rather than reading as a measure of what went on the wire.
+    expect(parsed.coordination_footer_note).toMatch(/NOT what was sent/i);
   });
 
   it("FINDING 2: a relative report_path is rejected BEFORE anything launches", async () => {

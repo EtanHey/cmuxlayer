@@ -596,8 +596,25 @@ function normalizePromptText(value: string): string {
   return normalizeText(value.replace(/<\/?\s*user_query\s*>/gi, " "));
 }
 
+/**
+ * P11b: the boot injection is now a one-line pointer at the spawn contract
+ * file. Session identity matches a recorded prompt against the caller's text,
+ * so whatever the engine appended must be strippable -- both the pointer form
+ * and the pre-P11b inline form (still reachable via CMUXLAYER_BOOT_CONTRACT
+ * =inline, and present in every session recorded before this shipped).
+ */
+function stripManagedContractPointer(normalized: string): string | null {
+  const match = normalized.match(
+    /^(.*?) cmuxlayer contract for ([A-Za-z0-9_-]+): Read and follow (\/.+\/([A-Za-z0-9_-]+)\/contract\.md)$/,
+  );
+  if (!match || match[2] !== match[4]) return null;
+  return match[1]!.trim();
+}
+
 function stripManagedMailboxContract(value: string): string {
   const normalized = normalizePromptText(value);
+  const pointerStripped = stripManagedContractPointer(normalized);
+  if (pointerStripped !== null) return pointerStripped;
   const match = normalized.match(
     /^(.*?) cmuxlayer mailbox contract for ([A-Za-z0-9_-]+): monitor with tail -n0 -F (\/.+\/([A-Za-z0-9_-]+)\/inbox\.jsonl); after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> (.+)$/,
   );

@@ -678,6 +678,59 @@ describe("findLatestHarnessSessionIdentity (cwd → real session id)", () => {
     }
   });
 
+  it("P11b — Codex: matches a managed prompt with the appended contract POINTER", () => {
+    // Session identity matches a recorded prompt against the caller's text, so
+    // whatever the engine appended must be strippable. P11b changed what it
+    // appends; if the stripper does not follow, every managed Codex spawn stops
+    // resolving its session -- silently.
+    const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-pointer-prompt-"));
+    const cwd = "/Users/e/Gits/cmuxlayer";
+    const root = join(localHome, ".codex", "sessions", "2026", "08", "18");
+    mkdirSync(root, { recursive: true });
+    const file = join(root, "rollout-pointer.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "pointer-session", cwd },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Repair the agent automatically.\n\n" +
+                  "cmuxlayer contract for cmuxlayerCodex-abcd1234: Read and follow /Users/e/.cmux/agents/cmuxlayerCodex-abcd1234/contract.md",
+              },
+            ],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    try {
+      expect(
+        findLatestHarnessSessionIdentity("codex", cwd, {
+          home: localHome,
+          expectedText: "Repair the agent automatically.",
+        })?.session_id,
+      ).toBe("pointer-session");
+      expect(
+        findLatestHarnessSessionIdentity("codex", cwd, {
+          home: localHome,
+          expectedText: "Different task.",
+        }),
+      ).toBeNull();
+    } finally {
+      rmSync(localHome, { recursive: true, force: true });
+    }
+  });
+
   it("Codex: matches a managed mailbox contract with a custom inbox base dir", () => {
     const localHome = mkdtempSync(join(tmpdir(), "cmux-harness-custom-inbox-"));
     const cwd = "/Users/e/Gits/cmuxlayer";

@@ -32,6 +32,9 @@ const ESSENTIAL_FIELDS = [
   "report_path",
   "done_marker",
   "coordination_footer_bytes",
+  // P11b: the file the boot pointer points at. A lead that cannot see it cannot
+  // check whether the worker was actually told -- the whole point of the trade.
+  "contract_path",
   // Provenance travels WITH the byte count or the count is a false claim.
   "coordination_footer_delivered",
   "coordination_footer_note",
