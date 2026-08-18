@@ -11,6 +11,7 @@ import {
   inferRecordRoleOrNull,
   isAgentRoleInferenceError,
 } from "./layout-policy.js";
+import { screenConfirmedAgentState } from "./live-agent-state.js";
 
 export type AgentHealthStatus = "healthy" | "degraded" | "unhealthy";
 export type AgentHealthIssueSeverity = "blocking" | "degraded" | "info";
@@ -436,31 +437,26 @@ export function evaluateAgentHealth(
       `screen parses as ${input.screen_status} but the last ${input.surface_write_liveness?.consecutive_broken_pipe_failures ?? "several"} surface writes failed with a broken pipe`,
     );
   }
-  const screenDone = input.screen_status === "done";
   let reconciledState: AgentState | undefined;
-  let screenConfirmedState: AgentState | undefined;
+  // AIDEV-NOTE (F1): the screen->state rule lives in live-agent-state.ts so the
+  // health report, caller resolution, delivery gating and P11 closure all agree
+  // on what "live" means. Do not re-derive it here.
+  const screenConfirmedState =
+    screenConfirmedAgentState({
+      status: input.screen_status,
+      agent_type: input.screen_agent_type,
+      control_state: input.screen_control_state,
+    }) ?? undefined;
   const screenIsShell =
     input.screen_control_state === "shell" &&
     input.screen_agent_type === "unknown";
   if (screenIsShell) {
-    screenConfirmedState = "error";
     addIssue(
       issueCodes,
       issues,
       "agent_shell_fallback",
       "tracked agent surface has fallen back to a bare shell with no agent process visible",
     );
-  } else if (screenActive) {
-    screenConfirmedState = "working";
-  } else if (
-    input.screen_control_state === "ready" &&
-    input.screen_agent_type !== null &&
-    input.screen_agent_type !== undefined &&
-    input.screen_agent_type !== "unknown"
-  ) {
-    screenConfirmedState = "ready";
-  } else if (screenDone) {
-    screenConfirmedState = "done";
   }
   if (screenConfirmedState && screenConfirmedState !== agent.state) {
     reconciledState = screenConfirmedState;

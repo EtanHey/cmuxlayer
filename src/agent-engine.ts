@@ -44,6 +44,15 @@ import {
 } from "./agent-registry.js";
 import type { AgentDiscovery } from "./agent-discovery.js";
 import {
+  isLiveActive,
+  resolveLiveAgentState,
+  type LiveAgentState,
+} from "./live-agent-state.js";
+
+/** Live-derived state for a record, injected by the server (F1). */
+export type LiveStateResolver = (agent: AgentRecord) => LiveAgentState | null;
+
+import {
   resumeCommandForAgent,
   resumeCwdForAgent,
   resumeInvocationForAgent,
@@ -1452,6 +1461,7 @@ export function resolveSpawnLaunchPlan(
 
 export class AgentEngine {
   private stateMgr: StateManager;
+  private liveStateResolver: LiveStateResolver | null = null;
   private registry: AgentRegistry;
   private client: AgentEngineClient;
   private spawnPreflight: (
@@ -1703,6 +1713,25 @@ export class AgentEngine {
     return this.registry;
   }
 
+  /**
+   * AIDEV-NOTE (F1): P11 closure is a statement about what an agent IS doing,
+   * so it must read the live-derived state. Reading `agent.state` made a
+   * working agent report `closure:"artifact_missing"` -- which P11's own table
+   * means "route a reviewer NOW" -- purely because #408 had flipped its
+   * registry record to `done`. The server injects the live probe; without one
+   * this degrades to the record, and says so through the resolution's `source`.
+   */
+  setLiveStateResolver(resolver: LiveStateResolver | null): void {
+    this.liveStateResolver = resolver;
+  }
+
+  /** Live state for one record, or the record's own state when unprobed. */
+  liveStateOf(agent: AgentRecord): LiveAgentState {
+    return (
+      this.liveStateResolver?.(agent) ?? resolveLiveAgentState(agent, null)
+    );
+  }
+
   assessHarvestability(agent: AgentRecord): WorkerHarvestability {
     const issueCodes: string[] = [];
     const issues: string[] = [];
@@ -1712,16 +1741,35 @@ export class AgentEngine {
     };
 
     const role = agent.role ?? inferRecordRoleOrNull(agent);
+    // AIDEV-NOTE (F1): closure is derived from the LIVE state, but only ONE
+    // live observation is strong enough to overturn a recorded `done`: the
+    // screen showing the agent still WORKING. That is what #408 produced live
+    // (`state {value:"working", source:"screen"}` beside `detail.state:"done"`)
+    // and it made P11 report `artifact_missing` -- "route a reviewer NOW" --
+    // on an agent mid-turn. A `ready` prompt cannot overturn done (a finished
+    // worker sits at one too), and a dead/shell pane must not either: there
+    // the record's `done` plus the missing artifact IS the story.
+    const live = this.liveStateOf(agent);
+    const effectiveState = isLiveActive(live) ? live.state : agent.state;
     const neutralEvidenceChannel: HarvestabilityEvidenceChannel = {
       done_source: agent.task_done_detected_at ? "screen" : "none",
       degraded: false,
       reason: null,
     };
-    if (agent.state !== "done" || role === "orchestrator") {
+    if (effectiveState !== "done" || role === "orchestrator") {
+      // AIDEV-NOTE (F1): the contract PAIR is state-independent -- report_path
+      // and done_marker are what the lead must check whenever it looks. The
+      // record-only read here was invisible while `done` always took the branch
+      // below; now that a live-working agent can land here, a prose-contract
+      // agent would have reported a null pair mid-turn.
+      const preClosureGoal = this.readClosureGoalContract(
+        agent.goal_file ?? null,
+        agent,
+      );
       return {
         closeable: false,
         closure: resolveClosureState({
-          state: agent.state,
+          state: effectiveState,
           role,
           // A contract exists if EITHER source supplies one; sourcing this from
           // the record alone made a legacy prose agent read not_applicable while
@@ -1732,8 +1780,8 @@ export class AgentEngine {
           closureArtifactVerified: null,
         }),
         closure_artifact_verified: null,
-        report_path: agent.report_path ?? null,
-        done_marker: agent.done_marker ?? null,
+        report_path: preClosureGoal.reportPath,
+        done_marker: preClosureGoal.doneMarker,
         report_exists: null,
         report_fresh: null,
         report_final_line: null,
@@ -1845,7 +1893,7 @@ export class AgentEngine {
         !keptOpen?.present &&
         (!prLoopRequired || prLoopSatisfied === true),
       closure: resolveClosureState({
-        state: agent.state,
+        state: effectiveState,
         role,
         contractIssued: Boolean(goal.reportPath && goal.doneMarker),
         closureArtifactVerified,

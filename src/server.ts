@@ -87,6 +87,14 @@ import {
   type DiscoveredAgent,
 } from "./agent-discovery.js";
 import {
+  INTERACTIVE_AGENT_STATES,
+  isLiveDeliverable,
+  isLiveTerminal,
+  resolveLiveAgentState,
+  TERMINAL_AGENT_STATES,
+  type LiveAgentState,
+} from "./live-agent-state.js";
+import {
   resumeCommandForAgent,
   toAgentStatePayload,
   toObservedPublicAgent,
@@ -492,9 +500,6 @@ const LAUNCHER_LINE_CORRUPTION_ERROR =
   "launcher line corrupted by external input; manual Enter may have executed a modified command";
 /** Heartbeat freshness window before dispatch_to_agent falls back to a surface nudge. */
 const INBOX_NUDGE_HEARTBEAT_MAX_AGE_MS = AGENT_HEALTH_MONITOR_MAX_AGE_MS;
-const INTERACTIVE_AGENT_STATES = new Set<AgentState>(["ready", "idle"]);
-/** Agent states that are safe to close without `force`: the task is over. */
-const TERMINAL_AGENT_STATES = new Set<AgentState>(["done", "error"]);
 const READY_PATTERN_CLIS: CliType[] = [
   "claude",
   "codex",
@@ -3538,6 +3543,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       // Health/read paths should not fail just because a refresh scan failed.
     }
   };
+  /**
+   * AIDEV-NOTE (F1): live-derived state for one record, resolved from the last
+   * screen scan. Wired to the discovery cache inside the lifecycle block; until
+   * then (and whenever no fresh scan exists) it degrades to the registry record
+   * as explicit `source: "registry"` provenance, never as silent truth.
+   */
+  const liveAgentStateProbe: {
+    current: ((agent: AgentRecord) => LiveAgentState | null) | null;
+  } = { current: null };
+  const liveStateFor = (agent: AgentRecord): LiveAgentState =>
+    liveAgentStateProbe.current?.(agent) ?? resolveLiveAgentState(agent, null);
+
   const resolveCurrentCallerAgent = (): AgentRecord | null => {
     const callerSurface = currentCallerContext()?.surfaceId?.trim();
     if (!callerSurface) return null;
@@ -3545,13 +3562,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     const records = [
       ...(context.lifecycleRegistry?.list() ?? []),
       ...stateMgr.listStates(),
-    ].filter((agent) => !TERMINAL_AGENT_STATES.has(agent.state));
+    ];
+    const matchesUuid = (agent: AgentRecord): boolean =>
+      agent.surface_uuid?.trim().toLowerCase() === normalizedSurface;
+    const matchesSurfaceId = (agent: AgentRecord): boolean =>
+      agent.surface_id === callerSurface;
+    // AIDEV-NOTE (F1): a terminal state is an ORDERING signal here, never an
+    // exclusion, and it is read LIVE. #408 flips live agents to `done` within
+    // minutes; excluding those records made the caller invisible, so the child
+    // it spawned recorded parent_agent_id:null (U6) and the #378 worker guard
+    // silently no-opped. A record bound to the surface the call is arriving on
+    // is the best available caller identity even when the record is stale --
+    // the call itself is the liveness evidence. The live-first ordering still
+    // lets a genuinely live record win a recycled surface (#378 MEDIUM-A).
+    // AIDEV-TODO (F1 review, finding 2): the LAST tier below matches a terminal
+    // record by `surface_id`, and `surface_id` is a RECYCLABLE ref -- a dead
+    // worker's record whose ref got reused can claim to be the caller, and #378
+    // then forces the new pane's children to worker/right off a corpse. The
+    // obvious guard -- compare the live pane's CLI to the record's, as
+    // deliverAgentInput does -- does NOT work here: `registry.listMerged`
+    // rewrites `record.cli` from the live pane, so by the time caller
+    // resolution runs, a recycled record already claims the new occupant's CLI.
+    // Needs a signal the merge does not overwrite. Tiers 1 and 3 (UUID) are
+    // unaffected. Tracked in #468.
+    const live = (agent: AgentRecord): boolean =>
+      !isLiveTerminal(liveStateFor(agent));
     return (
-      records.find(
-        (agent) =>
-          agent.surface_uuid?.trim().toLowerCase() === normalizedSurface,
-      ) ??
-      records.find((agent) => agent.surface_id === callerSurface) ??
+      records.find((agent) => matchesUuid(agent) && live(agent)) ??
+      records.find((agent) => matchesSurfaceId(agent) && live(agent)) ??
+      records.find(matchesUuid) ??
+      records.find(matchesSurfaceId) ??
       null
     );
   };
@@ -10242,6 +10282,48 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       listSurfaces: surfaceProvider,
       readScreen: (surface, opts) => client.readScreen(surface, opts),
     });
+    // AIDEV-NOTE (F1): from here on, every consumer that used to read
+    // `agent.state` as truth resolves the LIVE state through this probe. It
+    // reads the last screen scan only -- no I/O on the caller's path -- and
+    // returns null when there is no fresh evidence, which degrades to the
+    // registry record with honest `registry` provenance.
+    const screenObservationForRecord = (
+      agent: AgentRecord,
+    ): {
+      status: string | null;
+      agent_type: string | null;
+      control_state: string | null;
+    } | null => {
+      const cached = discovery.cachedScan();
+      if (!cached) return null;
+      const uuidKey = (value: string | null | undefined): string | null =>
+        value?.trim().toLowerCase() || null;
+      const agentUuid = uuidKey(agent.surface_uuid);
+      // Same binding rule list_agents uses: a UUID pair, or a surface_id match
+      // ONLY when neither side has a UUID and this observer owns the seat.
+      // A looser match would let an unrelated pane's screen decide an agent's
+      // state, which is a worse lie than the stale record it replaces.
+      const row = cached.rows.find((surface) => {
+        const surfaceUuid = uuidKey(surface.surface_uuid);
+        return agentUuid && surfaceUuid
+          ? agentUuid === surfaceUuid
+          : Boolean(
+              !agentUuid &&
+              !surfaceUuid &&
+              agent.surface_observer_id &&
+              agent.surface_observer_id === registry.getObserverId() &&
+              surface.surface_id === agent.surface_id,
+            );
+      });
+      if (!row || row.read_error) return null;
+      return {
+        status: row.parsed_status ?? null,
+        agent_type: row.cli === "kiro" ? "unknown" : (row.cli ?? null),
+        control_state: row.control_state ?? null,
+      };
+    };
+    liveAgentStateProbe.current = (agent) =>
+      resolveLiveAgentState(agent, screenObservationForRecord(agent));
     const awaitLifecycleStart = async (): Promise<void> => {
       if (context.lifecycleStartPromise) {
         await context.lifecycleStartPromise;
@@ -10571,6 +10653,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     context.lifecycleSweepEngine = engine;
     lifecycleHealthEngine = engine;
+    // F1: closure, harvestability and the health report all resolve state
+    // through the same live probe the caller/delivery paths use.
+    engine.setLiveStateResolver(liveAgentStateProbe.current);
 
     server.tool(
       "arm_watch",
@@ -10899,13 +10984,31 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               context.surfaceObserverId,
             )?.pty_dead === true,
         }));
+      // AIDEV-NOTE (F1): gate on the LIVE state, not the route's registry copy.
+      // `freshOccupant` is a target-scoped scan taken moments ago -- the same
+      // evidence P4 uses. Reading the record here is what returned a terminal
+      // `failed` receipt to an agent sitting at a live prompt (ledger row 4):
+      // #408 had flipped its record to `done` while its screen read ready.
+      const liveRouteState = resolveLiveAgentState(
+        { state: route.state },
+        freshOccupant && !freshOccupant.read_error
+          ? {
+              status: freshOccupant.parsed_status,
+              agent_type:
+                freshOccupant.cli === "kiro" ? "unknown" : freshOccupant.cli,
+              control_state: freshOccupant.control_state,
+            }
+          : null,
+      );
       if (
         !args.allow_busy &&
-        !INTERACTIVE_AGENT_STATES.has(route.state) &&
+        !isLiveDeliverable(liveRouteState) &&
         !routeSurfaceAlive
       ) {
         throw new RetryableDeliveryError(
-          `Agent "${args.agent_id}" is not in an interactive state (current: ${route.state}). ` +
+          `Agent "${args.agent_id}" is not in an interactive state ` +
+            `(current: ${liveRouteState.state}, source: ${liveRouteState.source}` +
+            `${liveRouteState.stale_registry_state ? `, registry record says ${liveRouteState.registry_state}` : ""}). ` +
             `Must be in: ${[...INTERACTIVE_AGENT_STATES].join(", ")}. ` +
             `Pass allow_busy: true to bypass this gate and deliver raw keystrokes regardless of state.`,
         );
@@ -10961,10 +11064,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             // be caught, never reported as ok. Verified agent messages may
             // retry Return once only while the exact text remains in a Codex
             // composer; accepted TUI queues are nonterminal receipts instead.
+            // AIDEV-NOTE (F1): gate verification on the SAME live-resolved
+            // state the delivery gate above used. Reading the registry record
+            // here meant the class this lane newly admits -- registry-terminal
+            // + screen `ready` + allow_busy:false -- skipped verification
+            // entirely and returned an unproven success: the same receipt lie
+            // with the sign flipped (false `failed` -> false `ok`). It also
+            // suppressed markAgentWorking below, so the poisoned record was
+            // never corrected and every later send repeated the unverified path.
             verify_submit:
               args.press_enter &&
-              (args.allow_busy ||
-                INTERACTIVE_AGENT_STATES.has(deliveryRoute.state)),
+              (args.allow_busy || isLiveDeliverable(liveRouteState)),
             // A single recovery Return is part of verified sends and inbox
             // wakeups. Other lifecycle mutations (notably goal supersession)
             // retain their stricter no-retry evidence semantics.
@@ -15124,6 +15234,39 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               delivery_id: deliveryId,
             });
           } catch (error) {
+            // AIDEV-NOTE (F1): a RetryableDeliveryError is, by name and by the
+            // drain loop's own handling, NOT a terminal outcome -- the engine
+            // backs it off and tries again. Flattening it into a terminal
+            // `failed` receipt here contradicted send_to's own published
+            // promise ("Omit it to receive a nonterminal queued receipt") and
+            // was the fleet's #1 receipt lie: a lead told its live worker was
+            // dead. Hand back the queued receipt the drain loop will honour.
+            if (error instanceof RetryableDeliveryError) {
+              const receipt = engine.queueDelivery({
+                delivery_id: deliveryId,
+                agent_id: agentId,
+                text: args.text,
+                press_enter: args.press_enter,
+                source_event: "send_to",
+              });
+              const data = {
+                accepted: true,
+                agent_id: agentId,
+                ...buildPublicDeliveryReceipt({
+                  delivery_state: "queued",
+                  delivery_id: receipt.delivery_id,
+                  typed: false,
+                  submit_attempted: false,
+                  submit_verified: receipt.submit_verified,
+                  retry_count: receipt.retry_count,
+                  WARNING: `Delivery is queued for retry, not delivered yet: ${error.message}`,
+                }),
+              };
+              return okFormatted(
+                `send_to accepted — delivery ${receipt.delivery_id} queued for retry`,
+                data,
+              );
+            }
             const failedReceipt = engine.resolveDelivery(
               {
                 delivery_id: deliveryId,
