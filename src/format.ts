@@ -113,6 +113,9 @@ export function formatReadScreen(
   if (parsed.cost !== null)
     statusParts.push(`cost: $${parsed.cost.toFixed(2)}`);
   if (parsed.done_signal) statusParts.push("DONE");
+  if (parsed.paused) {
+    statusParts.push(`paused:${parsed.paused_source ?? "inferred"}`);
+  }
 
   if (statusParts.length > 0) {
     result.push(`\u2502 ${statusParts.join("  \u2502  ")}`);
@@ -189,7 +192,10 @@ export function formatListAgents(
     const state = pad(a.state.value ?? "unknown", 8);
     const model = pad(truncate(a.model.value ?? "unknown", 16), 18);
     const session = pad(a.session_id.value ?? "\u2014", 14);
-    lines.push(`\u2502 ${id} ${repo} ${state} ${model} ${session}`);
+    const pausedMark = a.paused?.value ? ` paused:${a.paused.source}` : "";
+    lines.push(
+      `\u2502 ${id} ${repo} ${state} ${model} ${session}${pausedMark}`,
+    );
   }
 
   if (skippedAgents.length > 0) {
@@ -286,10 +292,7 @@ export function formatDelivery(
     head = `typed into ${label}${parens} (not submitted)`;
   } else if (info.pending) {
     head = `delivering to ${label}${parens}`;
-  } else if (
-    info.submit_attempted &&
-    info.submit_verified === null
-  ) {
+  } else if (info.submit_attempted && info.submit_verified === null) {
     head = `submission attempted to ${label}${parens} (not verified)`;
   } else if (info.delivered) {
     head = `delivered to ${label}${parens}`;

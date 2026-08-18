@@ -64,6 +64,19 @@ describe("agent facade projections", () => {
     });
   });
 
+  it("projects paused visibility with the pause source, not registry provenance", () => {
+    const projected = toObservedPublicAgent(
+      makeRecord({ paused: true, paused_source: "inferred" }),
+      { derivedAtMs: 2_000 },
+    );
+
+    expect(projected.paused).toEqual({
+      value: true,
+      source: "inferred",
+      observed_at_ms: 2_000,
+    });
+  });
+
   it("exposes whether a listed agent was spawned or adopted", () => {
     const projected = toObservedPublicAgent(
       makeRecord({ surface_provenance: "cmuxlayer_spawn" }),

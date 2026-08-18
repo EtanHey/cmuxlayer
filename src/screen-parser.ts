@@ -242,6 +242,29 @@ const CLAUDE_WORKING_LINE_RE =
 // Claude's context-limit/auto-compact banner wording is not stable. A pane
 // sitting at one of these blockers must not become "working" merely because
 // the same line also contains a busy-looking marker.
+// Proven pause chrome only (cmuxlayer#446 review): Codex 0.147.0 prints
+// "Goal paused (/goal resume)"; a ctrl-Z'd pane prints zsh job-control
+// "zsh: suspended" / "[N]+ Stopped". A Claude background-task "⏸ paused"
+// row is not an agent pause — the composer can still act.
+const FOOTER_PAUSE_SCAN_LINES = 5;
+const CODEX_GOAL_PAUSED_RE = /^Goal paused\s*\(\/goal resume\)\s*$/i;
+const ZSH_SUSPENDED_RE = /^zsh:\s+suspended\b/i;
+const JOB_STOPPED_RE = /^\[\d+\][+-]?\s+Stopped\b/;
+
+export function screenShowsPaused(text: string): boolean {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-FOOTER_PAUSE_SCAN_LINES)
+    .some(
+      (line) =>
+        CODEX_GOAL_PAUSED_RE.test(line) ||
+        ZSH_SUSPENDED_RE.test(line) ||
+        JOB_STOPPED_RE.test(line),
+    );
+}
+
 const CONTEXT_LIMIT_BANNER_RE =
   /\bcontext\s+(?:low|window\s+is\s+almost\s+full|limit\s+reached)\b|\bauto-compact(?:ing)?\b|\bcompacting\s+conversation\b/i;
 const THINKING_RE =
@@ -1713,6 +1736,8 @@ export function parseScreen(text: string): ParsedScreenResult {
     errors,
     model,
     cost,
+    paused: screenShowsPaused(normalized),
+    paused_source: "inferred",
   };
 
   if (cliUpdateState !== undefined) {

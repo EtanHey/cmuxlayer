@@ -7,6 +7,7 @@ import type {
   ObservedPublicAgent,
   PublicAgent,
 } from "./agent-types.js";
+import type { PauseSource } from "./types.js";
 import { buildResumeCommand } from "./agent-command.js";
 
 export type AgentStatePayload = AgentRecord & {
@@ -15,7 +16,10 @@ export type AgentStatePayload = AgentRecord & {
 };
 
 export function resumeCommandForAgent(
-  record: Pick<AgentRecord, "cli" | "repo" | "cli_session_id" | "launcher_name">,
+  record: Pick<
+    AgentRecord,
+    "cli" | "repo" | "cli_session_id" | "launcher_name"
+  >,
 ): string | undefined {
   if (!record.cli_session_id) return undefined;
   try {
@@ -38,9 +42,7 @@ function observed<T>(
   return { value, source, observed_at_ms: observedAtMs };
 }
 
-export function toPublicAgent(
-  record: AgentRecord,
-): PublicAgent {
+export function toPublicAgent(record: AgentRecord): PublicAgent {
   const resumeCommand = resumeCommandForAgent(record);
   return {
     agent_id: record.agent_id,
@@ -63,6 +65,8 @@ export function toObservedPublicAgent(
     stateSource?: ObservationSource;
     screenObservedAtMs?: number;
     screenModel?: string | null;
+    paused?: boolean;
+    pausedSource?: PauseSource;
   } = {},
 ): ObservedPublicAgent {
   const derivedAtMs = opts.derivedAtMs ?? Date.now();
@@ -113,6 +117,16 @@ export function toObservedPublicAgent(
       "registry",
       registryObservedAtMs,
     ),
+    paused: {
+      value: opts.paused ?? record.paused === true,
+      source: (opts.pausedSource ??
+        record.paused_source ??
+        "inferred") as PauseSource,
+      observed_at_ms:
+        opts.paused !== undefined
+          ? (opts.screenObservedAtMs ?? derivedAtMs)
+          : registryObservedAtMs,
+    },
     ...(resumeCommand ? { resume_command: resumeCommand } : {}),
   };
 }

@@ -129,6 +129,7 @@ import {
   isCodexUpdateMenuScreen,
   isPickerOrMenuScreen,
   parseScreen,
+  screenShowsPaused,
 } from "./screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -885,6 +886,7 @@ export interface PublicDeliveryReceipt {
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
   duplicate_of?: string;
+  WARNING?: string;
 }
 
 /**
@@ -899,6 +901,7 @@ export function buildPublicDeliveryReceipt(input: {
   submit_attempted: boolean;
   submit_verified: boolean | null;
   retry_count: number;
+  WARNING?: string;
 }): PublicDeliveryReceipt {
   const evidencedState =
     input.delivery_state === "queued" ||
@@ -925,7 +928,15 @@ export function buildPublicDeliveryReceipt(input: {
       ? { delivery: evidencedState, delivery_state: evidencedState }
       : {}),
     ...(input.delivery_id ? { delivery_id: input.delivery_id } : {}),
+    ...(input.WARNING ? { WARNING: input.WARNING } : {}),
   };
+}
+
+export function pausedTargetWarning(source: string): string {
+  return (
+    `WARNING — target pane is paused (source: ${source}) and cannot act. ` +
+    "Delivery is queued, not submitted. Do not relay as sent."
+  );
 }
 
 export interface DeliveryRecord {
@@ -13154,7 +13165,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     server.tool(
       "list_agents",
-      "List live-derived agents, including registry-persisted prompt blockage; filter to blocked agents or children with mine/parent_agent_id. Default summary is lean (id, state, surface_id, send_via). Pass detail=full for health diagnostics and the full registry record.",
+      "List live-derived agents, including registry-persisted prompt blockage and pause state; filter to blocked agents or children with mine/parent_agent_id. Default summary is lean (id, state, surface_id, send_via, paused). Pass detail=full for health diagnostics and the full registry record.",
       {
         state: z
           .enum([
@@ -13344,6 +13355,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                         : "registry",
                       screenObservedAtMs: screenObservation?.observed_at_ms,
                       screenModel: screenObservation?.model,
+                      ...(trustedScreenObservation?.paused !== undefined
+                        ? {
+                            paused: trustedScreenObservation.paused,
+                            pausedSource:
+                              trustedScreenObservation.paused_source ??
+                              "inferred",
+                          }
+                        : agent.paused === true
+                          ? {
+                              paused: true,
+                              pausedSource: agent.paused_source ?? "inferred",
+                            }
+                          : {}),
                     }),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
@@ -14315,6 +14339,36 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       },
     );
 
+    const observePausedTarget = async (
+      agent: AgentRecord | null | undefined,
+    ): Promise<{ paused: boolean; source: string }> => {
+      if (agent?.paused === true) {
+        return {
+          paused: true,
+          source: agent.paused_source ?? "inferred",
+        };
+      }
+      if (!agent?.surface_id) {
+        return { paused: false, source: "inferred" };
+      }
+      const snapshot = await readParsedSurface(
+        agent.surface_id,
+        agent.workspace_id ?? undefined,
+      ).catch(() => null);
+      if (snapshot?.parsed.paused === true) {
+        engine.markObservedPause(agent.agent_id, true);
+        return {
+          paused: true,
+          source: snapshot.parsed.paused_source,
+        };
+      }
+      if (snapshot?.text && screenShowsPaused(snapshot.text)) {
+        engine.markObservedPause(agent.agent_id, true);
+        return { paused: true, source: "inferred" };
+      }
+      return { paused: false, source: "inferred" };
+    };
+
     // 17. send_to
     server.tool(
       "send_to",
@@ -14606,6 +14660,30 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                 continue;
               }
               const deliveryId = randomUUID();
+              const livePaused = await observePausedTarget(agent);
+              if (livePaused.paused) {
+                const queued = engine.queueDelivery({
+                  agent_id: agent.agent_id,
+                  text: args.text,
+                  press_enter: args.press_enter,
+                  source_event: "send_to",
+                });
+                mutableReceipts.push({
+                  ...resolutionMetadata,
+                  agent_id: agent.agent_id,
+                  ...buildPublicDeliveryReceipt({
+                    delivery_state: "queued",
+                    delivery_id: queued.delivery_id,
+                    typed: false,
+                    submit_attempted: false,
+                    submit_verified: queued.submit_verified,
+                    retry_count: queued.retry_count,
+                    WARNING: pausedTargetWarning(livePaused.source),
+                  }),
+                  accepted: true,
+                });
+                continue;
+              }
               if (!args.allow_busy && agent.state === "working") {
                 const queued = engine.queueDelivery({
                   agent_id: agent.agent_id,
@@ -14805,6 +14883,32 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             };
             return okFormatted(
               `send_to duplicate_of ${duplicate.delivery_id}`,
+              data,
+            );
+          }
+          const livePaused = await observePausedTarget(targetAgent);
+          if (livePaused.paused) {
+            const receipt = engine.queueDelivery({
+              agent_id: agentId,
+              text: args.text,
+              press_enter: args.press_enter,
+              source_event: "send_to",
+            });
+            const data = {
+              accepted: true,
+              agent_id: agentId,
+              ...buildPublicDeliveryReceipt({
+                delivery_state: "queued",
+                delivery_id: receipt.delivery_id,
+                typed: false,
+                submit_attempted: false,
+                submit_verified: receipt.submit_verified,
+                retry_count: receipt.retry_count,
+                WARNING: pausedTargetWarning(livePaused.source),
+              }),
+            };
+            return okFormatted(
+              `WARNING — send_to queued; paused target ${agentId} cannot act`,
               data,
             );
           }

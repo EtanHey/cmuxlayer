@@ -10536,6 +10536,83 @@ Session ID: ${sessionId}`,
       });
     });
 
+    it("treats a confirmed-paused child as halted and notifies the live ancestor", async () => {
+      const nowMs = Date.parse("2026-08-18T13:40:00.000Z");
+      engine.dispose();
+      engine = new AgentEngine(
+        stateMgr,
+        new AgentRegistry(stateMgr, async () => liveSurfaces),
+        mockClient,
+        {
+          spawnPreflight: async () => {},
+          sessionIdentityResolver: () => null,
+          inboxOpts: { baseDir: TEST_DIR },
+          haltNow: () => nowMs,
+          haltAwaitingInputDwellMs: 0,
+        },
+      );
+      const parent = makeRecord({
+        agent_id: "paused-parent",
+        surface_id: "surface:paused-parent",
+        workspace_id: "workspace:paused-lane",
+        state: "working",
+        role: "orchestrator",
+        cli: "claude",
+        parent_agent_id: null,
+        spawn_depth: 0,
+        halt_escalation: true,
+      });
+      const child = makeRecord({
+        agent_id: "paused-child",
+        surface_id: "surface:paused-child",
+        workspace_id: "workspace:paused-lane",
+        state: "idle",
+        parent_agent_id: parent.agent_id,
+        spawn_depth: 1,
+        halt_escalation: true,
+      });
+      stateMgr.writeState(parent);
+      stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map((record) =>
+        makeSurface(record.surface_id),
+      );
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
+        async (surface: string) => ({
+          surface,
+          text:
+            surface === parent.surface_id
+              ? "Claude Code\nWorking (2s • esc to interrupt)"
+              : "gpt-5.5 xhigh · 99% left\nGoal paused (/goal resume)\ncodex>",
+          lines: 80,
+          scrollback_used: false,
+        }),
+      );
+      await engine.getRegistry().reconstitute();
+
+      const pausedScreen =
+        "gpt-5.5 xhigh · 99% left\nGoal paused (/goal resume)\ncodex>";
+      await (engine as any).maybeEscalateLiveHalt(child, pausedScreen);
+      await (engine as any).maybeEscalateLiveHalt(
+        engine.getAgentState(child.agent_id),
+        pausedScreen,
+      );
+
+      expect(engine.getAgentState(child.agent_id)).toMatchObject({
+        paused: true,
+        paused_source: "inferred",
+        halt_episode_type: "paused",
+        halt_notification_sent_at: expect.any(String),
+        halt_notified_ancestor_id: parent.agent_id,
+      });
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([
+        expect.objectContaining({
+          to: parent.agent_id,
+          tag: "agent_halt_paused",
+          task: expect.stringContaining(child.agent_id),
+        }),
+      ]);
+    });
+
     it("records an undeliverable parentless halt and retries when a fallback sink later appears", async () => {
       const nowMs = Date.parse("2026-08-14T13:25:00.000Z");
       engine.dispose();
@@ -13611,6 +13688,37 @@ Session ID: ${sessionId}`,
       expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
         text: "persist me",
         delivery_state: "queued",
+      });
+    });
+
+    it("holds a queued delivery while the target is paused without typing or retrying", async () => {
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: "paused-queued-delivery",
+          state: "idle",
+          surface_id: "surface:42",
+          paused: true,
+          paused_source: "inferred",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      const submitter = vi.fn();
+      engine.setDeliverySubmitter(submitter);
+      const receipt = engine.queueDelivery({
+        agent_id: "paused-queued-delivery",
+        text: "do not type this",
+        press_enter: true,
+        source_event: "send_to",
+      });
+
+      await engine.drainDeliveryQueue();
+
+      expect(submitter).not.toHaveBeenCalled();
+      expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "queued",
+        terminal: false,
+        retry_count: 0,
       });
     });
 

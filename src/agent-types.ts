@@ -3,7 +3,7 @@
  * Every field is a primitive (string | number | null).
  */
 import { randomUUID } from "node:crypto";
-import type { ParsedControlPlaneState } from "./types.js";
+import type { ParsedControlPlaneState, PauseSource } from "./types.js";
 
 export type AgentState =
   "creating" | "booting" | "ready" | "working" | "idle" | "done" | "error";
@@ -20,7 +20,8 @@ export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 export type ObservationSource = "screen" | "registry" | "process";
 export type AgentReviveOutcome =
   "pending" | "failed" | "revived" | "unrecoverable";
-export type AgentHaltType = "awaiting_input" | "idle_without_done" | "wedged";
+export type AgentHaltType =
+  "awaiting_input" | "idle_without_done" | "wedged" | "paused";
 
 export interface Observed<T> {
   value: T;
@@ -121,6 +122,10 @@ export interface AgentRecord {
   /** Screen-authoritative prompt blocker, persisted independently of inbox delivery. */
   blocked_on_prompt?: boolean;
   blocked_on_prompt_since?: string | null;
+  /** Screen-inferred or cmux-reported pause; panes that cannot act. */
+  paused?: boolean;
+  paused_source?: PauseSource | null;
+  paused_since?: string | null;
   /** Number of mature halt attempts whose hierarchy had no healthy ancestor. */
   halt_missing_ancestor_count?: number;
   /** Best-effort sink selected after hierarchy delivery was unavailable. */
@@ -183,6 +188,11 @@ export interface ObservedPublicAgent {
   submit_verified: Observed<boolean | null>;
   model_mismatch: Observed<boolean | null>;
   blocked_on_prompt: Observed<boolean>;
+  paused: {
+    value: boolean;
+    source: PauseSource;
+    observed_at_ms: number;
+  };
 }
 
 export interface AgentRoute {
