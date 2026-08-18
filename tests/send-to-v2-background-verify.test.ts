@@ -646,6 +646,46 @@ describe("send_to v2 background verify", () => {
     expect(filed).toHaveLength(1);
   });
 
+  it("returns a nonterminal wait_for delivery receipt with timed_out instead of rejecting", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+
+    const sent = parseResult(
+      await callTool(server, "send_to", {
+        agent_id: "agent-1",
+        text: "still waiting",
+        press_enter: true,
+      }),
+    );
+    expect(sent.delivery_state).toBe("pending_verify");
+
+    const waitPromise = server._registeredTools.wait_for.handler(
+      { delivery_id: sent.delivery_id, timeout_ms: 200 },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(300);
+    const waited = await waitPromise;
+    const parsed = parseResult(waited);
+
+    expect(waited.isError).not.toBe(true);
+    expect(parsed).toMatchObject({
+      ok: true,
+      delivery_id: sent.delivery_id,
+      delivery_state: "pending_verify",
+      terminal: false,
+      timed_out: true,
+    });
+    expect(
+      server._registeredTools.interact._engine.getDeliveryReceipt(
+        sent.delivery_id,
+      ),
+    ).toMatchObject({
+      delivery_state: "pending_verify",
+      terminal: false,
+    });
+  });
+
   it("lets wait_for accept a delivery_id and return the terminal receipt", async () => {
     const client = new FakeAgentSurfaceClient();
     server = createVerifyServer(client);

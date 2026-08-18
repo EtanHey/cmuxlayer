@@ -6446,7 +6446,7 @@ export class AgentEngine {
   async waitForDelivery(
     deliveryId: string,
     timeoutMs: number,
-  ): Promise<AgentDeliveryReceipt> {
+  ): Promise<AgentDeliveryReceipt & { timed_out?: boolean }> {
     const start = Date.now();
     const existing = this.getDeliveryReceipt(deliveryId);
     if (!existing) {
@@ -6455,33 +6455,32 @@ export class AgentEngine {
     if (existing.terminal) {
       return existing;
     }
-    return new Promise<AgentDeliveryReceipt>((resolve, reject) => {
-      const finish = (receipt: AgentDeliveryReceipt) => {
-        clearInterval(timer);
-        resolve(receipt);
-      };
-      const timer = setInterval(() => {
-        const elapsed = Date.now() - start;
-        const current = this.getDeliveryReceipt(deliveryId);
-        if (!current) {
+    return new Promise<AgentDeliveryReceipt & { timed_out?: boolean }>(
+      (resolve, reject) => {
+        const finish = (
+          receipt: AgentDeliveryReceipt & { timed_out?: boolean },
+        ) => {
           clearInterval(timer);
-          reject(new Error(`Delivery not found: ${deliveryId}`));
-          return;
-        }
-        if (current.terminal) {
-          finish(current);
-          return;
-        }
-        if (elapsed >= timeoutMs) {
-          clearInterval(timer);
-          reject(
-            new Error(
-              `Timed out after ${timeoutMs}ms waiting for delivery ${deliveryId}`,
-            ),
-          );
-        }
-      }, DELIVERY_WAIT_POLL_MS);
-    });
+          resolve(receipt);
+        };
+        const timer = setInterval(() => {
+          const elapsed = Date.now() - start;
+          const current = this.getDeliveryReceipt(deliveryId);
+          if (!current) {
+            clearInterval(timer);
+            reject(new Error(`Delivery not found: ${deliveryId}`));
+            return;
+          }
+          if (current.terminal) {
+            finish(current);
+            return;
+          }
+          if (elapsed >= timeoutMs) {
+            finish({ ...current, timed_out: true });
+          }
+        }, DELIVERY_WAIT_POLL_MS);
+      },
+    );
   }
 
   async verifyPendingDeliveries(): Promise<void> {

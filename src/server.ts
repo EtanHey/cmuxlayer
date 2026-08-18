@@ -663,6 +663,10 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       agent_id: z.string().optional(),
       results: z.array(z.record(z.unknown())).optional(),
       watch: z.record(z.unknown()).optional(),
+      delivery_id: z.string().optional(),
+      delivery_state: z.string().optional(),
+      terminal: z.boolean().optional(),
+      timed_out: z.boolean().optional(),
     })
     .passthrough(),
   control_health: z
@@ -12897,6 +12901,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               terminal: receipt.terminal,
               submit_verified: receipt.submit_verified,
               agent_id: receipt.agent_id,
+              ...(receipt.timed_out ? { timed_out: true } : {}),
             };
             return okFormatted(formatOk("wait_for", data), data);
           }
