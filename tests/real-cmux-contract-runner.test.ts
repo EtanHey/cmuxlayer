@@ -71,6 +71,33 @@ describe("real cmux contract runner helpers", () => {
     );
   });
 
+  it("turns a skip into a hard failure under CMUX_CONTRACT_REQUIRE_LIVE=1 (#370)", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        join(process.cwd(), "scripts", "run-real-cmux-contract.ts"),
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          CMUX_SOCKET_PATH: "",
+          CMUX_CONTRACT_REQUIRE_LIVE: "1",
+        },
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+
+    expect(result.status).toBe(1);
+    const output = result.stdout + result.stderr;
+    expect(output).toContain("[contract] FAIL:");
+    expect(output).toContain("CMUX_CONTRACT_REQUIRE_LIVE=1");
+    expect(output).not.toContain("[contract] SKIP:");
+  });
+
   it("accepts only the live system.ping response shape", () => {
     expect(() => assertPingShape({ pong: true })).not.toThrow();
     expect(() => assertPingShape({ pong: false })).toThrow(/pong: true/);

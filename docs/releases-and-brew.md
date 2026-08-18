@@ -87,25 +87,145 @@ ID so distinct identities cannot collide after filename sanitization.
 One command does the whole pipeline:
 
 ```bash
-~/Gits/cmuxlayer/scripts/release.sh 0.3.0
+~/Gits/cmuxlayer/scripts/release.sh 0.4.44                     # asks once before pushing
+~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --yes               # no prompt
+~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --dry-run           # print every step, change nothing
+~/Gits/cmuxlayer/scripts/release.sh 0.4.44 --require-contract  # a skipped real-cmux gate aborts
 ```
 
-It will: verify a clean tree + green build/tests, bump `package.json`, commit,
-push `main`, tag `vX.Y.Z`, then update the Homebrew formula's `url` + `sha256`
-in `~/Gits/homebrew-layers` and push the tap. Afterwards, run the verification
-helper with the released version:
+It will: verify a clean tree + green typecheck/tests, run the real-cmux
+contract gate, bump `package.json`, commit, push `main`, tag `vX.Y.Z`, update
+the Homebrew formula's `url` + `sha256` in `~/Gits/homebrew-layers`, push the
+tap, and **sync the tap clone Homebrew itself reads**. Afterwards, run the
+verification helper on **each** Mac:
 
 ```bash
-~/Gits/cmuxlayer/scripts/release-verify.sh 0.3.0
+~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.44                # sync clone → upgrade → assert
+~/Gits/cmuxlayer/scripts/release-verify.sh 0.4.44 --verify-only  # assert only; never upgrades
 ```
 
-The helper fetches and hard-resets the tap clone Homebrew actually reads at
+### The release receipt (stop trusting scrollback)
+
+Both scripts write a durable **release receipt** through
+`scripts/release-receipt.mjs` instead of leaving the answer to "did this
+release actually gate, ship, and land on every Mac?" in four terminals'
+scrollback.
+
+- Location: `$CMUXLAYER_RELEASE_RECEIPTS_DIR`, defaulting to
+  `~/.local/state/cmuxlayer/release-receipts/release-<version>.json`.
+- `release.sh` records: version, tag, release commit SHA, timestamps,
+  tarball URL + `sha256`, each gate's result (`gates.typecheck`,
+  `gates.tests`, `gates.contract` — `pass` / `skip` / `fail`, with
+  `gates.contract_reason` on a skip), the tap push, and the tap-clone sync
+  (`tap.clone_sync` = `synced` / `skipped` / `failed`, with before/after SHAs).
+- `release-verify.sh` records `verify.result`, `verify.mode`, tap-clone
+  divergence, and appends one **install evidence** entry
+  (`{host, result, installed, mode, at}`) to `installs[]`.
+- Every mutation also appends to an in-file `events[]` trail; writes are atomic
+  (temp file + rename), and re-running `init` never drops existing install
+  evidence.
+
+**The default ledger is per-Mac, not fleet-wide.** `~/.local/state/…` is local
+disk: four Macs running `release-verify.sh` produce four separate
+`release-<version>.json` files, each holding its own single `installs[]` entry.
+That is still a real improvement — four durable files beat four scrollbacks —
+but collecting them is on you.
+
+To aggregate a release into **one** file, point every Mac at shared storage:
+
+```bash
+export CMUXLAYER_RELEASE_RECEIPTS_DIR=/path/to/shared/release-receipts
+```
+
+The `installs[]` array and its `host` field exist for exactly that. One caveat
+before you do it: `release-receipt.mjs` does a read-modify-write with **no
+locking**, so two Macs verifying the same version at the same moment can drop
+one another's entry. Stagger them, or treat a shared ledger as best-effort
+until locking lands.
+
+Read one directly:
+
+```bash
+node ~/Gits/cmuxlayer/scripts/release-receipt.mjs show 0.4.44
+node ~/Gits/cmuxlayer/scripts/release-receipt.mjs path 0.4.44
+```
+
+Receipt writes are never a gate: a failed receipt write warns and the release
+continues. `--dry-run` writes no receipt at all.
+
+### The real-cmux contract gate (#370)
+
+`release.sh` runs `bun run test:contract`. That lane **skips itself** when no
+live, non-production cmux socket is reachable — cmux grants
+`CMUX_SOCKET_CAPABILITY` only to processes started inside a pane, and the
+runner refuses the production socket outright (pin
+`/tmp/cmux-nightly.sock`, or set `CMUX_CONTRACT_ALLOW_PROD=1` to override).
+Those skips are why 0.4.17–0.4.19 shipped without the gate ever running.
+
+Now the skip is classified and written to the receipt as
+`gates.contract: skip` with its reason, and there are two ways to make it a
+hard gate:
+
+- `scripts/release.sh <version> --require-contract` — a skipped gate aborts the
+  release before anything is pushed;
+- `CMUX_CONTRACT_REQUIRE_LIVE=1 bun run test:contract` — the runner itself
+  turns a skip into `[contract] FAIL:` and a non-zero exit.
+
+`scripts/nightly-contract-run.sh` writes its own nightly receipt under
+`~/.local/state/cmux/contract-nightly-<date>.json`.
+
+**Running it green.** Open a shell *inside a cmux pane* (that is the only place
+`CMUX_SOCKET_CAPABILITY` is granted) and run the lane. Verified green on
+2026-08-18 from a pane on the live socket:
+
+```bash
+CMUX_CONTRACT_ALLOW_PROD=1 bun run test:contract
+# [contract] PASS system.ping shape on ~/.local/state/cmux/cmux-501.sock
+# [contract] PASS detached orphan pid=… denied with EPROTO
+# [contract] PASS list_surfaces/read_screen through dist daemon pid=…
+# [contract] PASS doctor --json healthy on isolated live stack
+# [contract] PASS graceful retire/autostart …
+# [contract] PASS real-cmux contract lane
+```
+
+The lane's live steps against the pinned cmux are read-only (`system.ping`,
+`list_surfaces`, `read_screen`); the daemon it retires and restarts is its own,
+under a temp `HOME` and a temp socket. Prefer the nightly pin
+(`CMUX_SOCKET_PATH=/tmp/cmux-nightly.sock`) when nightly is up;
+`CMUX_CONTRACT_ALLOW_PROD=1` is the explicit override when it is not.
+
+### Verify-only mode (failures-ledger 10.5)
+
+`release-verify.sh --verify-only` (alias `--no-upgrade`) **asserts without
+mutating this Mac**: no `brew upgrade`, no `reset --hard` of Homebrew's tap
+clone. It fetches (remote refs only), reports how many commits brew's clone is
+behind `origin/main`, asserts `brew list --versions cmuxlayer`, and appends its
+install evidence. This exists because a "verification" that silently upgraded
+mid-fleet nearly broke an explicit operator hold on the v0.4.24 cut.
+
+The default (upgrading) mode is unchanged: it fetches and hard-resets the tap
+clone Homebrew actually reads at
 `$(brew --repository)/Library/Taps/etanhey/homebrew-layers` to `origin/main`,
 runs `brew upgrade etanhey/layers/cmuxlayer`, and fails unless
-`brew list --versions cmuxlayer` prints exactly the released version. This
-explicit sync is required because that tap's `origin` can be the local
-`~/Gits/homebrew-layers` checkout while its `main` has no upstream tracking, so
-`brew update` alone does not guarantee a fast-forward.
+`brew list --versions cmuxlayer` prints exactly the released version.
+
+> ⚠️ `brew upgrade` deletes the running keg under every live MCP child, so
+> agents holding an old cmuxlayer child keep running deleted code until they
+> `/mcp reconnect cmuxlayer` (#371). "Deployed" is per-agent, not fleet-wide —
+> which is what the per-Mac `installs[]` evidence is for.
+
+### Why the tap clone must be synced explicitly (#371, failures-ledger 16)
+
+`release.sh` edits and pushes `~/Gits/homebrew-layers`, but brew reads its OWN
+clone under `$(brew --repository)/Library/Taps/etanhey/homebrew-layers`. That
+clone's `main` frequently has **no upstream tracking**, so `brew update` reports
+"Already up-to-date" while sitting commits behind and `git pull` fails with "no
+tracking information" — observed on both Macs after v0.4.26. Both `release.sh`
+(after the tap push) and `release-verify.sh` (default mode) therefore run an
+explicit `git -C <clone> fetch origin && git -C <clone> reset --hard origin/main`.
+In `release.sh` this step is **additive and non-fatal** — the release is already
+pushed by then, so a missing brew or missing clone is recorded as
+`tap.clone_sync: skipped` rather than failing the run.
 
 Manual equivalent, if you prefer:
 
@@ -208,5 +328,7 @@ explicit `workspace` only when you deliberately want a different one.
 | `~/.golems/config.yaml` → `mcpServers.cmuxlayer` | wires the launcher into the fleet |
 | `~/.golems/bin/cmuxlayer-mcp` | launcher: brew (default) vs live source (`CMUXLAYER_DEV=1`) |
 | `EtanHey/homebrew-layers` → `Formula/cmuxlayer.rb` | the brew formula (stable tag + `head`) |
-| `scripts/release.sh` | one-command release: bump → tag → formula bump → push |
-| `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version |
+| `scripts/release.sh` | one-command release: gate → bump → tag → formula bump → push → sync brew's tap clone → receipt |
+| `scripts/release-verify.sh` | sync Homebrew's tap clone → upgrade → assert installed version (`--verify-only` asserts without upgrading) |
+| `scripts/release-receipt.mjs` | the release receipts ledger (`CMUXLAYER_RELEASE_RECEIPTS_DIR`) |
+| `scripts/run-real-cmux-contract.ts` | the real-cmux contract lane (`CMUX_CONTRACT_REQUIRE_LIVE=1` makes a skip fatal) |
