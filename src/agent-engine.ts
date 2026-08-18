@@ -15,6 +15,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import {
+  resolveClosureState,
+  type ClosureState,
+} from "./coordination-paths.js";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { StateManager } from "./state-manager.js";
@@ -338,6 +342,14 @@ export interface SpawnAgentResult {
   launch_mode?: AgentLaunchMode;
   /** Whether the reported `model` was actually pinned, and by what (#433). */
   model_pin?: ModelPinSource;
+  /** P11/U10: engine-issued coordination contract, returned in the receipt. */
+  report_path?: string;
+  done_marker?: string;
+  /** Constraint 1: the footer's own byte cost, declared not buried (#424/#425). */
+  coordination_footer_bytes?: number;
+  /** Provenance: the footer is NOT injected yet, so the bytes were never sent. */
+  coordination_footer_delivered?: boolean;
+  coordination_footer_note?: string;
 }
 
 export class AgentLaunchError extends Error {
@@ -387,6 +399,12 @@ export interface KeptOpenContract {
 
 export interface WorkerHarvestability {
   closeable: boolean;
+  /**
+   * P11 Constraint 3: the state a caller reads at DEFAULT detail. Never a bare
+   * boolean -- "done but unverified" (act now) and "still working" (wait) were
+   * both `false` under the boolean, and the first is the S3 deadlock.
+   */
+  closure: ClosureState;
   closure_artifact_verified: boolean | null;
   report_path: string | null;
   done_marker: string | null;
@@ -1689,9 +1707,20 @@ export class AgentEngine {
     if (agent.state !== "done" || role === "orchestrator") {
       return {
         closeable: false,
+        closure: resolveClosureState({
+          state: agent.state,
+          role,
+          // A contract exists if EITHER source supplies one; sourcing this from
+          // the record alone made a legacy prose agent read not_applicable while
+          // working and verified once done (reviewer nit).
+          contractIssued:
+            Boolean(agent.report_path && agent.done_marker) ||
+            Boolean(agent.goal_file),
+          closureArtifactVerified: null,
+        }),
         closure_artifact_verified: null,
-        report_path: null,
-        done_marker: null,
+        report_path: agent.report_path ?? null,
+        done_marker: agent.done_marker ?? null,
         report_exists: null,
         report_fresh: null,
         report_final_line: null,
@@ -1705,17 +1734,24 @@ export class AgentEngine {
     }
 
     const evidenceChannel = this.readHarvestabilityEvidenceChannel(agent);
-    const goal = this.readClosureGoalContract(agent.goal_file ?? null);
+    const goal = this.readClosureGoalContract(agent.goal_file ?? null, agent);
+    const engineIssued = Boolean(agent.report_path && agent.done_marker);
     const reportText = goal.reportPath
       ? this.readTextFile(goal.reportPath)
       : null;
     const reportExists = goal.reportPath ? reportText !== null : null;
+    // AIDEV-NOTE (P11): freshness needs a baseline, and an engine-issued
+    // contract has no goal file to compare against. The correct analogue is the
+    // spawn that ISSUED the contract -- otherwise reportFresh is null forever
+    // and closure_artifact_verified can never become true for a spawned worker.
     const reportFresh =
       goal.reportPath && reportText !== null
-        ? this.reportIsFreshForGoalContract(
-            goal.reportPath,
-            agent.goal_file ?? null,
-          )
+        ? engineIssued
+          ? this.reportIsFreshForIssuedContract(goal.reportPath, agent)
+          : this.reportIsFreshForGoalContract(
+              goal.reportPath,
+              agent.goal_file ?? null,
+            )
         : null;
     const reportFinalLine = reportText
       ? this.extractFinalNonEmptyLine(reportText)
@@ -1795,6 +1831,12 @@ export class AgentEngine {
         closureArtifactVerified &&
         !keptOpen?.present &&
         (!prLoopRequired || prLoopSatisfied === true),
+      closure: resolveClosureState({
+        state: agent.state,
+        role,
+        contractIssued: Boolean(goal.reportPath && goal.doneMarker),
+        closureArtifactVerified,
+      }),
       closure_artifact_verified: closureArtifactVerified,
       report_path: goal.reportPath,
       done_marker: goal.doneMarker,
@@ -1835,17 +1877,30 @@ export class AgentEngine {
     return { done_source: doneSource, degraded: false, reason: null };
   }
 
-  private readClosureGoalContract(goalFile: string | null): {
+  /**
+   * AIDEV-NOTE (P11/U10): PRECEDENCE, not replacement. An engine-issued contract
+   * on the record always wins over anything parsed out of the brief -- that is
+   * the S3 fix, because the prose heuristic below can resolve a DIFFERENT path
+   * than the one the worker was actually told. The heuristic survives only as
+   * the fallback for legacy and supersede_agent_goal records.
+   */
+  private readClosureGoalContract(
+    goalFile: string | null,
+    agent?: AgentRecord,
+  ): {
     goalText: string | null;
     reportPath: string | null;
     doneMarker: string | null;
     goalReadFailed: boolean;
   } {
+    const issuedReportPath = agent?.report_path ?? null;
+    const issuedDoneMarker = agent?.done_marker ?? null;
+    const issued = Boolean(issuedReportPath && issuedDoneMarker);
     if (!goalFile) {
       return {
         goalText: null,
-        reportPath: null,
-        doneMarker: null,
+        reportPath: issuedReportPath,
+        doneMarker: issuedDoneMarker,
         goalReadFailed: false,
       };
     }
@@ -1853,15 +1908,19 @@ export class AgentEngine {
     if (goalText === null) {
       return {
         goalText: null,
-        reportPath: null,
-        doneMarker: null,
-        goalReadFailed: true,
+        reportPath: issuedReportPath,
+        doneMarker: issuedDoneMarker,
+        goalReadFailed: !issued,
       };
     }
     return {
       goalText,
-      reportPath: this.extractReportPath(goalText, goalFile),
-      doneMarker: this.extractDoneMarker(goalText),
+      reportPath: issued
+        ? issuedReportPath
+        : this.extractReportPath(goalText, goalFile),
+      doneMarker: issued
+        ? issuedDoneMarker
+        : this.extractDoneMarker(goalText),
       goalReadFailed: false,
     };
   }
@@ -1961,6 +2020,22 @@ export class AgentEngine {
         .filter((line) => line.length > 0)
         .at(-1) ?? ""
     );
+  }
+
+  /**
+   * Freshness for an engine-issued contract: the report must be at least as new
+   * as the spawn that issued it, so a stale file left at that path by an earlier
+   * occupant cannot be read as this agent's closure evidence.
+   */
+  private reportIsFreshForIssuedContract(
+    reportPath: string,
+    agent: AgentRecord,
+  ): boolean | null {
+    const reportMtimeMs = safeMtimeMs(reportPath);
+    if (reportMtimeMs <= 0) return null;
+    const issuedAtMs = Date.parse(agent.created_at ?? "");
+    if (!Number.isFinite(issuedAtMs)) return null;
+    return reportMtimeMs >= issuedAtMs;
   }
 
   private reportIsFreshForGoalContract(

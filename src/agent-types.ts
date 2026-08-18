@@ -168,6 +168,13 @@ export interface AgentRecord {
   effort_mismatch?: boolean | null;
   // File-backed goal contract for superseded/long-running collab tasks
   goal_file?: string | null;
+  // AIDEV-NOTE (P11/U10): engine-ISSUED coordination contract. Authored once at
+  // spawn, returned in the receipt, and told to the worker -- so the DONE
+  // signal's producer and consumer read the same string instead of each
+  // re-deriving one from the lead's prose. Null on legacy/superseded records,
+  // which fall back to the goal_file prose heuristic.
+  report_path?: string | null;
+  done_marker?: string | null;
   // Launch context for worktree/profile-aware spawns
   launch_cwd?: string | null;
   mcp_profile?: string | null;

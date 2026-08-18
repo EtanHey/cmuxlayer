@@ -55,6 +55,12 @@ import {
   type SpawnAgentParams,
 } from "./agent-engine.js";
 import {
+  COORDINATION_FOOTER_NOT_DELIVERED,
+  issueCoordinationContract,
+  coordinationFooterBytes,
+  type CoordinationContract,
+} from "./coordination-paths.js";
+import {
   defaultDeliveryTicketDir,
   fileDeliveryFailureGithubIssue,
   type DeliveryFailureTicket,
@@ -614,6 +620,11 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       boot_prompt_delivered: z.boolean().optional(),
       boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
       boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      report_path: z.string().optional(),
+      done_marker: z.string().optional(),
+      coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      coordination_footer_delivered: z.boolean().optional(),
+      coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
     })
     .passthrough(),
@@ -633,6 +644,11 @@ const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> = {
       boot_prompt_delivered: z.boolean().optional(),
       boot_prompt_receipt: DeliveryReceiptOutputSchema.optional(),
       boot_prompt_bytes: z.number().int().nonnegative().optional(),
+      report_path: z.string().optional(),
+      done_marker: z.string().optional(),
+      coordination_footer_bytes: z.number().int().nonnegative().optional(),
+      coordination_footer_delivered: z.boolean().optional(),
+      coordination_footer_note: z.string().optional(),
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
       boot_prompt_warning: z.string().nullable().optional(),
       registry_state: z.string().nullable().optional(),
@@ -3479,6 +3495,21 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   ): string =>
     `cmuxlayer mailbox contract for ${agentId}: monitor with ${monitorBoot.monitor_command}; ` +
     `after each handled message run CMUX_INBOX_MSG_ID=<handled-message-id> ${monitorBoot.cursor_update_command}`;
+
+  // AIDEV-NOTE (P11/U10): the engine issues the coordination contract at spawn,
+  // returns it in the receipt, persists it on the record, AND tells the worker
+  // the same two strings. That is the whole S3 fix -- producer and consumer read
+  // one engine-authored value instead of each re-deriving one from prose.
+  // Derived from agent_id alone and applied above launchMode, so a
+  // registry-optional / raw-CLI spawn (#453) gets an identical contract.
+  const issueSpawnCoordination = (
+    agentId: string,
+    reportPathOverride?: string | null,
+  ): CoordinationContract =>
+    issueCoordinationContract(agentId, {
+      ...inboxOpts,
+      reportPath: reportPathOverride ?? null,
+    });
   // Wired up by the agent-lifecycle block below (when enabled). Lets the
   // dispatch_to_agent nudge reuse the guarded relay path — stale-surface
   // resync + recycled-occupant identity checks — instead of raw keystrokes.
@@ -11221,6 +11252,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           .describe(
             "Notify the nearest live ancestor when this agent remains awaiting input, idle without done evidence, or wedged past its dwell threshold. Set false for deliberate debugging lanes.",
           ),
+        report_path: z
+          .string()
+          .refine((value) => isAbsolute(value.trim()), {
+            message:
+              "report_path must be absolute so the producer and consumer resolve the same file",
+          })
+          .optional()
+          .describe(
+            "Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues `~/.cmux/agents/<agent_id>/report.md`, returns it in this receipt, persists it, and verifies closure against it. NOTE: the engine does NOT yet tell the worker this path -- the boot-prompt footer is not wired (see coordination_footer_delivered in the receipt), so until then YOU must relay report_path and done_marker to the worker, or every done worker will render closure:\"artifact_missing\". Pass this only to place the report somewhere you already watch (e.g. a collab dir).",
+          ),
         force_new: z
           .boolean()
           .optional()
@@ -11254,6 +11295,20 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       async (args) => {
         const creation = new CreatedIdentityScope();
         try {
+          // P11 finding 2: reject a relative override BEFORE anything launches.
+          // The zod .refine() covers real MCP calls; this covers direct handler
+          // invocation, so no call path can leave an orphaned pane behind an
+          // input-validation error.
+          if (
+            typeof args.report_path === "string" &&
+            !isAbsolute(args.report_path.trim())
+          ) {
+            return err(
+              new Error(
+                `report_path must be absolute so the producer and consumer resolve the same file: ${args.report_path}`,
+              ),
+            );
+          }
           if (args.resume_agent_id) {
             const incompatible = [
               "repo",
@@ -11729,10 +11784,47 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           );
           launchShellRecoveryBySurface.delete(result.surface_id);
           const monitorBoot = ensureMonitorBoot(result.agent_id);
+          const coordination = issueSpawnCoordination(
+            result.agent_id,
+            args.report_path,
+          );
+          // AIDEV-NOTE (P11): the coordination footer is NOT injected here yet,
+          // and that is a measured decision, not an oversight. The mailbox
+          // contract alone is ~479 chars for a real agent id, and
+          // SEND_INPUT_CHUNK_THRESHOLD is 500 -- so appending ANY report
+          // contract pushes the boot injection over the threshold and moves
+          // every spawn's boot delivery from the typed path to the chunked
+          // paste path (measured: 618 chars, 10 failing tests, 4 of them
+          // submit-verification timeouts). That is a change to the most
+          // incident-prone path in this repo (#434/#438), not an additive one.
+          // Landing it needs either a slimmer mailbox contract (#425 measured
+          // that class) or an explicit decision to move boot delivery onto the
+          // chunked route. Until then the contract is still ISSUED, RETURNED,
+          // and PERSISTED, so the consumer is authoritative: a worker that
+          // writes somewhere else now renders as closure "artifact_missing"
+          // (actionable) instead of a silent deadlock.
           const injectedBootPrompt = mailboxBootContract(
             result.agent_id,
             monitorBoot,
           );
+          result.report_path = coordination.report_path;
+          result.done_marker = coordination.done_marker;
+          // Finding 3: never report the footer's size without reporting that it
+          // was not sent -- same shape as the v0.4.42 `paused` provenance fix.
+          result.coordination_footer_bytes =
+            coordinationFooterBytes(coordination);
+          result.coordination_footer_delivered = false;
+          result.coordination_footer_note = COORDINATION_FOOTER_NOT_DELIVERED;
+          try {
+            const patched = stateMgr.updateRecord(result.agent_id, {
+              report_path: coordination.report_path,
+              done_marker: coordination.done_marker,
+            });
+            registry.set(result.agent_id, patched);
+          } catch {
+            // Receipt already carries the contract; a registry write failure
+            // must not fail an otherwise-successful spawn.
+          }
           const spawnedBinding = engine.getAgentState(result.agent_id);
           appendStaleBuildWarning(result);
           const placementWarnings = [
@@ -12961,9 +13053,26 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                       topology,
                     )
                   : undefined;
+                // P11 Contract B: a lead that BLOCKS on its children gets the
+                // closure state in the reply it was already waiting for -- the
+                // completion signal surfaces where the parent actually looks,
+                // with no new carrier (#414: a carrier without a reader is not
+                // a carrier).
+                const harvest = resultAgent
+                  ? engine.assessHarvestability(resultAgent)
+                  : null;
                 return {
                   ...result,
                   health,
+                  ...(harvest
+                    ? {
+                        closure: harvest.closure,
+                        closure_artifact_verified:
+                          harvest.closure_artifact_verified,
+                        report_path: harvest.report_path,
+                        done_marker: harvest.done_marker,
+                      }
+                    : {}),
                   agent:
                     result.agent && health
                       ? { ...result.agent, health }
@@ -13408,6 +13517,11 @@ export function createServer(opts?: CreateServerOptions): McpServer {
                     }),
                     surface_id: agent.surface_id,
                     send_via: "send_to" as const,
+                    // P11 Constraint 3: at DEFAULT detail, so a lead can tell a
+                    // deadlocked child (done, no artifact -> act) from a busy one
+                    // (pending -> wait) WITHOUT a second full-detail call. A bare
+                    // boolean made both of those `false`; that was the S3 bug.
+                    closure: engine.assessHarvestability(agent).closure,
                     ...(args.detail === "full"
                       ? {
                           health: {
@@ -15289,6 +15403,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           const supersedePatch = {
             task_summary: taskSummary,
             goal_file: args.goal_file,
+            // AIDEV-NOTE (P11 finding 1): clear the engine-issued pair so the
+            // prose fallback resumes for the NEW brief. supersede is the one
+            // contract channel that actually reaches the worker -- it delivers
+            // `/goal Read and execute this goal file` to the pane -- so the
+            // worker will honor the superseding brief's path. If the consumer
+            // kept checking the originally issued path it would render
+            // artifact_missing forever: the exact S3 disagreement, re-created
+            // through the door that used to work. Whatever reached the worker
+            // is what the consumer must verify against.
+            report_path: null,
+            done_marker: null,
             task_done_candidate_at: null,
             task_done_detected_at: null,
             boot_prompt_pending: false,
